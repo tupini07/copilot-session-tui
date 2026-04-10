@@ -74,10 +74,13 @@ fn load_single_session(dir: &Path) -> Result<Session> {
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
     let is_active = detect_active(dir);
+    let cwd = ws.cwd.unwrap_or_default();
+    let project_root = resolve_project_root(&cwd);
 
     Ok(Session {
         id: ws.id,
-        cwd: ws.cwd.unwrap_or_default(),
+        cwd,
+        project_root,
         summary: ws.summary,
         created_at,
         updated_at,
@@ -101,6 +104,57 @@ pub fn load_session_details(session: &mut Session) -> Result<()> {
         session.tool_call_count = details.tool_call_count;
     }
     Ok(())
+}
+
+/// Public wrapper for project root resolution (used by auto-filter)
+pub fn resolve_project_root_pub(cwd: &str) -> String {
+    resolve_project_root(cwd)
+}
+
+/// Resolve the project root from a working directory.
+/// Walks up from `cwd` looking for `.git`. If `.git` is a file (git worktree),
+/// follows the `gitdir:` pointer back to the main repository root.
+fn resolve_project_root(cwd: &str) -> String {
+    if cwd.is_empty() {
+        return cwd.to_string();
+    }
+
+    let mut current = PathBuf::from(cwd);
+    loop {
+        let git_path = current.join(".git");
+        if git_path.is_dir() {
+            // Normal git repo — this directory is the project root
+            return current.to_string_lossy().to_string();
+        }
+        if git_path.is_file() {
+            // Git worktree — .git is a file like "gitdir: /path/to/main/.git/worktrees/<name>"
+            if let Ok(content) = fs::read_to_string(&git_path) {
+                if let Some(gitdir) = content.trim().strip_prefix("gitdir:") {
+                    let gitdir = gitdir.trim();
+                    let gitdir_path = if Path::new(gitdir).is_absolute() {
+                        PathBuf::from(gitdir)
+                    } else {
+                        current.join(gitdir)
+                    };
+                    // Follow: .git/worktrees/<name> -> go up 2 levels to get .git, then parent
+                    if let Some(dot_git) = gitdir_path.parent().and_then(|p| p.parent()) {
+                        if let Some(repo_root) = dot_git.parent() {
+                            if dot_git.ends_with(".git") {
+                                return repo_root.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            // Couldn't resolve — use the worktree dir itself
+            return current.to_string_lossy().to_string();
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    // No .git found — fall back to original cwd
+    cwd.to_string()
 }
 
 /// Detect if a session is currently active by checking lock files

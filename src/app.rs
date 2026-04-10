@@ -102,15 +102,16 @@ impl App {
             .filter(|(_, s)| {
                 // Project filter
                 if let Some(ref proj) = self.project_filter {
-                    if !s.cwd.eq_ignore_ascii_case(proj) {
+                    if !s.project_root.eq_ignore_ascii_case(proj) {
                         return false;
                     }
                 }
                 // Search filter
                 if !self.search_query.is_empty() {
                     let haystack = format!(
-                        "{} {} {}",
+                        "{} {} {} {}",
                         s.display_name(),
+                        s.project_root,
                         s.cwd,
                         s.id
                     );
@@ -158,7 +159,7 @@ impl App {
                 });
             }
             SortField::Project => {
-                self.sessions.sort_by(|a, b| a.cwd.cmp(&b.cwd));
+                self.sessions.sort_by(|a, b| a.project_root.cmp(&b.project_root));
             }
         }
         self.apply_filter();
@@ -181,20 +182,20 @@ impl App {
 
 fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
     use chrono::{DateTime, Utc};
-    // Track the most recent updated_at per project
+    // Track the most recent updated_at per project (using resolved project_root)
     let mut latest: std::collections::HashMap<String, DateTime<Utc>> =
         std::collections::HashMap::new();
     for s in sessions {
-        if s.cwd.is_empty() {
+        if s.project_root.is_empty() {
             continue;
         }
         if let Some(updated) = s.updated_at {
-            let entry = latest.entry(s.cwd.clone()).or_insert(updated);
+            let entry = latest.entry(s.project_root.clone()).or_insert(updated);
             if updated > *entry {
                 *entry = updated;
             }
         } else {
-            latest.entry(s.cwd.clone()).or_insert_with(|| DateTime::<Utc>::MIN_UTC);
+            latest.entry(s.project_root.clone()).or_insert_with(|| DateTime::<Utc>::MIN_UTC);
         }
     }
     let mut projects: Vec<String> = latest.keys().cloned().collect();

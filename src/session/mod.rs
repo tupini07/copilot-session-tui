@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub struct Session {
     pub id: String,
     pub cwd: String,
+    pub project_root: String, // resolved git root (worktree-aware), falls back to cwd
     pub summary: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -41,10 +42,10 @@ impl Session {
     }
 
     pub fn project_name(&self) -> &str {
-        std::path::Path::new(&self.cwd)
+        std::path::Path::new(&self.project_root)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&self.cwd)
+            .unwrap_or(&self.project_root)
     }
 
     pub fn relative_time(&self) -> String {

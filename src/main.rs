@@ -54,8 +54,10 @@ fn main() -> Result<()> {
     if cli.auto_filter {
         if let Ok(cwd) = std::env::current_dir() {
             let cwd_str = cwd.to_string_lossy().to_string();
-            if app.unique_projects.iter().any(|p| p == &cwd_str) {
-                app.set_project_filter(Some(cwd_str));
+            // Resolve project root (handles worktrees) for matching
+            let resolved = loader::resolve_project_root_pub(&cwd_str);
+            if app.unique_projects.iter().any(|p| p.eq_ignore_ascii_case(&resolved)) {
+                app.set_project_filter(Some(resolved));
             }
         }
     }
