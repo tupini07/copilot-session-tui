@@ -27,7 +27,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
-    let area = centered_rect(40, 20, f.area());
+    let area = centered_rect(40, 30, f.area());
     f.render_widget(Clear, area);
 
     let name = app
