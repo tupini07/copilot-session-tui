@@ -106,6 +106,17 @@ pub fn load_session_details(session: &mut Session) -> Result<()> {
     Ok(())
 }
 
+/// Canonicalize a path to get consistent casing/representation, falling back to lossy string
+fn canonicalize_or_lossy(p: &Path) -> String {
+    fs::canonicalize(p)
+        .map(|c| {
+            let s = c.to_string_lossy().to_string();
+            // Strip Windows \\?\ extended path prefix
+            s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+        })
+        .unwrap_or_else(|_| p.to_string_lossy().to_string())
+}
+
 /// Public wrapper for project root resolution (used by auto-filter)
 pub fn resolve_project_root_pub(cwd: &str) -> String {
     resolve_project_root(cwd)
@@ -124,7 +135,7 @@ fn resolve_project_root(cwd: &str) -> String {
         let git_path = current.join(".git");
         if git_path.is_dir() {
             // Normal git repo — this directory is the project root
-            return current.to_string_lossy().to_string();
+            return canonicalize_or_lossy(&current);
         }
         if git_path.is_file() {
             // Git worktree — .git is a file like "gitdir: /path/to/main/.git/worktrees/<name>"
@@ -140,14 +151,14 @@ fn resolve_project_root(cwd: &str) -> String {
                     if let Some(dot_git) = gitdir_path.parent().and_then(|p| p.parent()) {
                         if let Some(repo_root) = dot_git.parent() {
                             if dot_git.ends_with(".git") {
-                                return repo_root.to_string_lossy().to_string();
+                                return canonicalize_or_lossy(repo_root);
                             }
                         }
                     }
                 }
             }
             // Couldn't resolve — use the worktree dir itself
-            return current.to_string_lossy().to_string();
+            return canonicalize_or_lossy(&current);
         }
         if !current.pop() {
             break;
