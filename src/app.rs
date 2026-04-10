@@ -180,13 +180,24 @@ impl App {
 }
 
 fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
-    let mut projects: Vec<String> = sessions
-        .iter()
-        .map(|s| s.cwd.clone())
-        .filter(|c| !c.is_empty())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    projects.sort();
+    use chrono::{DateTime, Utc};
+    // Track the most recent updated_at per project
+    let mut latest: std::collections::HashMap<String, DateTime<Utc>> =
+        std::collections::HashMap::new();
+    for s in sessions {
+        if s.cwd.is_empty() {
+            continue;
+        }
+        if let Some(updated) = s.updated_at {
+            let entry = latest.entry(s.cwd.clone()).or_insert(updated);
+            if updated > *entry {
+                *entry = updated;
+            }
+        } else {
+            latest.entry(s.cwd.clone()).or_insert_with(|| DateTime::<Utc>::MIN_UTC);
+        }
+    }
+    let mut projects: Vec<String> = latest.keys().cloned().collect();
+    projects.sort_by(|a, b| latest[b].cmp(&latest[a])); // most recent first
     projects
 }
