@@ -98,7 +98,9 @@ fn run_app(
     loop {
         // Update visible rows based on terminal size
         let size = terminal.size()?;
-        app.visible_rows = (size.height as usize).saturating_sub(6) / 2; // 2 lines per item
+        // visible_rows must match the session_list take() count:
+        // inner height = total height - 6 (title + borders + status), each item = 2 lines
+        app.visible_rows = (size.height as usize).saturating_sub(6) / 2;
 
         // Load details for selected session
         input::maybe_load_details(app);

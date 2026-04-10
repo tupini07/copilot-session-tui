@@ -22,14 +22,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let visible_height = inner.height as usize;
+    let visible_items = inner.height as usize / 2; // each item is 2 lines tall
 
     let items: Vec<ListItem> = app
         .filtered_indices
         .iter()
         .enumerate()
         .skip(app.scroll_offset)
-        .take(visible_height)
+        .take(visible_items)
         .map(|(display_idx, &real_idx)| {
             let session = &app.sessions[real_idx];
             let is_selected = display_idx == app.selected;
