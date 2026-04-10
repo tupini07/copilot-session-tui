@@ -1,7 +1,7 @@
 use crate::app::{App, Mode};
 use crate::session::loader;
 use crate::session::manager;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
     if !event::poll(std::time::Duration::from_millis(100))? {
@@ -11,6 +11,11 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
     let Event::Key(key) = event::read()? else {
         return Ok(false);
     };
+
+    // Only handle key press events (ignore Release/Repeat to avoid double input on Windows)
+    if key.kind != KeyEventKind::Press {
+        return Ok(false);
+    }
 
     // Ctrl+C always quits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
