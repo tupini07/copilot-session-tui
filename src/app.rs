@@ -34,7 +34,7 @@ pub struct App {
     pub sort_field: SortField,
     pub detail_loaded_for: Option<String>,
     pub should_quit: bool,
-    pub should_resume: Option<String>,
+    pub should_resume: Option<(String, String)>, // (session_id, cwd)
     pub status_message: Option<String>,
     pub visible_rows: usize,
 }

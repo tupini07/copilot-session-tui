@@ -83,9 +83,9 @@ fn main() -> Result<()> {
     result?;
 
     // Resume session if requested
-    if let Some(session_id) = app.should_resume {
-        eprintln!("Resuming session {}...", &session_id[..8]);
-        manager::resume_session(&session_id)?;
+    if let Some((session_id, cwd)) = app.should_resume {
+        eprintln!("Resuming session {} in {}...", &session_id[..8], &cwd);
+        manager::resume_session(&session_id, &cwd)?;
     }
 
     Ok(())

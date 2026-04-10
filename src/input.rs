@@ -59,7 +59,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
                     app.status_message =
                         Some("Cannot resume: session is already active".to_string());
                 } else {
-                    app.should_resume = Some(session.id.clone());
+                    app.should_resume = Some((session.id.clone(), session.cwd.clone()));
                 }
             }
         }

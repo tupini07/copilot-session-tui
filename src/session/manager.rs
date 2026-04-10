@@ -47,15 +47,22 @@ pub fn delete_session(session_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resume a session by launching `copilot --resume=<id>`
-pub fn resume_session(session_id: &str) -> Result<()> {
-    // Find copilot executable
+/// Resume a session by launching `copilot --resume=<id>` in the session's working directory
+pub fn resume_session(session_id: &str, cwd: &str) -> Result<()> {
     let copilot = find_copilot()?;
 
-    Command::new(copilot)
-        .arg(format!("--resume={}", session_id))
-        .status()
-        .context("Failed to launch copilot")?;
+    let mut cmd = Command::new(copilot);
+    cmd.arg(format!("--resume={}", session_id));
+
+    // Set the working directory to the session's original cwd
+    if !cwd.is_empty() {
+        let cwd_path = Path::new(cwd);
+        if cwd_path.exists() {
+            cmd.current_dir(cwd_path);
+        }
+    }
+
+    cmd.status().context("Failed to launch copilot")?;
 
     Ok(())
 }
