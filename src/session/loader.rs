@@ -38,8 +38,21 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
         }
 
         match load_single_session(&path) {
-            Ok(session) => sessions.push(session),
-            Err(_) => continue, // skip malformed sessions
+            Ok(session) => {
+                // Skip empty sessions (no summary and no events)
+                if session.summary.is_none() {
+                    let events_path = path.join("events.jsonl");
+                    let has_events = events_path.exists()
+                        && fs::metadata(&events_path)
+                            .map(|m| m.len() > 100) // trivial events file = just session.start
+                            .unwrap_or(false);
+                    if !has_events {
+                        continue;
+                    }
+                }
+                sessions.push(session);
+            }
+            Err(_) => continue,
         }
     }
 
