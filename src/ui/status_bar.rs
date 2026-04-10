@@ -54,6 +54,17 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 key_span("q"),
                 Span::raw(" Quit"),
             ];
+            if let Some(ref info) = app.update_info {
+                spans.push(Span::raw("  │  "));
+                spans.push(Span::styled(
+                    format!("⬆ v{} → v{} ", info.current_version, info.latest_version),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(key_span("u"));
+                spans.push(Span::raw(" Update"));
+            }
             if let Some(ref msg) = app.status_message {
                 spans.push(Span::raw("  │  "));
                 spans.push(Span::styled(

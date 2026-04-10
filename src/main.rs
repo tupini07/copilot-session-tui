@@ -3,6 +3,7 @@ mod events;
 mod input;
 mod session;
 mod ui;
+mod updater;
 
 use anyhow::Result;
 use clap::Parser;
@@ -50,6 +51,9 @@ fn main() -> Result<()> {
 
     let mut app = App::new(sessions);
 
+    // Start background update check
+    app.update_receiver = Some(updater::check_for_updates_async());
+
     // Auto-filter to current directory if enabled
     if cli.auto_filter {
         if let Ok(cwd) = std::env::current_dir() {
@@ -84,6 +88,15 @@ fn main() -> Result<()> {
     // Handle result
     result?;
 
+    // Perform update if requested (after terminal is restored)
+    if app.should_update {
+        eprintln!("Updating copilot-session-tui...");
+        if let Err(e) = updater::perform_update() {
+            eprintln!("Update failed: {}", e);
+        }
+        return Ok(());
+    }
+
     // Resume session if requested
     if let Some((session_id, cwd)) = app.should_resume {
         eprintln!("Resuming session {} in {}...", &session_id[..8], &cwd);
@@ -107,13 +120,16 @@ fn run_app(
         // Load details for selected session
         input::maybe_load_details(app);
 
+        // Poll for update check results
+        app.poll_update();
+
         // Draw
         terminal.draw(|f| ui::draw(f, app))?;
 
         // Handle input
         input::handle_input(app)?;
 
-        if app.should_quit || app.should_resume.is_some() {
+        if app.should_quit || app.should_resume.is_some() || app.should_update {
             break;
         }
     }

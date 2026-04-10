@@ -99,6 +99,13 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
         }
+        KeyCode::Char('u') => {
+            if app.update_info.is_some() {
+                app.should_update = true;
+            } else {
+                app.status_message = Some("No update available".to_string());
+            }
+        }
         _ => {}
     }
 }

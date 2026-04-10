@@ -1,6 +1,8 @@
 use crate::session::Session;
+use crate::updater::UpdateInfo;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use std::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -37,6 +39,9 @@ pub struct App {
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
     pub status_message: Option<String>,
     pub visible_rows: usize,
+    pub update_info: Option<UpdateInfo>,
+    pub update_receiver: Option<mpsc::Receiver<Option<UpdateInfo>>>,
+    pub should_update: bool,
 }
 
 impl App {
@@ -61,6 +66,9 @@ impl App {
             should_resume: None,
             status_message: None,
             visible_rows: 20,
+            update_info: None,
+            update_receiver: None,
+            should_update: false,
         }
     }
 
@@ -176,6 +184,18 @@ impl App {
             SortField::Created => "Created",
             SortField::Name => "Name",
             SortField::Project => "Project",
+        }
+    }
+
+    pub fn poll_update(&mut self) {
+        if self.update_info.is_some() {
+            return;
+        }
+        if let Some(ref rx) = self.update_receiver {
+            if let Ok(result) = rx.try_recv() {
+                self.update_info = result;
+                self.update_receiver = None;
+            }
         }
     }
 }

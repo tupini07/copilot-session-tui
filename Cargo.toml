@@ -15,3 +15,6 @@ dirs = "6"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 fuzzy-matcher = "0.3"
+self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2"] }
+semver = "1"
+ureq = { version = "2", features = ["json"] }

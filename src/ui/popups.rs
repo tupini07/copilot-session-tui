@@ -186,6 +186,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("s", "Cycle sort order"),
         Line::from(""),
         help_line("?", "Toggle this help"),
+        help_line("u", "Update (when available)"),
         help_line("q/Esc", "Quit"),
         help_line("Ctrl+C", "Force quit"),
         Line::from(""),
