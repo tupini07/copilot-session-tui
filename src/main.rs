@@ -114,8 +114,10 @@ fn run_app(
         // Update visible rows based on terminal size
         let size = terminal.size()?;
         // visible_rows must match the session_list take() count:
-        // inner height = total height - 6 (title + borders + status), each item = 2 lines
-        app.visible_rows = (size.height as usize).saturating_sub(6) / 2;
+        // inner height = total height - 6 (title + borders + status)
+        // each item = 2 lines normally, 1 line when project filter is active
+        let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
+        app.visible_rows = (size.height as usize).saturating_sub(6) / lines_per_item;
 
         // Load details for selected session
         input::maybe_load_details(app);

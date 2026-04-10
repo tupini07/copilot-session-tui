@@ -22,7 +22,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let visible_items = inner.height as usize / 2; // each item is 2 lines tall
+    let has_project_filter = app.project_filter.is_some();
+    let lines_per_item = if has_project_filter { 1 } else { 2 };
+    let visible_items = inner.height as usize / lines_per_item;
 
     let items: Vec<ListItem> = app
         .filtered_indices
@@ -56,12 +58,6 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let time = session.relative_time();
-            let project = session.project_name();
-            let truncated_project = if project.len() > 15 {
-                format!("{}...", &project[..12])
-            } else {
-                project.to_string()
-            };
 
             let line = Line::from(vec![
                 indicator,
@@ -75,19 +71,30 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]);
 
-            let project_line = Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    truncated_project,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-                ),
-            ]);
+            let lines = if has_project_filter {
+                vec![line]
+            } else {
+                let project = session.project_name();
+                let truncated_project = if project.len() > 15 {
+                    format!("{}...", &project[..12])
+                } else {
+                    project.to_string()
+                };
+                let project_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        truncated_project,
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    ),
+                ]);
+                vec![line, project_line]
+            };
 
             if is_selected {
-                ListItem::new(vec![line, project_line])
+                ListItem::new(lines)
                     .style(Style::default().bg(Color::DarkGray))
             } else {
-                ListItem::new(vec![line, project_line])
+                ListItem::new(lines)
             }
         })
         .collect();
