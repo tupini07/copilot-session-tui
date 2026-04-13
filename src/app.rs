@@ -33,6 +33,9 @@ pub struct App {
     pub project_filter: Option<String>,
     pub unique_projects: Vec<String>,
     pub project_selected: usize,
+    pub project_scroll_offset: usize,
+    pub project_visible_rows: usize,
+    pub project_search_query: String,
     pub sort_field: SortField,
     pub detail_loaded_for: Option<String>,
     pub should_quit: bool,
@@ -60,6 +63,9 @@ impl App {
             project_filter: None,
             unique_projects,
             project_selected: 0,
+            project_scroll_offset: 0,
+            project_visible_rows: 10,
+            project_search_query: String::new(),
             sort_field: SortField::LastUsed,
             detail_loaded_for: None,
             should_quit: false,
@@ -171,6 +177,29 @@ impl App {
             }
         }
         self.apply_filter();
+    }
+
+    /// Returns indices into `unique_projects` that match the current project search query.
+    pub fn filtered_project_indices(&self) -> Vec<usize> {
+        if self.project_search_query.is_empty() {
+            return (0..self.unique_projects.len()).collect();
+        }
+        let matcher = SkimMatcherV2::default();
+        self.unique_projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| {
+                let short_name = std::path::Path::new(project)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(project);
+                let haystack = format!("{} {}", project, short_name);
+                matcher
+                    .fuzzy_match(&haystack, &self.project_search_query)
+                    .is_some()
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn set_project_filter(&mut self, project: Option<String>) {

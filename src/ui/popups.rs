@@ -102,7 +102,9 @@ pub fn draw_rename(f: &mut Frame, app: &App) {
 }
 
 pub fn draw_project_filter(f: &mut Frame, app: &App) {
-    let height = (app.unique_projects.len() + 3).min(20) as u16;
+    let filtered = app.filtered_project_indices();
+    let item_count = filtered.len() + 1; // +1 for "All Projects"
+    let height = (item_count + 5).min(20) as u16; // +5 for search input, borders, padding
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(80.0) as u16;
     let area = centered_rect(50, percent_y.max(25), f.area());
     f.render_widget(Clear, area);
@@ -115,24 +117,58 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut items = Vec::new();
+    // Split inner area: search input at top, list below
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
 
-    // "All Projects" option
-    let all_style = if app.project_selected == 0 {
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    items.push(ListItem::new(Line::from(Span::styled(
-        "  All Projects",
-        all_style,
-    ))));
+    // Search input
+    let search_line = Line::from(vec![
+        Span::styled(" 🔍 ", Style::default().fg(Color::Yellow)),
+        Span::styled(&app.project_search_query, Style::default().fg(Color::White)),
+        Span::styled("█", Style::default().fg(Color::Yellow)),
+    ]);
+    f.render_widget(Paragraph::new(search_line), chunks[0]);
 
-    for (i, project) in app.unique_projects.iter().enumerate() {
-        let is_selected = app.project_selected == i + 1;
+    // Separator
+    let sep = Line::from(Span::styled(
+        "─".repeat(chunks[1].width as usize),
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(Paragraph::new(sep), chunks[1]);
+
+    // Project list
+    let has_all_option = app.project_search_query.is_empty();
+    let visible_rows = chunks[2].height as usize;
+
+    // Build all logical items with their indices
+    let mut all_items: Vec<(usize, ListItem)> = Vec::new();
+
+    // "All Projects" option (only shown when search is empty)
+    if has_all_option {
+        let all_style = if app.project_selected == 0 {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        all_items.push((0, ListItem::new(Line::from(Span::styled(
+            "  All Projects",
+            all_style,
+        )))));
+    }
+
+    for (list_i, &proj_idx) in filtered.iter().enumerate() {
+        let project = &app.unique_projects[proj_idx];
+        let item_index = if has_all_option {
+            list_i + 1
+        } else {
+            list_i
+        };
+        let is_selected = app.project_selected == item_index;
         let is_active = app.project_filter.as_deref() == Some(project.as_str());
 
         let prefix = if is_active { "● " } else { "  " };
@@ -154,11 +190,18 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
             Style::default().fg(Color::White)
         };
 
-        items.push(ListItem::new(Line::from(Span::styled(display, style))));
+        all_items.push((item_index, ListItem::new(Line::from(Span::styled(display, style)))));
     }
 
+    let items: Vec<ListItem> = all_items
+        .into_iter()
+        .skip(app.project_scroll_offset)
+        .take(visible_rows)
+        .map(|(_, item)| item)
+        .collect();
+
     let list = List::new(items);
-    f.render_widget(list, inner);
+    f.render_widget(list, chunks[2]);
 }
 
 pub fn draw_help(f: &mut Frame) {
@@ -181,7 +224,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("d", "Delete selected session"),
         Line::from(""),
         help_line("/", "Search / fuzzy filter"),
-        help_line("f/p", "Filter by project"),
+        help_line("f/p", "Filter by project (type to search)"),
         help_line("c", "Clear project filter"),
         help_line("s", "Cycle sort order"),
         Line::from(""),

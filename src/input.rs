@@ -85,6 +85,8 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('f') | KeyCode::Char('p') => {
             app.project_selected = 0;
+            app.project_scroll_offset = 0;
+            app.project_search_query.clear();
             app.mode = Mode::FilterProject;
         }
         KeyCode::Char('s') => {
@@ -192,33 +194,61 @@ fn handle_confirm_delete(app: &mut App, key: KeyCode) {
 }
 
 fn handle_filter_project(app: &mut App, key: KeyCode) {
-    // projects list: index 0 = "All Projects", then unique_projects
-    let total = app.unique_projects.len() + 1;
+    let filtered = app.filtered_project_indices();
+    let has_all_option = app.project_search_query.is_empty();
+    let total = filtered.len() + if has_all_option { 1 } else { 0 };
 
     match key {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if app.project_selected > 0 {
                 app.project_selected -= 1;
+                if app.project_selected < app.project_scroll_offset {
+                    app.project_scroll_offset = app.project_selected;
+                }
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if app.project_selected + 1 < total {
                 app.project_selected += 1;
+                if app.project_selected >= app.project_scroll_offset + app.project_visible_rows {
+                    app.project_scroll_offset = app.project_selected - app.project_visible_rows + 1;
+                }
             }
         }
         KeyCode::Enter => {
-            if app.project_selected == 0 {
+            if total == 0 {
+                // No matches, do nothing
+            } else if has_all_option && app.project_selected == 0 {
                 app.set_project_filter(None);
                 app.status_message = Some("Showing all projects".to_string());
+                app.mode = Mode::Normal;
             } else {
-                let project = app.unique_projects[app.project_selected - 1].clone();
-                app.status_message = Some(format!("Filtered to: {}", project));
-                app.set_project_filter(Some(project));
+                let list_idx = if has_all_option {
+                    app.project_selected - 1
+                } else {
+                    app.project_selected
+                };
+                if list_idx < filtered.len() {
+                    let proj_idx = filtered[list_idx];
+                    let project = app.unique_projects[proj_idx].clone();
+                    app.status_message = Some(format!("Filtered to: {}", project));
+                    app.set_project_filter(Some(project));
+                }
+                app.mode = Mode::Normal;
             }
-            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.project_search_query.pop();
+            app.project_selected = 0;
+            app.project_scroll_offset = 0;
+        }
+        KeyCode::Char(c) => {
+            app.project_search_query.push(c);
+            app.project_selected = 0;
+            app.project_scroll_offset = 0;
         }
         _ => {}
     }

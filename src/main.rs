@@ -119,6 +119,13 @@ fn run_app(
         let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
         app.visible_rows = (size.height as usize).saturating_sub(6) / lines_per_item;
 
+        // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
+        let popup_percent = 80u16.min(25u16.max(
+            (((app.unique_projects.len() + 6).min(20) as f32 / size.height as f32) * 100.0) as u16,
+        ));
+        let popup_height = (size.height as usize * popup_percent as usize) / 100;
+        app.project_visible_rows = popup_height.saturating_sub(4); // borders + search + separator
+
         // Load details for selected session
         input::maybe_load_details(app);
 
