@@ -127,6 +127,7 @@ pub fn perform_update() -> Result<()> {
         .repo_name(REPO_NAME)
         .bin_name("copilot-session-tui")
         .show_download_progress(true)
+        .no_confirm(true) // user already confirmed via TUI
         .current_version(self_update::cargo_crate_version!())
         .build()?
         .update()?;
