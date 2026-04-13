@@ -3,6 +3,20 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::config::UserConfig;
+
+fn apply_config_args(cmd: &mut Command, config: &UserConfig) {
+    if config.yolo {
+        cmd.arg("--yolo");
+    }
+    if let Some(ref model) = config.model {
+        cmd.arg(format!("--model={}", model));
+    }
+    if let Some(ref effort) = config.reasoning_effort {
+        cmd.arg(format!("--reasoning-effort={}", effort));
+    }
+}
+
 /// Rename a session by updating the summary field in workspace.yaml
 pub fn rename_session(session_dir: &Path, new_name: &str) -> Result<()> {
     let workspace_path = session_dir.join("workspace.yaml");
@@ -48,11 +62,12 @@ pub fn delete_session(session_dir: &Path) -> Result<()> {
 }
 
 /// Resume a session by launching `copilot --resume=<id>` in the session's working directory
-pub fn resume_session(session_id: &str, cwd: &str) -> Result<()> {
+pub fn resume_session(session_id: &str, cwd: &str, config: &UserConfig) -> Result<()> {
     let copilot = find_copilot()?;
 
     let mut cmd = Command::new(copilot);
     cmd.arg(format!("--resume={}", session_id));
+    apply_config_args(&mut cmd, config);
 
     // Set the working directory to the session's original cwd
     if !cwd.is_empty() {
@@ -68,10 +83,11 @@ pub fn resume_session(session_id: &str, cwd: &str) -> Result<()> {
 }
 
 /// Start a new session by launching `copilot` in the given working directory
-pub fn start_new_session(cwd: &str) -> Result<()> {
+pub fn start_new_session(cwd: &str, config: &UserConfig) -> Result<()> {
     let copilot = find_copilot()?;
 
     let mut cmd = Command::new(copilot);
+    apply_config_args(&mut cmd, config);
     let cwd_path = Path::new(cwd);
     if cwd_path.exists() {
         cmd.current_dir(cwd_path);

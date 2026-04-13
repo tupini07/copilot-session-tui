@@ -229,6 +229,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("c", "Clear project filter"),
         help_line("s", "Cycle sort order"),
         Line::from(""),
+        help_line(",", "Settings"),
         help_line("?", "Toggle this help"),
         help_line("u", "Update (when available)"),
         help_line("q/Esc", "Quit"),
@@ -259,5 +260,134 @@ fn help_line(key: &str, desc: &str) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(desc.to_string(), Style::default().fg(Color::White)),
+    ])
+}
+
+pub fn draw_settings(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 40, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Settings ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(""));
+
+    // Row 0: Yolo mode
+    let yolo_value = if app.config.yolo { "ON" } else { "OFF" };
+    let yolo_color = if app.config.yolo { Color::Green } else { Color::Red };
+    lines.push(settings_row(
+        "Yolo Mode",
+        yolo_value,
+        yolo_color,
+        app.settings_selected == 0,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Pass --yolo flag (allow all permissions)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+
+    // Row 1: Model
+    let model_display = if app.settings_editing_model {
+        format!("{}█", app.settings_model_input)
+    } else {
+        app.config
+            .model
+            .as_deref()
+            .unwrap_or("(default)")
+            .to_string()
+    };
+    let model_color = if app.config.model.is_some() {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    lines.push(settings_row(
+        "Model",
+        &model_display,
+        model_color,
+        app.settings_selected == 1,
+        app.settings_editing_model,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Pass --model flag (e.g. gpt-5.2, claude-sonnet-4)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+
+    // Row 2: Reasoning effort
+    let effort_display = app
+        .config
+        .reasoning_effort
+        .as_deref()
+        .unwrap_or("(default)");
+    let effort_color = if app.config.reasoning_effort.is_some() {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+    lines.push(settings_row(
+        "Reasoning Effort",
+        effort_display,
+        effort_color,
+        app.settings_selected == 2,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Pass --reasoning-effort (low/medium/high/xhigh)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
+        Span::raw(" Toggle  "),
+        Span::styled("Esc/,", Style::default().fg(Color::Magenta)),
+        Span::raw(" Save & Close"),
+    ]));
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(paragraph, inner);
+}
+
+fn settings_row<'a>(
+    label: &str,
+    value: &str,
+    value_color: Color,
+    is_selected: bool,
+    is_editing: bool,
+) -> Line<'a> {
+    let pointer = if is_selected { "▸ " } else { "  " };
+    let label_style = if is_selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let value_style = if is_editing {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(value_color)
+    };
+
+    Line::from(vec![
+        Span::styled(
+            pointer.to_string(),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(format!("{:<20}", label), label_style),
+        Span::styled(value.to_string(), value_style),
     ])
 }

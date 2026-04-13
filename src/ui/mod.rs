@@ -85,6 +85,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::FilterProject => popups::draw_project_filter(f, app),
         Mode::Help => popups::draw_help(f),
         Mode::Rename => popups::draw_rename(f, app),
+        Mode::Settings => popups::draw_settings(f, app),
         _ => {}
     }
 }

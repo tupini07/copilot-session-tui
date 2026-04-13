@@ -1,3 +1,4 @@
+use crate::config::UserConfig;
 use crate::session::Session;
 use crate::updater::UpdateInfo;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -12,6 +13,7 @@ pub enum Mode {
     ConfirmDelete,
     FilterProject,
     Help,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +48,14 @@ pub struct App {
     pub update_info: Option<UpdateInfo>,
     pub update_receiver: Option<mpsc::Receiver<Option<UpdateInfo>>>,
     pub should_update: bool,
+    pub config: UserConfig,
+    pub settings_selected: usize,
+    pub settings_editing_model: bool,
+    pub settings_model_input: String,
 }
 
 impl App {
-    pub fn new(sessions: Vec<Session>) -> Self {
+    pub fn new(sessions: Vec<Session>, config: UserConfig) -> Self {
         let unique_projects = extract_unique_projects(&sessions);
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
 
@@ -77,6 +83,10 @@ impl App {
             update_info: None,
             update_receiver: None,
             should_update: false,
+            config,
+            settings_selected: 0,
+            settings_editing_model: false,
+            settings_model_input: String::new(),
         }
     }
 

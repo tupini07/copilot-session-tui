@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod events;
 mod input;
 mod session;
@@ -49,7 +50,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut app = App::new(sessions);
+    let mut app = App::new(sessions, config::load());
 
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
@@ -100,13 +101,13 @@ fn main() -> Result<()> {
     // Resume session if requested
     if let Some((session_id, cwd)) = app.should_resume {
         eprintln!("Resuming session {} in {}...", &session_id[..8], &cwd);
-        manager::resume_session(&session_id, &cwd)?;
+        manager::resume_session(&session_id, &cwd, &app.config)?;
     }
 
     // Start new session if requested
     if let Some(cwd) = app.should_new_session {
         eprintln!("Starting new session in {}...", &cwd);
-        manager::start_new_session(&cwd)?;
+        manager::start_new_session(&cwd, &app.config)?;
     }
 
     Ok(())

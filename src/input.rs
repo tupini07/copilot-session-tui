@@ -1,4 +1,5 @@
 use crate::app::{App, Mode};
+use crate::config;
 use crate::session::loader;
 use crate::session::manager;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -30,6 +31,7 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
         Mode::ConfirmDelete => handle_confirm_delete(app, key.code),
         Mode::FilterProject => handle_filter_project(app, key.code),
         Mode::Help => handle_help(app, key.code),
+        Mode::Settings => handle_settings(app, key.code),
     }
 
     Ok(true)
@@ -108,6 +110,12 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+        }
+        KeyCode::Char(',') => {
+            app.settings_selected = 0;
+            app.settings_editing_model = false;
+            app.settings_model_input = app.config.model.clone().unwrap_or_default();
+            app.mode = Mode::Settings;
         }
         KeyCode::Char('u') => {
             if app.update_info.is_some() {
@@ -266,6 +274,84 @@ fn handle_help(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
             app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+}
+
+// Settings rows: 0 = Yolo, 1 = Model, 2 = Reasoning Effort
+const SETTINGS_COUNT: usize = 3;
+
+fn handle_settings(app: &mut App, key: KeyCode) {
+    // If editing the model field, handle text input
+    if app.settings_editing_model {
+        match key {
+            KeyCode::Esc => {
+                app.settings_editing_model = false;
+            }
+            KeyCode::Enter => {
+                let val = app.settings_model_input.trim().to_string();
+                app.config.model = if val.is_empty() { None } else { Some(val) };
+                app.settings_editing_model = false;
+                let _ = config::save(&app.config);
+            }
+            KeyCode::Backspace => {
+                app.settings_model_input.pop();
+            }
+            KeyCode::Char(c) => {
+                app.settings_model_input.push(c);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key {
+        KeyCode::Esc | KeyCode::Char(',') => {
+            let _ = config::save(&app.config);
+            app.mode = Mode::Normal;
+            app.status_message = Some("Settings saved".to_string());
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.settings_selected > 0 {
+                app.settings_selected -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.settings_selected + 1 < SETTINGS_COUNT {
+                app.settings_selected += 1;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            match app.settings_selected {
+                0 => {
+                    // Toggle yolo
+                    app.config.yolo = !app.config.yolo;
+                    let _ = config::save(&app.config);
+                }
+                1 => {
+                    // Enter model editing mode
+                    app.settings_model_input = app.config.model.clone().unwrap_or_default();
+                    app.settings_editing_model = true;
+                }
+                2 => {
+                    // Cycle reasoning effort: None → low → medium → high → xhigh → None
+                    let efforts = config::REASONING_EFFORTS;
+                    app.config.reasoning_effort = match &app.config.reasoning_effort {
+                        None => Some(efforts[0].to_string()),
+                        Some(current) => {
+                            match efforts.iter().position(|&e| e == current.as_str()) {
+                                Some(i) if i + 1 < efforts.len() => {
+                                    Some(efforts[i + 1].to_string())
+                                }
+                                _ => None,
+                            }
+                        }
+                    };
+                    let _ = config::save(&app.config);
+                }
+                _ => {}
+            }
         }
         _ => {}
     }
