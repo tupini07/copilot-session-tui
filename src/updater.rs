@@ -65,12 +65,17 @@ fn check_latest_version() -> Result<String> {
         REPO_OWNER, REPO_NAME
     );
 
-    let response: serde_json::Value = ureq::get(&url)
-        .set("User-Agent", "copilot-session-tui")
-        .timeout(Duration::from_secs(5))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+
+    let response: serde_json::Value = agent.get(&url)
+        .header("User-Agent", "copilot-session-tui")
         .call()
         .context("Failed to check for updates")?
-        .into_json()
+        .into_body()
+        .read_json()
         .context("Failed to parse update response")?;
 
     let tag = response["tag_name"]
