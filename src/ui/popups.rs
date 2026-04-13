@@ -220,6 +220,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("↑/k ↓/j", "Navigate sessions"),
         help_line("Home/End", "Jump to first/last"),
         help_line("Enter", "Resume selected session"),
+        help_line("n", "New session in filtered project"),
         help_line("r", "Rename selected session"),
         help_line("d", "Delete selected session"),
         Line::from(""),

@@ -67,6 +67,21 @@ pub fn resume_session(session_id: &str, cwd: &str) -> Result<()> {
     Ok(())
 }
 
+/// Start a new session by launching `copilot` in the given working directory
+pub fn start_new_session(cwd: &str) -> Result<()> {
+    let copilot = find_copilot()?;
+
+    let mut cmd = Command::new(copilot);
+    let cwd_path = Path::new(cwd);
+    if cwd_path.exists() {
+        cmd.current_dir(cwd_path);
+    }
+
+    cmd.status().context("Failed to launch copilot")?;
+
+    Ok(())
+}
+
 fn find_copilot() -> Result<String> {
     // Check common locations
     let candidates = [

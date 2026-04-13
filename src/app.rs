@@ -40,6 +40,7 @@ pub struct App {
     pub detail_loaded_for: Option<String>,
     pub should_quit: bool,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
+    pub should_new_session: Option<String>,       // cwd for new session
     pub status_message: Option<String>,
     pub visible_rows: usize,
     pub update_info: Option<UpdateInfo>,
@@ -70,6 +71,7 @@ impl App {
             detail_loaded_for: None,
             should_quit: false,
             should_resume: None,
+            should_new_session: None,
             status_message: None,
             visible_rows: 20,
             update_info: None,

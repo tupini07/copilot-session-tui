@@ -98,6 +98,14 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.set_project_filter(None);
             app.status_message = Some("Filter cleared".to_string());
         }
+        KeyCode::Char('n') => {
+            // Start new session in filtered project directory
+            if let Some(ref project) = app.project_filter {
+                app.should_new_session = Some(project.clone());
+            } else {
+                app.status_message = Some("Filter by a project first (f) to start a new session".to_string());
+            }
+        }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
         }

@@ -103,6 +103,12 @@ fn main() -> Result<()> {
         manager::resume_session(&session_id, &cwd)?;
     }
 
+    // Start new session if requested
+    if let Some(cwd) = app.should_new_session {
+        eprintln!("Starting new session in {}...", &cwd);
+        manager::start_new_session(&cwd)?;
+    }
+
     Ok(())
 }
 
@@ -138,7 +144,7 @@ fn run_app(
         // Handle input
         input::handle_input(app)?;
 
-        if app.should_quit || app.should_resume.is_some() || app.should_update {
+        if app.should_quit || app.should_resume.is_some() || app.should_update || app.should_new_session.is_some() {
             break;
         }
     }
