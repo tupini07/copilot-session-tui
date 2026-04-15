@@ -44,6 +44,29 @@ copilot-session-tui --auto-filter false
 copilot-session-tui --copilot-home /path/to/.copilot
 ```
 
+### Shell integration (auto-cd into project directory)
+
+When you resume or start a session through the TUI, the copilot subprocess runs in the correct project directory. However, after it exits, your shell returns to wherever you originally launched `copilot-session-tui` — this is a limitation of how processes work (a child process cannot change its parent's working directory).
+
+To automatically `cd` into the project directory after exiting, add this to your shell config:
+
+**Bash** (`~/.bashrc`):
+```bash
+eval "$(copilot-session-tui init bash)"
+```
+
+**Zsh** (`~/.zshrc`):
+```bash
+eval "$(copilot-session-tui init zsh)"
+```
+
+**PowerShell** (`$PROFILE`):
+```powershell
+Invoke-Expression (copilot-session-tui init powershell | Out-String)
+```
+
+This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and your shell will auto-cd into the project directory after exiting a session.
+
 ## Keyboard Shortcuts
 
 | Key | Action |

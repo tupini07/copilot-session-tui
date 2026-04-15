@@ -7,7 +7,7 @@ mod ui;
 mod updater;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -33,10 +33,33 @@ struct Cli {
     /// Auto-filter to sessions from the current directory
     #[arg(long, default_value = "true")]
     auto_filter: bool,
+
+    /// Write the session's project directory to this file on exit (for shell cd wrapper)
+    #[arg(long)]
+    last_dir_file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Output shell integration script (add to your shell config for auto-cd on exit)
+    Init {
+        /// Shell type
+        #[arg(value_parser = ["bash", "zsh", "powershell"])]
+        shell: String,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(Commands::Init { shell }) = &cli.command {
+        print_shell_init(shell);
+        return Ok(());
+    }
 
     let copilot_home = cli
         .copilot_home
@@ -98,16 +121,33 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Track the directory to write to --last-dir-file
+    let mut last_dir: Option<String> = None;
+
     // Resume session if requested
     if let Some((session_id, cwd)) = app.should_resume {
         eprintln!("Resuming session {} in {}...", &session_id[..8], &cwd);
+        last_dir = Some(cwd.clone());
         manager::resume_session(&session_id, &cwd, &app.config)?;
     }
 
     // Start new session if requested
     if let Some(cwd) = app.should_new_session {
         eprintln!("Starting new session in {}...", &cwd);
+        last_dir = Some(cwd.clone());
         manager::start_new_session(&cwd, &app.config)?;
+    }
+
+    // If user quit without entering a session but has an active project filter, use that
+    if last_dir.is_none() {
+        if let Some(ref project) = app.project_filter {
+            last_dir = Some(project.clone());
+        }
+    }
+
+    // Write last directory to file if --last-dir-file was provided
+    if let (Some(ref path), Some(ref dir)) = (&cli.last_dir_file, &last_dir) {
+        let _ = std::fs::write(path, dir);
     }
 
     Ok(())
@@ -151,4 +191,40 @@ fn run_app(
     }
 
     Ok(())
+}
+
+fn print_shell_init(shell: &str) {
+    match shell {
+        "bash" | "zsh" => {
+            print!(
+                r#"cst() {{
+    local tmpfile
+    tmpfile=$(mktemp)
+    command copilot-session-tui --last-dir-file="$tmpfile" "$@"
+    local last_dir
+    last_dir=$(cat "$tmpfile" 2>/dev/null)
+    rm -f "$tmpfile"
+    if [ -n "$last_dir" ] && [ -d "$last_dir" ]; then
+        cd "$last_dir" || true
+    fi
+}}
+"#
+            );
+        }
+        "powershell" => {
+            print!(
+                r#"function cst {{
+    $tmpfile = [System.IO.Path]::GetTempFileName()
+    copilot-session-tui --last-dir-file="$tmpfile" @args
+    $lastDir = Get-Content $tmpfile -ErrorAction SilentlyContinue
+    Remove-Item $tmpfile -ErrorAction SilentlyContinue
+    if ($lastDir -and (Test-Path $lastDir)) {{
+        Set-Location $lastDir
+    }}
+}}
+"#
+            );
+        }
+        _ => unreachable!(),
+    }
 }
