@@ -205,9 +205,8 @@ impl App {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(project);
-                let haystack = format!("{} {}", project, short_name);
                 matcher
-                    .fuzzy_match(&haystack, &self.project_search_query)
+                    .fuzzy_match(short_name, &self.project_search_query)
                     .is_some()
             })
             .map(|(i, _)| i)
