@@ -27,6 +27,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
+    // Name (full, untruncated)
+    lines.push(Line::from(vec![
+        Span::styled("  Name: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(session.display_name(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]));
+
+    lines.push(Line::from(""));
+
     // ID
     lines.push(Line::from(vec![
         Span::styled("  ID: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),

@@ -43,8 +43,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let name = session.display_name();
-            let truncated_name = if name.len() > 28 {
-                format!("{}...", &name[..25])
+            // 2 chars for indicator, 1 space + 8 chars for time column
+            let max_name_width = (inner.width as usize).saturating_sub(11);
+            let truncated_name = if name.len() > max_name_width {
+                let end = max_name_width.saturating_sub(3);
+                format!("{}...", &name[..end])
             } else {
                 name.to_string()
             };
@@ -62,7 +65,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 indicator,
                 Span::styled(
-                    format!("{:<28}", truncated_name),
+                    format!("{:<width$}", truncated_name, width = max_name_width),
                     name_style,
                 ),
                 Span::styled(
