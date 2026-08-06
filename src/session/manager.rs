@@ -19,31 +19,36 @@ fn apply_config_args(cmd: &mut Command, config: &UserConfig) {
     }
 }
 
-/// Rename a session by updating the summary field in workspace.yaml
+/// Rename a session using the current `name` field while preserving legacy metadata.
 pub fn rename_session(session_dir: &Path, new_name: &str) -> Result<()> {
     let workspace_path = session_dir.join("workspace.yaml");
     let content = fs::read_to_string(&workspace_path)
         .with_context(|| format!("Failed to read {}", workspace_path.display()))?;
 
     let mut new_lines = Vec::new();
-    let mut found_summary = false;
+    let has_name = content.lines().any(|line| line.starts_with("name:"));
+    let mut found_title = false;
 
     for line in content.lines() {
-        if line.starts_with("summary:") && !line.starts_with("summary_count:") {
+        if line.starts_with("name:") {
+            new_lines.push(format!("name: {}", new_name));
+            found_title = true;
+        } else if !has_name && line.starts_with("summary:") && !line.starts_with("summary_count:") {
             new_lines.push(format!("summary: {}", new_name));
-            found_summary = true;
+            found_title = true;
         } else {
             new_lines.push(line.to_string());
         }
     }
 
-    if !found_summary {
-        // Insert summary after id line
+    if !found_title {
+        // New Copilot CLI versions use `name`; older `summary` files remain
+        // supported by the replacement path above.
         let mut inserted = Vec::new();
         for line in &new_lines {
             inserted.push(line.clone());
             if line.starts_with("id:") {
-                inserted.push(format!("summary: {}", new_name));
+                inserted.push(format!("name: {}", new_name));
             }
         }
         new_lines = inserted;
@@ -182,4 +187,43 @@ fn find_copilot() -> Result<String> {
     }
 
     anyhow::bail!("Could not find copilot CLI. Make sure it's installed and in PATH.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_updates_current_name_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace.yaml");
+        fs::write(
+            &workspace,
+            "id: test\nname: Generated title\nsummary_count: 0\n",
+        )
+        .unwrap();
+
+        rename_session(temp.path(), "My title").unwrap();
+
+        let content = fs::read_to_string(workspace).unwrap();
+        assert!(content.contains("name: My title\n"));
+        assert!(!content.contains("summary: My title\n"));
+    }
+
+    #[test]
+    fn rename_preserves_legacy_summary_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace.yaml");
+        fs::write(
+            &workspace,
+            "id: test\nsummary: Old title\nsummary_count: 1\n",
+        )
+        .unwrap();
+
+        rename_session(temp.path(), "My title").unwrap();
+
+        let content = fs::read_to_string(workspace).unwrap();
+        assert!(content.contains("summary: My title\n"));
+        assert!(content.contains("summary_count: 1\n"));
+    }
 }

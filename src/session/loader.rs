@@ -36,7 +36,7 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
 
         match load_single_session(&path) {
             Ok(session) => {
-                // Skip empty sessions (no summary and no events)
+                // Skip empty sessions (no title and no events)
                 if session.summary.is_none() {
                     let events_path = path.join("events.jsonl");
                     let has_events = events_path.exists()
@@ -91,7 +91,9 @@ fn load_single_session(dir: &Path) -> Result<Session> {
         id: ws.id,
         cwd,
         project_root,
-        summary: ws.summary,
+        // `name` is the current Copilot CLI field. Prefer `summary` when
+        // present so titles written by older TUI versions remain effective.
+        summary: ws.summary.or(ws.name),
         created_at,
         updated_at,
         is_active,
@@ -225,4 +227,43 @@ fn is_process_running(pid: u32) -> bool {
 fn is_process_running(pid: u32) -> bool {
     use std::path::Path as StdPath;
     StdPath::new(&format!("/proc/{}", pid)).exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_workspace(dir: &Path, title_fields: &str) {
+        fs::write(
+            dir.join("workspace.yaml"),
+            format!(
+                "id: test-session\ncwd: {}\n{title_fields}created_at: 2026-08-06T12:00:00Z\nupdated_at: 2026-08-06T12:00:00Z\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn loads_current_name_field() {
+        let temp = tempfile::tempdir().unwrap();
+        write_workspace(temp.path(), "name: Generated title\n");
+
+        let session = load_single_session(temp.path()).unwrap();
+
+        assert_eq!(session.display_name(), "Generated title");
+    }
+
+    #[test]
+    fn legacy_summary_takes_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        write_workspace(
+            temp.path(),
+            "name: Generated title\nsummary: Legacy TUI rename\n",
+        );
+
+        let session = load_single_session(temp.path()).unwrap();
+
+        assert_eq!(session.display_name(), "Legacy TUI rename");
+    }
 }

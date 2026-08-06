@@ -27,6 +27,7 @@ pub struct Session {
 pub struct WorkspaceYaml {
     pub id: String,
     pub cwd: Option<String>,
+    pub name: Option<String>,
     pub summary: Option<String>,
     #[allow(dead_code)]
     pub summary_count: Option<u32>,
