@@ -1,10 +1,10 @@
-pub mod session_list;
-pub mod session_detail;
-pub mod status_bar;
 pub mod popups;
+pub mod session_detail;
+pub mod session_list;
+pub mod status_bar;
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::Frame;
 
 use crate::app::{App, Mode};
 
@@ -14,7 +14,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // title bar
+            Constraint::Length(1), // title bar
             Constraint::Min(5),    // main content
             Constraint::Length(2), // status bar
         ])
@@ -56,10 +56,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .fg(ratatui::style::Color::Black)
                 .bg(ratatui::style::Color::Magenta),
         ),
-        ratatui::text::Span::raw(format!(
-            "  {} sessions",
-            app.filtered_indices.len()
-        )),
+        ratatui::text::Span::raw(format!("  {} sessions", app.filtered_indices.len())),
     ]));
 
     f.render_widget(title, main_layout[0]);
@@ -67,10 +64,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Main content: session list + detail pane
     let content_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(45),
-            Constraint::Percentage(55),
-        ])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(main_layout[1]);
 
     session_list::draw(f, app, content_layout[0]);
@@ -82,10 +76,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Popups overlay
     match app.mode {
         Mode::ConfirmDelete => popups::draw_delete_confirm(f, app),
+        Mode::ConfirmForceDelete => popups::draw_force_delete_confirm(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
         Mode::Help => popups::draw_help(f),
         Mode::Rename => popups::draw_rename(f, app),
         Mode::Settings => popups::draw_settings(f, app),
+        Mode::ProjectSettings => popups::draw_project_settings(f, app),
+        Mode::BranchName => popups::draw_branch_name(f, app),
         _ => {}
     }
 }

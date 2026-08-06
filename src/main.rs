@@ -18,7 +18,7 @@ use ratatui::Terminal;
 use std::io;
 use std::path::PathBuf;
 
-use app::App;
+use app::{App, NewSessionRequest};
 use session::loader;
 use session::manager;
 
@@ -61,9 +61,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let copilot_home = cli
-        .copilot_home
-        .unwrap_or_else(loader::copilot_home);
+    let copilot_home = cli.copilot_home.unwrap_or_else(loader::copilot_home);
 
     // Load sessions
     let sessions = loader::load_sessions(&copilot_home)?;
@@ -84,7 +82,11 @@ fn main() -> Result<()> {
             let cwd_str = cwd.to_string_lossy().to_string();
             // Resolve project root (handles worktrees) for matching
             let resolved = loader::resolve_project_root_pub(&cwd_str);
-            if app.unique_projects.iter().any(|p| p.eq_ignore_ascii_case(&resolved)) {
+            if app
+                .unique_projects
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&resolved))
+            {
                 app.set_project_filter(Some(resolved));
             }
         }
@@ -132,10 +134,27 @@ fn main() -> Result<()> {
     }
 
     // Start new session if requested
-    if let Some(cwd) = app.should_new_session {
-        eprintln!("Starting new session in {}...", &cwd);
-        last_dir = Some(cwd.clone());
-        manager::start_new_session(&cwd, &app.config)?;
+    if let Some(request) = app.should_new_session.take() {
+        match request {
+            NewSessionRequest::Normal { cwd } => {
+                eprintln!("Starting new session in {}...", &cwd);
+                last_dir = Some(cwd.clone());
+                manager::start_new_session(&cwd, &app.config)?;
+            }
+            NewSessionRequest::Worktree {
+                source_project,
+                branch,
+                config,
+            } => {
+                let worktree = manager::start_worktree_session(
+                    &source_project,
+                    &branch,
+                    &config,
+                    &app.config,
+                )?;
+                last_dir = Some(worktree.to_string_lossy().to_string());
+            }
+        }
     }
 
     // If user quit without entering a session but has an active project filter, use that
@@ -153,10 +172,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         // Update visible rows based on terminal size
         let size = terminal.size()?;
@@ -185,7 +201,11 @@ fn run_app(
         // Handle input
         input::handle_input(app)?;
 
-        if app.should_quit || app.should_resume.is_some() || app.should_update || app.should_new_session.is_some() {
+        if app.should_quit
+            || app.should_resume.is_some()
+            || app.should_update
+            || app.should_new_session.is_some()
+        {
             break;
         }
     }

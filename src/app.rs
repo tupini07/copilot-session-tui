@@ -1,4 +1,5 @@
-use crate::config::UserConfig;
+use crate::config::{EffectiveWorktreeConfig, ProjectSettings, UserConfig};
+use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::updater::UpdateInfo;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -11,9 +12,12 @@ pub enum Mode {
     Search,
     Rename,
     ConfirmDelete,
+    ConfirmForceDelete,
     FilterProject,
     Help,
     Settings,
+    ProjectSettings,
+    BranchName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +26,31 @@ pub enum SortField {
     Created,
     Name,
     Project,
+}
+
+#[derive(Debug, Clone)]
+pub enum NewSessionRequest {
+    Normal {
+        cwd: String,
+    },
+    Worktree {
+        source_project: String,
+        branch: String,
+        config: EffectiveWorktreeConfig,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum DeleteTarget {
+    SessionOnly,
+    Managed { entry: ManagedWorktree, dirty: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsEditField {
+    Model,
+    BranchPrefix,
+    WorktreeRoot,
 }
 
 pub struct App {
@@ -42,7 +71,7 @@ pub struct App {
     pub detail_loaded_for: Option<String>,
     pub should_quit: bool,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
-    pub should_new_session: Option<String>,       // cwd for new session
+    pub should_new_session: Option<NewSessionRequest>,
     pub status_message: Option<String>,
     pub visible_rows: usize,
     pub update_info: Option<UpdateInfo>,
@@ -50,8 +79,15 @@ pub struct App {
     pub should_update: bool,
     pub config: UserConfig,
     pub settings_selected: usize,
-    pub settings_editing_model: bool,
-    pub settings_model_input: String,
+    pub settings_editing: Option<SettingsEditField>,
+    pub settings_input: String,
+    pub project_settings: Option<ProjectSettings>,
+    pub project_settings_selected: usize,
+    pub project_settings_editing: bool,
+    pub project_settings_input: String,
+    pub branch_input: String,
+    pub branch_config: Option<EffectiveWorktreeConfig>,
+    pub pending_delete: Option<DeleteTarget>,
 }
 
 impl App {
@@ -85,8 +121,15 @@ impl App {
             should_update: false,
             config,
             settings_selected: 0,
-            settings_editing_model: false,
-            settings_model_input: String::new(),
+            settings_editing: None,
+            settings_input: String::new(),
+            project_settings: None,
+            project_settings_selected: 0,
+            project_settings_editing: false,
+            project_settings_input: String::new(),
+            branch_input: String::new(),
+            branch_config: None,
+            pending_delete: None,
         }
     }
 
@@ -134,13 +177,8 @@ impl App {
                 }
                 // Search filter
                 if !self.search_query.is_empty() {
-                    let haystack = format!(
-                        "{} {} {} {}",
-                        s.display_name(),
-                        s.project_root,
-                        s.cwd,
-                        s.id
-                    );
+                    let haystack =
+                        format!("{} {} {} {}", s.display_name(), s.project_root, s.cwd, s.id);
                     return matcher.fuzzy_match(&haystack, &self.search_query).is_some();
                 }
                 true
@@ -175,7 +213,8 @@ impl App {
                 });
             }
             SortField::Created => {
-                self.sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                self.sessions
+                    .sort_by(|a, b| b.created_at.cmp(&a.created_at));
             }
             SortField::Name => {
                 self.sessions.sort_by(|a, b| {
@@ -185,7 +224,8 @@ impl App {
                 });
             }
             SortField::Project => {
-                self.sessions.sort_by(|a, b| a.project_root.cmp(&b.project_root));
+                self.sessions
+                    .sort_by(|a, b| a.project_root.cmp(&b.project_root));
             }
         }
         self.apply_filter();
@@ -255,7 +295,9 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
                 *entry = updated;
             }
         } else {
-            latest.entry(s.project_root.clone()).or_insert_with(|| DateTime::<Utc>::MIN_UTC);
+            latest
+                .entry(s.project_root.clone())
+                .or_insert_with(|| DateTime::<Utc>::MIN_UTC);
         }
     }
     let mut projects: Vec<String> = latest.keys().cloned().collect();

@@ -20,10 +20,7 @@ pub fn copilot_home() -> PathBuf {
 pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
     let session_dir = copilot_home.join("session-state");
     if !session_dir.exists() {
-        anyhow::bail!(
-            "Session directory not found: {}",
-            session_dir.display()
-        );
+        anyhow::bail!("Session directory not found: {}", session_dir.display());
     }
 
     let mut sessions = Vec::new();
@@ -205,6 +202,10 @@ fn detect_active(dir: &Path) -> bool {
         }
     }
     false
+}
+
+pub fn session_is_active(dir: &Path) -> bool {
+    detect_active(dir)
 }
 
 #[cfg(windows)]

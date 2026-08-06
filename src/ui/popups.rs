@@ -1,10 +1,10 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, DeleteTarget, SettingsEditField};
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -27,7 +27,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
-    let area = centered_rect(40, 30, f.area());
+    let area = centered_rect(55, 36, f.area());
     f.render_widget(Clear, area);
 
     let name = app
@@ -35,25 +35,57 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
         .map(|s| s.display_name().to_string())
         .unwrap_or_default();
 
-    let text = vec![
+    let managed = matches!(app.pending_delete, Some(DeleteTarget::Managed { .. }));
+    let dirty = matches!(
+        app.pending_delete,
+        Some(DeleteTarget::Managed { dirty: true, .. })
+    );
+    let action = if managed {
+        "  Delete this session and its TUI-managed worktree?"
+    } else {
+        "  Delete this session?"
+    };
+
+    let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Delete this session?",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            action,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(format!("  {}", name)),
         Line::from(""),
+    ];
+    if managed {
+        text.push(Line::from(Span::styled(
+            "  The worktree will be removed before session metadata.",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if dirty {
+        text.push(Line::from(Span::styled(
+            "  This worktree is dirty; another force confirmation follows.",
+            Style::default().fg(Color::Red),
+        )));
+    }
+    text.extend([
+        Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Yes  "),
-            Span::styled("any key", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "any key",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Cancel"),
         ]),
-    ];
+    ]);
 
     let block = Block::default()
         .title(" Confirm Delete ")
@@ -62,6 +94,46 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 36, f.area());
+    f.render_widget(Clear, area);
+    let path = match &app.pending_delete {
+        Some(DeleteTarget::Managed { entry, .. }) => entry.path.display().to_string(),
+        _ => String::new(),
+    };
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  FORCE REMOVE DIRTY WORKTREE?",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!("  {path}")),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Modified, staged, and untracked files will be permanently lost.",
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Press "),
+            Span::styled(
+                "Shift+Y",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" to force delete; any other key cancels"),
+        ]),
+    ];
+    let block = Block::default()
+        .title(" Destructive Confirmation ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 pub fn draw_rename(f: &mut Frame, app: &App) {
@@ -120,7 +192,11 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     // Split inner area: search input at top, list below
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(inner);
 
     // Search input
@@ -155,19 +231,15 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(Color::White)
         };
-        all_items.push((0, ListItem::new(Line::from(Span::styled(
-            "  All Projects",
-            all_style,
-        )))));
+        all_items.push((
+            0,
+            ListItem::new(Line::from(Span::styled("  All Projects", all_style))),
+        ));
     }
 
     for (list_i, &proj_idx) in filtered.iter().enumerate() {
         let project = &app.unique_projects[proj_idx];
-        let item_index = if has_all_option {
-            list_i + 1
-        } else {
-            list_i
-        };
+        let item_index = if has_all_option { list_i + 1 } else { list_i };
         let is_selected = app.project_selected == item_index;
         let is_active = app.project_filter.as_deref() == Some(project.as_str());
 
@@ -190,7 +262,10 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
             Style::default().fg(Color::White)
         };
 
-        all_items.push((item_index, ListItem::new(Line::from(Span::styled(display, style)))));
+        all_items.push((
+            item_index,
+            ListItem::new(Line::from(Span::styled(display, style))),
+        ));
     }
 
     let items: Vec<ListItem> = all_items
@@ -221,6 +296,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("Home/End", "Jump to first/last"),
         help_line("Enter", "Resume selected session"),
         help_line("n", "New session in filtered project"),
+        help_line("N", "New isolated worktree session"),
         help_line("r", "Rename selected session"),
         help_line("d", "Delete selected session"),
         Line::from(""),
@@ -229,7 +305,8 @@ pub fn draw_help(f: &mut Frame) {
         help_line("c", "Clear project filter"),
         help_line("s", "Cycle sort order"),
         Line::from(""),
-        help_line(",", "Settings"),
+        help_line(",", "Global settings"),
+        help_line(".", "Filtered-project settings"),
         help_line("?", "Toggle this help"),
         help_line("u", "Update (when available)"),
         help_line("q/Esc", "Quit"),
@@ -264,11 +341,11 @@ fn help_line(key: &str, desc: &str) -> Line<'static> {
 }
 
 pub fn draw_settings(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 40, f.area());
+    let area = centered_rect(65, 68, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Settings ")
+        .title(" Global Settings ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
 
@@ -281,7 +358,11 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
 
     // Row 0: Yolo mode
     let yolo_value = if app.config.yolo { "ON" } else { "OFF" };
-    let yolo_color = if app.config.yolo { Color::Green } else { Color::Red };
+    let yolo_color = if app.config.yolo {
+        Color::Green
+    } else {
+        Color::Red
+    };
     lines.push(settings_row(
         "Yolo Mode",
         yolo_value,
@@ -297,8 +378,9 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     // Row 1: Model
-    let model_display = if app.settings_editing_model {
-        format!("{}█", app.settings_model_input)
+    let model_editing = app.settings_editing == Some(SettingsEditField::Model);
+    let model_display = if model_editing {
+        format!("{}█", app.settings_input)
     } else {
         app.config
             .model
@@ -316,7 +398,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         &model_display,
         model_color,
         app.settings_selected == 1,
-        app.settings_editing_model,
+        model_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Pass --model flag (e.g. gpt-5.2, claude-sonnet-4)",
@@ -349,16 +431,157 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     )));
 
     lines.push(Line::from(""));
+    let prefix_editing = app.settings_editing == Some(SettingsEditField::BranchPrefix);
+    let prefix_display = if prefix_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        app.config.worktree.branch_prefix.clone()
+    };
+    lines.push(settings_row(
+        "Branch Prefix",
+        &prefix_display,
+        Color::Cyan,
+        app.settings_selected == 3,
+        prefix_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Default branch prefix for isolated sessions",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+    let root_editing = app.settings_editing == Some(SettingsEditField::WorktreeRoot);
+    let root_display = if root_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        app.config.worktree.root.to_string_lossy().to_string()
+    };
+    lines.push(settings_row(
+        "Worktree Root",
+        &root_display,
+        Color::Cyan,
+        app.settings_selected == 4,
+        root_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Relative paths resolve from the global config directory",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
-        Span::raw(" Toggle  "),
+        Span::raw(" Edit/Toggle  "),
         Span::styled("Esc/,", Style::default().fg(Color::Magenta)),
         Span::raw(" Save & Close"),
     ]));
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+}
+
+pub fn draw_project_settings(f: &mut Frame, app: &App) {
+    let area = centered_rect(70, 50, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Project Settings (.cst.json) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(settings) = app.project_settings.as_ref() else {
+        return;
+    };
+    let prefix_override = settings.branch_prefix_override().is_some();
+    let root_override = settings.root_override().is_some();
+    let prefix_value = if app.project_settings_editing && app.project_settings_selected == 0 {
+        format!("{}█", app.project_settings_input)
+    } else {
+        settings.effective_branch_prefix().to_string()
+    };
+    let root_value = if app.project_settings_editing && app.project_settings_selected == 1 {
+        format!("{}█", app.project_settings_input)
+    } else {
+        settings.effective_root().to_string_lossy().to_string()
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  Repository: {}", settings.repository_root.display()),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        project_settings_row(
+            "Branch Prefix",
+            &prefix_value,
+            prefix_override,
+            app.project_settings_selected == 0,
+            app.project_settings_editing && app.project_settings_selected == 0,
+        ),
+        Line::from(Span::styled(
+            "    Effective prefix used to prepopulate isolated branches",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        project_settings_row(
+            "Worktree Root",
+            &root_value,
+            root_override,
+            app.project_settings_selected == 1,
+            app.project_settings_editing && app.project_settings_selected == 1,
+        ),
+        Line::from(Span::styled(
+            "    Relative overrides resolve from the repository root",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Space", Style::default().fg(Color::Blue)),
+            Span::raw(" Inherit/Override  "),
+            Span::styled("Enter", Style::default().fg(Color::Blue)),
+            Span::raw(" Edit  "),
+            Span::styled("Esc/.", Style::default().fg(Color::Blue)),
+            Span::raw(" Save & Close"),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+pub fn draw_branch_name(f: &mut Frame, app: &App) {
+    let area = centered_rect(65, 28, f.area());
+    f.render_widget(Clear, area);
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Branch for isolated worktree session:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&app.branch_input, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" Create  "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" Cancel"),
+        ]),
+    ];
+    let block = Block::default()
+        .title(" New Isolated Session ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(Paragraph::new(text).block(block), area);
 }
 
 fn settings_row<'a>(
@@ -383,11 +606,35 @@ fn settings_row<'a>(
     };
 
     Line::from(vec![
-        Span::styled(
-            pointer.to_string(),
-            Style::default().fg(Color::Magenta),
-        ),
+        Span::styled(pointer.to_string(), Style::default().fg(Color::Magenta)),
         Span::styled(format!("{:<20}", label), label_style),
         Span::styled(value.to_string(), value_style),
+    ])
+}
+
+fn project_settings_row<'a>(
+    label: &str,
+    value: &str,
+    is_override: bool,
+    is_selected: bool,
+    is_editing: bool,
+) -> Line<'a> {
+    let pointer = if is_selected { "▸ " } else { "  " };
+    let state = if is_override { "Override" } else { "Inherited" };
+    let state_color = if is_override {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+    let value_color = if is_editing {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    Line::from(vec![
+        Span::styled(pointer.to_string(), Style::default().fg(Color::Blue)),
+        Span::styled(format!("{:<18}", label), Style::default().fg(Color::White)),
+        Span::styled(format!("[{state:<9}] "), Style::default().fg(state_color)),
+        Span::styled(value.to_string(), Style::default().fg(value_color)),
     ])
 }

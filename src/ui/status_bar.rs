@@ -1,45 +1,41 @@
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::app::{App, Mode};
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let line1 = match app.mode {
-        Mode::Search => {
-            Line::from(vec![
-                Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Yellow)),
-                Span::raw(" "),
-                Span::styled(&app.search_query, Style::default().fg(Color::Yellow)),
-                Span::styled("█", Style::default().fg(Color::Yellow)),
-                Span::raw("  "),
-                Span::styled("Enter", Style::default().fg(Color::Cyan)),
-                Span::raw(" confirm  "),
-                Span::styled("Esc", Style::default().fg(Color::Cyan)),
-                Span::raw(" cancel"),
-            ])
-        }
-        Mode::Normal => {
-            Line::from(vec![
-                Span::raw(" "),
-                key_span("↑↓"),
-                Span::raw(" Navigate  "),
-                key_span("Enter"),
-                Span::raw(" Resume  "),
-                key_span("r"),
-                Span::raw(" Rename  "),
-                key_span("d"),
-                Span::raw(" Delete  "),
-                key_span("/"),
-                Span::raw(" Search  "),
-                key_span("f"),
-                Span::raw(" Filter  "),
-                key_span("s"),
-                Span::raw(" Sort"),
-            ])
-        }
+        Mode::Search => Line::from(vec![
+            Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(" "),
+            Span::styled(&app.search_query, Style::default().fg(Color::Yellow)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::raw("  "),
+            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" confirm  "),
+            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" cancel"),
+        ]),
+        Mode::Normal => Line::from(vec![
+            Span::raw(" "),
+            key_span("↑↓"),
+            Span::raw(" Navigate  "),
+            key_span("Enter"),
+            Span::raw(" Resume  "),
+            key_span("r"),
+            Span::raw(" Rename  "),
+            key_span("d"),
+            Span::raw(" Delete  "),
+            key_span("/"),
+            Span::raw(" Search  "),
+            key_span("f"),
+            Span::raw(" Filter  "),
+            key_span("s"),
+            Span::raw(" Sort"),
+        ]),
         _ => Line::from(""),
     };
 
@@ -50,9 +46,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 key_span("c"),
                 Span::raw(" Clear filter  "),
                 key_span("n"),
-                Span::raw(" New session  "),
+                Span::raw(" New  "),
+                key_span("N"),
+                Span::raw(" Worktree  "),
                 key_span(","),
-                Span::raw(" Settings  "),
+                Span::raw(" Global settings  "),
+                key_span("."),
+                Span::raw(" Project settings  "),
                 key_span("?"),
                 Span::raw(" Help  "),
                 key_span("q"),
@@ -90,8 +90,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let paragraph = Paragraph::new(vec![line1, line2])
-        .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    let paragraph =
+        Paragraph::new(vec![line1, line2]).style(Style::default().bg(Color::Rgb(30, 30, 40)));
 
     f.render_widget(paragraph, area);
 }

@@ -1,5 +1,6 @@
 pub mod loader;
 pub mod manager;
+pub mod worktree;
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;

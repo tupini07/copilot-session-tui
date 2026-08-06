@@ -18,3 +18,8 @@ fuzzy-matcher = "0.3"
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2"] }
 semver = "1"
 ureq = { version = "3", features = ["json"] }
+ignore = "0.4"
+sha2 = "0.10"
+tempfile = "3"
+fs4 = "1"
+uuid = { version = "1", features = ["v4"] }

@@ -9,8 +9,9 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - **Fuzzy search** — find sessions by name, project, or ID
 - **Session details** — preview edited files, last message, and session stats
 - **Resume** — press Enter to launch `copilot --resume` directly
+- **Isolated sessions** — press `N` to create a branch-backed Git worktree before launching Copilot
 - **Rename** — rename sessions inline with `r`
-- **Delete** — remove old sessions with `d` (with confirmation)
+- **Safe cleanup** — delete TUI-created worktrees with dirty-worktree and unmerged-branch protection
 - **Sort** — cycle through sort orders (last used, created, name, project)
 - **Active detection** — see which sessions are currently in use
 
@@ -74,12 +75,16 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `↑/k` `↓/j` | Navigate sessions |
 | `Home` / `End` | Jump to first/last |
 | `Enter` | Resume selected session |
+| `n` | New session in the filtered project |
+| `N` | New isolated worktree session with an editable branch name |
 | `r` | Rename session |
 | `d` | Delete session (with confirmation) |
 | `/` | Fuzzy search |
 | `f` / `p` | Filter by project |
 | `c` | Clear project filter |
 | `s` | Cycle sort order |
+| `,` | Edit global settings |
+| `.` | Edit filtered-project `.cst.json` settings |
 | `?` | Show help |
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
@@ -93,6 +98,82 @@ The TUI reads session data directly from `~/.copilot/session-state/` (or `COPILO
 - **`inuse.*.lock`** — lock files used to detect active sessions
 
 When you resume a session, the TUI exits cleanly and launches `copilot --resume=<session-id>`.
+
+## Isolated Worktree Sessions
+
+Filter to a project and press uppercase `N`. The branch editor is prepopulated with
+`copilot/<timestamp>` (or the configured prefix). CST validates the name with Git,
+creates a short collision-resistant path, copies configured ignored files, and launches
+Copilot with both its process directory and shell auto-`cd` target set to that worktree.
+
+New branches start from the cached `refs/remotes/origin/HEAD`. If that reference is not
+available, CST uses the filtered project's current `HEAD` and prints a notice before
+Copilot starts.
+
+The default worktree root is the platform local-data directory under `cst/wt` (for
+example, `%LOCALAPPDATA%\cst\wt` on Windows). Generated repository and branch
+components are bounded, filesystem-safe, and include short hashes to avoid collisions.
+
+### Configuration
+
+Press `,` for global settings. Existing global files containing only `yolo`, `model`,
+and `reasoning_effort` remain valid. Worktree defaults are stored in the same config:
+
+```json
+{
+  "yolo": false,
+  "worktree": {
+    "branch_prefix": "copilot/",
+    "root": "D:\\cst-wt"
+  }
+}
+```
+
+Press `.` while a project filter is active to edit repository-root `.cst.json`.
+Each field explicitly shows `Inherited` or `Override`; `Space` toggles that state.
+Project settings take precedence over global settings, which take precedence over
+built-in defaults:
+
+```json
+{
+  "worktree": {
+    "branch_prefix": "feature/",
+    "root": ".worktrees"
+  }
+}
+```
+
+A relative global root is resolved from the global config directory. A relative
+project root override is resolved from the repository root. Invalid project JSON is
+reported and is never silently overwritten.
+
+### `.worktreeinclude`
+
+CST implements Claude Code's `.worktreeinclude` convention. Put the file at the
+repository root and use gitignore syntax, including directory patterns and `!`
+negation:
+
+```gitignore
+.env
+.env.local
+cache/
+!cache/large/
+```
+
+Only files that both match `.worktreeinclude` and are reported by Git as ignored are
+copied. Tracked files are never copied, and relative directory structure is preserved.
+If copying fails, CST rolls back the new worktree and branch before launching Copilot.
+
+### Cleanup and ownership
+
+CST atomically records only worktrees it creates in an app-data registry and prunes
+entries whose paths no longer exist. Manually created worktrees and ordinary sessions
+remain session-only during deletion.
+
+Deleting a registered session explicitly removes its worktree first. Dirty worktrees
+require a second `Shift+Y` force confirmation. CST then attempts `git branch -d`; an
+unmerged branch is preserved and reported, and CST never escalates automatically to
+`git branch -D`. Active sessions cannot be deleted.
 
 ## License
 
