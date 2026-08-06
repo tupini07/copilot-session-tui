@@ -12,6 +12,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - **Isolated sessions** — press `N` to create a branch-backed Git worktree before launching Copilot
 - **Rename** — rename sessions inline with `r`
 - **Safe cleanup** — delete TUI-created worktrees with dirty-worktree and unmerged-branch protection
+- **Self-update** — checks GitHub Releases in the background and installs updates from the TUI
 - **Sort** — cycle through sort orders (last used, created, name, project)
 - **Active detection** — see which sessions are currently in use
 
@@ -31,6 +32,12 @@ cargo build --release
 ```
 
 The binary will be at `target/release/copilot-session-tui` (or `.exe` on Windows).
+
+### Updates
+
+The TUI checks GitHub Releases for a newer version at startup, using a 12-hour cache.
+When an update is available, the status bar shows the current and latest versions.
+Press `u` to download and install the matching release asset, then restart the TUI.
 
 ### Usage
 
@@ -85,6 +92,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `s` | Cycle sort order |
 | `,` | Edit global settings |
 | `.` | Edit filtered-project `.cst.json` settings |
+| `u` | Install an available update |
 | `?` | Show help |
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
@@ -93,7 +101,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 
 The TUI reads session data directly from `~/.copilot/session-state/` (or `COPILOT_HOME`):
 
-- **`workspace.yaml`** — session metadata (ID, working directory, summary, timestamps)
+- **`workspace.yaml`** — session metadata (ID, working directory, title, timestamps)
 - **`events.jsonl`** — event log (parsed on-demand for edited files and messages)
 - **`inuse.*.lock`** — lock files used to detect active sessions
 
