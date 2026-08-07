@@ -1,6 +1,6 @@
 [package]
 name = "copilot-session-tui"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "A TUI for managing GitHub Copilot CLI sessions"
 
@@ -15,7 +15,7 @@ dirs = "6"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 fuzzy-matcher = "0.3"
-self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2"] }
+self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate"] }
 semver = "1"
 ureq = { version = "3", features = ["json"] }
 ignore = "0.4"

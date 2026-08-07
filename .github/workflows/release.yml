@@ -47,7 +47,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -DestinationPath "${{ matrix.archive }}"
+          # NoCompression (stored entries) so that binaries <= v0.6.0, which were built
+          # without the self_update `compression-zip-deflate` feature, can still extract
+          # this archive and update themselves to a fixed version.
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -DestinationPath "${{ matrix.archive }}" -CompressionLevel NoCompression
 
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
