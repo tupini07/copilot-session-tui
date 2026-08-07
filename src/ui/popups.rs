@@ -249,7 +249,15 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
             .and_then(|n| n.to_str())
             .unwrap_or(project);
 
-        let display = format!("{}{}", prefix, name);
+        let display = if app
+            .cwd_project
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(project))
+        {
+            format!("{}{} (current dir)", prefix, name)
+        } else {
+            format!("{}{}", prefix, name)
+        };
 
         let style = if is_selected {
             Style::default()
@@ -295,7 +303,7 @@ pub fn draw_help(f: &mut Frame) {
         help_line("↑/k ↓/j", "Navigate sessions"),
         help_line("Home/End", "Jump to first/last"),
         help_line("Enter", "Resume selected session"),
-        help_line("n", "New session in filtered project"),
+        help_line("n", "New session in current project"),
         help_line("N", "New isolated worktree session"),
         help_line("r", "Rename selected session"),
         help_line("d", "Delete selected session"),

@@ -62,6 +62,11 @@ pub struct App {
     pub search_query: String,
     pub rename_input: String,
     pub project_filter: Option<String>,
+    /// Project root of the directory `cst` was launched from (git-aware).
+    /// `None` when the launch directory is not inside a Git repository.
+    pub cwd_project: Option<String>,
+    /// Raw directory `cst` was launched from.
+    pub cwd: Option<String>,
     pub unique_projects: Vec<String>,
     pub project_selected: usize,
     pub project_scroll_offset: usize,
@@ -104,6 +109,8 @@ impl App {
             search_query: String::new(),
             rename_input: String::new(),
             project_filter: None,
+            cwd_project: None,
+            cwd: None,
             unique_projects,
             project_selected: 0,
             project_scroll_offset: 0,
@@ -256,6 +263,44 @@ impl App {
     pub fn set_project_filter(&mut self, project: Option<String>) {
         self.project_filter = project;
         self.apply_filter();
+    }
+
+    /// Record the directory `cst` was launched from. When that directory belongs to a
+    /// Git project it becomes selectable in the project filter even if it has no
+    /// sessions yet, and is auto-selected as the current filter.
+    pub fn set_cwd_context(&mut self, cwd: String, auto_filter: bool) {
+        let project = crate::session::loader::detect_project_root(&cwd);
+        self.cwd = Some(cwd);
+
+        let Some(project) = project else {
+            return;
+        };
+
+        let known = self
+            .unique_projects
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&project));
+        if !known {
+            self.unique_projects.insert(0, project.clone());
+        }
+        self.cwd_project = Some(project.clone());
+
+        if auto_filter {
+            self.set_project_filter(Some(project));
+        }
+    }
+
+    /// Project used by project-scoped actions: the active filter, falling back to the
+    /// project of the launch directory.
+    pub fn active_project(&self) -> Option<String> {
+        self.project_filter
+            .clone()
+            .or_else(|| self.cwd_project.clone())
+    }
+
+    /// Directory to start a plain new session in.
+    pub fn new_session_dir(&self) -> Option<String> {
+        self.active_project().or_else(|| self.cwd.clone())
     }
 
     pub fn sort_label(&self) -> &str {

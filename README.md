@@ -42,7 +42,7 @@ Press `u` to download and install the matching release asset, then restart the T
 ### Usage
 
 ```bash
-# Run in any directory — auto-filters to sessions from that project
+# Run in any Git project — auto-filters to that project, even if it has no sessions yet
 copilot-session-tui
 
 # Run without auto-filter to see all sessions
@@ -82,7 +82,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `↑/k` `↓/j` | Navigate sessions |
 | `Home` / `End` | Jump to first/last |
 | `Enter` | Resume selected session |
-| `n` | New session in the filtered project |
+| `n` | New session in the filtered project (or the current directory's project) |
 | `N` | New isolated worktree session with an editable branch name |
 | `r` | Rename session |
 | `d` | Delete session (with confirmation) |

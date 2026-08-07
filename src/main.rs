@@ -63,33 +63,17 @@ fn main() -> Result<()> {
 
     let copilot_home = cli.copilot_home.unwrap_or_else(loader::copilot_home);
 
-    // Load sessions
-    let sessions = loader::load_sessions(&copilot_home)?;
-
-    if sessions.is_empty() {
-        eprintln!("No Copilot sessions found in {}", copilot_home.display());
-        return Ok(());
-    }
+    // Load sessions (may be empty — the TUI still lets you start a new session)
+    let sessions = loader::load_sessions(&copilot_home).unwrap_or_default();
 
     let mut app = App::new(sessions, config::load());
 
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
 
-    // Auto-filter to current directory if enabled
-    if cli.auto_filter {
-        if let Ok(cwd) = std::env::current_dir() {
-            let cwd_str = cwd.to_string_lossy().to_string();
-            // Resolve project root (handles worktrees) for matching
-            let resolved = loader::resolve_project_root_pub(&cwd_str);
-            if app
-                .unique_projects
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&resolved))
-            {
-                app.set_project_filter(Some(resolved));
-            }
-        }
+    // Record the launch directory; auto-filters to its project when enabled
+    if let Ok(cwd) = std::env::current_dir() {
+        app.set_cwd_context(cwd.to_string_lossy().to_string(), cli.auto_filter);
     }
 
     // Setup terminal
@@ -158,9 +142,16 @@ fn main() -> Result<()> {
     }
 
     // If user quit without entering a session but has an active project filter, use that
+    // (skip when the filter is just the project we were launched from — no cd needed)
     if last_dir.is_none() {
         if let Some(ref project) = app.project_filter {
-            last_dir = Some(project.clone());
+            let is_launch_project = app
+                .cwd_project
+                .as_ref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(project));
+            if !is_launch_project {
+                last_dir = Some(project.clone());
+            }
         }
     }
 

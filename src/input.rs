@@ -95,10 +95,8 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.status_message = Some("Filter cleared".to_string());
         }
         KeyCode::Char('n') => {
-            if let Some(ref project) = app.project_filter {
-                app.should_new_session = Some(NewSessionRequest::Normal {
-                    cwd: project.clone(),
-                });
+            if let Some(cwd) = app.new_session_dir() {
+                app.should_new_session = Some(NewSessionRequest::Normal { cwd });
             } else {
                 app.status_message =
                     Some("Filter by a project first (f) to start a new session".to_string());
@@ -155,7 +153,7 @@ fn begin_delete(app: &mut App) {
 }
 
 fn begin_worktree_session(app: &mut App) {
-    let Some(project) = app.project_filter.clone() else {
+    let Some(project) = app.active_project() else {
         app.status_message =
             Some("Filter by a project first (f) to create an isolated session".to_string());
         return;
@@ -182,7 +180,7 @@ fn begin_worktree_session(app: &mut App) {
 }
 
 fn begin_project_settings(app: &mut App) {
-    let Some(project) = app.project_filter.clone() else {
+    let Some(project) = app.active_project() else {
         app.status_message =
             Some("Filter by a project first (f) to edit project settings".to_string());
         return;
@@ -686,5 +684,36 @@ mod tests {
         assert!(settings.root_override().is_none());
         settings.save().unwrap();
         assert!(!temp.path().join(".cst.json").exists());
+    }
+
+    #[test]
+    fn new_session_uses_cwd_project_without_a_filter() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+        assert!(app.project_filter.is_none());
+
+        handle_normal(&mut app, KeyCode::Char('n'));
+
+        match app.should_new_session {
+            Some(NewSessionRequest::Normal { ref cwd }) => {
+                assert_eq!(cwd, app.cwd_project.as_ref().unwrap());
+            }
+            other => panic!("expected a normal new session request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwd_project_is_offered_in_the_project_list_and_auto_filtered() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), true);
+
+        let project = app.cwd_project.clone().unwrap();
+        assert_eq!(app.project_filter.as_ref(), Some(&project));
+        assert!(app.unique_projects.contains(&project));
     }
 }

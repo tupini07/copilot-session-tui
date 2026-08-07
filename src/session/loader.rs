@@ -129,17 +129,22 @@ fn canonicalize_or_lossy(p: &Path) -> String {
         .unwrap_or_else(|_| p.to_string_lossy().to_string())
 }
 
-/// Public wrapper for project root resolution (used by auto-filter)
-pub fn resolve_project_root_pub(cwd: &str) -> String {
-    resolve_project_root(cwd)
+/// Resolve the project root of `cwd`, returning `None` when `cwd` is not inside
+/// a Git repository. Used to detect whether the current directory is a project.
+pub fn detect_project_root(cwd: &str) -> Option<String> {
+    find_project_root(cwd)
 }
 
 /// Resolve the project root from a working directory.
 /// Walks up from `cwd` looking for `.git`. If `.git` is a file (git worktree),
 /// follows the `gitdir:` pointer back to the main repository root.
 fn resolve_project_root(cwd: &str) -> String {
+    find_project_root(cwd).unwrap_or_else(|| cwd.to_string())
+}
+
+fn find_project_root(cwd: &str) -> Option<String> {
     if cwd.is_empty() {
-        return cwd.to_string();
+        return None;
     }
 
     let mut current = PathBuf::from(cwd);
@@ -147,7 +152,7 @@ fn resolve_project_root(cwd: &str) -> String {
         let git_path = current.join(".git");
         if git_path.is_dir() {
             // Normal git repo — this directory is the project root
-            return canonicalize_or_lossy(&current);
+            return Some(canonicalize_or_lossy(&current));
         }
         if git_path.is_file() {
             // Git worktree — .git is a file like "gitdir: /path/to/main/.git/worktrees/<name>"
@@ -163,21 +168,21 @@ fn resolve_project_root(cwd: &str) -> String {
                     if let Some(dot_git) = gitdir_path.parent().and_then(|p| p.parent()) {
                         if let Some(repo_root) = dot_git.parent() {
                             if dot_git.ends_with(".git") {
-                                return canonicalize_or_lossy(repo_root);
+                                return Some(canonicalize_or_lossy(repo_root));
                             }
                         }
                     }
                 }
             }
             // Couldn't resolve — use the worktree dir itself
-            return canonicalize_or_lossy(&current);
+            return Some(canonicalize_or_lossy(&current));
         }
         if !current.pop() {
             break;
         }
     }
-    // No .git found — fall back to original cwd
-    cwd.to_string()
+    // No .git found
+    None
 }
 
 /// Detect if a session is currently active by checking lock files
@@ -265,5 +270,24 @@ mod tests {
         let session = load_single_session(temp.path()).unwrap();
 
         assert_eq!(session.display_name(), "Legacy TUI rename");
+    }
+
+    #[test]
+    fn detect_project_root_finds_repo_root_from_subdirectory() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        let nested = temp.path().join("src").join("deep");
+        fs::create_dir_all(&nested).unwrap();
+
+        let detected = detect_project_root(&nested.to_string_lossy()).unwrap();
+
+        assert_eq!(detected, canonicalize_or_lossy(temp.path()));
+    }
+
+    #[test]
+    fn detect_project_root_returns_none_outside_a_repo() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert!(detect_project_root(&temp.path().to_string_lossy()).is_none());
     }
 }

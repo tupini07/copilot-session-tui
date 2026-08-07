@@ -16,8 +16,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     if app.filtered_indices.is_empty() {
-        let empty = ratatui::widgets::Paragraph::new("  No sessions found")
-            .style(Style::default().fg(Color::DarkGray));
+        let hint = if app.new_session_dir().is_some() {
+            "  No sessions found\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
+        } else {
+            "  No sessions found"
+        };
+        let empty =
+            ratatui::widgets::Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty, inner);
         return;
     }
