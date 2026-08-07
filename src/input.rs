@@ -1,4 +1,4 @@
-use crate::app::{App, DeleteTarget, Mode, NewSessionRequest, SettingsEditField};
+use crate::app::{App, DeleteTarget, Mode, NewSessionRequest, SettingsEditField, View};
 use crate::config;
 use crate::session::loader;
 use crate::session::manager;
@@ -11,17 +11,32 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    let Event::Key(key) = event::read()? else {
-        return Ok(false);
+    let event = event::read()?;
+    handle_terminal_event(app, event)?;
+    Ok(true)
+}
+
+/// Apply an already-read terminal event to the session list UI.
+///
+/// Split out from `handle_input` so the multiplexer's event thread — which owns the
+/// only reader of the terminal — can route events here instead of polling separately.
+pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    let Event::Key(key) = event else {
+        return Ok(());
     };
 
     if key.kind != KeyEventKind::Press {
-        return Ok(false);
+        return Ok(());
+    }
+
+    if app.confirm_quit {
+        handle_quit_confirm(app, key.code);
+        return Ok(());
     }
 
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.should_quit = true;
-        return Ok(true);
+        request_quit(app);
+        return Ok(());
     }
 
     match app.mode {
@@ -35,15 +50,97 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
         Mode::Settings => handle_settings(app, key.code),
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
+        Mode::PaneList => handle_pane_list(app, key.code),
     }
 
-    Ok(true)
+    Ok(())
+}
+
+/// Quitting kills every pane, so confirm while sessions are still running.
+fn request_quit(app: &mut App) {
+    let running = app
+        .mux
+        .as_mut()
+        .map(|mux| {
+            mux.reap();
+            mux.running_count()
+        })
+        .unwrap_or(0);
+    if running > 0 {
+        app.confirm_quit = true;
+    } else {
+        app.should_quit = true;
+    }
+}
+
+fn handle_quit_confirm(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.confirm_quit = false;
+            app.should_quit = true;
+        }
+        _ => {
+            app.confirm_quit = false;
+            app.status_message = Some("Quit cancelled".to_string());
+        }
+    }
+}
+
+/// Pane switcher: attach, kill, or dismiss without touching the underlying session list.
+fn handle_pane_list(app: &mut App, key: KeyCode) {
+    let Some(mux) = app.mux.as_mut() else {
+        app.mode = Mode::Normal;
+        return;
+    };
+    let count = mux.panes.len();
+    if count == 0 {
+        app.mode = Mode::Normal;
+        return;
+    }
+
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.pane_selected = app.pane_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.pane_selected = (app.pane_selected + 1).min(count - 1);
+        }
+        KeyCode::Char(digit @ '1'..='9') => {
+            let index = digit as usize - '1' as usize;
+            if index < count {
+                app.pane_selected = index;
+            }
+        }
+        KeyCode::Enter => {
+            let index = app.pane_selected.min(count - 1);
+            mux.select_index(index);
+            let id = mux.panes[index].id;
+            app.mode = Mode::Normal;
+            app.view = View::Attached(id);
+        }
+        KeyCode::Char('x') => {
+            let index = app.pane_selected.min(count - 1);
+            let id = mux.panes[index].id;
+            let title = mux.panes[index].title.clone();
+            mux.remove(id);
+            app.pane_selected = app.pane_selected.min(mux.panes.len().saturating_sub(1));
+            if mux.panes.is_empty() {
+                app.mode = Mode::Normal;
+            }
+            app.view = View::List;
+            app.status_message = Some(format!("Ended '{title}'"));
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
 }
 
 fn handle_normal(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Char('q') | KeyCode::Esc => {
-            app.should_quit = true;
+            request_quit(app);
         }
         KeyCode::Up | KeyCode::Char('k') => app.move_up(),
         KeyCode::Down | KeyCode::Char('j') => app.move_down(),
@@ -59,16 +156,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
                 }
             }
         }
-        KeyCode::Enter => {
-            if let Some(session) = app.selected_session() {
-                if session.is_active {
-                    app.status_message =
-                        Some("Cannot resume: session is already active".to_string());
-                } else {
-                    app.should_resume = Some((session.id.clone(), session.cwd.clone()));
-                }
-            }
-        }
+        KeyCode::Enter => resume_selected(app),
         KeyCode::Char('/') => {
             app.mode = Mode::Search;
             app.search_query.clear();
@@ -96,7 +184,14 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('n') => {
             if let Some(cwd) = app.new_session_dir() {
-                app.should_new_session = Some(NewSessionRequest::Normal { cwd });
+                if app.mux_enabled() {
+                    let title = project_title(&cwd);
+                    if let Err(error) = app.attach_new_session(&cwd, title) {
+                        app.status_message = Some(format!("Cannot start session: {error}"));
+                    }
+                } else {
+                    app.should_new_session = Some(NewSessionRequest::Normal { cwd });
+                }
             } else {
                 app.status_message =
                     Some("Filter by a project first (f) to start a new session".to_string());
@@ -120,6 +215,44 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         _ => {}
     }
+}
+
+fn resume_selected(app: &mut App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    let (id, cwd, title) = (
+        session.id.clone(),
+        session.cwd.clone(),
+        session.display_name().to_string(),
+    );
+
+    if app.mux_enabled() {
+        // A pane we own is not "busy elsewhere" — re-focus it instead of refusing.
+        if app.pane_for_session(&id).is_none() && session.is_active {
+            app.status_message = Some("Cannot resume: session is already active".to_string());
+            return;
+        }
+        if let Err(error) = app.attach_session(&id, &cwd, title) {
+            app.status_message = Some(format!("Cannot attach session: {error}"));
+        }
+        return;
+    }
+
+    if session.is_active {
+        app.status_message = Some("Cannot resume: session is already active".to_string());
+    } else {
+        app.should_resume = Some((id, cwd));
+    }
+}
+
+/// Short, human-readable pane label derived from a project directory.
+fn project_title(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(cwd)
+        .to_string()
 }
 
 fn begin_delete(app: &mut App) {
@@ -390,7 +523,7 @@ fn handle_help(app: &mut App, key: KeyCode) {
     }
 }
 
-const SETTINGS_COUNT: usize = 5;
+const SETTINGS_COUNT: usize = 7;
 
 fn handle_settings(app: &mut App, key: KeyCode) {
     if let Some(field) = app.settings_editing {
@@ -410,7 +543,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
     }
 
     match key {
-        KeyCode::Esc | KeyCode::Char(',') => match config::save(&app.config) {
+        KeyCode::Esc | KeyCode::Char(',') => match config::save(&app.persistable_config()) {
             Ok(()) => {
                 app.mode = Mode::Normal;
                 app.status_message = Some("Global settings saved".to_string());
@@ -447,6 +580,18 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::WorktreeRoot,
                 app.config.worktree.root.to_string_lossy().to_string(),
             ),
+            5 => {
+                // The row reflects the persisted value; a `--mux` override only lasts
+                // for this invocation and must not be flipped by editing settings.
+                app.mux_on_disk = !app.mux_on_disk;
+                app.status_message =
+                    Some("Multiplexer setting applies the next time CST starts".to_string());
+            }
+            6 => begin_global_edit(
+                app,
+                SettingsEditField::MuxPrefix,
+                app.config.mux_prefix.clone(),
+            ),
             _ => {}
         },
         _ => {}
@@ -478,10 +623,23 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
             }
             app.config.worktree.root = PathBuf::from(value);
         }
+        SettingsEditField::MuxPrefix => {
+            // Reject unparseable chords here rather than silently defaulting at startup.
+            let Some(chord) = crate::mux::KeyChord::parse(&value) else {
+                app.status_message = Some(format!(
+                    "'{value}' is not a valid prefix (try C-b, C-g, C-a)"
+                ));
+                return;
+            };
+            app.config.mux_prefix = chord.label();
+            if let Some(mux) = app.mux.as_mut() {
+                mux.prefix = chord;
+            }
+        }
     }
     app.settings_editing = None;
     app.settings_input.clear();
-    if let Err(error) = config::save(&app.config) {
+    if let Err(error) = config::save(&app.persistable_config()) {
         app.status_message = Some(format!("Failed to save global settings: {error}"));
     }
 }
@@ -610,6 +768,45 @@ fn save_and_close_project_settings(app: &mut App) {
     }
 }
 
+/// Create the worktree and attach it as a pane, rolling back if the pane cannot start.
+fn start_worktree_pane(app: &mut App, project: &str, config: &config::EffectiveWorktreeConfig) {
+    let branch = app.branch_input.clone();
+    let created = match worktree::create_managed_worktree(Path::new(project), &branch, config) {
+        Ok(created) => created,
+        Err(error) => {
+            app.mode = Mode::Normal;
+            app.branch_config = None;
+            app.status_message = Some(format!("Cannot create worktree: {error}"));
+            return;
+        }
+    };
+
+    let path = created.entry.path.clone();
+    let title = branch.clone();
+    match app.attach_new_session(&path.to_string_lossy(), title) {
+        Ok(()) => {
+            app.mode = Mode::Normal;
+            app.branch_config = None;
+            app.status_message = match created.notice {
+                Some(notice) => Some(format!("Isolated session on '{branch}' — {notice}")),
+                None => Some(format!("Isolated session on '{branch}'")),
+            };
+        }
+        Err(error) => {
+            // The worktree exists but has no session; undo it rather than leaking one.
+            let rollback = worktree::rollback_created_worktree(&created.entry);
+            app.mode = Mode::Normal;
+            app.branch_config = None;
+            app.status_message = Some(match rollback {
+                Ok(()) => format!("Cannot start session: {error}; worktree rolled back"),
+                Err(rollback_error) => format!(
+                    "Cannot start session: {error}; worktree rollback also failed: {rollback_error}"
+                ),
+            });
+        }
+    }
+}
+
 fn handle_branch_name(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => {
@@ -618,7 +815,7 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
             app.status_message = Some("Isolated session cancelled".to_string());
         }
         KeyCode::Enter => {
-            let Some(project) = app.project_filter.clone() else {
+            let Some(project) = app.active_project() else {
                 app.mode = Mode::Normal;
                 app.status_message = Some("Project filter was cleared".to_string());
                 return;
@@ -632,6 +829,10 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
                 app.status_message = Some("Worktree configuration is unavailable".to_string());
                 return;
             };
+            if app.mux_enabled() {
+                start_worktree_pane(app, &project, &config);
+                return;
+            }
             app.should_new_session = Some(NewSessionRequest::Worktree {
                 source_project: project,
                 branch: app.branch_input.clone(),

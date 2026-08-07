@@ -8,15 +8,40 @@ use crate::config::{EffectiveWorktreeConfig, UserConfig};
 use super::worktree::{self, ManagedWorktree};
 
 fn apply_config_args(cmd: &mut Command, config: &UserConfig) {
+    for arg in config_args(config) {
+        cmd.arg(arg);
+    }
+}
+
+/// Copilot CLI arguments implied by the user's config.
+///
+/// Shared by the launch-and-exit path (`std::process::Command`) and the multiplexer
+/// path (`portable_pty::CommandBuilder`) so both modes launch identical sessions.
+pub fn config_args(config: &UserConfig) -> Vec<String> {
+    let mut args = Vec::new();
     if config.yolo {
-        cmd.arg("--yolo");
+        args.push("--yolo".to_string());
     }
     if let Some(ref model) = config.model {
-        cmd.arg(format!("--model={}", model));
+        args.push(format!("--model={}", model));
     }
     if let Some(ref effort) = config.reasoning_effort {
-        cmd.arg(format!("--reasoning-effort={}", effort));
+        args.push(format!("--reasoning-effort={}", effort));
     }
+    args
+}
+
+/// Program plus arguments for resuming an existing session inside a pane.
+pub fn resume_command(session_id: &str, config: &UserConfig) -> Result<(String, Vec<String>)> {
+    let copilot = find_copilot()?;
+    let mut args = vec![format!("--resume={}", session_id)];
+    args.extend(config_args(config));
+    Ok((copilot, args))
+}
+
+/// Program plus arguments for starting a fresh session inside a pane.
+pub fn new_session_command(config: &UserConfig) -> Result<(String, Vec<String>)> {
+    Ok((find_copilot()?, config_args(config)))
 }
 
 /// Rename a session using the current `name` field while preserving legacy metadata.

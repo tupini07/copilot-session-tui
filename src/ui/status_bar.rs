@@ -19,23 +19,33 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Esc", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel"),
         ]),
-        Mode::Normal => Line::from(vec![
-            Span::raw(" "),
-            key_span("↑↓"),
-            Span::raw(" Navigate  "),
-            key_span("Enter"),
-            Span::raw(" Resume  "),
-            key_span("r"),
-            Span::raw(" Rename  "),
-            key_span("d"),
-            Span::raw(" Delete  "),
-            key_span("/"),
-            Span::raw(" Search  "),
-            key_span("f"),
-            Span::raw(" Filter  "),
-            key_span("s"),
-            Span::raw(" Sort"),
-        ]),
+        Mode::Normal => {
+            let mut spans = vec![
+                Span::raw(" "),
+                key_span("↑↓"),
+                Span::raw(" Navigate  "),
+                key_span("Enter"),
+                Span::raw(" Resume  "),
+                key_span("r"),
+                Span::raw(" Rename  "),
+                key_span("d"),
+                Span::raw(" Delete  "),
+                key_span("/"),
+                Span::raw(" Search  "),
+                key_span("f"),
+                Span::raw(" Filter  "),
+                key_span("s"),
+                Span::raw(" Sort"),
+            ];
+            if let Some(prefix) = app.prefix_label() {
+                spans.push(Span::raw("  │  "));
+                spans.push(Span::styled(
+                    format!("mux {prefix}"),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            Line::from(spans)
+        }
         _ => Line::from(""),
     };
 

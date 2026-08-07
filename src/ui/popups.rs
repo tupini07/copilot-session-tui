@@ -26,6 +26,148 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Warn before quitting while sessions are still running.
+///
+/// Without a daemon, quitting CST really does terminate every pane — this is the main
+/// behavioural difference from tmux, so it must be stated plainly.
+pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
+    let running: Vec<String> = app
+        .mux
+        .as_ref()
+        .map(|mux| {
+            mux.panes
+                .iter()
+                .filter(|pane| pane.is_running())
+                .map(|pane| pane.title.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let height = (running.len() + 8).min(20) as u16;
+    let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
+    let area = centered_rect(60, percent_y.max(30), f.area());
+    f.render_widget(Clear, area);
+
+    let mut text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  Quit and end {} running session(s)?", running.len()),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for title in running.iter().take(8) {
+        text.push(Line::from(Span::styled(
+            format!("    • {title}"),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    if running.len() > 8 {
+        text.push(Line::from(Span::styled(
+            format!("    … and {} more", running.len() - 8),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "  Sessions do not survive CST exiting.",
+        Style::default().fg(Color::Yellow),
+    )));
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "y",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" quit and end them    "),
+        Span::styled(
+            "n",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" keep working"),
+    ]));
+
+    let block = Block::default()
+        .title(" Quit ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}
+
+/// Switcher over the panes this CST instance owns, opened with `prefix w`.
+pub fn draw_pane_list(f: &mut Frame, app: &App) {
+    let Some(mux) = app.mux.as_ref() else {
+        return;
+    };
+
+    let height = (mux.panes.len() + 5).min(20) as u16;
+    let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
+    let area = centered_rect(60, percent_y.max(30), f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Sessions ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let items: Vec<ListItem> = mux
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| {
+            let selected = index == app.pane_selected;
+            let base = if selected {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let (marker, marker_style) = if !pane.is_running() {
+                ("✖", Style::default().fg(Color::Red))
+            } else if mux.focused == Some(pane.id) {
+                ("●", Style::default().fg(Color::Green))
+            } else {
+                ("○", Style::default().fg(Color::DarkGray))
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", index + 1), base.fg(Color::Cyan)),
+                Span::styled(marker, marker_style),
+                Span::styled(format!(" {}", pane.title), base),
+            ]))
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[0]);
+
+    let hint = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::raw(" select  "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" attach  "),
+        Span::styled("x", Style::default().fg(Color::Cyan)),
+        Span::raw(" kill  "),
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::raw(" close"),
+    ]);
+    f.render_widget(Paragraph::new(hint), chunks[1]);
+}
+
 pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let area = centered_rect(55, 36, f.area());
     f.render_widget(Clear, area);
@@ -287,11 +429,11 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(list, chunks[2]);
 }
 
-pub fn draw_help(f: &mut Frame) {
+pub fn draw_help(f: &mut Frame, app: &App) {
     let area = centered_rect(55, 70, f.area());
     f.render_widget(Clear, area);
 
-    let text = vec![
+    let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Copilot Session Manager - Keyboard Shortcuts",
@@ -320,11 +462,37 @@ pub fn draw_help(f: &mut Frame) {
         help_line("q/Esc", "Quit"),
         help_line("Ctrl+C", "Force quit"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Press any key to close",
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
+
+    if let Some(prefix) = app.prefix_label() {
+        text.push(Line::from(Span::styled(
+            format!("  Multiplexer (prefix {prefix})"),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        text.push(help_line(&format!("{prefix} d"), "Detach to session list"));
+        text.push(help_line(&format!("{prefix} w"), "Session switcher"));
+        text.push(help_line(
+            &format!("{prefix} n/p"),
+            "Next / previous session",
+        ));
+        text.push(help_line(
+            &format!("{prefix} 1-9"),
+            "Jump to session by number",
+        ));
+        text.push(help_line(&format!("{prefix} x"), "End the focused session"));
+        text.push(help_line(
+            &format!("{prefix} {prefix}"),
+            "Send the prefix key itself",
+        ));
+        text.push(Line::from(""));
+    }
+
+    text.push(Line::from(Span::styled(
+        "  Press any key to close",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let block = Block::default()
         .title(" Help ")
@@ -473,6 +641,44 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     ));
     lines.push(Line::from(Span::styled(
         "    Relative paths resolve from the global config directory",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+    let mux_value = if app.mux_on_disk { "ON" } else { "OFF" };
+    let mux_color = if app.mux_on_disk {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    lines.push(settings_row(
+        "Multiplexer",
+        mux_value,
+        mux_color,
+        app.settings_selected == 5,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Run sessions inside CST as panes (applies on restart)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+    let mux_prefix_editing = app.settings_editing == Some(SettingsEditField::MuxPrefix);
+    let mux_prefix_display = if mux_prefix_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        app.config.mux_prefix.clone()
+    };
+    lines.push(settings_row(
+        "Mux Prefix",
+        &mux_prefix_display,
+        Color::Cyan,
+        app.settings_selected == 6,
+        mux_prefix_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Prefix key for pane commands, e.g. C-b, C-g, C-a",
         Style::default().fg(Color::DarkGray),
     )));
 

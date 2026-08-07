@@ -1,7 +1,10 @@
 mod app;
 mod config;
+mod debug_keys;
 mod events;
 mod input;
+mod mux;
+mod mux_input;
 mod session;
 mod ui;
 mod updater;
@@ -38,6 +41,14 @@ struct Cli {
     #[arg(long)]
     last_dir_file: Option<PathBuf>,
 
+    /// Run sessions as panes inside CST for this invocation, overriding the `mux` config
+    #[arg(long, overrides_with = "no_mux")]
+    mux: bool,
+
+    /// Launch sessions in the terminal and exit, overriding the `mux` config
+    #[arg(long, overrides_with = "mux")]
+    no_mux: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -50,15 +61,24 @@ enum Commands {
         #[arg(value_parser = ["bash", "zsh", "powershell"])]
         shell: String,
     },
+    /// Report how this terminal delivers key presses (used to pick a mux prefix key)
+    #[command(hide = true)]
+    DebugKeys,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Handle subcommands
-    if let Some(Commands::Init { shell }) = &cli.command {
-        print_shell_init(shell);
-        return Ok(());
+    match &cli.command {
+        Some(Commands::Init { shell }) => {
+            print_shell_init(shell);
+            return Ok(());
+        }
+        Some(Commands::DebugKeys) => {
+            return debug_keys::run();
+        }
+        None => {}
     }
 
     let copilot_home = cli.copilot_home.unwrap_or_else(loader::copilot_home);
@@ -66,7 +86,17 @@ fn main() -> Result<()> {
     // Load sessions (may be empty — the TUI still lets you start a new session)
     let sessions = loader::load_sessions(&copilot_home).unwrap_or_default();
 
-    let mut app = App::new(sessions, config::load());
+    let mut user_config = config::load();
+    // CLI flags win for this invocation only; they are never written back to disk.
+    let mux_on_disk = user_config.mux;
+    if cli.mux {
+        user_config.mux = true;
+    } else if cli.no_mux {
+        user_config.mux = false;
+    }
+
+    let mut app = App::new(sessions, user_config);
+    app.mux_on_disk = mux_on_disk;
 
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
@@ -144,6 +174,11 @@ fn main() -> Result<()> {
     // If user quit without entering a session but has an active project filter, use that
     // (skip when the filter is just the project we were launched from — no cd needed)
     if last_dir.is_none() {
+        // In mux mode the session ran inside CST, so the last focused pane's directory is
+        // the most useful place for the shell wrapper to land.
+        last_dir = app.exit_dir.take();
+    }
+    if last_dir.is_none() {
         if let Some(ref project) = app.project_filter {
             let is_launch_project = app
                 .cwd_project
@@ -164,33 +199,49 @@ fn main() -> Result<()> {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    // In mux mode a dedicated thread feeds terminal events into the same channel as PTY
+    // output, so the loop can wait on both at once instead of polling.
+    let terminal_events = app.mux.as_ref().map(|mux| {
+        let sender = mux.events.clone();
+        std::thread::spawn(move || loop {
+            match crossterm::event::read() {
+                Ok(event) => {
+                    if sender.send(mux::MuxEvent::Term(event)).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        })
+    });
+    drop(terminal_events);
+
     loop {
-        // Update visible rows based on terminal size
         let size = terminal.size()?;
-        // visible_rows must match the session_list take() count:
-        // inner height = total height - 6 (title + borders + status)
-        // each item = 2 lines normally, 1 line when project filter is active
-        let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
-        app.visible_rows = (size.height as usize).saturating_sub(6) / lines_per_item;
+        update_layout_metrics(app, size.height);
 
-        // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
-        let popup_percent = 80u16.min(25u16.max(
-            (((app.unique_projects.len() + 6).min(20) as f32 / size.height as f32) * 100.0) as u16,
-        ));
-        let popup_height = (size.height as usize * popup_percent as usize) / 100;
-        app.project_visible_rows = popup_height.saturating_sub(4); // borders + search + separator
+        if app.mux.is_some() {
+            // Panes occupy the full screen minus the one-line pane status bar.
+            let rows = size.height.saturating_sub(1).max(1);
+            let cols = size.width.max(1);
+            if app.pane_size != (rows, cols) {
+                app.pane_size = (rows, cols);
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.resize_all(rows, cols);
+                }
+            }
+        }
 
-        // Load details for selected session
         input::maybe_load_details(app);
-
-        // Poll for update check results
         app.poll_update();
 
-        // Draw
         terminal.draw(|f| ui::draw(f, app))?;
 
-        // Handle input
-        input::handle_input(app)?;
+        if app.mux.is_some() {
+            pump_mux(app)?;
+        } else {
+            input::handle_input(app)?;
+        }
 
         if app.should_quit
             || app.should_resume.is_some()
@@ -201,7 +252,83 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
     }
 
+    // Without a daemon, panes are children of this process and must be reaped. Capture the
+    // exit directory first — shutdown drops the panes that hold it.
+    if let Some(mux) = app.mux.as_mut() {
+        app.exit_dir = mux
+            .focused_cwd()
+            .map(|path| path.to_string_lossy().to_string());
+        let _ = mux.shutdown();
+    }
+
     Ok(())
+}
+
+fn update_layout_metrics(app: &mut App, height: u16) {
+    // visible_rows must match the session_list take() count:
+    // inner height = total height - 6 (title + borders + status)
+    // each item = 2 lines normally, 1 line when project filter is active
+    let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
+    app.visible_rows = (height as usize).saturating_sub(6) / lines_per_item;
+
+    // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
+    let popup_percent = 80u16
+        .min(25u16.max(
+            (((app.unique_projects.len() + 6).min(20) as f32 / height as f32) * 100.0) as u16,
+        ));
+    let popup_height = (height as usize * popup_percent as usize) / 100;
+    app.project_visible_rows = popup_height.saturating_sub(4); // borders + search + separator
+}
+
+/// Wait for the next terminal or PTY event and apply it.
+///
+/// Output arriving in many small chunks is drained in one go so a chatty child cannot
+/// force a repaint per chunk.
+fn pump_mux(app: &mut App) -> Result<()> {
+    let Some(mux) = app.mux.as_ref() else {
+        return Ok(());
+    };
+
+    let first = match mux
+        .receiver
+        .recv_timeout(std::time::Duration::from_millis(250))
+    {
+        Ok(event) => event,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            app.should_quit = true;
+            return Ok(());
+        }
+    };
+
+    let mut pending = vec![first];
+    while let Ok(event) = app.mux.as_ref().expect("mux present").receiver.try_recv() {
+        pending.push(event);
+        if pending.len() >= 256 {
+            break;
+        }
+    }
+
+    for event in pending {
+        match event {
+            mux::MuxEvent::Term(event) => apply_terminal_event(app, event)?,
+            other => {
+                mux_input::handle_mux_event(app, other);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_terminal_event(app: &mut App, event: crossterm::event::Event) -> Result<()> {
+    match app.view {
+        app::View::Attached(_) => {
+            mux_input::handle_attached_event(app, event);
+            Ok(())
+        }
+        app::View::List => input::handle_terminal_event(app, event),
+    }
 }
 
 fn print_shell_init(shell: &str) {

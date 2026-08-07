@@ -10,6 +10,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - **Session details** — preview edited files, last message, and session stats
 - **Resume** — press Enter to launch `copilot --resume` directly
 - **Isolated sessions** — press `N` to create a branch-backed Git worktree before launching Copilot
+- **Multiplexer** — optionally run sessions as panes inside CST, tmux-style, instead of handing over the terminal
 - **Rename** — rename sessions inline with `r`
 - **Safe cleanup** — delete TUI-created worktrees with dirty-worktree and unmerged-branch protection
 - **Self-update** — checks GitHub Releases in the background and installs updates from the TUI
@@ -106,6 +107,49 @@ The TUI reads session data directly from `~/.copilot/session-state/` (or `COPILO
 - **`inuse.*.lock`** — lock files used to detect active sessions
 
 When you resume a session, the TUI exits cleanly and launches `copilot --resume=<session-id>`.
+
+## Multiplexer
+
+By default CST is a launcher: it hands the terminal to Copilot and gets out of the way. Enable
+the multiplexer and it instead becomes a tmux-like host — sessions run in PTY-backed panes
+*inside* CST, so several can stay alive in a single terminal window and you can flip between
+them and the session list without ever leaving the TUI.
+
+```json
+{
+  "mux": true,
+  "mux_prefix": "C-b"
+}
+```
+
+Toggle it from global settings (`,`), or override it for one invocation with `--mux` /
+`--no-mux`. The setting takes effect the next time CST starts; a CLI override is never
+written back to the config file.
+
+While attached to a session, every keystroke goes to Copilot except the prefix key:
+
+| Key | Action |
+|-----|--------|
+| `prefix` `d` | Detach back to the session list (the session keeps running) |
+| `prefix` `w` | Session switcher |
+| `prefix` `n` / `p` | Next / previous session |
+| `prefix` `1`–`9` | Jump to a session by number |
+| `prefix` `x` | End the focused session |
+| `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
+
+In the session list, a magenta `▶` marks sessions running as panes in this CST instance,
+distinct from the green `●` that marks sessions held by some other process.
+
+> **Sessions do not survive CST exiting.** There is no background daemon: quitting CST
+> terminates every pane it owns, so it asks for confirmation while any are still running.
+> Copilot's own session state is still on disk, so you can resume the conversation later —
+> but anything mid-flight is interrupted.
+
+`mux_prefix` accepts chords such as `C-b`, `C-g`, `C-a`, or `C-Space`. Plain control keys are
+used deliberately: they are the class of key terminals deliver most reliably, whereas
+`Ctrl-Shift-*` style bindings depend on keyboard-protocol support that Windows Terminal only
+partially implements. If a prefix does not seem to reach CST, run `cst debug-keys` to see
+exactly what your terminal sends.
 
 ## Isolated Worktree Sessions
 

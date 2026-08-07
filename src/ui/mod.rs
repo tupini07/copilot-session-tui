@@ -1,3 +1,4 @@
+pub mod pane;
 pub mod popups;
 pub mod session_detail;
 pub mod session_list;
@@ -6,10 +7,15 @@ pub mod status_bar;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, View};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();
+
+    if matches!(app.view, View::Attached(_)) {
+        pane::draw(f, app, size);
+        return;
+    }
 
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -78,11 +84,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::ConfirmDelete => popups::draw_delete_confirm(f, app),
         Mode::ConfirmForceDelete => popups::draw_force_delete_confirm(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
-        Mode::Help => popups::draw_help(f),
+        Mode::Help => popups::draw_help(f, app),
         Mode::Rename => popups::draw_rename(f, app),
         Mode::Settings => popups::draw_settings(f, app),
         Mode::ProjectSettings => popups::draw_project_settings(f, app),
         Mode::BranchName => popups::draw_branch_name(f, app),
+        Mode::PaneList => popups::draw_pane_list(f, app),
         _ => {}
+    }
+
+    if app.confirm_quit {
+        popups::draw_quit_confirm(f, app);
     }
 }

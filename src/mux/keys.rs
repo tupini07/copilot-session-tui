@@ -1,0 +1,266 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Encode a decoded key event back into the bytes a terminal would have sent.
+///
+/// Crossterm parses the terminal's byte stream into `KeyEvent`s; to forward a key to
+/// a child process we have to reverse that translation. `application_cursor` selects
+/// between the normal (`CSI A`) and application (`SS3 A`) cursor-key encodings, which
+/// full-screen programs switch on via DECCKM.
+pub fn encode(key: &KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    let base: Vec<u8> = match key.code {
+        KeyCode::Char(c) => {
+            let mut bytes = if ctrl {
+                vec![control_byte(c)?]
+            } else {
+                let mut buffer = [0u8; 4];
+                c.encode_utf8(&mut buffer).as_bytes().to_vec()
+            };
+            if alt {
+                let mut escaped = vec![0x1b];
+                escaped.append(&mut bytes);
+                bytes = escaped;
+            }
+            return Some(bytes);
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Tab => {
+            if shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                vec![b'\t']
+            }
+        }
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        // DEL rather than BS: this is what modern terminals send and what readline expects.
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => cursor_key(b'A', key.modifiers, application_cursor),
+        KeyCode::Down => cursor_key(b'B', key.modifiers, application_cursor),
+        KeyCode::Right => cursor_key(b'C', key.modifiers, application_cursor),
+        KeyCode::Left => cursor_key(b'D', key.modifiers, application_cursor),
+        KeyCode::Home => cursor_key(b'H', key.modifiers, application_cursor),
+        KeyCode::End => cursor_key(b'F', key.modifiers, application_cursor),
+        KeyCode::Insert => tilde_key(2, key.modifiers),
+        KeyCode::Delete => tilde_key(3, key.modifiers),
+        KeyCode::PageUp => tilde_key(5, key.modifiers),
+        KeyCode::PageDown => tilde_key(6, key.modifiers),
+        KeyCode::F(n) => function_key(n, key.modifiers)?,
+        KeyCode::Null => vec![0],
+        _ => return None,
+    };
+
+    if alt && !base.starts_with(&[0x1b]) {
+        let mut escaped = vec![0x1b];
+        escaped.extend_from_slice(&base);
+        return Some(escaped);
+    }
+    Some(base)
+}
+
+/// Map `Ctrl-<char>` to its C0 control byte (Ctrl-A = 0x01 … Ctrl-Z = 0x1a, plus the
+/// symbolic controls). Returns `None` for combinations with no byte representation.
+fn control_byte(c: char) -> Option<u8> {
+    let lower = c.to_ascii_lowercase();
+    match lower {
+        'a'..='z' => Some(lower as u8 - b'a' + 1),
+        ' ' | '@' => Some(0),
+        '[' => Some(0x1b),
+        '\\' => Some(0x1c),
+        ']' => Some(0x1d),
+        '^' => Some(0x1e),
+        '_' | '/' => Some(0x1f),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
+/// Modifier parameter used by xterm: 1 + bitmask (shift 1, alt 2, ctrl 4).
+fn modifier_param(modifiers: KeyModifiers) -> Option<u8> {
+    let mut mask = 0;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        mask |= 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        mask |= 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        mask |= 4;
+    }
+    if mask == 0 {
+        None
+    } else {
+        Some(mask + 1)
+    }
+}
+
+fn cursor_key(final_byte: u8, modifiers: KeyModifiers, application_cursor: bool) -> Vec<u8> {
+    match modifier_param(modifiers) {
+        // Modified cursor keys always use the CSI form with a parameter.
+        Some(param) => format!("\x1b[1;{}{}", param, final_byte as char).into_bytes(),
+        None if application_cursor => vec![0x1b, b'O', final_byte],
+        None => vec![0x1b, b'[', final_byte],
+    }
+}
+
+fn tilde_key(number: u8, modifiers: KeyModifiers) -> Vec<u8> {
+    match modifier_param(modifiers) {
+        Some(param) => format!("\x1b[{};{}~", number, param).into_bytes(),
+        None => format!("\x1b[{}~", number).into_bytes(),
+    }
+}
+
+fn function_key(n: u8, modifiers: KeyModifiers) -> Option<Vec<u8>> {
+    // F1-F4 use SS3 when unmodified; the rest use CSI <number> ~.
+    let unmodified = modifier_param(modifiers).is_none();
+    let bytes = match (n, unmodified) {
+        (1, true) => b"\x1bOP".to_vec(),
+        (2, true) => b"\x1bOQ".to_vec(),
+        (3, true) => b"\x1bOR".to_vec(),
+        (4, true) => b"\x1bOS".to_vec(),
+        _ => {
+            let number = function_key_number(n)?;
+            match modifier_param(modifiers) {
+                Some(param) => format!("\x1b[{};{}~", number, param).into_bytes(),
+                None => format!("\x1b[{}~", number).into_bytes(),
+            }
+        }
+    };
+    Some(bytes)
+}
+
+fn function_key_number(n: u8) -> Option<u8> {
+    match n {
+        1 => Some(11),
+        2 => Some(12),
+        3 => Some(13),
+        4 => Some(14),
+        5 => Some(15),
+        // 16 is deliberately skipped by the xterm scheme.
+        6 => Some(17),
+        7 => Some(18),
+        8 => Some(19),
+        9 => Some(20),
+        10 => Some(21),
+        // 22 is likewise skipped.
+        11 => Some(23),
+        12 => Some(24),
+        _ => None,
+    }
+}
+
+/// Wrap pasted text in bracketed-paste markers when the child has enabled the mode.
+pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut bytes = b"\x1b[200~".to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_with(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn plain_characters_are_utf8() {
+        assert_eq!(encode(&key(KeyCode::Char('a')), false).unwrap(), b"a");
+        assert_eq!(
+            encode(&key(KeyCode::Char('é')), false).unwrap(),
+            "é".as_bytes()
+        );
+    }
+
+    #[test]
+    fn control_characters_map_to_c0_bytes() {
+        let ctrl_b = key_with(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_eq!(encode(&ctrl_b, false).unwrap(), vec![0x02]);
+
+        let ctrl_c = key_with(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(encode(&ctrl_c, false).unwrap(), vec![0x03]);
+
+        let ctrl_space = key_with(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(encode(&ctrl_space, false).unwrap(), vec![0x00]);
+    }
+
+    #[test]
+    fn uppercase_control_matches_lowercase() {
+        let upper = key_with(KeyCode::Char('B'), KeyModifiers::CONTROL);
+        assert_eq!(encode(&upper, false).unwrap(), vec![0x02]);
+    }
+
+    #[test]
+    fn alt_prefixes_escape() {
+        let alt_x = key_with(KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(encode(&alt_x, false).unwrap(), vec![0x1b, b'x']);
+    }
+
+    #[test]
+    fn cursor_keys_respect_application_mode() {
+        assert_eq!(encode(&key(KeyCode::Up), false).unwrap(), b"\x1b[A");
+        assert_eq!(encode(&key(KeyCode::Up), true).unwrap(), b"\x1bOA");
+        assert_eq!(encode(&key(KeyCode::Left), false).unwrap(), b"\x1b[D");
+    }
+
+    #[test]
+    fn modified_cursor_keys_use_csi_with_parameters() {
+        let ctrl_right = key_with(KeyCode::Right, KeyModifiers::CONTROL);
+        // Application mode must not win over the modified form.
+        assert_eq!(encode(&ctrl_right, true).unwrap(), b"\x1b[1;5C");
+
+        let shift_up = key_with(KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(encode(&shift_up, false).unwrap(), b"\x1b[1;2A");
+    }
+
+    #[test]
+    fn editing_keys_use_tilde_sequences() {
+        assert_eq!(encode(&key(KeyCode::Delete), false).unwrap(), b"\x1b[3~");
+        assert_eq!(encode(&key(KeyCode::PageUp), false).unwrap(), b"\x1b[5~");
+        let ctrl_delete = key_with(KeyCode::Delete, KeyModifiers::CONTROL);
+        assert_eq!(encode(&ctrl_delete, false).unwrap(), b"\x1b[3;5~");
+    }
+
+    #[test]
+    fn enter_tab_backspace_and_escape() {
+        assert_eq!(encode(&key(KeyCode::Enter), false).unwrap(), b"\r");
+        assert_eq!(encode(&key(KeyCode::Tab), false).unwrap(), b"\t");
+        assert_eq!(encode(&key(KeyCode::Backspace), false).unwrap(), vec![0x7f]);
+        assert_eq!(encode(&key(KeyCode::Esc), false).unwrap(), vec![0x1b]);
+        assert_eq!(encode(&key(KeyCode::BackTab), false).unwrap(), b"\x1b[Z");
+    }
+
+    #[test]
+    fn function_keys_split_between_ss3_and_csi() {
+        assert_eq!(encode(&key(KeyCode::F(1)), false).unwrap(), b"\x1bOP");
+        assert_eq!(encode(&key(KeyCode::F(5)), false).unwrap(), b"\x1b[15~");
+        assert_eq!(encode(&key(KeyCode::F(12)), false).unwrap(), b"\x1b[24~");
+        let shift_f1 = key_with(KeyCode::F(1), KeyModifiers::SHIFT);
+        assert_eq!(encode(&shift_f1, false).unwrap(), b"\x1b[11;2~");
+    }
+
+    #[test]
+    fn unsupported_keys_are_dropped() {
+        assert!(encode(&key(KeyCode::F(20)), false).is_none());
+        let ctrl_digit = key_with(KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert!(encode(&ctrl_digit, false).is_none());
+    }
+
+    #[test]
+    fn paste_is_bracketed_only_when_enabled() {
+        assert_eq!(encode_paste("hi", false), b"hi");
+        assert_eq!(encode_paste("hi", true), b"\x1b[200~hi\x1b[201~");
+    }
+}

@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::Frame;
 
 use crate::app::App;
 
@@ -41,7 +41,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let session = &app.sessions[real_idx];
             let is_selected = display_idx == app.selected;
 
-            let indicator = if session.is_active {
+            // Panes we own read differently from a foreign `inuse` lock: ours can be
+            // re-attached, theirs cannot.
+            let indicator = if app.has_running_pane_for(&session.id) {
+                Span::styled("▶ ", Style::default().fg(Color::Magenta))
+            } else if session.is_active {
                 Span::styled("● ", Style::default().fg(Color::Green))
             } else {
                 Span::raw("  ")
@@ -99,8 +103,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             };
 
             if is_selected {
-                ListItem::new(lines)
-                    .style(Style::default().bg(Color::DarkGray))
+                ListItem::new(lines).style(Style::default().bg(Color::DarkGray))
             } else {
                 ListItem::new(lines)
             }

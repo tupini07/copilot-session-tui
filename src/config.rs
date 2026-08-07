@@ -8,8 +8,11 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_BRANCH_PREFIX: &str = "copilot/";
 pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+/// Plain control bytes like Ctrl-b travel reliably through every terminal we target,
+/// unlike chords that depend on the keyboard-enhancement protocol.
+pub const DEFAULT_MUX_PREFIX: &str = "C-b";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
     #[serde(default)]
     pub yolo: bool,
@@ -20,8 +23,33 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
+    /// Run sessions inside CST as multiplexed panes instead of launching and exiting.
+    #[serde(default)]
+    pub mux: bool,
+
+    /// Key that escapes back to CST while a pane is focused.
+    #[serde(default = "default_mux_prefix")]
+    pub mux_prefix: String,
+
     #[serde(default)]
     pub worktree: WorktreeConfig,
+}
+
+fn default_mux_prefix() -> String {
+    DEFAULT_MUX_PREFIX.to_string()
+}
+
+impl Default for UserConfig {
+    fn default() -> Self {
+        Self {
+            yolo: false,
+            model: None,
+            reasoning_effort: None,
+            mux: false,
+            mux_prefix: default_mux_prefix(),
+            worktree: WorktreeConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

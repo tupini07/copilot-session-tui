@@ -1,10 +1,21 @@
 use crate::config::{EffectiveWorktreeConfig, ProjectSettings, UserConfig};
+use crate::mux::{KeyChord, MuxState, Pane, PaneSpec};
+use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::updater::UpdateInfo;
+use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use std::path::PathBuf;
 use std::sync::mpsc;
+
+/// Which surface the user is looking at: the session list, or a live session pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    List,
+    Attached(crate::mux::PaneId),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -18,6 +29,8 @@ pub enum Mode {
     Settings,
     ProjectSettings,
     BranchName,
+    /// Pane switcher opened with `prefix w`.
+    PaneList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +64,7 @@ pub enum SettingsEditField {
     Model,
     BranchPrefix,
     WorktreeRoot,
+    MuxPrefix,
 }
 
 pub struct App {
@@ -93,12 +107,36 @@ pub struct App {
     pub branch_input: String,
     pub branch_config: Option<EffectiveWorktreeConfig>,
     pub pending_delete: Option<DeleteTarget>,
+    /// Present only when multiplexing is enabled; owns every live pane.
+    pub mux: Option<MuxState>,
+    pub view: View,
+    /// Rows/cols available to a pane, kept in sync with the terminal size.
+    pub pane_size: (u16, u16),
+    /// Set when the user tries to quit while panes are still running.
+    pub confirm_quit: bool,
+    /// Highlighted row in the pane switcher.
+    pub pane_selected: usize,
+    /// The `mux` value stored on disk, so a `--mux` / `--no-mux` override for this
+    /// invocation is never accidentally persisted by the settings popup.
+    pub mux_on_disk: bool,
+    /// Directory of the last focused pane, captured before panes are torn down so the
+    /// shell wrapper can still auto-`cd` there.
+    pub exit_dir: Option<String>,
 }
 
 impl App {
     pub fn new(sessions: Vec<Session>, config: UserConfig) -> Self {
         let unique_projects = extract_unique_projects(&sessions);
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
+        let mux_on_disk = config.mux;
+
+        // An unparseable prefix falls back to the default rather than refusing to start.
+        let mux = config.mux.then(|| {
+            let prefix = KeyChord::parse(&config.mux_prefix)
+                .or_else(|| KeyChord::parse(crate::config::DEFAULT_MUX_PREFIX))
+                .expect("the default mux prefix must parse");
+            MuxState::new(prefix)
+        });
 
         App {
             sessions,
@@ -137,7 +175,47 @@ impl App {
             branch_input: String::new(),
             branch_config: None,
             pending_delete: None,
+            mux,
+            view: View::List,
+            pane_size: (24, 80),
+            confirm_quit: false,
+            pane_selected: 0,
+            mux_on_disk,
+            exit_dir: None,
         }
+    }
+
+    /// Config as it should be written to disk, with any per-invocation override undone.
+    pub fn persistable_config(&self) -> UserConfig {
+        let mut config = self.config.clone();
+        config.mux = self.mux_on_disk;
+        config
+    }
+
+    /// Open the pane switcher, pre-selecting the currently focused pane.
+    pub fn open_pane_list(&mut self) {
+        let Some(mux) = self.mux.as_ref() else {
+            return;
+        };
+        if mux.panes.is_empty() {
+            self.status_message = Some("No running sessions".to_string());
+            return;
+        }
+        self.pane_selected = mux
+            .focused
+            .and_then(|id| mux.panes.iter().position(|pane| pane.id == id))
+            .unwrap_or(0);
+        self.view = View::List;
+        self.mode = Mode::PaneList;
+    }
+
+    pub fn mux_enabled(&self) -> bool {
+        self.mux.is_some()
+    }
+
+    /// Status message that also warns when the prefix key had to be defaulted.
+    pub fn prefix_label(&self) -> Option<String> {
+        self.mux.as_ref().map(|mux| mux.prefix.label())
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
@@ -303,6 +381,92 @@ impl App {
         self.active_project().or_else(|| self.cwd.clone())
     }
 
+    /// Attach an existing Copilot session as a pane, or focus it if already attached.
+    pub fn attach_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
+        // A pane that already exited is not worth re-focusing; drop it and resume afresh.
+        if let Some(mux) = self.mux.as_mut() {
+            if let Some(existing) = mux.pane_for_session(session_id) {
+                let running = mux.pane(existing).is_some_and(|pane| pane.is_running());
+                if running {
+                    mux.focused = Some(existing);
+                    self.view = View::Attached(existing);
+                    return Ok(());
+                }
+                mux.remove(existing);
+            }
+        }
+        let (program, args) = manager::resume_command(session_id, &self.config)?;
+        self.spawn_pane(
+            title,
+            PathBuf::from(cwd),
+            Some(session_id.to_string()),
+            program,
+            args,
+        )
+    }
+
+    /// Start a brand new Copilot session as a pane.
+    pub fn attach_new_session(&mut self, cwd: &str, title: String) -> Result<()> {
+        let (program, args) = manager::new_session_command(&self.config)?;
+        self.spawn_pane(title, PathBuf::from(cwd), None, program, args)
+    }
+
+    fn spawn_pane(
+        &mut self,
+        title: String,
+        cwd: PathBuf,
+        session_id: Option<String>,
+        program: String,
+        args: Vec<String>,
+    ) -> Result<()> {
+        let (rows, cols) = self.pane_size;
+        let Some(mux) = self.mux.as_mut() else {
+            anyhow::bail!("Multiplexing is disabled");
+        };
+        let id = mux.allocate_id();
+        let pane = Pane::spawn(
+            PaneSpec {
+                id,
+                title,
+                cwd,
+                session_id,
+                program,
+                args,
+            },
+            rows,
+            cols,
+            mux.events.clone(),
+        )?;
+        mux.push(pane);
+        self.view = View::Attached(id);
+        Ok(())
+    }
+
+    /// Leave the focused pane running and return to the session list.
+    pub fn detach(&mut self) {
+        self.view = View::List;
+        if let Some(mux) = self.mux.as_mut() {
+            mux.prefix_pending = false;
+        }
+    }
+
+    /// Panes owned by this instance, for marking rows in the session list.
+    pub fn pane_for_session(&self, session_id: &str) -> Option<crate::mux::PaneId> {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id))
+    }
+
+    /// Whether a session is live in one of our panes. Exited panes are not marked, since
+    /// the session is resumable again.
+    pub fn has_running_pane_for(&self, session_id: &str) -> bool {
+        self.mux.as_ref().is_some_and(|mux| {
+            mux.pane_for_session(session_id)
+                .and_then(|id| mux.pane(id))
+                .is_some_and(|pane| pane.is_running())
+        })
+    }
+
     pub fn sort_label(&self) -> &str {
         match self.sort_field {
             SortField::LastUsed => "Last Used",
@@ -348,4 +512,50 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
     let mut projects: Vec<String> = latest.keys().cloned().collect();
     projects.sort_by(|a, b| latest[b].cmp(&latest[a])); // most recent first
     projects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with(mux: bool) -> App {
+        let config = UserConfig {
+            mux,
+            ..UserConfig::default()
+        };
+        App::new(Vec::new(), config)
+    }
+
+    #[test]
+    fn cli_override_is_not_persisted_by_settings() {
+        // Simulates `--mux` on a machine whose config file says mux is off.
+        let mut app = app_with(true);
+        app.mux_on_disk = false;
+
+        assert!(app.mux_enabled());
+        assert!(!app.persistable_config().mux);
+    }
+
+    #[test]
+    fn settings_toggle_is_persisted() {
+        let mut app = app_with(false);
+        app.mux_on_disk = true;
+        assert!(app.persistable_config().mux);
+    }
+
+    #[test]
+    fn pane_list_reports_when_there_is_nothing_to_switch_to() {
+        let mut app = app_with(true);
+        app.open_pane_list();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn pane_list_is_inert_without_the_multiplexer() {
+        let mut app = app_with(false);
+        app.open_pane_list();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status_message.is_none());
+    }
 }
