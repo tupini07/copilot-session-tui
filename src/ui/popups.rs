@@ -109,6 +109,35 @@ fn project_label(cwd: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
+/// Blocking-work notice, drawn on the frame before the work actually starts.
+pub fn draw_busy(f: &mut Frame, title: &str, detail: &str) {
+    let area = centered_rect(50, 20, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  ⠿  {detail}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  This can take a few seconds.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
+}
+
 pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let Some(mux) = app.mux.as_ref() else {
         return;
