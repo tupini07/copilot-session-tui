@@ -6,6 +6,7 @@ mod input;
 mod mux;
 mod mux_input;
 mod session;
+mod text;
 mod ui;
 mod updater;
 

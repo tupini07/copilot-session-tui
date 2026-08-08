@@ -15,8 +15,7 @@ pub struct SessionDetails {
 
 /// Parse events.jsonl to extract session details
 pub fn parse_events(path: &Path) -> Result<SessionDetails> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
 
     let mut edited_files_ordered: Vec<String> = Vec::new();
@@ -46,12 +45,9 @@ pub fn parse_events(path: &Path) -> Result<SessionDetails> {
             "user.message" => {
                 turn_count += 1;
                 if let Some(content) = event["data"]["content"].as_str() {
-                    // Truncate long messages for preview
-                    let preview = if content.len() > 200 {
-                        format!("{}...", &content[..200])
-                    } else {
-                        content.to_string()
-                    };
+                    // Truncate long messages for preview. Messages routinely contain
+                    // emoji, so this must not slice raw bytes.
+                    let preview = crate::text::truncate_to_width(content, 200);
                     last_user_message = Some(preview);
                 }
             }

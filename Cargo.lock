@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "copilot-session-tui"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -416,6 +416,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "tui-term",
+ "unicode-segmentation",
+ "unicode-width",
  "ureq",
  "uuid",
  "vt100",

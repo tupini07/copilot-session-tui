@@ -166,7 +166,9 @@ fn textwrap(text: &str, max_width: usize) -> Vec<String> {
     for word in text.split_whitespace() {
         if current.is_empty() {
             current = word.to_string();
-        } else if current.len() + 1 + word.len() <= max_width {
+        } else if crate::text::display_width(&current) + 1 + crate::text::display_width(word)
+            <= max_width
+        {
             current.push(' ');
             current.push_str(word);
         } else {

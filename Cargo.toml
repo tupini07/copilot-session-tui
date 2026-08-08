@@ -1,6 +1,6 @@
 [package]
 name = "copilot-session-tui"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "A TUI for managing GitHub Copilot CLI sessions"
 
@@ -19,6 +19,10 @@ self_update = { version = "0.42", default-features = false, features = ["archive
 semver = "1"
 ureq = { version = "3", features = ["json"] }
 ignore = "0.4"
+# Session names contain emoji; measuring and cutting them safely needs real Unicode
+# width and grapheme support. Both already ship as ratatui dependencies.
+unicode-width = "0.2"
+unicode-segmentation = "1"
 sha2 = "0.10"
 tempfile = "3"
 fs4 = "1"

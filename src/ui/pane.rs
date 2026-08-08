@@ -8,6 +8,7 @@ use tui_term::widget::PseudoTerminal;
 
 use crate::app::App;
 use crate::mux::PaneStatus;
+use crate::text;
 use crate::ui::tabs;
 
 /// Frames of the startup spinner. Braille dots read as motion even in a plain terminal.
@@ -114,7 +115,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             )]
         }
     };
-    let hint_width: usize = hint.iter().map(|span| span.content.chars().count()).sum();
+    let hint_width: usize = hint
+        .iter()
+        .map(|span| text::display_width(&span.content))
+        .sum();
 
     let focused_index = mux
         .panes

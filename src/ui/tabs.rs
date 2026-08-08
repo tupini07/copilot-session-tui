@@ -66,15 +66,9 @@ fn window_start(focused: usize, total: usize, visible: usize) -> usize {
 }
 
 fn truncate(title: &str, budget: usize) -> String {
-    let chars: Vec<char> = title.chars().collect();
-    if chars.len() <= budget {
-        return title.to_string();
-    }
-    if budget <= 1 {
-        return "…".to_string();
-    }
-    let kept: String = chars[..budget - 1].iter().collect();
-    format!("{}…", kept.trim_end())
+    // Measured in terminal columns, not chars, so an emoji title cannot overflow its
+    // tab and push the rest of the strip sideways.
+    crate::text::truncate_to_width(title, budget)
 }
 
 #[cfg(test)]
@@ -111,9 +105,24 @@ mod tests {
         let (tabs, hidden) = layout(&sessions(&names), 0, 60);
 
         assert_eq!(hidden, 0);
-        let total: usize = tabs.iter().map(|tab| tab.label.chars().count()).sum();
+        let total: usize = tabs
+            .iter()
+            .map(|tab| crate::text::display_width(&tab.label))
+            .sum();
         assert!(total <= 60, "tabs overflowed the strip: {total}");
         assert!(tabs[0].label.contains('…'));
+    }
+
+    #[test]
+    fn emoji_titles_are_measured_in_columns_so_the_strip_never_overflows() {
+        let names = ["🚀🚀🚀🚀🚀🚀 launch", "🎉🎉🎉🎉🎉🎉 party", "plain title"];
+        let (tabs, _) = layout(&sessions(&names), 0, 40);
+
+        let total: usize = tabs
+            .iter()
+            .map(|tab| crate::text::display_width(&tab.label))
+            .sum();
+        assert!(total <= 40, "emoji tabs overflowed the strip: {total}");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::text;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
@@ -52,14 +53,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let name = session.display_name();
-            // 2 chars for indicator, 1 space + 8 chars for time column
+            // 2 columns for indicator, 1 space + 8 columns for the time column
             let max_name_width = (inner.width as usize).saturating_sub(11);
-            let truncated_name = if name.len() > max_name_width {
-                let end = max_name_width.saturating_sub(3);
-                format!("{}...", &name[..end])
-            } else {
-                name.to_string()
-            };
+            let truncated_name = text::truncate_to_width(name, max_name_width);
 
             let name_style = if is_selected {
                 Style::default()
@@ -74,7 +70,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let line = Line::from(vec![
                 indicator,
                 Span::styled(
-                    format!("{:<width$}", truncated_name, width = max_name_width),
+                    text::pad_to_width(&truncated_name, max_name_width),
                     name_style,
                 ),
                 Span::styled(
@@ -87,11 +83,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 vec![line]
             } else {
                 let project = session.project_name();
-                let truncated_project = if project.len() > 15 {
-                    format!("{}...", &project[..12])
-                } else {
-                    project.to_string()
-                };
+                let truncated_project = text::truncate_to_width(project, 15);
                 let project_line = Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
@@ -112,4 +104,115 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+#[cfg(test)]
+pub mod tests {
+    use crate::app::App;
+    use crate::config::UserConfig;
+    use crate::session::Session;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn session_named(name: &str) -> Session {
+        Session {
+            id: "abcdef123456".to_string(),
+            cwd: "C:/Workspace/zazen".to_string(),
+            project_root: "C:/Workspace/zazen".to_string(),
+            summary: Some(name.to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: false,
+            dir_path: PathBuf::from("."),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+        }
+    }
+
+    pub fn render_with(name: &str, width: u16) -> String {
+        let app = App::new(vec![session_named(name)], UserConfig::default());
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, &app))
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn an_emoji_name_renders_without_panicking() {
+        let text = render_with("🚀 Ship it", 60);
+        assert!(text.contains("🚀"), "emoji must survive rendering:\n{text}");
+    }
+
+    #[test]
+    fn a_long_emoji_name_is_truncated_on_a_character_boundary() {
+        // Long enough to force truncation, with the emoji straddling the cut.
+        let name = "Publishing to f-droid 🚀 and elsewhere too, at length";
+        let text = render_with(name, 40);
+        assert!(text.contains("Publishing"), "got:\n{text}");
+    }
+
+    /// Rows as grids of cell symbols, so positions can be compared in terminal columns
+    /// rather than bytes — an emoji is one cell but four bytes.
+    pub fn render_cells(name: &str, width: u16) -> Vec<Vec<String>> {
+        let app = App::new(vec![session_named(name)], UserConfig::default());
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, &app))
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Column at which `needle` starts, counted in cells.
+    fn column_of(rows: &[Vec<String>], needle: &str) -> usize {
+        for row in rows {
+            for start in 0..row.len() {
+                if row[start..].concat().starts_with(needle) {
+                    return start;
+                }
+            }
+        }
+        panic!("{needle:?} was not on screen");
+    }
+
+    #[test]
+    fn emoji_names_do_not_panic_at_any_terminal_width() {
+        // Byte-slicing a name used to abort here; the emoji straddles every cut point.
+        let name = "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀 rocket session";
+        for width in 20u16..=140 {
+            let rendered = render_with(name, width);
+            assert!(!rendered.is_empty(), "width {width} produced no output");
+        }
+    }
+
+    #[test]
+    fn an_emoji_name_keeps_the_timestamp_column_aligned() {
+        // The emoji occupies two columns; if it is counted as one char the whole row
+        // shifts and the right-hand time column no longer lines up.
+        let plain = render_cells("ab plain name", 60);
+        let emoji = render_cells("🚀 plain name", 60);
+
+        assert_eq!(
+            column_of(&plain, "unknown"),
+            column_of(&emoji, "unknown"),
+            "the emoji shifted the time column"
+        );
+    }
 }
