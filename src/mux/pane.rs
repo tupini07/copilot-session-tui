@@ -3,6 +3,7 @@ use crossterm::event::KeyEvent;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::callbacks::PaneCallbacks;
 use super::keys;
@@ -28,6 +29,8 @@ pub struct Pane {
     pub title: String,
     pub cwd: PathBuf,
     pub status: PaneStatus,
+    /// When the child was spawned, so the UI can say how long a slow start has taken.
+    pub started_at: Instant,
     parser: PaneParser,
     pty: PtySession,
 }
@@ -93,6 +96,7 @@ impl Pane {
             title,
             cwd,
             status: PaneStatus::Running,
+            started_at: Instant::now(),
             parser,
             pty,
         })
@@ -100,6 +104,16 @@ impl Pane {
 
     pub fn is_running(&self) -> bool {
         self.status == PaneStatus::Running
+    }
+
+    /// True while the child has produced nothing visible yet.
+    ///
+    /// Copilot takes a few seconds to draw its first frame, and ConPTY emits control
+    /// sequences long before any text, so "has the screen got anything on it" is a more
+    /// honest readiness signal than "have we received bytes".
+    pub fn is_blank(&self) -> bool {
+        self.with_screen(|screen| screen.contents().trim().is_empty())
+            .unwrap_or(true)
     }
 
     pub fn mark_exited(&mut self, code: Option<u32>) {

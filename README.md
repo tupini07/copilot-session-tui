@@ -130,11 +130,11 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 
 | Key | Action |
 |-----|--------|
-| `prefix` `d` | Detach back to the session list (the session keeps running) |
+| `prefix` `d` | Back to the session list — the session keeps running |
 | `prefix` `w` | Session switcher |
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
-| `prefix` `x` | End the focused session |
+| `prefix` `x` | End the focused session for good |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
 
 In the session list, a magenta `▶` marks sessions running as panes in this CST instance,

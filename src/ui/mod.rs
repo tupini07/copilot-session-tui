@@ -3,6 +3,7 @@ pub mod popups;
 pub mod session_detail;
 pub mod session_list;
 pub mod status_bar;
+pub mod tabs;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;

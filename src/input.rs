@@ -1,4 +1,6 @@
-use crate::app::{App, DeleteTarget, Mode, NewSessionRequest, SettingsEditField, View};
+use crate::app::{
+    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, View,
+};
 use crate::config;
 use crate::session::loader;
 use crate::session::manager;
@@ -769,12 +771,18 @@ fn save_and_close_project_settings(app: &mut App) {
 }
 
 /// Create the worktree and attach it as a pane, rolling back if the pane cannot start.
-fn start_worktree_pane(app: &mut App, project: &str, config: &config::EffectiveWorktreeConfig) {
-    let branch = app.branch_input.clone();
-    let created = match worktree::create_managed_worktree(Path::new(project), &branch, config) {
+///
+/// Runs from the main loop rather than the key handler so the "creating…" notice is
+/// already on screen before this blocks.
+pub fn run_pending_worktree(app: &mut App, pending: PendingWorktree) {
+    let PendingWorktree {
+        project,
+        branch,
+        config,
+    } = pending;
+    let created = match worktree::create_managed_worktree(Path::new(&project), &branch, &config) {
         Ok(created) => created,
         Err(error) => {
-            app.mode = Mode::Normal;
             app.branch_config = None;
             app.status_message = Some(format!("Cannot create worktree: {error}"));
             return;
@@ -785,7 +793,6 @@ fn start_worktree_pane(app: &mut App, project: &str, config: &config::EffectiveW
     let title = branch.clone();
     match app.attach_new_session(&path.to_string_lossy(), title) {
         Ok(()) => {
-            app.mode = Mode::Normal;
             app.branch_config = None;
             app.status_message = match created.notice {
                 Some(notice) => Some(format!("Isolated session on '{branch}' — {notice}")),
@@ -795,7 +802,6 @@ fn start_worktree_pane(app: &mut App, project: &str, config: &config::EffectiveW
         Err(error) => {
             // The worktree exists but has no session; undo it rather than leaking one.
             let rollback = worktree::rollback_created_worktree(&created.entry);
-            app.mode = Mode::Normal;
             app.branch_config = None;
             app.status_message = Some(match rollback {
                 Ok(()) => format!("Cannot start session: {error}; worktree rolled back"),
@@ -830,7 +836,16 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
                 return;
             };
             if app.mux_enabled() {
-                start_worktree_pane(app, &project, &config);
+                // Creating a worktree copies files and talks to Git, which can take a
+                // few seconds. Hand it to the main loop so a progress notice is painted
+                // before we block.
+                app.pending_worktree = Some(PendingWorktree {
+                    project,
+                    branch: app.branch_input.clone(),
+                    config,
+                });
+                app.mode = Mode::Normal;
+                app.status_message = Some(format!("Creating worktree for '{}'…", app.branch_input));
                 return;
             }
             app.should_new_session = Some(NewSessionRequest::Worktree {

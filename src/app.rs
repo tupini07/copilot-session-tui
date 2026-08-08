@@ -53,6 +53,14 @@ pub enum NewSessionRequest {
     },
 }
 
+/// A worktree creation deferred to the main loop so a progress notice can be drawn first.
+#[derive(Debug, Clone)]
+pub struct PendingWorktree {
+    pub project: String,
+    pub branch: String,
+    pub config: EffectiveWorktreeConfig,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeleteTarget {
     SessionOnly,
@@ -122,6 +130,8 @@ pub struct App {
     /// Directory of the last focused pane, captured before panes are torn down so the
     /// shell wrapper can still auto-`cd` there.
     pub exit_dir: Option<String>,
+    /// A worktree the main loop should create on its next iteration.
+    pub pending_worktree: Option<PendingWorktree>,
 }
 
 impl App {
@@ -182,6 +192,7 @@ impl App {
             pane_selected: 0,
             mux_on_disk,
             exit_dir: None,
+            pending_worktree: None,
         }
     }
 
@@ -424,6 +435,12 @@ impl App {
             anyhow::bail!("Multiplexing is disabled");
         };
         let id = mux.allocate_id();
+        // Sessions with no name yet would otherwise render as a blank tab and produce
+        // messages like "Session '' exited".
+        let title = match title.trim() {
+            "" => format!("session {id}"),
+            trimmed => trimmed.to_string(),
+        };
         let pane = Pane::spawn(
             PaneSpec {
                 id,

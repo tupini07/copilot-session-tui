@@ -237,6 +237,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
         terminal.draw(|f| ui::draw(f, app))?;
 
+        // Runs after the draw above so the "creating worktree…" notice is already on
+        // screen before this blocks on Git.
+        if let Some(pending) = app.pending_worktree.take() {
+            input::run_pending_worktree(app, pending);
+            continue;
+        }
+
         if app.mux.is_some() {
             pump_mux(app)?;
         } else {
@@ -289,9 +296,17 @@ fn pump_mux(app: &mut App) -> Result<()> {
         return Ok(());
     };
 
+    // A blank pane is showing the startup spinner, which needs frequent repaints; an
+    // established pane can idle until something actually happens.
+    let animating = mux
+        .panes
+        .iter()
+        .any(|pane| pane.is_running() && pane.is_blank());
+    let timeout = if animating { 100 } else { 250 };
+
     let first = match mux
         .receiver
-        .recv_timeout(std::time::Duration::from_millis(250))
+        .recv_timeout(std::time::Duration::from_millis(timeout))
     {
         Ok(event) => event,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(()),

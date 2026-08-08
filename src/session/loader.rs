@@ -215,17 +215,28 @@ pub fn session_is_active(dir: &Path) -> bool {
     detect_active(dir)
 }
 
+/// Whether a process is still alive.
+///
+/// `OpenProcess` succeeds for a live process and fails with `ERROR_INVALID_PARAMETER`
+/// once the PID is gone. A PID belonging to a process we may not query (access denied)
+/// still exists, so that case counts as running.
 #[cfg(windows)]
 fn is_process_running(pid: u32) -> bool {
-    use std::process::Command;
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output()
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            out.contains(&pid.to_string())
-        })
-        .unwrap_or(false)
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: `OpenProcess` takes no pointers; the handle it returns is closed below and
+    // never escapes this function.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        CloseHandle(handle);
+        true
+    }
 }
 
 #[cfg(not(windows))]

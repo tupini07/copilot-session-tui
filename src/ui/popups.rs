@@ -161,7 +161,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         Span::styled("Enter", Style::default().fg(Color::Cyan)),
         Span::raw(" attach  "),
         Span::styled("x", Style::default().fg(Color::Cyan)),
-        Span::raw(" kill  "),
+        Span::raw(" end  "),
         Span::styled("Esc", Style::default().fg(Color::Cyan)),
         Span::raw(" close"),
     ]);
@@ -471,7 +471,10 @@ pub fn draw_help(f: &mut Frame, app: &App) {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         )));
-        text.push(help_line(&format!("{prefix} d"), "Detach to session list"));
+        text.push(help_line(
+            &format!("{prefix} d"),
+            "Back to the list (session keeps running)",
+        ));
         text.push(help_line(&format!("{prefix} w"), "Session switcher"));
         text.push(help_line(
             &format!("{prefix} n/p"),
@@ -481,7 +484,10 @@ pub fn draw_help(f: &mut Frame, app: &App) {
             &format!("{prefix} 1-9"),
             "Jump to session by number",
         ));
-        text.push(help_line(&format!("{prefix} x"), "End the focused session"));
+        text.push(help_line(
+            &format!("{prefix} x"),
+            "End the focused session for good",
+        ));
         text.push(help_line(
             &format!("{prefix} {prefix}"),
             "Send the prefix key itself",

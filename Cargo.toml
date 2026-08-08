@@ -26,3 +26,11 @@ uuid = { version = "1", features = ["v4"] }
 portable-pty = "0.9"
 vt100 = "0.16"
 tui-term = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# Checking whether a PID is alive by shelling out to tasklist costs ~250 ms per call,
+# which dominated startup. OpenProcess answers the same question in microseconds.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
