@@ -116,6 +116,14 @@ impl Pane {
             .unwrap_or(true)
     }
 
+    /// Feed bytes straight into the parser, standing in for child output in tests.
+    #[cfg(test)]
+    pub fn feed_for_test(&mut self, bytes: &[u8]) {
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.process(bytes);
+        }
+    }
+
     pub fn mark_exited(&mut self, code: Option<u32>) {
         self.status = PaneStatus::Exited(code);
     }

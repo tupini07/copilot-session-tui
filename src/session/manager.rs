@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::config::{EffectiveWorktreeConfig, UserConfig};
 
@@ -192,13 +193,34 @@ pub fn start_worktree_session(
     Ok(created.entry.path)
 }
 
+/// Locate the Copilot binary, caching the result.
+///
+/// The probe spawns `copilot --version`, which boots the whole Node CLI and costs
+/// ~400ms. That ran on the UI thread for every session create and resume, freezing the
+/// TUI before the pane could even show its startup spinner. The location cannot
+/// meaningfully change while CST is running, so resolve it once.
 fn find_copilot() -> Result<String> {
+    static RESOLVED: OnceLock<Option<String>> = OnceLock::new();
+
+    RESOLVED.get_or_init(locate_copilot).clone().ok_or_else(|| {
+        anyhow::anyhow!("Could not find copilot CLI. Make sure it's installed and in PATH.")
+    })
+}
+
+/// Populate the Copilot lookup cache off the UI thread at startup.
+pub fn warm_copilot_lookup() {
+    std::thread::spawn(|| {
+        let _ = find_copilot();
+    });
+}
+
+fn locate_copilot() -> Option<String> {
     // Check common locations
     let candidates = ["copilot", "copilot.exe"];
 
     for candidate in &candidates {
         if Command::new(candidate).arg("--version").output().is_ok() {
-            return Ok(candidate.to_string());
+            return Some(candidate.to_string());
         }
     }
 
@@ -207,11 +229,11 @@ fn find_copilot() -> Result<String> {
         let npm_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let copilot_path = format!("{}/@github/copilot/bin/copilot", npm_root);
         if Path::new(&copilot_path).exists() {
-            return Ok(copilot_path);
+            return Some(copilot_path);
         }
     }
 
-    anyhow::bail!("Could not find copilot CLI. Make sure it's installed and in PATH.")
+    None
 }
 
 #[cfg(test)]

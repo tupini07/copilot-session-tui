@@ -158,3 +158,111 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
     f.render_widget(status, layout[1]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UserConfig;
+    use crate::mux::{Pane, PaneSpec};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::sync::mpsc;
+
+    /// Render the whole UI into an off-screen buffer and return it as plain text.
+    fn render(app: &App) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, app))
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    /// A child that stays alive without printing anything, standing in for Copilot's
+    /// several-second boot.
+    fn silent_pane(events: mpsc::Sender<crate::mux::MuxEvent>) -> Pane {
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "booting".to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: None,
+                program,
+                args,
+            },
+            24,
+            80,
+            events,
+        )
+        .expect("pane spawns")
+    }
+
+    fn mux_app() -> App {
+        let config = UserConfig {
+            mux: true,
+            ..UserConfig::default()
+        };
+        App::new(Vec::new(), config)
+    }
+
+    #[test]
+    fn a_session_that_has_drawn_nothing_shows_the_startup_spinner() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+
+        let text = render(&app);
+
+        assert!(
+            text.contains("Starting Copilot"),
+            "a blank pane must show the spinner, got:\n{text}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn the_spinner_clears_once_the_session_paints_something() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+
+        // Stand in for Copilot's first frame arriving.
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .focused_pane_mut()
+            .expect("pane")
+            .feed_for_test(b"hello from copilot");
+
+        let text = render(&app);
+
+        assert!(
+            !text.contains("Starting Copilot"),
+            "the spinner must disappear as soon as the child draws, got:\n{text}"
+        );
+        assert!(text.contains("hello from copilot"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+}

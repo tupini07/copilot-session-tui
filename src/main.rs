@@ -101,6 +101,10 @@ fn main() -> Result<()> {
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
 
+    // Resolving the Copilot binary costs ~400ms; do it off-thread so the first session
+    // does not pay for it on the UI thread.
+    manager::warm_copilot_lookup();
+
     // Record the launch directory; auto-filters to its project when enabled
     if let Ok(cwd) = std::env::current_dir() {
         app.set_cwd_context(cwd.to_string_lossy().to_string(), cli.auto_filter);
