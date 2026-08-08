@@ -101,6 +101,14 @@ pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
 }
 
 /// Switcher over the panes this CST instance owns, opened with `prefix w`.
+/// Last path component of a pane's working directory, to disambiguate same-named
+/// sessions living in different projects.
+fn project_label(cwd: &std::path::Path) -> String {
+    cwd.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let Some(mux) = app.mux.as_ref() else {
         return;
@@ -148,6 +156,11 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
                 Span::styled(format!(" {} ", index + 1), base.fg(Color::Cyan)),
                 Span::styled(marker, marker_style),
                 Span::styled(format!(" {}", pane.title), base),
+                // Panes routinely span several projects, so the title alone is ambiguous.
+                Span::styled(
+                    format!("  {}", project_label(&pane.cwd)),
+                    base.fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
@@ -492,6 +505,7 @@ pub fn draw_help(f: &mut Frame, app: &App) {
             &format!("{prefix} {prefix}"),
             "Send the prefix key itself",
         ));
+        text.push(help_line("", "These work from this list too"));
         text.push(Line::from(""));
     }
 

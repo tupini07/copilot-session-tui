@@ -41,6 +41,12 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    // The prefix works from the session list too, so panes stay reachable after
+    // detaching without having to re-resume a session from the list.
+    if matches!(app.mode, Mode::Normal) && crate::mux_input::handle_list_prefix(app, key) {
+        return Ok(());
+    }
+
     match app.mode {
         Mode::Normal => handle_normal(app, key.code),
         Mode::Search => handle_search(app, key.code),

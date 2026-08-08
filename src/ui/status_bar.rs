@@ -39,10 +39,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             ];
             if let Some(prefix) = app.prefix_label() {
                 spans.push(Span::raw("  │  "));
-                spans.push(Span::styled(
-                    format!("mux {prefix}"),
-                    Style::default().fg(Color::Magenta),
-                ));
+                if app.prefix_pending() {
+                    spans.push(Span::styled(
+                        format!("{prefix} …"),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    let running = app.running_pane_count();
+                    let label = if running > 0 {
+                        format!("{prefix} w  {running} running")
+                    } else {
+                        format!("mux {prefix}")
+                    };
+                    spans.push(Span::styled(label, Style::default().fg(Color::Magenta)));
+                }
             }
             Line::from(spans)
         }

@@ -74,6 +74,61 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Route a key from the session list through the prefix state machine.
+///
+/// Returns true when the key was consumed, so panes remain reachable from the list
+/// instead of only from inside an attached pane.
+pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
+    let Some(mux) = app.mux.as_mut() else {
+        return false;
+    };
+
+    if !mux.prefix_pending {
+        if mux.prefix.matches(&key) {
+            mux.prefix_pending = true;
+            return true;
+        }
+        return false;
+    }
+
+    mux.prefix_pending = false;
+    if mux.panes.is_empty() {
+        app.status_message = Some("No sessions are running".to_string());
+        return true;
+    }
+
+    let prefix = mux.prefix;
+    match resolve_prefix_command(&key, &prefix) {
+        // There is no child to re-attach to and nothing to detach from, so the only
+        // sensible reading of these from the list is "show me what's running".
+        Some(PrefixCommand::Detach) | Some(PrefixCommand::Literal) => app.open_pane_list(),
+        Some(PrefixCommand::PaneList) => app.open_pane_list(),
+        Some(PrefixCommand::NextPane) => {
+            mux.cycle(true);
+            attach_focused(app);
+        }
+        Some(PrefixCommand::PreviousPane) => {
+            mux.cycle(false);
+            attach_focused(app);
+        }
+        Some(PrefixCommand::SelectIndex(index)) => {
+            // Panes are labelled from 1 in the UI.
+            mux.select_index(index.saturating_sub(1));
+            attach_focused(app);
+        }
+        Some(PrefixCommand::KillPane) => kill_focused(app),
+        Some(PrefixCommand::Cancel) | None => {}
+    }
+    true
+}
+
+/// Bring the focused pane back on screen after the list changed it.
+fn attach_focused(app: &mut App) {
+    if let Some(id) = app.mux.as_ref().and_then(|mux| mux.focused) {
+        app.view = View::Attached(id);
+    }
+}
+
 fn kill_focused(app: &mut App) {
     let Some(mux) = app.mux.as_mut() else {
         return;
@@ -179,6 +234,59 @@ mod tests {
 
         assert_eq!(app.view, View::List);
         assert!(!app.mux.as_ref().unwrap().prefix_pending);
+    }
+
+    #[test]
+    fn the_prefix_is_recognised_from_the_session_list() {
+        let mut app = mux_app();
+        app.view = View::List;
+
+        let consumed = handle_list_prefix(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            consumed,
+            "the prefix must not fall through to list bindings"
+        );
+        assert!(app.mux.as_ref().unwrap().prefix_pending);
+    }
+
+    #[test]
+    fn ordinary_list_keys_are_left_alone_when_no_prefix_is_pending() {
+        let mut app = mux_app();
+        app.view = View::List;
+
+        let consumed = handle_list_prefix(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
+
+        assert!(
+            !consumed,
+            "'n' must still create a new session from the list"
+        );
+    }
+
+    #[test]
+    fn a_prefix_command_from_the_list_reports_when_nothing_is_running() {
+        let mut app = mux_app();
+        app.view = View::List;
+        handle_list_prefix(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+
+        let consumed = handle_list_prefix(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+        );
+
+        assert!(consumed);
+        assert!(!app.mux.as_ref().unwrap().prefix_pending);
+        assert_eq!(app.mode, crate::app::Mode::Normal, "no panes, no switcher");
+        assert!(app.status_message.is_some());
     }
 
     #[test]

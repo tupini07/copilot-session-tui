@@ -229,6 +229,19 @@ impl App {
         self.mux.as_ref().map(|mux| mux.prefix.label())
     }
 
+    /// True while the prefix has been pressed and a command key is awaited.
+    pub fn prefix_pending(&self) -> bool {
+        self.mux.as_ref().is_some_and(|mux| mux.prefix_pending)
+    }
+
+    /// Live panes owned by this instance, for the session list footer.
+    pub fn running_pane_count(&self) -> usize {
+        self.mux
+            .as_ref()
+            .map(|mux| mux.panes.iter().filter(|pane| pane.is_running()).count())
+            .unwrap_or(0)
+    }
+
     pub fn selected_session(&self) -> Option<&Session> {
         self.filtered_indices
             .get(self.selected)

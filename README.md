@@ -137,6 +137,10 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `x` | End the focused session for good |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
 
+The prefix also works from the session list, so detaching never strands a running pane:
+`prefix` `w` opens the switcher, `prefix` `n`/`p` and `prefix` `1`–`9` re-attach directly,
+and `prefix` `x` ends the focused one. The footer shows how many panes are running.
+
 In the session list, a magenta `▶` marks sessions running as panes in this CST instance,
 distinct from the green `●` that marks sessions held by some other process.
 
