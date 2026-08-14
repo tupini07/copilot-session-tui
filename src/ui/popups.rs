@@ -522,6 +522,14 @@ pub fn draw_help(f: &mut Frame, app: &App) {
         ));
         text.push(help_line(&format!("{prefix} w"), "Session switcher"));
         text.push(help_line(
+            &format!("{prefix} e"),
+            "Toggle/focus the session scratchpad",
+        ));
+        text.push(help_line(
+            &format!("{prefix} t"),
+            "Toggle/focus the session terminal",
+        ));
+        text.push(help_line(
             &format!("{prefix} n/p"),
             "Next / previous session",
         ));

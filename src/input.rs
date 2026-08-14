@@ -136,6 +136,7 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
             let id = mux.panes[index].id;
             app.mode = Mode::Normal;
             app.view = View::Attached(id);
+            crate::mux_input::sync_workspace_panels(app);
         }
         KeyCode::Char('x') => {
             let index = app.pane_selected.min(count - 1);
@@ -215,8 +216,11 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             if let Some(cwd) = app.new_session_dir() {
                 if app.mux_enabled() {
                     let title = project_title(&cwd);
-                    if let Err(error) = app.attach_new_session(&cwd, title) {
-                        app.status_message = Some(format!("Cannot start session: {error}"));
+                    match app.attach_new_session(&cwd, title) {
+                        Ok(()) => crate::mux_input::sync_workspace_panels(app),
+                        Err(error) => {
+                            app.status_message = Some(format!("Cannot start session: {error}"))
+                        }
                     }
                 } else {
                     app.should_new_session = Some(NewSessionRequest::Normal { cwd });
@@ -262,8 +266,9 @@ fn resume_selected(app: &mut App) {
             app.status_message = Some("Cannot resume: session is already active".to_string());
             return;
         }
-        if let Err(error) = app.attach_session(&id, &cwd, title) {
-            app.status_message = Some(format!("Cannot attach session: {error}"));
+        match app.attach_session(&id, &cwd, title) {
+            Ok(()) => crate::mux_input::sync_workspace_panels(app),
+            Err(error) => app.status_message = Some(format!("Cannot attach session: {error}")),
         }
         return;
     }

@@ -518,6 +518,12 @@ impl TerminalManager {
         self.focused = false;
     }
 
+    pub fn focus(&mut self) {
+        if self.is_visible() {
+            self.focused = true;
+        }
+    }
+
     pub fn remove(&mut self, session_id: &str) {
         self.panes.remove(session_id);
         if self.active_id.as_deref() == Some(session_id) {

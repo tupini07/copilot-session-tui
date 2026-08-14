@@ -20,7 +20,7 @@ pub fn draw(frame: &mut Frame, terminal: &TerminalPane, focused: bool, area: Rec
     };
     let title = Line::styled(
         format!(
-            " Terminal: {} [{}] - Ctrl+B returns to sessions ",
+            " Terminal: {} [{}] - prefix t toggles ",
             terminal.session_name, status
         ),
         Style::default().fg(status_color),

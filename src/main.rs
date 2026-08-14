@@ -231,32 +231,66 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
     loop {
         let size = terminal.size()?;
-        let terminal_height = if matches!(app.view, app::View::List) && app.terminal.is_visible() {
+        let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
+            ui::attached_layout(
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                app.scratchpad.is_some(),
+                app.terminal.is_visible(),
+            )
+        });
+        let terminal_height = if attached_layout.is_none() && app.terminal.is_visible() {
             ui::terminal_panel_height(size.height.saturating_sub(3))
         } else {
             0
         };
         update_layout_metrics(app, size.height, terminal_height);
 
-        if let Some(terminal_pane) = app.terminal.active_mut().filter(|_| terminal_height > 0) {
-            if let Err(error) = terminal_pane.resize(
-                1,
-                size.height.saturating_sub(terminal_height + 1),
-                terminal_height.saturating_sub(2),
-                size.width.saturating_sub(2),
-            ) {
-                app.status_message = Some(format!("Terminal resize failed: {error}"));
+        if let Some(layout) = attached_layout {
+            app.workspace_areas = app::WorkspaceAreas {
+                chat: layout.chat,
+                scratchpad: layout.scratchpad,
+                terminal: layout.terminal,
+            };
+            if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut())
+            {
+                if let Err(error) = terminal_pane.resize(
+                    area.x.saturating_add(1),
+                    area.y.saturating_add(1),
+                    area.height.saturating_sub(2),
+                    area.width.saturating_sub(2),
+                ) {
+                    app.status_message = Some(format!("Terminal resize failed: {error}"));
+                }
             }
-        }
 
-        if app.mux.is_some() {
-            // Panes occupy the full screen minus the one-line pane status bar.
-            let rows = size.height.saturating_sub(1).max(1);
-            let cols = size.width.max(1);
+            let rows = layout.chat.height.max(1);
+            let cols = layout.chat.width.max(1);
             if app.pane_size != (rows, cols) {
                 app.pane_size = (rows, cols);
                 if let Some(mux) = app.mux.as_mut() {
                     mux.resize_all(rows, cols);
+                }
+            }
+        } else {
+            if let Some(terminal_pane) = app.terminal.active_mut().filter(|_| terminal_height > 0) {
+                if let Err(error) = terminal_pane.resize(
+                    1,
+                    size.height.saturating_sub(terminal_height + 1),
+                    terminal_height.saturating_sub(2),
+                    size.width.saturating_sub(2),
+                ) {
+                    app.status_message = Some(format!("Terminal resize failed: {error}"));
+                }
+            }
+
+            if app.mux.is_some() {
+                let rows = size.height.saturating_sub(1).max(1);
+                let cols = size.width.max(1);
+                if app.pane_size != (rows, cols) {
+                    app.pane_size = (rows, cols);
+                    if let Some(mux) = app.mux.as_mut() {
+                        mux.resize_all(rows, cols);
+                    }
                 }
             }
         }

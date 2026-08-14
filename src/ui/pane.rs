@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -46,13 +46,7 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
     f.render_widget(Paragraph::new(lines), box_area);
 }
 
-/// Draw the focused session pane plus a one-line status strip.
-pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
+pub fn draw_chat(f: &mut Frame, app: &App, terminal_area: Rect) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
@@ -60,7 +54,6 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let terminal_area = layout[0];
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen);
         f.render_widget(widget, terminal_area);
@@ -83,7 +76,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+}
 
+pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let Some(mux) = app.mux.as_ref() else {
+        return;
+    };
+    let Some(pane) = mux.focused_pane() else {
+        return;
+    };
     let prefix = mux.prefix.label();
 
     // The hint is fixed-width and reserved first; tabs take whatever is left, so a long
@@ -97,12 +98,19 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" d list  w switch  n/p cycle  x end "),
+            Span::raw(" d list  e scratch  t terminal  w switch  n/p cycle  x end "),
         ],
         PaneStatus::Running => vec![
             Span::raw(" "),
             Span::styled(prefix.clone(), Style::default().fg(Color::Cyan)),
-            Span::raw(" for commands "),
+            Span::raw(format!(
+                " for commands · {} focused ",
+                match app.workspace_focus {
+                    crate::app::WorkspaceFocus::Chat => "chat",
+                    crate::app::WorkspaceFocus::Scratchpad => "scratchpad",
+                    crate::app::WorkspaceFocus::Terminal => "terminal",
+                }
+            )),
         ],
         PaneStatus::Exited(code) => {
             let text = match code {
@@ -133,7 +141,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let (tab_list, hidden) = tabs::layout(
         &sessions,
         focused_index,
-        (layout[1].width as usize).saturating_sub(hint_width),
+        (area.width as usize).saturating_sub(hint_width),
     );
 
     let mut spans: Vec<Span> = Vec::new();
@@ -160,7 +168,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let status =
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
-    f.render_widget(status, layout[1]);
+    f.render_widget(status, area);
 }
 
 #[cfg(test)]
@@ -267,6 +275,39 @@ mod tests {
             "the spinner must disappear as soon as the child draws, got:\n{text}"
         );
         assert!(text.contains("hello from copilot"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn attached_workspace_renders_chat_scratchpad_and_terminal_together() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.scratchpad = Some(
+            crate::scratchpad::Scratchpad::open("workspace-render-test", "Notes".to_string())
+                .unwrap(),
+        );
+        app.scratchpad_owner = Some(id);
+        let directory = tempfile::tempdir().unwrap();
+        app.terminal
+            .activate(
+                "workspace-render-test".to_string(),
+                "Shell".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &crate::config::TerminalConfig::default(),
+            )
+            .unwrap();
+        app.workspace_focus = crate::app::WorkspaceFocus::Terminal;
+
+        let text = render(&mut app);
+
+        assert!(text.contains("Scratchpad"), "got:\n{text}");
+        assert!(text.contains("Terminal: Shell"), "got:\n{text}");
+        assert!(text.contains("Starting Copilot"), "got:\n{text}");
+        app.terminal.shutdown();
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 }

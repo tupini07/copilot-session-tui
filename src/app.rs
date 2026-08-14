@@ -9,6 +9,7 @@ use crate::updater::UpdateInfo;
 use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use ratatui::layout::Rect;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -17,6 +18,20 @@ use std::sync::mpsc;
 pub enum View {
     List,
     Attached(crate::mux::PaneId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceFocus {
+    Chat,
+    Scratchpad,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceAreas {
+    pub chat: Rect,
+    pub scratchpad: Option<Rect>,
+    pub terminal: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +152,10 @@ pub struct App {
     /// A worktree the main loop should create on its next iteration.
     pub pending_worktree: Option<PendingWorktree>,
     pub scratchpad: Option<Scratchpad>,
+    pub scratchpad_owner: Option<crate::mux::PaneId>,
     pub terminal: TerminalManager,
+    pub workspace_focus: WorkspaceFocus,
+    pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
 }
 
@@ -201,7 +219,10 @@ impl App {
             exit_dir: None,
             pending_worktree: None,
             scratchpad: None,
+            scratchpad_owner: None,
             terminal: TerminalManager::default(),
+            workspace_focus: WorkspaceFocus::Chat,
+            workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
         };
         app.apply_filter();
@@ -228,6 +249,8 @@ impl App {
             .focused
             .and_then(|id| mux.panes.iter().position(|pane| pane.id == id))
             .unwrap_or(0);
+        self.workspace_focus = WorkspaceFocus::Chat;
+        self.terminal.unfocus();
         self.view = View::List;
         self.mode = Mode::PaneList;
     }
@@ -542,6 +565,18 @@ impl App {
 
     /// Leave the focused pane running and return to the session list.
     pub fn detach(&mut self) {
+        let scratchpad_error = self
+            .scratchpad
+            .as_mut()
+            .and_then(|scratchpad| scratchpad.save().err());
+        if let Some(error) = scratchpad_error {
+            self.status_message = Some(format!("Scratchpad save failed: {error}"));
+        } else {
+            self.scratchpad = None;
+            self.scratchpad_owner = None;
+        }
+        self.terminal.hide();
+        self.workspace_focus = WorkspaceFocus::Chat;
         self.view = View::List;
         if let Some(mux) = self.mux.as_mut() {
             mux.prefix_pending = false;

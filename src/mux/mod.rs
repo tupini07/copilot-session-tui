@@ -124,6 +124,8 @@ pub enum PrefixCommand {
     PreviousPane,
     KillPane,
     PaneList,
+    Scratchpad,
+    Terminal,
     SelectIndex(usize),
     /// `prefix prefix` — send a literal prefix keystroke to the child.
     Literal,
@@ -140,6 +142,8 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('p') => Some(PrefixCommand::PreviousPane),
         KeyCode::Char('x') => Some(PrefixCommand::KillPane),
         KeyCode::Char('w') => Some(PrefixCommand::PaneList),
+        KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
+        KeyCode::Char('t') => Some(PrefixCommand::Terminal),
         KeyCode::Char(c) if c.is_ascii_digit() => {
             Some(PrefixCommand::SelectIndex(c.to_digit(10)? as usize))
         }
@@ -353,6 +357,14 @@ mod tests {
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('x'), none), &chord),
             Some(PrefixCommand::KillPane)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('e'), none), &chord),
+            Some(PrefixCommand::Scratchpad)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('t'), none), &chord),
+            Some(PrefixCommand::Terminal)
         );
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('2'), none), &chord),

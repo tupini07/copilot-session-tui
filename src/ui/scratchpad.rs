@@ -1,5 +1,5 @@
 use edtui::{EditorTheme, EditorView, LineNumbers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -8,12 +8,16 @@ use ratatui::Frame;
 use crate::scratchpad::Scratchpad;
 
 pub fn draw(f: &mut Frame, scratchpad: &mut Scratchpad) {
+    draw_in(f, scratchpad, f.area(), true);
+}
+
+pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: bool) {
     let [title_area, editor_area, status_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
-    .areas(f.area());
+    .areas(area);
 
     let dirty = if scratchpad.is_dirty() {
         " • modified"
@@ -32,13 +36,18 @@ pub fn draw(f: &mut Frame, scratchpad: &mut Scratchpad) {
     ]));
     f.render_widget(title, title_area);
 
+    let border_color = if focused {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     let theme = EditorTheme::default()
         .base(Style::default().fg(Color::White).bg(Color::Black))
         .selection_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(border_color)),
         )
         .hide_status_line();
     let editor = EditorView::new(&mut scratchpad.state)

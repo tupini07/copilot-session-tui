@@ -7,10 +7,18 @@ pub mod status_bar;
 pub mod tabs;
 pub mod terminal_pane;
 
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
-use crate::app::{App, Mode, View};
+use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttachedLayout {
+    pub chat: Rect,
+    pub scratchpad: Option<Rect>,
+    pub terminal: Option<Rect>,
+    pub status: Rect,
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == Mode::Scratchpad {
@@ -23,7 +31,30 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     if matches!(app.view, View::Attached(_)) {
-        pane::draw(f, app, size);
+        let layout = attached_layout(size, app.scratchpad.is_some(), app.terminal.is_visible());
+        app.workspace_areas = WorkspaceAreas {
+            chat: layout.chat,
+            scratchpad: layout.scratchpad,
+            terminal: layout.terminal,
+        };
+        pane::draw_chat(f, app, layout.chat);
+        if let (Some(area), Some(scratchpad)) = (layout.scratchpad, app.scratchpad.as_mut()) {
+            scratchpad::draw_in(
+                f,
+                scratchpad,
+                area,
+                app.workspace_focus == WorkspaceFocus::Scratchpad,
+            );
+        }
+        if let (Some(area), Some(terminal)) = (layout.terminal, app.terminal.active()) {
+            terminal_pane::draw(
+                f,
+                terminal,
+                app.workspace_focus == WorkspaceFocus::Terminal,
+                area,
+            );
+        }
+        pane::draw_status(f, app, layout.status);
         return;
     }
 
@@ -144,5 +175,76 @@ pub fn terminal_panel_height(content_height: u16) -> u16 {
         content_height / 2
     } else {
         (content_height * 2 / 5).clamp(7, 16)
+    }
+}
+
+pub fn attached_layout(
+    area: Rect,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+) -> AttachedLayout {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let content = vertical[0];
+    let status = vertical[1];
+
+    let (top, terminal) = if terminal_visible {
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(terminal_panel_height(content.height)),
+            ])
+            .split(content);
+        (sections[0], Some(sections[1]))
+    } else {
+        (content, None)
+    };
+
+    let (chat, scratchpad) = if scratchpad_visible {
+        let sections = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(top);
+        (sections[0], Some(sections[1]))
+    } else {
+        (top, None)
+    };
+
+    AttachedLayout {
+        chat,
+        scratchpad,
+        terminal,
+        status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attached_workspace_places_scratchpad_right_and_terminal_below() {
+        let layout = attached_layout(Rect::new(0, 0, 120, 40), true, true);
+        let scratchpad = layout.scratchpad.unwrap();
+        let terminal = layout.terminal.unwrap();
+
+        assert_eq!(layout.status.y, 39);
+        assert_eq!(scratchpad.x, layout.chat.right());
+        assert_eq!(scratchpad.y, layout.chat.y);
+        assert_eq!(terminal.y, layout.chat.bottom());
+        assert_eq!(terminal.width, 120);
+        assert_eq!(layout.chat.width + scratchpad.width, 120);
+    }
+
+    #[test]
+    fn hidden_tools_give_the_chat_the_full_content_area() {
+        let layout = attached_layout(Rect::new(0, 0, 100, 30), false, false);
+
+        assert_eq!(layout.chat, Rect::new(0, 0, 100, 29));
+        assert!(layout.scratchpad.is_none());
+        assert!(layout.terminal.is_none());
     }
 }

@@ -124,12 +124,14 @@ Enter on an empty list marker ends the list.
 
 ### Session terminal
 
-Press `t` to open a shell in the selected session's exact working directory.
+Press `t` in the session list, or `prefix` `t` while attached, to open a shell
+in the selected session's exact working directory.
 Each session keeps its own shell process while CST is running, including when
-its panel is hidden. While the terminal is focused, all keys (including
-`Ctrl+C`) and paste events are sent to the shell. Press `Ctrl+B` to return
-focus to the session list, then `t` to hide the panel. If the shell exits,
-press Enter while the panel is focused to restart it.
+its panel is hidden. In mux mode the terminal remains below the conversation,
+and `prefix` `e` opens the scratchpad beside it. Repeating either command hides
+its focused panel; invoking it from another panel moves focus there. While the
+terminal is focused, all keys (including `Ctrl+C`) and paste events are sent to
+the shell. If the shell exits, press Enter while focused to restart it.
 
 Mouse wheel, click, drag, and release events are forwarded whenever the nested
 application enables terminal mouse tracking, so full-screen applications can
@@ -173,6 +175,8 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 |-----|--------|
 | `prefix` `d` | Back to the session list — the session keeps running |
 | `prefix` `w` | Session switcher |
+| `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
+| `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
