@@ -489,6 +489,9 @@ pub fn draw_help(f: &mut Frame, app: &App) {
         help_line("Enter", "Resume selected session"),
         help_line("n", "New session in current project"),
         help_line("N", "New isolated worktree session"),
+        help_line("Space", "Toggle selected session favorite"),
+        help_line("e", "Open selected session scratchpad"),
+        help_line("t", "Toggle selected session terminal"),
         help_line("r", "Rename selected session"),
         help_line("d", "Delete selected session"),
         Line::from(""),
@@ -566,7 +569,7 @@ fn help_line(key: &str, desc: &str) -> Line<'static> {
 }
 
 pub fn draw_settings(f: &mut Frame, app: &App) {
-    let area = centered_rect(65, 68, f.area());
+    let area = centered_rect(65, 78, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -728,6 +731,35 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     ));
     lines.push(Line::from(Span::styled(
         "    Prefix key for pane commands, e.g. C-b, C-g, C-a",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    lines.push(Line::from(""));
+    let shell_editing = app.settings_editing == Some(SettingsEditField::TerminalShell);
+    let shell_display = if shell_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        app.config
+            .terminal
+            .shell
+            .as_deref()
+            .unwrap_or("(platform default)")
+            .to_string()
+    };
+    let shell_color = if app.config.terminal.shell.is_some() {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    lines.push(settings_row(
+        "Terminal Shell",
+        &shell_display,
+        shell_color,
+        app.settings_selected == 7,
+        shell_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Executable or path; blank uses the platform default",
         Style::default().fg(Color::DarkGray),
     )));
 

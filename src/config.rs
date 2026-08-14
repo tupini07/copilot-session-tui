@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,9 @@ pub const DEFAULT_MUX_PREFIX: &str = "C-b";
 pub struct UserConfig {
     #[serde(default)]
     pub yolo: bool,
+
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub favorites: BTreeSet<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -33,6 +36,15 @@ pub struct UserConfig {
 
     #[serde(default)]
     pub worktree: WorktreeConfig,
+
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TerminalConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 fn default_mux_prefix() -> String {
@@ -43,11 +55,13 @@ impl Default for UserConfig {
     fn default() -> Self {
         Self {
             yolo: false,
+            favorites: BTreeSet::new(),
             model: None,
             reasoning_effort: None,
             mux: false,
             mux_prefix: default_mux_prefix(),
             worktree: WorktreeConfig::default(),
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -346,8 +360,33 @@ mod tests {
                 .unwrap();
 
         assert!(config.yolo);
+        assert!(config.favorites.is_empty());
         assert_eq!(config.worktree.branch_prefix, DEFAULT_BRANCH_PREFIX);
         assert_eq!(config.worktree.root, default_worktree_root());
+        assert!(config.terminal.shell.is_none());
+    }
+
+    #[test]
+    fn favorites_round_trip_in_global_config() {
+        let mut config = UserConfig::default();
+        config.favorites.insert("session-b".to_string());
+        config.favorites.insert("session-a".to_string());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: UserConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.favorites, config.favorites);
+    }
+
+    #[test]
+    fn terminal_shell_round_trips_in_global_config() {
+        let mut config = UserConfig::default();
+        config.terminal.shell = Some("pwsh".to_string());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: UserConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.terminal.shell.as_deref(), Some("pwsh"));
     }
 
     #[test]

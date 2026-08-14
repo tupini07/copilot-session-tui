@@ -5,7 +5,9 @@ mod events;
 mod input;
 mod mux;
 mod mux_input;
+mod scratchpad;
 mod session;
+mod terminal_pane;
 mod text;
 mod ui;
 mod updater;
@@ -13,13 +15,13 @@ mod updater;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use app::{App, NewSessionRequest};
@@ -114,7 +116,12 @@ fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -126,9 +133,11 @@ fn main() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
+    app.terminal.shutdown();
 
     // Handle result
     result?;
@@ -199,7 +208,6 @@ fn main() -> Result<()> {
     if let (Some(ref path), Some(ref dir)) = (&cli.last_dir_file, &last_dir) {
         let _ = std::fs::write(path, dir);
     }
-
     Ok(())
 }
 
@@ -223,7 +231,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
     loop {
         let size = terminal.size()?;
-        update_layout_metrics(app, size.height);
+        let terminal_height = if matches!(app.view, app::View::List) && app.terminal.is_visible() {
+            ui::terminal_panel_height(size.height.saturating_sub(3))
+        } else {
+            0
+        };
+        update_layout_metrics(app, size.height, terminal_height);
+
+        if let Some(terminal_pane) = app.terminal.active_mut().filter(|_| terminal_height > 0) {
+            if let Err(error) = terminal_pane.resize(
+                1,
+                size.height.saturating_sub(terminal_height + 1),
+                terminal_height.saturating_sub(2),
+                size.width.saturating_sub(2),
+            ) {
+                app.status_message = Some(format!("Terminal resize failed: {error}"));
+            }
+        }
 
         if app.mux.is_some() {
             // Panes occupy the full screen minus the one-line pane status bar.
@@ -239,6 +263,21 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
         input::maybe_load_details(app);
         app.poll_update();
+
+        if let Some(scratchpad) = app.scratchpad.as_mut() {
+            if let Err(error) = scratchpad.autosave_if_due() {
+                scratchpad.status_message = Some(format!("Autosave failed: {error}"));
+            }
+        }
+
+        let mut host_sequences = app.terminal.drain_host_sequences();
+        host_sequences.append(&mut app.host_sequences);
+        if !host_sequences.is_empty() {
+            for sequence in host_sequences {
+                terminal.backend_mut().write_all(&sequence)?;
+            }
+            terminal.backend_mut().flush()?;
+        }
 
         terminal.draw(|f| ui::draw(f, app))?;
 
@@ -276,12 +315,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     Ok(())
 }
 
-fn update_layout_metrics(app: &mut App, height: u16) {
+fn update_layout_metrics(app: &mut App, height: u16, terminal_height: u16) {
     // visible_rows must match the session_list take() count:
     // inner height = total height - 6 (title + borders + status)
     // each item = 2 lines normally, 1 line when project filter is active
     let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
-    app.visible_rows = (height as usize).saturating_sub(6) / lines_per_item;
+    app.visible_rows =
+        (height as usize).saturating_sub(6 + terminal_height as usize) / lines_per_item;
 
     // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
     let popup_percent = 80u16

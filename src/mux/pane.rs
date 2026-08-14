@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -33,6 +33,7 @@ pub struct Pane {
     pub started_at: Instant,
     parser: PaneParser,
     pty: PtySession,
+    mouse_captured: bool,
 }
 
 /// Everything needed to start a pane, grouped so callers don't juggle a long argument list.
@@ -66,7 +67,7 @@ impl Pane {
             size.cols,
             // Scrollback keeps output above the viewport reachable once copy-mode lands.
             5000,
-            PaneCallbacks::new(pty.writer_handle()),
+            PaneCallbacks::new(pty.writer_handle(), events.clone()),
         )));
 
         let pump_parser = Arc::clone(&parser);
@@ -99,6 +100,7 @@ impl Pane {
             started_at: Instant::now(),
             parser,
             pty,
+            mouse_captured: false,
         })
     }
 
@@ -188,6 +190,76 @@ impl Pane {
         }
         let bytes = keys::encode_paste(text, self.bracketed_paste());
         self.pty.write(&bytes)
+    }
+
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> Result<()> {
+        if !self.is_running() {
+            return Ok(());
+        }
+        let Some((mode, encoding, rows, cols)) = self.with_screen(|screen| {
+            let (rows, cols) = screen.size();
+            (
+                screen.mouse_protocol_mode(),
+                screen.mouse_protocol_encoding(),
+                rows,
+                cols,
+            )
+        }) else {
+            return Ok(());
+        };
+        let inside = event.column < cols && event.row < rows;
+
+        if mode == vt100::MouseProtocolMode::None {
+            if inside {
+                match event.kind {
+                    MouseEventKind::ScrollUp => self.scroll(3),
+                    MouseEventKind::ScrollDown => self.scroll(-3),
+                    _ => Ok(()),
+                }
+            } else {
+                Ok(())
+            }
+        } else {
+            if matches!(event.kind, MouseEventKind::Down(_)) && inside {
+                self.mouse_captured = true;
+            }
+            let coordinates = if inside {
+                Some((event.column + 1, event.row + 1))
+            } else if self.mouse_captured
+                && matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+            {
+                Some((
+                    event.column.clamp(0, cols.saturating_sub(1)) + 1,
+                    event.row.clamp(0, rows.saturating_sub(1)) + 1,
+                ))
+            } else {
+                None
+            };
+            let sequence = coordinates
+                .and_then(|position| keys::encode_mouse(event, position, mode, encoding));
+            if matches!(event.kind, MouseEventKind::Up(_)) {
+                self.mouse_captured = false;
+            }
+            if let Some(sequence) = sequence {
+                self.pty.write(&sequence)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn scroll(&mut self, rows: isize) -> Result<()> {
+        let mut parser = self
+            .parser
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Terminal parser lock was poisoned"))?;
+        let current = parser.screen().scrollback();
+        let next = if rows.is_negative() {
+            current.saturating_sub(rows.unsigned_abs())
+        } else {
+            current.saturating_add(rows as usize)
+        };
+        parser.screen_mut().set_scrollback(next);
+        Ok(())
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {

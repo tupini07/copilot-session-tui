@@ -173,7 +173,7 @@ mod tests {
     use std::sync::mpsc;
 
     /// Render the whole UI into an off-screen buffer and return it as plain text.
-    fn render(app: &App) -> String {
+    fn render(app: &mut App) -> String {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
@@ -234,7 +234,7 @@ mod tests {
         app.mux.as_mut().expect("mux").push(pane);
         app.view = crate::app::View::Attached(id);
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(
             text.contains("Starting Copilot"),
@@ -260,7 +260,7 @@ mod tests {
             .expect("pane")
             .feed_for_test(b"hello from copilot");
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(
             !text.contains("Starting Copilot"),

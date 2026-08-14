@@ -7,6 +7,9 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - **Full session list** — see ALL your Copilot sessions with virtual scrolling
 - **Project filter** — filter sessions by working directory (auto-detects current project)
 - **Fuzzy search** — find sessions by name, project, or ID
+- **Favorites** — pin frequently used sessions to the top of the unfiltered view
+- **Session scratchpads** — keep persistent notes with lightweight text editing
+- **Session terminals** — run a persistent shell in the selected session's directory
 - **Session details** — preview edited files, last message, and session stats
 - **Resume** — press Enter to launch `copilot --resume` directly
 - **Isolated sessions** — press `N` to create a branch-backed Git worktree before launching Copilot
@@ -21,7 +24,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.70+
+- [Rust](https://rustup.rs/) 1.86+
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) (Windows) or GCC (Linux/macOS)
 
 ### Build from source
@@ -83,6 +86,9 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `↑/k` `↓/j` | Navigate sessions |
 | `Home` / `End` | Jump to first/last |
 | `Enter` | Resume selected session |
+| `Space` | Toggle selected session favorite |
+| `e` | Open selected session scratchpad |
+| `t` | Toggle and focus the selected session terminal |
 | `n` | New session in the filtered project (or the current directory's project) |
 | `N` | New isolated worktree session with an editable branch name |
 | `r` | Rename session |
@@ -97,6 +103,41 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `?` | Show help |
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
+
+### Scratchpad editing
+
+Scratchpads are plain-text files stored in CST's local app-data directory and
+autosaved after edits. They are removed when their session is deleted.
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `Ctrl+S` | Save and close / save |
+| `Shift+Arrows` | Select text |
+| `Ctrl+A` | Select all |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+Shift+K` | Delete current line |
+| `Alt+↑` / `Alt+↓` | Move current line |
+
+Pressing Enter after a bullet or numbered item continues the list. Pressing
+Enter on an empty list marker ends the list.
+
+### Session terminal
+
+Press `t` to open a shell in the selected session's exact working directory.
+Each session keeps its own shell process while CST is running, including when
+its panel is hidden. While the terminal is focused, all keys (including
+`Ctrl+C`) and paste events are sent to the shell. Press `Ctrl+B` to return
+focus to the session list, then `t` to hide the panel. If the shell exits,
+press Enter while the panel is focused to restart it.
+
+Mouse wheel, click, drag, and release events are forwarded whenever the nested
+application enables terminal mouse tracking, so full-screen applications can
+handle their own scrolling and text selection. Otherwise, the wheel scrolls
+CST's terminal scrollback. `Ctrl+V` and `Meta+V` are forwarded for applications
+that read images directly from the system clipboard; an empty image-paste
+event is translated to `Ctrl+V`. OSC 52 clipboard-copy requests are passed
+through to the outer terminal so nested selection handlers can still copy.
 
 ## How It Works
 
@@ -137,6 +178,9 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `x` | End the focused session for good |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
 
+Mouse tracking, image-paste triggers, and OSC 52 clipboard-copy requests are forwarded
+through the mux so Copilot retains the outer terminal's scrolling, paste, and copy behavior.
+
 The prefix also works from the session list, so detaching never strands a running pane:
 `prefix` `w` opens the switcher, `prefix` `n`/`p` and `prefix` `1`–`9` re-attach directly,
 and `prefix` `x` ends the focused one. The footer shows how many panes are running.
@@ -173,17 +217,25 @@ components are bounded, filesystem-safe, and include short hashes to avoid colli
 ### Configuration
 
 Press `,` for global settings. Existing global files containing only `yolo`, `model`,
-and `reasoning_effort` remain valid. Worktree defaults are stored in the same config:
+and `reasoning_effort` remain valid. Terminal and worktree defaults are stored in the
+same config:
 
 ```json
 {
   "yolo": false,
+  "terminal": {
+    "shell": "pwsh"
+  },
   "worktree": {
     "branch_prefix": "copilot/",
     "root": "D:\\cst-wt"
   }
 }
 ```
+
+Leave `terminal.shell` unset or blank to use the platform's default shell. Set it
+to an executable name on `PATH` (such as `pwsh`, `powershell`, or `bash`) or to
+an absolute executable path. The setting applies when a new terminal shell starts.
 
 Press `.` while a project filter is active to edit repository-root `.cst.json`.
 Each field explicitly shows `Inherited` or `Override`; `Space` toggles that state.

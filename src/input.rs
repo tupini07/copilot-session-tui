@@ -23,6 +23,16 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
 /// Split out from `handle_input` so the multiplexer's event thread — which owns the
 /// only reader of the terminal — can route events here instead of polling separately.
 pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    if app.mode == Mode::Scratchpad {
+        handle_scratchpad(app, event);
+        return Ok(());
+    }
+
+    if app.terminal.is_focused() {
+        handle_terminal(app, event);
+        return Ok(());
+    }
+
     let Event::Key(key) = event else {
         return Ok(());
     };
@@ -59,6 +69,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
         Mode::PaneList => handle_pane_list(app, key.code),
+        Mode::Scratchpad => unreachable!(),
     }
 
     Ok(())
@@ -175,6 +186,16 @@ fn handle_normal(app: &mut App, key: KeyCode) {
                 app.mode = Mode::Rename;
             }
         }
+        KeyCode::Char('e') => open_scratchpad(app),
+        KeyCode::Char('t') => toggle_terminal(app),
+        KeyCode::Char(' ') => match app.toggle_selected_favorite() {
+            Ok(Some(true)) => app.status_message = Some("Added to favorites".to_string()),
+            Ok(Some(false)) => app.status_message = Some("Removed from favorites".to_string()),
+            Ok(None) => {}
+            Err(error) => {
+                app.status_message = Some(format!("Failed to save favorite: {error}"));
+            }
+        },
         KeyCode::Char('d') => begin_delete(app),
         KeyCode::Char('f') | KeyCode::Char('p') => {
             app.project_selected = 0;
@@ -263,6 +284,76 @@ fn project_title(cwd: &str) -> String {
         .to_string()
 }
 
+fn toggle_terminal(app: &mut App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    let session_id = session.id.clone();
+    let session_name = session.display_name().to_string();
+    let cwd = session.cwd.clone();
+
+    if app.terminal.is_visible() && app.terminal.active_session_id() == Some(session_id.as_str()) {
+        app.terminal.hide();
+        app.status_message = Some("Terminal hidden; shell is still running".to_string());
+        return;
+    }
+
+    match app
+        .terminal
+        .activate(session_id, session_name, cwd, &app.config.terminal)
+    {
+        Ok(crate::terminal_pane::Activation::Opened) => {
+            app.status_message = Some("Terminal opened in session directory".to_string())
+        }
+        Ok(crate::terminal_pane::Activation::Focused) => {
+            app.status_message = Some("Terminal focused".to_string())
+        }
+        Ok(crate::terminal_pane::Activation::Restarted) => {
+            app.status_message = Some("Terminal shell restarted".to_string())
+        }
+        Err(error) => {
+            app.status_message = Some(format!("Cannot open terminal: {error}"));
+        }
+    }
+}
+
+fn handle_terminal(app: &mut App, event: Event) {
+    if let Event::Key(key) = &event {
+        if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('b')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            app.terminal.unfocus();
+            app.status_message = Some("Terminal remains open; press t to hide it".to_string());
+            return;
+        }
+
+        if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Enter
+            && app
+                .terminal
+                .active()
+                .is_some_and(|terminal| !terminal.is_running())
+        {
+            match app.terminal.restart_active(&app.config.terminal) {
+                Ok(()) => {
+                    app.status_message = Some("Terminal shell restarted".to_string());
+                }
+                Err(error) => {
+                    app.status_message = Some(format!("Cannot restart terminal: {error}"));
+                }
+            }
+            return;
+        }
+    }
+
+    if let Some(terminal) = app.terminal.active_mut() {
+        if let Err(error) = terminal.handle_event(event) {
+            app.status_message = Some(format!("Terminal input failed: {error}"));
+        }
+    }
+}
+
 fn begin_delete(app: &mut App) {
     let Some(session) = app.selected_session() else {
         return;
@@ -271,6 +362,7 @@ fn begin_delete(app: &mut App) {
         app.status_message = Some("Cannot delete: session is currently active".to_string());
         return;
     }
+
     let cwd = session.cwd.clone();
 
     match worktree::managed_worktree_for_cwd(Path::new(&cwd)) {
@@ -289,6 +381,41 @@ fn begin_delete(app: &mut App) {
         }
         Err(error) => {
             app.status_message = Some(format!("Cannot inspect worktree registry: {error}"));
+        }
+    }
+}
+
+fn open_scratchpad(app: &mut App) {
+    let Some(session) = app.selected_session() else {
+        return;
+    };
+    let session_id = session.id.clone();
+    let session_name = session.display_name().to_string();
+    match crate::scratchpad::Scratchpad::open(&session_id, session_name) {
+        Ok(scratchpad) => {
+            app.scratchpad = Some(scratchpad);
+            app.mode = Mode::Scratchpad;
+        }
+        Err(error) => {
+            app.status_message = Some(format!("Cannot open scratchpad: {error}"));
+        }
+    }
+}
+
+fn handle_scratchpad(app: &mut App, event: Event) {
+    let Some(scratchpad) = app.scratchpad.as_mut() else {
+        app.mode = Mode::Normal;
+        return;
+    };
+    match scratchpad.handle_event(event) {
+        Ok(crate::scratchpad::InputOutcome::Continue) => {}
+        Ok(crate::scratchpad::InputOutcome::Close) => {
+            app.scratchpad = None;
+            app.mode = Mode::Normal;
+            app.status_message = Some("Scratchpad saved".to_string());
+        }
+        Err(error) => {
+            scratchpad.status_message = Some(format!("Scratchpad save failed: {error}"));
         }
     }
 }
@@ -433,10 +560,12 @@ fn perform_delete(app: &mut App, force: bool) {
     }
 
     let dir = app.sessions[idx].dir_path.clone();
+    let session_id = app.sessions[idx].id.clone();
     let target = app
         .pending_delete
         .clone()
         .unwrap_or(DeleteTarget::SessionOnly);
+    app.terminal.remove(&session_id);
     let result = match target {
         DeleteTarget::SessionOnly => {
             manager::delete_session(&dir).map(|_| "Session deleted".to_string())
@@ -447,8 +576,21 @@ fn perform_delete(app: &mut App, force: bool) {
     match result {
         Ok(message) => {
             app.sessions.remove(idx);
+            let favorite_error = app.forget_favorite(&session_id).err();
+            let scratchpad_error = crate::scratchpad::delete(&session_id).err();
             app.apply_filter();
-            app.status_message = Some(message);
+            let mut errors = Vec::new();
+            if let Some(error) = favorite_error {
+                errors.push(format!("favorites: {error}"));
+            }
+            if let Some(error) = scratchpad_error {
+                errors.push(format!("scratchpad: {error}"));
+            }
+            app.status_message = Some(if errors.is_empty() {
+                message
+            } else {
+                format!("{message}; cleanup failed for {}", errors.join(", "))
+            });
         }
         Err(error) => {
             app.status_message = Some(format!("Delete failed: {error}"));
@@ -531,7 +673,7 @@ fn handle_help(app: &mut App, key: KeyCode) {
     }
 }
 
-const SETTINGS_COUNT: usize = 7;
+const SETTINGS_COUNT: usize = 8;
 
 fn handle_settings(app: &mut App, key: KeyCode) {
     if let Some(field) = app.settings_editing {
@@ -600,6 +742,11 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::MuxPrefix,
                 app.config.mux_prefix.clone(),
             ),
+            7 => begin_global_edit(
+                app,
+                SettingsEditField::TerminalShell,
+                app.config.terminal.shell.clone().unwrap_or_default(),
+            ),
             _ => {}
         },
         _ => {}
@@ -643,6 +790,9 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
             if let Some(mux) = app.mux.as_mut() {
                 mux.prefix = chord;
             }
+        }
+        SettingsEditField::TerminalShell => {
+            app.config.terminal.shell = (!value.is_empty()).then_some(value);
         }
     }
     app.settings_editing = None;

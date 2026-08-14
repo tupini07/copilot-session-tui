@@ -7,59 +7,73 @@ use ratatui::Frame;
 use crate::app::{App, Mode};
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let line1 = match app.mode {
-        Mode::Search => Line::from(vec![
-            Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Yellow)),
-            Span::raw(" "),
-            Span::styled(&app.search_query, Style::default().fg(Color::Yellow)),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
-            Span::raw(" confirm  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
-            Span::raw(" cancel"),
-        ]),
-        Mode::Normal => {
-            let mut spans = vec![
+    let line1 = if app.terminal.is_focused() {
+        Line::from(vec![
+            Span::raw(" Terminal input active  "),
+            key_span("Ctrl+B"),
+            Span::raw(" Return to sessions  "),
+            key_span("Enter"),
+            Span::raw(" Restart after shell exits"),
+        ])
+    } else {
+        match app.mode {
+            Mode::Search => Line::from(vec![
+                Span::styled(" / ", Style::default().fg(Color::Black).bg(Color::Yellow)),
                 Span::raw(" "),
-                key_span("↑↓"),
-                Span::raw(" Navigate  "),
-                key_span("Enter"),
-                Span::raw(" Resume  "),
-                key_span("r"),
-                Span::raw(" Rename  "),
-                key_span("d"),
-                Span::raw(" Delete  "),
-                key_span("/"),
-                Span::raw(" Search  "),
-                key_span("f"),
-                Span::raw(" Filter  "),
-                key_span("s"),
-                Span::raw(" Sort"),
-            ];
-            if let Some(prefix) = app.prefix_label() {
-                spans.push(Span::raw("  │  "));
-                if app.prefix_pending() {
-                    spans.push(Span::styled(
-                        format!("{prefix} …"),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    let running = app.running_pane_count();
-                    let label = if running > 0 {
-                        format!("{prefix} w  {running} running")
+                Span::styled(&app.search_query, Style::default().fg(Color::Yellow)),
+                Span::styled("█", Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled("Enter", Style::default().fg(Color::Cyan)),
+                Span::raw(" confirm  "),
+                Span::styled("Esc", Style::default().fg(Color::Cyan)),
+                Span::raw(" cancel"),
+            ]),
+            Mode::Normal => {
+                let mut spans = vec![
+                    Span::raw(" "),
+                    key_span("↑↓"),
+                    Span::raw(" Navigate  "),
+                    key_span("Enter"),
+                    Span::raw(" Resume  "),
+                    key_span("r"),
+                    Span::raw(" Rename  "),
+                    key_span("d"),
+                    Span::raw(" Delete  "),
+                    key_span("e"),
+                    Span::raw(" Scratchpad  "),
+                    key_span("t"),
+                    Span::raw(" Terminal  "),
+                    key_span("/"),
+                    Span::raw(" Search  "),
+                    key_span("f"),
+                    Span::raw(" Filter  "),
+                    key_span("s"),
+                    Span::raw(" Sort"),
+                ];
+                if let Some(prefix) = app.prefix_label() {
+                    spans.push(Span::raw("  │  "));
+                    if app.prefix_pending() {
+                        spans.push(Span::styled(
+                            format!("{prefix} …"),
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ));
                     } else {
-                        format!("mux {prefix}")
-                    };
-                    spans.push(Span::styled(label, Style::default().fg(Color::Magenta)));
+                        let running = app.running_pane_count();
+                        let label = if running > 0 {
+                            format!("{prefix} w  {running} running")
+                        } else {
+                            format!("mux {prefix}")
+                        };
+                        spans.push(Span::styled(label, Style::default().fg(Color::Magenta)));
+                    }
                 }
+                Line::from(spans)
             }
-            Line::from(spans)
+            _ => Line::from(""),
         }
-        _ => Line::from(""),
     };
 
     let line2 = match app.mode {
@@ -72,6 +86,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" New  "),
                 key_span("N"),
                 Span::raw(" Worktree  "),
+                key_span("Space"),
+                Span::raw(" Favorite  "),
                 key_span(","),
                 Span::raw(" Global settings  "),
                 key_span("."),

@@ -1,16 +1,25 @@
 pub mod pane;
 pub mod popups;
+pub mod scratchpad;
 pub mod session_detail;
 pub mod session_list;
 pub mod status_bar;
 pub mod tabs;
+pub mod terminal_pane;
 
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
 use crate::app::{App, Mode, View};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
+    if app.mode == Mode::Scratchpad {
+        if let Some(scratchpad) = app.scratchpad.as_mut() {
+            scratchpad::draw(f, scratchpad);
+        }
+        return;
+    }
+
     let size = f.area();
 
     if matches!(app.view, View::Attached(_)) {
@@ -68,14 +77,32 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     f.render_widget(title, main_layout[0]);
 
+    let content_sections = if app.terminal.is_visible() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(terminal_panel_height(main_layout[1].height)),
+            ])
+            .split(main_layout[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(5), Constraint::Length(0)])
+            .split(main_layout[1])
+    };
+
     // Main content: session list + detail pane
     let content_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(main_layout[1]);
+        .split(content_sections[0]);
 
     session_list::draw(f, app, content_layout[0]);
     session_detail::draw(f, app, content_layout[1]);
+    if let Some(terminal) = app.terminal.active().filter(|_| app.terminal.is_visible()) {
+        terminal_pane::draw(f, terminal, app.terminal.is_focused(), content_sections[1]);
+    }
 
     // Status bar
     status_bar::draw(f, app, main_layout[2]);
@@ -109,5 +136,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 pending.branch
             ),
         );
+    }
+}
+
+pub fn terminal_panel_height(content_height: u16) -> u16 {
+    if content_height < 10 {
+        content_height / 2
+    } else {
+        (content_height * 2 / 5).clamp(7, 16)
     }
 }

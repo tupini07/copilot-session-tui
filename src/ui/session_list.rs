@@ -44,17 +44,22 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
             // Panes we own read differently from a foreign `inuse` lock: ours can be
             // re-attached, theirs cannot.
-            let indicator = if app.has_running_pane_for(&session.id) {
+            let active_indicator = if app.has_running_pane_for(&session.id) {
                 Span::styled("▶ ", Style::default().fg(Color::Magenta))
             } else if session.is_active {
                 Span::styled("● ", Style::default().fg(Color::Green))
             } else {
                 Span::raw("  ")
             };
+            let favorite_indicator = if app.is_favorite(&session.id) {
+                Span::styled("★ ", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("  ")
+            };
 
             let name = session.display_name();
-            // 2 columns for indicator, 1 space + 8 columns for the time column
-            let max_name_width = (inner.width as usize).saturating_sub(11);
+            // 4 columns for indicators, 1 space + 8 columns for the time column
+            let max_name_width = (inner.width as usize).saturating_sub(13);
             let truncated_name = text::truncate_to_width(name, max_name_width);
 
             let name_style = if is_selected {
@@ -68,7 +73,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let time = session.relative_time();
 
             let line = Line::from(vec![
-                indicator,
+                active_indicator,
+                favorite_indicator,
                 Span::styled(
                     text::pad_to_width(&truncated_name, max_name_width),
                     name_style,
@@ -85,7 +91,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 let project = session.project_name();
                 let truncated_project = text::truncate_to_width(project, 15);
                 let project_line = Line::from(vec![
-                    Span::raw("  "),
+                    Span::raw("    "),
                     Span::styled(
                         truncated_project,
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
@@ -133,11 +139,11 @@ pub mod tests {
     }
 
     pub fn render_with(name: &str, width: u16) -> String {
-        let app = App::new(vec![session_named(name)], UserConfig::default());
+        let mut app = App::new(vec![session_named(name)], UserConfig::default());
         let backend = TestBackend::new(width, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| crate::ui::draw(f, &app))
+            .draw(|f| crate::ui::draw(f, &mut app))
             .expect("draw succeeds");
         let buffer = terminal.backend().buffer().clone();
         buffer
@@ -164,11 +170,11 @@ pub mod tests {
     /// Rows as grids of cell symbols, so positions can be compared in terminal columns
     /// rather than bytes — an emoji is one cell but four bytes.
     pub fn render_cells(name: &str, width: u16) -> Vec<Vec<String>> {
-        let app = App::new(vec![session_named(name)], UserConfig::default());
+        let mut app = App::new(vec![session_named(name)], UserConfig::default());
         let backend = TestBackend::new(width, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|f| crate::ui::draw(f, &app))
+            .draw(|f| crate::ui::draw(f, &mut app))
             .expect("draw succeeds");
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)

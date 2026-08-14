@@ -1,8 +1,10 @@
-use crate::config::{EffectiveWorktreeConfig, ProjectSettings, UserConfig};
+use crate::config::{self, EffectiveWorktreeConfig, ProjectSettings, UserConfig};
 use crate::mux::{KeyChord, MuxState, Pane, PaneSpec};
+use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
+use crate::terminal_pane::TerminalManager;
 use crate::updater::UpdateInfo;
 use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -31,6 +33,7 @@ pub enum Mode {
     BranchName,
     /// Pane switcher opened with `prefix w`.
     PaneList,
+    Scratchpad,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,7 @@ pub enum SettingsEditField {
     BranchPrefix,
     WorktreeRoot,
     MuxPrefix,
+    TerminalShell,
 }
 
 pub struct App {
@@ -132,6 +136,9 @@ pub struct App {
     pub exit_dir: Option<String>,
     /// A worktree the main loop should create on its next iteration.
     pub pending_worktree: Option<PendingWorktree>,
+    pub scratchpad: Option<Scratchpad>,
+    pub terminal: TerminalManager,
+    pub host_sequences: Vec<Vec<u8>>,
 }
 
 impl App {
@@ -148,7 +155,7 @@ impl App {
             MuxState::new(prefix)
         });
 
-        App {
+        let mut app = App {
             sessions,
             filtered_indices,
             selected: 0,
@@ -193,7 +200,12 @@ impl App {
             mux_on_disk,
             exit_dir: None,
             pending_worktree: None,
-        }
+            scratchpad: None,
+            terminal: TerminalManager::default(),
+            host_sequences: Vec::new(),
+        };
+        app.apply_filter();
+        app
     }
 
     /// Config as it should be written to disk, with any per-invocation override undone.
@@ -295,11 +307,67 @@ impl App {
             .map(|(i, _)| i)
             .collect();
 
+        if self.project_filter.is_none() && self.search_query.is_empty() {
+            self.filtered_indices
+                .sort_by_key(|&index| !self.config.favorites.contains(&self.sessions[index].id));
+        }
+
         // Reset selection if out of bounds
         if self.selected >= self.filtered_indices.len() {
             self.selected = self.filtered_indices.len().saturating_sub(1);
         }
         self.scroll_offset = 0;
+    }
+
+    pub fn is_favorite(&self, session_id: &str) -> bool {
+        self.config.favorites.contains(session_id)
+    }
+
+    pub fn toggle_selected_favorite(&mut self) -> anyhow::Result<Option<bool>> {
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return Ok(None);
+        };
+        let was_favorite = self.config.favorites.contains(&session_id);
+
+        if was_favorite {
+            self.config.favorites.remove(&session_id);
+        } else {
+            self.config.favorites.insert(session_id.clone());
+        }
+
+        if let Err(error) = config::save(&self.persistable_config()) {
+            if was_favorite {
+                self.config.favorites.insert(session_id);
+            } else {
+                self.config.favorites.remove(&session_id);
+            }
+            return Err(error);
+        }
+
+        self.apply_filter();
+        if let Some(display_index) = self
+            .filtered_indices
+            .iter()
+            .position(|&index| self.sessions[index].id == session_id)
+        {
+            self.selected = display_index;
+            if self.selected >= self.visible_rows {
+                self.scroll_offset = self.selected - self.visible_rows + 1;
+            }
+        }
+
+        Ok(Some(!was_favorite))
+    }
+
+    pub fn forget_favorite(&mut self, session_id: &str) -> anyhow::Result<bool> {
+        if !self.config.favorites.remove(session_id) {
+            return Ok(false);
+        }
+        if let Err(error) = config::save(&self.persistable_config()) {
+            self.config.favorites.insert(session_id.to_string());
+            return Err(error);
+        }
+        Ok(true)
     }
 
     pub fn cycle_sort(&mut self) {
@@ -547,6 +615,7 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     fn app_with(mux: bool) -> App {
         let config = UserConfig {
@@ -587,5 +656,73 @@ mod tests {
         app.open_pane_list();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.status_message.is_none());
+    }
+
+    fn session(id: &str, project: &str, updated_at: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            cwd: project.to_string(),
+            project_root: project.to_string(),
+            summary: Some(format!("Session {id}")),
+            created_at: None,
+            updated_at: Some(
+                DateTime::parse_from_rfc3339(updated_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            is_active: false,
+            dir_path: PathBuf::from(id),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+        }
+    }
+
+    fn visible_ids(app: &App) -> Vec<&str> {
+        app.filtered_indices
+            .iter()
+            .map(|&index| app.sessions[index].id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn favorites_lead_only_in_fully_unfiltered_view() {
+        let sessions = vec![
+            session("newest", "project-a", "2026-08-14T12:00:00Z"),
+            session("favorite", "project-a", "2026-08-13T12:00:00Z"),
+            session("oldest", "project-b", "2026-08-12T12:00:00Z"),
+        ];
+        let mut config = UserConfig::default();
+        config.favorites.insert("favorite".to_string());
+        let mut app = App::new(sessions, config);
+
+        assert_eq!(visible_ids(&app), vec!["favorite", "newest", "oldest"]);
+
+        app.set_project_filter(Some("project-a".to_string()));
+        assert_eq!(visible_ids(&app), vec!["newest", "favorite"]);
+
+        app.set_project_filter(None);
+        app.search_query = "Session".to_string();
+        app.apply_filter();
+        assert_eq!(visible_ids(&app), vec!["newest", "favorite", "oldest"]);
+    }
+
+    #[test]
+    fn favorites_preserve_the_selected_sort_within_each_group() {
+        let sessions = vec![
+            session("zebra", "project", "2026-08-14T12:00:00Z"),
+            session("beta", "project", "2026-08-13T12:00:00Z"),
+            session("alpha", "project", "2026-08-12T12:00:00Z"),
+        ];
+        let mut config = UserConfig::default();
+        config.favorites.insert("beta".to_string());
+        config.favorites.insert("alpha".to_string());
+        let mut app = App::new(sessions, config);
+
+        app.cycle_sort();
+        app.cycle_sort();
+        assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
+        assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
     }
 }

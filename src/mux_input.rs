@@ -19,6 +19,11 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 let _ = pane.send_paste(&text);
             }
         }
+        Event::Mouse(mouse) => {
+            if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
+                let _ = pane.handle_mouse(mouse);
+            }
+        }
         _ => {}
     }
 }
@@ -188,6 +193,10 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 Some(0) | None => format!("Session '{title}' finished"),
                 Some(code) => format!("Session '{title}' exited with code {code}"),
             });
+            true
+        }
+        MuxEvent::HostSequence(sequence) => {
+            app.host_sequences.push(sequence);
             true
         }
         MuxEvent::Term(_) => true,

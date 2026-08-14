@@ -1,3 +1,4 @@
+use crate::mux::MuxEvent;
 use std::sync::mpsc::Sender;
 
 /// Replies the emulator owes the child process.
@@ -8,14 +9,16 @@ use std::sync::mpsc::Sender;
 /// first child produces no output at all.
 pub struct PaneCallbacks {
     replies: Sender<Vec<u8>>,
+    events: Sender<MuxEvent>,
     title: Option<String>,
     bell: bool,
 }
 
 impl PaneCallbacks {
-    pub fn new(replies: Sender<Vec<u8>>) -> Self {
+    pub fn new(replies: Sender<Vec<u8>>, events: Sender<MuxEvent>) -> Self {
         Self {
             replies,
+            events,
             title: None,
             bell: false,
         }
@@ -36,6 +39,16 @@ impl PaneCallbacks {
 }
 
 impl vt100::Callbacks for PaneCallbacks {
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, selector: &[u8], data: &[u8]) {
+        let mut sequence = Vec::with_capacity(selector.len() + data.len() + 10);
+        sequence.extend_from_slice(b"\x1b]52;");
+        sequence.extend_from_slice(selector);
+        sequence.push(b';');
+        sequence.extend_from_slice(data);
+        sequence.extend_from_slice(b"\x1b\\");
+        let _ = self.events.send(MuxEvent::HostSequence(sequence));
+    }
+
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
         self.bell = true;
     }
@@ -91,17 +104,23 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn parser_with_replies() -> (vt100::Parser<PaneCallbacks>, mpsc::Receiver<Vec<u8>>) {
+    fn parser_with_replies() -> (
+        vt100::Parser<PaneCallbacks>,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Receiver<MuxEvent>,
+    ) {
         let (tx, rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
         (
-            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(tx)),
+            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(tx, event_tx)),
             rx,
+            event_rx,
         )
     }
 
     #[test]
     fn answers_cursor_position_requests() {
-        let (mut parser, rx) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies();
 
         // Move to row 3, col 5 (1-based), then ask where the cursor is.
         parser.process(b"\x1b[3;5H\x1b[6n");
@@ -112,7 +131,7 @@ mod tests {
 
     #[test]
     fn answers_device_status_and_attribute_queries() {
-        let (mut parser, rx) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies();
 
         parser.process(b"\x1b[5n");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[0n");
@@ -126,7 +145,7 @@ mod tests {
 
     #[test]
     fn reports_the_text_area_size() {
-        let (mut parser, rx) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies();
 
         parser.process(b"\x1b[18t");
 
@@ -135,7 +154,7 @@ mod tests {
 
     #[test]
     fn captures_the_window_title() {
-        let (mut parser, _rx) = parser_with_replies();
+        let (mut parser, _rx, _) = parser_with_replies();
 
         parser.process(b"\x1b]2;my session\x07");
 
@@ -147,10 +166,22 @@ mod tests {
 
     #[test]
     fn unrelated_sequences_produce_no_reply() {
-        let (mut parser, rx) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies();
 
         parser.process(b"hello\x1b[1;1H");
 
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn forwards_clipboard_requests_to_the_host() {
+        let (mut parser, _, events) = parser_with_replies();
+
+        parser.process(b"\x1b]52;c;Q29waWVkIHRleHQ=\x07");
+
+        let MuxEvent::HostSequence(sequence) = events.try_recv().unwrap() else {
+            panic!("expected host sequence");
+        };
+        assert_eq!(sequence, b"\x1b]52;c;Q29waWVkIHRleHQ=\x1b\\");
     }
 }
