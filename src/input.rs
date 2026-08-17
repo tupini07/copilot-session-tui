@@ -107,11 +107,10 @@ fn handle_quit_confirm(app: &mut App, key: KeyCode) {
 
 /// Pane switcher: attach, kill, or dismiss without touching the underlying session list.
 fn handle_pane_list(app: &mut App, key: KeyCode) {
-    let Some(mux) = app.mux.as_mut() else {
+    let Some(count) = app.mux.as_ref().map(|mux| mux.panes.len()) else {
         app.mode = Mode::Normal;
         return;
     };
-    let count = mux.panes.len();
     if count == 0 {
         app.mode = Mode::Normal;
         return;
@@ -132,6 +131,7 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             let index = app.pane_selected.min(count - 1);
+            let mux = app.mux.as_mut().expect("mux checked above");
             mux.select_index(index);
             let id = mux.panes[index].id;
             app.mode = Mode::Normal;
@@ -140,8 +140,16 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('x') => {
             let index = app.pane_selected.min(count - 1);
-            let id = mux.panes[index].id;
-            let title = mux.panes[index].title.clone();
+            let (id, title) = app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.panes.get(index))
+                .map(|pane| (pane.id, pane.title.clone()))
+                .expect("pane index checked above");
+            if !app.forget_workspace_panels(id) {
+                return;
+            }
+            let mux = app.mux.as_mut().expect("mux checked above");
             mux.remove(id);
             app.pane_selected = app.pane_selected.min(mux.panes.len().saturating_sub(1));
             if mux.panes.is_empty() {
@@ -297,7 +305,8 @@ fn toggle_terminal(app: &mut App) {
     let session_name = session.display_name().to_string();
     let cwd = session.cwd.clone();
 
-    if app.terminal.is_visible() && app.terminal.active_session_id() == Some(session_id.as_str()) {
+    if app.list_terminal_visible() && app.terminal.active_session_id() == Some(session_id.as_str())
+    {
         app.terminal.hide();
         app.status_message = Some("Terminal hidden; shell is still running".to_string());
         return;
@@ -308,12 +317,15 @@ fn toggle_terminal(app: &mut App) {
         .activate(session_id, session_name, cwd, &app.config.terminal)
     {
         Ok(crate::terminal_pane::Activation::Opened) => {
+            app.terminal_owner = None;
             app.status_message = Some("Terminal opened in session directory".to_string())
         }
         Ok(crate::terminal_pane::Activation::Focused) => {
+            app.terminal_owner = None;
             app.status_message = Some("Terminal focused".to_string())
         }
         Ok(crate::terminal_pane::Activation::Restarted) => {
+            app.terminal_owner = None;
             app.status_message = Some("Terminal shell restarted".to_string())
         }
         Err(error) => {
@@ -398,6 +410,7 @@ fn open_scratchpad(app: &mut App) {
     match crate::scratchpad::Scratchpad::open(&session_id) {
         Ok(scratchpad) => {
             app.scratchpad = Some(scratchpad);
+            app.scratchpad_owner = None;
             app.mode = Mode::Scratchpad;
         }
         Err(error) => {
@@ -415,6 +428,7 @@ fn handle_scratchpad(app: &mut App, event: Event) {
         Ok(crate::scratchpad::InputOutcome::Continue) => {}
         Ok(crate::scratchpad::InputOutcome::Close) => {
             app.scratchpad = None;
+            app.scratchpad_owner = None;
             app.mode = Mode::Normal;
             app.status_message = Some("Scratchpad saved".to_string());
         }
@@ -569,6 +583,9 @@ fn perform_delete(app: &mut App, force: bool) {
         .pending_delete
         .clone()
         .unwrap_or(DeleteTarget::SessionOnly);
+    if app.terminal.active_session_id() == Some(session_id.as_str()) {
+        app.terminal_owner = None;
+    }
     app.terminal.remove(&session_id);
     let result = match target {
         DeleteTarget::SessionOnly => {

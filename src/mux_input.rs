@@ -190,6 +190,7 @@ fn toggle_attached_scratchpad(app: &mut App) {
             }
             app.scratchpad = None;
             app.scratchpad_owner = None;
+            app.scratchpad_open.remove(&pane_id);
             app.workspace_focus = WorkspaceFocus::Chat;
         } else {
             app.workspace_focus = WorkspaceFocus::Scratchpad;
@@ -205,6 +206,7 @@ fn toggle_attached_scratchpad(app: &mut App) {
         Ok(scratchpad) => {
             app.scratchpad = Some(scratchpad);
             app.scratchpad_owner = Some(pane_id);
+            app.scratchpad_open.insert(pane_id);
             app.workspace_focus = WorkspaceFocus::Scratchpad;
             app.terminal.unfocus();
         }
@@ -215,14 +217,16 @@ fn toggle_attached_scratchpad(app: &mut App) {
 }
 
 fn toggle_attached_terminal(app: &mut App) {
-    let Some((_, session_id, title, cwd)) = focused_workspace_context(app) else {
+    let Some((pane_id, session_id, title, cwd)) = focused_workspace_context(app) else {
         return;
     };
-    if app.terminal.is_visible()
+    if app.attached_terminal_visible()
         && app.terminal.active_session_id() == Some(session_id.as_str())
         && app.workspace_focus == WorkspaceFocus::Terminal
     {
         app.terminal.hide();
+        app.terminal_owner = None;
+        app.terminal_open.remove(&pane_id);
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     }
@@ -231,7 +235,11 @@ fn toggle_attached_terminal(app: &mut App) {
         .terminal
         .activate(session_id, title, cwd, &app.config.terminal)
     {
-        Ok(_) => app.workspace_focus = WorkspaceFocus::Terminal,
+        Ok(_) => {
+            app.terminal_owner = Some(pane_id);
+            app.terminal_open.insert(pane_id);
+            app.workspace_focus = WorkspaceFocus::Terminal;
+        }
         Err(error) => app.status_message = Some(format!("Cannot open terminal: {error}")),
     }
 }
@@ -240,43 +248,62 @@ pub fn sync_workspace_panels(app: &mut App) {
     let Some((pane_id, session_id, title, cwd)) = focused_workspace_context(app) else {
         let _ = close_scratchpad(app);
         app.terminal.hide();
+        app.terminal_owner = None;
+        app.scratchpad_open.clear();
+        app.terminal_open.clear();
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     };
 
-    if app.scratchpad.is_some() && app.scratchpad_owner != Some(pane_id) {
+    if app.scratchpad_owner != Some(pane_id) || app.scratchpad.is_none() {
         if !close_scratchpad(app) {
             return;
         }
-        match crate::scratchpad::Scratchpad::open(&session_id) {
-            Ok(scratchpad) => {
-                app.scratchpad = Some(scratchpad);
-                app.scratchpad_owner = Some(pane_id);
-            }
-            Err(error) => {
-                app.status_message = Some(format!("Cannot switch scratchpad: {error}"));
-                if app.workspace_focus == WorkspaceFocus::Scratchpad {
-                    app.workspace_focus = WorkspaceFocus::Chat;
+        if app.scratchpad_open.contains(&pane_id) {
+            match crate::scratchpad::Scratchpad::open(&session_id) {
+                Ok(scratchpad) => {
+                    app.scratchpad = Some(scratchpad);
+                    app.scratchpad_owner = Some(pane_id);
+                }
+                Err(error) => {
+                    app.scratchpad_open.remove(&pane_id);
+                    app.status_message = Some(format!("Cannot switch scratchpad: {error}"));
                 }
             }
         }
     }
 
-    if app.terminal.is_visible() && app.terminal.active_session_id() != Some(session_id.as_str()) {
-        match app
+    if app.terminal_open.contains(&pane_id) {
+        let activated = match app
             .terminal
             .activate(session_id, title, cwd, &app.config.terminal)
         {
-            Ok(_) if app.workspace_focus != WorkspaceFocus::Terminal => app.terminal.unfocus(),
-            Ok(_) => {}
+            Ok(_) => {
+                if app.workspace_focus != WorkspaceFocus::Terminal {
+                    app.terminal.unfocus();
+                }
+                true
+            }
             Err(error) => {
                 app.terminal.hide();
+                app.terminal_owner = None;
+                app.terminal_open.remove(&pane_id);
                 app.status_message = Some(format!("Cannot switch terminal: {error}"));
-                if app.workspace_focus == WorkspaceFocus::Terminal {
-                    app.workspace_focus = WorkspaceFocus::Chat;
-                }
+                false
             }
+        };
+        if activated {
+            app.terminal_owner = Some(pane_id);
         }
+    } else {
+        app.terminal.hide();
+        app.terminal_owner = None;
+    }
+
+    if (!app.attached_scratchpad_visible() && app.workspace_focus == WorkspaceFocus::Scratchpad)
+        || (!app.attached_terminal_visible() && app.workspace_focus == WorkspaceFocus::Terminal)
+    {
+        app.workspace_focus = WorkspaceFocus::Chat;
     }
 }
 
@@ -399,10 +426,13 @@ fn attach_focused(app: &mut App) {
 }
 
 fn kill_focused(app: &mut App) {
-    let Some(mux) = app.mux.as_mut() else {
+    let Some(id) = app.mux.as_ref().and_then(|mux| mux.focused) else {
         return;
     };
-    if let Some(id) = mux.focused {
+    if !app.forget_workspace_panels(id) {
+        return;
+    }
+    if let Some(mux) = app.mux.as_mut() {
         mux.remove(id);
     }
     sync_workspace_panels(app);
@@ -485,6 +515,12 @@ mod tests {
 
     fn attached_mux_app(session_id: &str) -> App {
         let mut app = mux_app();
+        push_test_pane(&mut app, 1, session_id);
+        app.view = View::Attached(1);
+        app
+    }
+
+    fn push_test_pane(app: &mut App, id: u64, session_id: &str) {
         let events = app.mux.as_ref().unwrap().events.clone();
         let (program, args) = if cfg!(windows) {
             (
@@ -499,8 +535,8 @@ mod tests {
         };
         let pane = Pane::spawn(
             PaneSpec {
-                id: 1,
-                title: "Test session".to_string(),
+                id,
+                title: format!("Test session {id}"),
                 cwd: std::env::temp_dir(),
                 session_id: Some(session_id.to_string()),
                 program,
@@ -512,8 +548,6 @@ mod tests {
         )
         .unwrap();
         app.mux.as_mut().unwrap().push(pane);
-        app.view = View::Attached(1);
-        app
     }
 
     fn send_prefix_command(app: &mut App, command: char) {
@@ -646,11 +680,63 @@ mod tests {
 
         send_prefix_command(&mut app, 't');
         assert!(app.terminal.is_visible());
+        assert_eq!(app.terminal_owner, Some(1));
         assert_eq!(app.workspace_focus, WorkspaceFocus::Terminal);
 
         send_prefix_command(&mut app, 't');
         assert!(!app.terminal.is_visible());
         assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        app.terminal.shutdown();
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn attached_panels_are_hidden_behind_the_pane_list_and_restored_on_reattach() {
+        let mut app = attached_mux_app("panel-reattach-test");
+        send_prefix_command(&mut app, 'e');
+        send_prefix_command(&mut app, 't');
+
+        app.open_pane_list();
+
+        assert_eq!(app.mode, crate::app::Mode::PaneList);
+        assert!(!app.attached_scratchpad_visible());
+        assert!(!app.attached_terminal_visible());
+        assert!(!app.list_terminal_visible());
+        assert!(app.scratchpad_open.contains(&1));
+        assert!(app.terminal_open.contains(&1));
+
+        app.view = View::Attached(1);
+        sync_workspace_panels(&mut app);
+
+        assert!(app.attached_scratchpad_visible());
+        assert!(app.attached_terminal_visible());
+        app.scratchpad = None;
+        app.terminal.shutdown();
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn attached_panels_are_not_inherited_by_another_session() {
+        let mut app = attached_mux_app("panel-owner-a");
+        push_test_pane(&mut app, 2, "panel-owner-b");
+        app.mux.as_mut().unwrap().select_index(0);
+        send_prefix_command(&mut app, 'e');
+        send_prefix_command(&mut app, 't');
+
+        app.mux.as_mut().unwrap().select_index(1);
+        app.view = View::Attached(2);
+        sync_workspace_panels(&mut app);
+
+        assert!(!app.attached_scratchpad_visible());
+        assert!(!app.attached_terminal_visible());
+
+        app.mux.as_mut().unwrap().select_index(0);
+        app.view = View::Attached(1);
+        sync_workspace_panels(&mut app);
+
+        assert!(app.attached_scratchpad_visible());
+        assert!(app.attached_terminal_visible());
+        app.scratchpad = None;
         app.terminal.shutdown();
         let _ = app.mux.as_mut().unwrap().shutdown();
     }

@@ -253,11 +253,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
             ui::attached_layout(
                 ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                app.scratchpad.is_some(),
-                app.terminal.is_visible(),
+                app.attached_scratchpad_visible(),
+                app.attached_terminal_visible(),
             )
         });
-        let terminal_height = if attached_layout.is_none() && app.terminal.is_visible() {
+        let terminal_height = if attached_layout.is_none() && app.list_terminal_visible() {
             ui::terminal_panel_height(size.height.saturating_sub(3))
         } else {
             0

@@ -10,6 +10,7 @@ use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -154,7 +155,10 @@ pub struct App {
     pub pending_worktree: Option<PendingWorktree>,
     pub scratchpad: Option<Scratchpad>,
     pub scratchpad_owner: Option<crate::mux::PaneId>,
+    pub scratchpad_open: HashSet<crate::mux::PaneId>,
     pub terminal: TerminalManager,
+    pub terminal_owner: Option<crate::mux::PaneId>,
+    pub terminal_open: HashSet<crate::mux::PaneId>,
     pub workspace_focus: WorkspaceFocus,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
@@ -222,7 +226,10 @@ impl App {
             pending_worktree: None,
             scratchpad: None,
             scratchpad_owner: None,
+            scratchpad_open: HashSet::new(),
             terminal: TerminalManager::default(),
+            terminal_owner: None,
+            terminal_open: HashSet::new(),
             workspace_focus: WorkspaceFocus::Chat,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
@@ -277,6 +284,47 @@ impl App {
             .as_ref()
             .map(|mux| mux.panes.iter().filter(|pane| pane.is_running()).count())
             .unwrap_or(0)
+    }
+
+    pub fn attached_scratchpad_visible(&self) -> bool {
+        matches!(self.view, View::Attached(id) if self.scratchpad_owner == Some(id)
+            && self.scratchpad_open.contains(&id))
+            && self.scratchpad.is_some()
+    }
+
+    pub fn attached_terminal_visible(&self) -> bool {
+        matches!(self.view, View::Attached(id) if self.terminal_owner == Some(id)
+            && self.terminal_open.contains(&id))
+            && self.terminal.is_visible()
+    }
+
+    pub fn list_terminal_visible(&self) -> bool {
+        matches!(self.view, View::List)
+            && self.terminal_owner.is_none()
+            && self.terminal.is_visible()
+    }
+
+    pub fn forget_workspace_panels(&mut self, pane_id: crate::mux::PaneId) -> bool {
+        if self.scratchpad_owner == Some(pane_id) {
+            if let Some(error) = self
+                .scratchpad
+                .as_mut()
+                .and_then(|scratchpad| scratchpad.save().err())
+            {
+                self.status_message = Some(format!("Scratchpad save failed: {error}"));
+                return false;
+            }
+            self.scratchpad = None;
+            self.scratchpad_owner = None;
+        }
+        self.scratchpad_open.remove(&pane_id);
+
+        if self.terminal_owner == Some(pane_id) {
+            self.terminal.hide();
+            self.terminal_owner = None;
+        }
+        self.terminal_open.remove(&pane_id);
+        true
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
@@ -567,17 +615,14 @@ impl App {
 
     /// Leave the focused pane running and return to the session list.
     pub fn detach(&mut self) {
-        let scratchpad_error = self
+        if let Some(error) = self
             .scratchpad
             .as_mut()
-            .and_then(|scratchpad| scratchpad.save().err());
-        if let Some(error) = scratchpad_error {
+            .and_then(|scratchpad| scratchpad.save().err())
+        {
             self.status_message = Some(format!("Scratchpad save failed: {error}"));
-        } else {
-            self.scratchpad = None;
-            self.scratchpad_owner = None;
         }
-        self.terminal.hide();
+        self.terminal.unfocus();
         self.workspace_focus = WorkspaceFocus::Chat;
         self.view = View::List;
         if let Some(mux) = self.mux.as_mut() {

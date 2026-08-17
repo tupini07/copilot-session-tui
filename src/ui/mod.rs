@@ -31,7 +31,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     if matches!(app.view, View::Attached(_)) {
-        let layout = attached_layout(size, app.scratchpad.is_some(), app.terminal.is_visible());
+        let layout = attached_layout(
+            size,
+            app.attached_scratchpad_visible(),
+            app.attached_terminal_visible(),
+        );
         app.workspace_areas = WorkspaceAreas {
             chat: layout.chat,
             scratchpad: layout.scratchpad,
@@ -108,7 +112,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     f.render_widget(title, main_layout[0]);
 
-    let content_sections = if app.terminal.is_visible() {
+    let content_sections = if app.list_terminal_visible() {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -131,7 +135,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     session_list::draw(f, app, content_layout[0]);
     session_detail::draw(f, app, content_layout[1]);
-    if let Some(terminal) = app.terminal.active().filter(|_| app.terminal.is_visible()) {
+    if let Some(terminal) = app
+        .terminal
+        .active()
+        .filter(|_| app.list_terminal_visible())
+    {
         terminal_pane::draw(f, terminal, app.terminal.is_focused(), content_sections[1]);
     }
 

@@ -301,6 +301,7 @@ mod tests {
         app.scratchpad =
             Some(crate::scratchpad::Scratchpad::open("workspace-render-test").unwrap());
         app.scratchpad_owner = Some(id);
+        app.scratchpad_open.insert(id);
         let directory = tempfile::tempdir().unwrap();
         app.terminal
             .activate(
@@ -310,6 +311,8 @@ mod tests {
                 &crate::config::TerminalConfig::default(),
             )
             .unwrap();
+        app.terminal_owner = Some(id);
+        app.terminal_open.insert(id);
         app.workspace_focus = crate::app::WorkspaceFocus::Terminal;
 
         let text = render(&mut app);
