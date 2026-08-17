@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "copilot-session-tui"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -774,8 +774,6 @@ dependencies = [
 [[package]]
 name = "edtui"
 version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9131e0e4f053070d7dd0ae21012e8378aaf914d77db72f63bbed5f8f5810ad01"
 dependencies = [
  "crossterm",
  "edtui-jagged",

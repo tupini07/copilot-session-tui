@@ -63,6 +63,12 @@ impl vt100::Callbacks for PaneCallbacks {
         }
     }
 
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(sequence) = crate::host_terminal::progress_sequence(params) {
+            let _ = self.events.send(MuxEvent::HostSequence(sequence));
+        }
+    }
+
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100::Screen,
@@ -183,5 +189,26 @@ mod tests {
             panic!("expected host sequence");
         };
         assert_eq!(sequence, b"\x1b]52;c;Q29waWVkIHRleHQ=\x1b\\");
+    }
+
+    #[test]
+    fn forwards_progress_state_to_the_host() {
+        let (mut parser, _, events) = parser_with_replies();
+
+        parser.process(b"\x1b]9;4;3;0\x07");
+
+        let MuxEvent::HostSequence(sequence) = events.try_recv().unwrap() else {
+            panic!("expected host sequence");
+        };
+        assert_eq!(sequence, b"\x1b]9;4;3;0\x1b\\");
+    }
+
+    #[test]
+    fn does_not_forward_unrelated_osc_commands() {
+        let (mut parser, _, events) = parser_with_replies();
+
+        parser.process(b"\x1b]8;;https://example.com\x07");
+
+        assert!(events.try_recv().is_err());
     }
 }

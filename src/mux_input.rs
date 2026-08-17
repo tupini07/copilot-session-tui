@@ -524,6 +524,8 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 Some(0) | None => format!("Session '{title}' finished"),
                 Some(code) => format!("Session '{title}' exited with code {code}"),
             });
+            app.host_sequences
+                .push(crate::host_terminal::CLEAR_PROGRESS.to_vec());
             true
         }
         MuxEvent::HostSequence(sequence) => {
@@ -865,5 +867,9 @@ mod tests {
 
         let message = app.status_message.unwrap();
         assert!(message.contains("code 2"), "unexpected message: {message}");
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::CLEAR_PROGRESS.to_vec()]
+        );
     }
 }

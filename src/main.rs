@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod debug_keys;
 mod events;
+mod host_terminal;
 mod input;
 mod mux;
 mod mux_input;
@@ -208,6 +209,10 @@ fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
+    terminal
+        .backend_mut()
+        .write_all(host_terminal::CLEAR_PROGRESS)?;
+    terminal.backend_mut().flush()?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,

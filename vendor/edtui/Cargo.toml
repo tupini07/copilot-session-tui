@@ -1,0 +1,31 @@
+[package]
+name = "edtui"
+version = "0.11.6"
+edition = "2021"
+authors = ["preiter <phil.reiter93@gmail.com>"]
+description = "A TUI based vim inspired editor"
+license = "MIT"
+repository = "https://github.com/preiter93/edtui"
+
+[features]
+arboard = ["dep:arboard"]
+default = ["arboard", "mouse-support", "syntax-highlighting"]
+mouse-support = []
+syntax-highlighting = ["dep:syntect", "dep:once_cell"]
+system-editor = ["dep:edit"]
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"], optional = true }
+arboard = { version = "3", optional = true }
+crossterm = "0.29"
+edit = { version = "0.1.5", optional = true }
+enum_dispatch = "0.3"
+jagged = { version = "0.1", package = "edtui-jagged" }
+once_cell = { version = "1", optional = true }
+ratatui-core = "0.1"
+ratatui-widgets = { version = "0.3.0", default-features = false }
+syntect = { version = "5", optional = true }
+unicode-width = "0.2.0"
+
+[dev-dependencies]
+ratatui = "0.30"

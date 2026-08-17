@@ -99,6 +99,9 @@ impl Scratchpad {
             }
         }
 
+        if !is_vertical_navigation(&event) {
+            self.state.reset_vertical_goal();
+        }
         self.status_message = None;
         let before = self.content();
         if !self.handle_shortcut(&event) {
@@ -162,6 +165,13 @@ impl Scratchpad {
         let Event::Key(key) = event else {
             return false;
         };
+
+        if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            self.dedent();
+            return true;
+        }
 
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             if self.state.selection.is_none() {
@@ -241,6 +251,16 @@ impl Scratchpad {
             self.state.execute(Redo);
             return true;
         }
+        if is_ctrl(key, 'w')
+            || (key.code == KeyCode::Backspace && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.delete_previous_word();
+            return true;
+        }
+        if key.code == KeyCode::Delete && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.delete_next_word();
+            return true;
+        }
         if is_ctrl(key, 'l') || is_alt(key, 'l') {
             self.toggle_checkbox();
             return true;
@@ -270,6 +290,49 @@ impl Scratchpad {
         }
 
         false
+    }
+
+    fn dedent(&mut self) {
+        let (start_row, end_row) = self
+            .state
+            .selection
+            .as_ref()
+            .map(|selection| (selection.start().row, selection.end().row))
+            .unwrap_or((self.state.cursor.row, self.state.cursor.row));
+        let removals: Vec<usize> = (start_row..=end_row)
+            .map(|row| {
+                self.state
+                    .lines
+                    .get(RowIndex::new(row))
+                    .map_or(0, |line| indentation_to_remove(line))
+            })
+            .collect();
+        if removals.iter().all(|removed| *removed == 0) {
+            return;
+        }
+
+        capture_custom_edit(&mut self.state);
+        for (row, removed) in (start_row..=end_row).zip(removals.iter().copied()) {
+            if removed == 0 {
+                continue;
+            }
+            if let Some(line) = self.state.lines.get_mut(RowIndex::new(row)) {
+                line.drain(..removed);
+            }
+        }
+
+        let removed_on_cursor_row = removals[self.state.cursor.row - start_row];
+        self.state.cursor.col = self.state.cursor.col.saturating_sub(removed_on_cursor_row);
+        if let Some(selection) = self.state.selection.as_mut() {
+            let start_removed = removals[selection.start.row - start_row];
+            let end_removed = removals[selection.end.row - start_row];
+            selection.start.col = selection.start.col.saturating_sub(start_removed);
+            selection.end.col = selection.end.col.saturating_sub(end_removed);
+            if let Some(anchor) = selection.anchor.as_mut() {
+                let anchor_removed = removals[anchor.row - start_row];
+                anchor.col = anchor.col.saturating_sub(anchor_removed);
+            }
+        }
     }
 
     fn begin_selection(&mut self) {
@@ -335,6 +398,62 @@ impl Scratchpad {
             self.state.execute(LineBreak(1));
         }
         true
+    }
+
+    fn delete_previous_word(&mut self) {
+        if self.state.selection.is_some() {
+            self.state.execute(DeleteSelection);
+            return;
+        }
+
+        let row = self.state.cursor.row;
+        let col = self.state.cursor.col;
+        if col > 0 {
+            let Some(line) = self.state.lines.get(RowIndex::new(row)) else {
+                return;
+            };
+            let start = previous_word_start(line, col);
+            capture_custom_edit(&mut self.state);
+            if let Some(line) = self.state.lines.get_mut(RowIndex::new(row)) {
+                line.drain(start..col);
+            }
+            self.state.cursor.col = start;
+        } else if row > 0 {
+            capture_custom_edit(&mut self.state);
+            let current = self.state.lines.remove(RowIndex::new(row));
+            let previous_row = row - 1;
+            if let Some(previous) = self.state.lines.get_mut(RowIndex::new(previous_row)) {
+                let previous_len = previous.len();
+                previous.extend(current);
+                self.state.cursor = Index2::new(previous_row, previous_len);
+            }
+        }
+    }
+
+    fn delete_next_word(&mut self) {
+        if self.state.selection.is_some() {
+            self.state.execute(DeleteSelection);
+            return;
+        }
+
+        let row = self.state.cursor.row;
+        let col = self.state.cursor.col;
+        let Some(line) = self.state.lines.get(RowIndex::new(row)) else {
+            return;
+        };
+        if col < line.len() {
+            let end = next_word_end(line, col);
+            capture_custom_edit(&mut self.state);
+            if let Some(line) = self.state.lines.get_mut(RowIndex::new(row)) {
+                line.drain(col..end);
+            }
+        } else if row + 1 < self.state.lines.len() {
+            capture_custom_edit(&mut self.state);
+            let next = self.state.lines.remove(RowIndex::new(row + 1));
+            if let Some(line) = self.state.lines.get_mut(RowIndex::new(row)) {
+                line.extend(next);
+            }
+        }
     }
 
     fn toggle_checkbox(&mut self) {
@@ -461,6 +580,17 @@ fn is_alt(key: &KeyEvent, character: char) -> bool {
         && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
 }
 
+fn is_vertical_navigation(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(KeyEvent {
+            code: KeyCode::Up | KeyCode::Down,
+            modifiers,
+            ..
+        }) if !modifiers.contains(KeyModifiers::ALT)
+    )
+}
+
 fn is_supported_key(key: KeyCode) -> bool {
     matches!(
         key,
@@ -474,6 +604,7 @@ fn is_supported_key(key: KeyCode) -> bool {
             | KeyCode::Backspace
             | KeyCode::Delete
             | KeyCode::Tab
+            | KeyCode::BackTab
             | KeyCode::Home
             | KeyCode::End
             | KeyCode::PageUp
@@ -533,6 +664,52 @@ fn checkbox_marker(line: &[char], start: usize) -> Option<bool> {
         Some(' ') => Some(false),
         Some('x' | 'X') => Some(true),
         _ => None,
+    }
+}
+
+fn previous_word_start(line: &[char], cursor: usize) -> usize {
+    let mut start = cursor.min(line.len());
+    while start > 0 && line[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let Some(class) = start.checked_sub(1).map(|index| word_class(line[index])) else {
+        return start;
+    };
+    while start > 0 && word_class(line[start - 1]) == class {
+        start -= 1;
+    }
+    start
+}
+
+fn next_word_end(line: &[char], cursor: usize) -> usize {
+    let mut end = cursor.min(line.len());
+    while end < line.len() && line[end].is_whitespace() {
+        end += 1;
+    }
+    let Some(class) = line.get(end).copied().map(word_class) else {
+        return end;
+    };
+    while end < line.len() && word_class(line[end]) == class {
+        end += 1;
+    }
+    while end < line.len() && line[end].is_whitespace() {
+        end += 1;
+    }
+    end
+}
+
+fn word_class(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn indentation_to_remove(line: &[char]) -> usize {
+    if line.first() == Some(&'\t') {
+        1
+    } else {
+        line.iter()
+            .take(2)
+            .take_while(|character| **character == ' ')
+            .count()
     }
 }
 
@@ -752,6 +929,103 @@ mod tests {
             .handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(scratchpad.content(), "* write tests");
+    }
+
+    #[test]
+    fn ctrl_w_and_ctrl_backspace_delete_the_previous_word() {
+        for (code, modifiers) in [
+            (KeyCode::Char('w'), KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+        ] {
+            let (_temp, mut scratchpad) = test_scratchpad("first second   ");
+            scratchpad.state.cursor = Index2::new(0, 15);
+
+            scratchpad.handle_event(key(code, modifiers)).unwrap();
+
+            assert_eq!(scratchpad.content(), "first ");
+            assert_eq!(scratchpad.state.cursor, Index2::new(0, 6));
+            scratchpad
+                .handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(scratchpad.content(), "first second   ");
+        }
+    }
+
+    #[test]
+    fn ctrl_delete_deletes_the_next_word_and_trailing_space() {
+        let (_temp, mut scratchpad) = test_scratchpad("first second third");
+        scratchpad.state.cursor = Index2::new(0, 6);
+
+        scratchpad
+            .handle_event(key(KeyCode::Delete, KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(scratchpad.content(), "first third");
+        assert_eq!(scratchpad.state.cursor, Index2::new(0, 6));
+    }
+
+    #[test]
+    fn word_deletion_joins_lines_at_the_boundary() {
+        let (_temp, mut scratchpad) = test_scratchpad("first\nsecond");
+        scratchpad.state.cursor = Index2::new(1, 0);
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "firstsecond");
+        assert_eq!(scratchpad.state.cursor, Index2::new(0, 5));
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+            .unwrap();
+        scratchpad.state.cursor = Index2::new(0, 5);
+        scratchpad
+            .handle_event(key(KeyCode::Delete, KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "firstsecond");
+        assert_eq!(scratchpad.state.cursor, Index2::new(0, 5));
+    }
+
+    #[test]
+    fn shift_tab_dedents_spaces_and_tabs_and_is_undoable() {
+        for (content, expected, cursor_before, cursor_after) in [
+            ("  indented", "indented", 6, 4),
+            ("\tindented", "indented", 5, 4),
+            (" indented", "indented", 5, 4),
+        ] {
+            let (_temp, mut scratchpad) = test_scratchpad(content);
+            scratchpad.state.cursor = Index2::new(0, cursor_before);
+
+            scratchpad
+                .handle_event(key(KeyCode::BackTab, KeyModifiers::SHIFT))
+                .unwrap();
+
+            assert_eq!(scratchpad.content(), expected);
+            assert_eq!(scratchpad.state.cursor, Index2::new(0, cursor_after));
+            scratchpad
+                .handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(scratchpad.content(), content);
+        }
+    }
+
+    #[test]
+    fn shift_tab_dedents_every_selected_line() {
+        let (_temp, mut scratchpad) = test_scratchpad("  first\n\tsecond\nthird");
+        scratchpad.state.cursor = Index2::new(0, 2);
+        scratchpad
+            .handle_event(key(KeyCode::Down, KeyModifiers::SHIFT))
+            .unwrap();
+
+        scratchpad
+            .handle_event(key(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        assert_eq!(scratchpad.content(), "first\nsecond\nthird");
+        assert_eq!(scratchpad.state.cursor, Index2::new(1, 1));
+        let selection = scratchpad.state.selection.as_ref().unwrap();
+        assert_eq!(selection.start, Index2::new(0, 0));
+        assert_eq!(selection.end, Index2::new(1, 1));
     }
 
     #[test]

@@ -127,14 +127,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         PaneStatus::Running => vec![
             Span::raw(" "),
             Span::styled(prefix.clone(), Style::default().fg(Color::Cyan)),
-            Span::raw(format!(
-                " for commands · {} focused ",
-                match app.workspace_focus {
-                    crate::app::WorkspaceFocus::Chat => "chat",
-                    crate::app::WorkspaceFocus::Scratchpad => "scratchpad",
-                    crate::app::WorkspaceFocus::Terminal => "terminal",
-                }
-            )),
+            Span::raw(" for commands "),
         ],
         PaneStatus::Exited(code) => {
             let text = match code {
@@ -346,11 +339,13 @@ mod tests {
         assert!(text.contains("Starting Copilot"), "got:\n{text}");
         assert!(!text.contains("Alt+H"), "got:\n{text}");
         assert!(!text.contains("Save/close"), "got:\n{text}");
+        assert!(!text.contains("focused"), "got:\n{text}");
 
         app.workspace_help = Some(crate::app::WorkspaceHelp::Scratchpad);
         let text = render(&mut app);
         assert!(text.contains("Scratchpad Help"), "got:\n{text}");
         assert!(text.contains("Ctrl/Alt+L"), "got:\n{text}");
+        assert!(text.contains("Shift+Tab"), "got:\n{text}");
         assert!(text.contains("Ctrl+Shift+K"), "got:\n{text}");
 
         app.terminal.shutdown();

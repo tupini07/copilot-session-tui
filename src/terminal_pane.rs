@@ -87,6 +87,12 @@ impl vt100::Callbacks for TerminalCallbacks {
         let _ = self.host_sequences.send(sequence);
     }
 
+    fn unhandled_osc(&mut self, _screen: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(sequence) = crate::host_terminal::progress_sequence(params) {
+            let _ = self.host_sequences.send(sequence);
+        }
+    }
+
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100::Screen,
@@ -817,6 +823,28 @@ mod tests {
         assert_eq!(
             receiver.recv_timeout(Duration::from_millis(100)).unwrap(),
             b"\x1b]52;c;Q29waWVkIHRleHQ=\x1b\\"
+        );
+    }
+
+    #[test]
+    fn parser_forwards_progress_to_the_outer_terminal() {
+        let (input, _) = mpsc::channel();
+        let (host_sequences, receiver) = mpsc::channel();
+        let mut parser = vt100::Parser::new_with_callbacks(
+            12,
+            80,
+            0,
+            TerminalCallbacks {
+                input,
+                host_sequences,
+            },
+        );
+
+        parser.process(b"\x1b]9;4;3;0\x07");
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(100)).unwrap(),
+            b"\x1b]9;4;3;0\x1b\\"
         );
     }
 

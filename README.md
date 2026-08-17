@@ -127,7 +127,9 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 
 Scratchpads are plain-text files stored in CST's local app-data directory and
 autosaved after edits. Cursor position is restored when a scratchpad is reopened.
-They are removed when their session is deleted.
+Long lines wrap visually at word boundaries without changing the saved text. Up/Down
+navigates those visual rows before crossing a real line break. Scratchpads are removed
+when their session is deleted.
 
 | Key | Action |
 |-----|--------|
@@ -136,7 +138,10 @@ They are removed when their session is deleted.
 | `Ctrl+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+W` / `Ctrl+Backspace` | Delete the previous word |
+| `Ctrl+Delete` | Delete the next word |
 | `Ctrl+L` / `Alt+L` | Add or toggle a checkbox on the current line |
+| `Shift+Tab` | Dedent the current line or selected lines |
 | `Ctrl+Shift+K` | Delete current line |
 | `Alt+↑` / `Alt+↓` | Move current line |
 
@@ -211,8 +216,9 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `x` | End the focused session for good |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
 
-Mouse tracking, image-paste triggers, and OSC 52 clipboard-copy requests are forwarded
-through the mux so Copilot retains the outer terminal's scrolling, paste, and copy behavior.
+Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;4 progress
+states are forwarded through the mux so Copilot retains the outer terminal's scrolling,
+paste, copy, and Windows Terminal tab-spinner behavior.
 
 The prefix also works from the session list, so detaching never strands a running pane:
 `prefix` `w` opens the switcher, `prefix` `n`/`p` and `prefix` `1`–`9` re-attach directly,
