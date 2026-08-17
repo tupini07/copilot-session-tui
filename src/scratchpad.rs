@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::workspace_state::{self, CursorPosition};
+
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
 
 pub enum InputOutcome {
@@ -29,6 +31,8 @@ pub struct Scratchpad {
     pub state: EditorState,
     handler: EditorEventHandler,
     path: PathBuf,
+    state_root: PathBuf,
+    session_id: String,
     dirty: bool,
     last_edit: Option<Instant>,
     pub status_message: Option<String>,
@@ -53,6 +57,13 @@ impl Scratchpad {
 
         let clipboard_error = Rc::new(RefCell::new(None));
         let mut state = EditorState::new(Lines::from(content));
+        let saved = workspace_state::load_in(root, session_id)?;
+        let row = saved.cursor.row.min(state.lines.len().saturating_sub(1));
+        let col = saved
+            .cursor
+            .col
+            .min(state.lines.len_col(row).unwrap_or_default());
+        state.cursor = Index2::new(row, col);
         state.mode = EditorMode::Insert;
         state.set_clipboard(TextClipboard::new(Rc::clone(&clipboard_error)));
 
@@ -60,6 +71,8 @@ impl Scratchpad {
             state,
             handler: EditorEventHandler::emacs_mode(),
             path,
+            state_root: root.to_path_buf(),
+            session_id: session_id.to_string(),
             dirty: false,
             last_edit: None,
             status_message: None,
@@ -121,13 +134,19 @@ impl Scratchpad {
     }
 
     pub fn save(&mut self) -> Result<()> {
-        if !self.dirty && self.path.exists() {
-            return Ok(());
+        if self.dirty || !self.path.exists() {
+            write_atomic(&self.path, &self.content())?;
+            self.dirty = false;
+            self.last_edit = None;
         }
-        write_atomic(&self.path, &self.content())?;
-        self.dirty = false;
-        self.last_edit = None;
-        Ok(())
+        workspace_state::set_cursor_in(
+            &self.state_root,
+            &self.session_id,
+            CursorPosition {
+                row: self.state.cursor.row,
+                col: self.state.cursor.col,
+            },
+        )
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -668,6 +687,39 @@ mod tests {
         assert_eq!(reopened.content(), "first\nsecond");
         assert!(delete_in(temp.path(), "session/id").unwrap());
         assert!(!delete_in(temp.path(), "session/id").unwrap());
+    }
+
+    #[test]
+    fn cursor_position_restores_and_clamps_to_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut scratchpad = Scratchpad::open_in(temp.path(), "cursor-session").unwrap();
+        scratchpad.state.lines = Lines::from("first\nsecond");
+        scratchpad.state.cursor = Index2::new(1, 4);
+        scratchpad.dirty = true;
+        scratchpad.save().unwrap();
+
+        let mut restored = Scratchpad::open_in(temp.path(), "cursor-session").unwrap();
+        assert_eq!(restored.state.cursor, Index2::new(1, 4));
+
+        restored.state.cursor = Index2::new(0, 3);
+        assert!(!restored.is_dirty());
+        restored.save().unwrap();
+        let restored_after_cursor_only_move =
+            Scratchpad::open_in(temp.path(), "cursor-session").unwrap();
+        assert_eq!(
+            restored_after_cursor_only_move.state.cursor,
+            Index2::new(0, 3)
+        );
+
+        fs::write(scratchpad_path_in(temp.path(), "cursor-session"), "short").unwrap();
+        workspace_state::set_cursor_in(
+            temp.path(),
+            "cursor-session",
+            CursorPosition { row: 99, col: 99 },
+        )
+        .unwrap();
+        let clamped = Scratchpad::open_in(temp.path(), "cursor-session").unwrap();
+        assert_eq!(clamped.state.cursor, Index2::new(0, 5));
     }
 
     #[test]

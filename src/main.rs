@@ -11,6 +11,7 @@ mod terminal_pane;
 mod text;
 mod ui;
 mod updater;
+mod workspace_state;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -360,6 +361,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         {
             break;
         }
+    }
+
+    if let Some(scratchpad) = app.scratchpad.as_mut() {
+        scratchpad.save()?;
     }
 
     // Without a daemon, panes are children of this process and must be reaped. Capture the

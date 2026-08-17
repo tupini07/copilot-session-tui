@@ -165,11 +165,16 @@ fn handle_scratchpad_event(app: &mut App, event: Event) {
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     };
-    match scratchpad.handle_event(event) {
+    let outcome = scratchpad.handle_event(event);
+    match outcome {
         Ok(crate::scratchpad::InputOutcome::Continue) => {}
         Ok(crate::scratchpad::InputOutcome::Close) => {
+            let context = focused_workspace_context(app);
             app.scratchpad = None;
             app.scratchpad_owner = None;
+            if let Some((pane_id, session_id, _, _)) = context {
+                app.remember_scratchpad_panel(pane_id, &session_id, false);
+            }
             app.workspace_focus = WorkspaceFocus::Chat;
         }
         Err(error) => {
@@ -221,7 +226,7 @@ fn toggle_attached_scratchpad(app: &mut App) {
             }
             app.scratchpad = None;
             app.scratchpad_owner = None;
-            app.scratchpad_open.remove(&pane_id);
+            app.remember_scratchpad_panel(pane_id, &session_id, false);
             app.workspace_focus = WorkspaceFocus::Chat;
         } else {
             app.workspace_focus = WorkspaceFocus::Scratchpad;
@@ -237,7 +242,7 @@ fn toggle_attached_scratchpad(app: &mut App) {
         Ok(scratchpad) => {
             app.scratchpad = Some(scratchpad);
             app.scratchpad_owner = Some(pane_id);
-            app.scratchpad_open.insert(pane_id);
+            app.remember_scratchpad_panel(pane_id, &session_id, true);
             app.workspace_focus = WorkspaceFocus::Scratchpad;
             app.terminal.unfocus();
         }
@@ -257,18 +262,18 @@ fn toggle_attached_terminal(app: &mut App) {
     {
         app.terminal.hide();
         app.terminal_owner = None;
-        app.terminal_open.remove(&pane_id);
+        app.remember_terminal_panel(pane_id, &session_id, false);
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     }
 
     match app
         .terminal
-        .activate(session_id, title, cwd, &app.config.terminal)
+        .activate(session_id.clone(), title, cwd, &app.config.terminal)
     {
         Ok(_) => {
             app.terminal_owner = Some(pane_id);
-            app.terminal_open.insert(pane_id);
+            app.remember_terminal_panel(pane_id, &session_id, true);
             app.workspace_focus = WorkspaceFocus::Terminal;
         }
         Err(error) => app.status_message = Some(format!("Cannot open terminal: {error}")),
@@ -555,7 +560,9 @@ mod tests {
             mux: true,
             ..UserConfig::default()
         };
-        App::new(Vec::new(), config)
+        let mut app = App::new(Vec::new(), config);
+        app.disable_workspace_state_persistence();
+        app
     }
 
     fn attached_mux_app(session_id: &str) -> App {

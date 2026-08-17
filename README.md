@@ -107,7 +107,8 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 ### Scratchpad editing
 
 Scratchpads are plain-text files stored in CST's local app-data directory and
-autosaved after edits. They are removed when their session is deleted.
+autosaved after edits. Cursor position is restored when a scratchpad is reopened.
+They are removed when their session is deleted.
 
 | Key | Action |
 |-----|--------|
@@ -132,6 +133,11 @@ and `prefix` `e` opens the scratchpad beside it. Repeating either command hides
 its focused panel; invoking it from another panel moves focus there. While the
 terminal is focused, all keys (including `Ctrl+C`) and paste events are sent to
 the shell. If the shell exits, press Enter while focused to restart it.
+
+CST remembers which mux panels were open for each session and restores them the
+next time that session is attached, including after a restart. Restored terminal
+panels start a new configured shell because child processes cannot survive CST
+exiting.
 
 Mouse wheel, click, drag, and release events are forwarded whenever the nested
 application enables terminal mouse tracking, so full-screen applications can

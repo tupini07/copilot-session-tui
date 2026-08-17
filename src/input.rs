@@ -613,6 +613,7 @@ fn perform_delete(app: &mut App, force: bool) {
             app.sessions.remove(idx);
             let favorite_error = app.forget_favorite(&session_id).err();
             let scratchpad_error = crate::scratchpad::delete(&session_id).err();
+            let workspace_error = crate::workspace_state::delete(&session_id).err();
             app.apply_filter();
             let mut errors = Vec::new();
             if let Some(error) = favorite_error {
@@ -620,6 +621,9 @@ fn perform_delete(app: &mut App, force: bool) {
             }
             if let Some(error) = scratchpad_error {
                 errors.push(format!("scratchpad: {error}"));
+            }
+            if let Some(error) = workspace_error {
+                errors.push(format!("workspace state: {error}"));
             }
             app.status_message = Some(if errors.is_empty() {
                 message

@@ -6,6 +6,7 @@ use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::terminal_pane::TerminalManager;
 use crate::updater::UpdateInfo;
+use crate::workspace_state;
 use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -168,6 +169,8 @@ pub struct App {
     pub workspace_help: Option<WorkspaceHelp>,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
+    workspace_state_enabled: bool,
+    workspace_state_root: PathBuf,
 }
 
 impl App {
@@ -240,6 +243,8 @@ impl App {
             workspace_help: None,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
+            workspace_state_enabled: true,
+            workspace_state_root: workspace_state::workspace_root(),
         };
         app.apply_filter();
         app
@@ -338,6 +343,77 @@ impl App {
         }
         self.terminal_open.remove(&pane_id);
         true
+    }
+
+    pub fn remember_scratchpad_panel(
+        &mut self,
+        pane_id: crate::mux::PaneId,
+        session_id: &str,
+        open: bool,
+    ) {
+        if open {
+            self.scratchpad_open.insert(pane_id);
+        } else {
+            self.scratchpad_open.remove(&pane_id);
+        }
+        if self.workspace_state_enabled {
+            if let Err(error) = workspace_state::set_scratchpad_open_in(
+                &self.workspace_state_root,
+                session_id,
+                open,
+            ) {
+                self.status_message = Some(format!("Cannot save workspace state: {error}"));
+            }
+        }
+    }
+
+    pub fn remember_terminal_panel(
+        &mut self,
+        pane_id: crate::mux::PaneId,
+        session_id: &str,
+        open: bool,
+    ) {
+        if open {
+            self.terminal_open.insert(pane_id);
+        } else {
+            self.terminal_open.remove(&pane_id);
+        }
+        if self.workspace_state_enabled {
+            if let Err(error) =
+                workspace_state::set_terminal_open_in(&self.workspace_state_root, session_id, open)
+            {
+                self.status_message = Some(format!("Cannot save workspace state: {error}"));
+            }
+        }
+    }
+
+    fn restore_workspace_panels(&mut self, pane_id: crate::mux::PaneId, session_id: &str) {
+        if !self.workspace_state_enabled {
+            return;
+        }
+        match workspace_state::load_in(&self.workspace_state_root, session_id) {
+            Ok(state) => {
+                if state.scratchpad_open {
+                    self.scratchpad_open.insert(pane_id);
+                }
+                if state.terminal_open {
+                    self.terminal_open.insert(pane_id);
+                }
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Cannot restore workspace state: {error}"));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn disable_workspace_state_persistence(&mut self) {
+        self.workspace_state_enabled = false;
+    }
+
+    #[cfg(test)]
+    fn set_workspace_state_root(&mut self, root: PathBuf) {
+        self.workspace_state_root = root;
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
@@ -608,6 +684,7 @@ impl App {
             "" => format!("session {id}"),
             trimmed => trimmed.to_string(),
         };
+        let workspace_session_id = session_id.clone();
         let pane = Pane::spawn(
             PaneSpec {
                 id,
@@ -623,6 +700,9 @@ impl App {
         )?;
         mux.push(pane);
         self.view = View::Attached(id);
+        if let Some(session_id) = workspace_session_id.as_deref() {
+            self.restore_workspace_panels(id, session_id);
+        }
         Ok(())
     }
 
@@ -751,6 +831,26 @@ mod tests {
         app.open_pane_list();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn panel_preferences_restore_for_a_new_pane_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = "workspace-restart-session";
+
+        let mut first_run = app_with(true);
+        first_run.set_workspace_state_root(temp.path().to_path_buf());
+        first_run.remember_scratchpad_panel(1, session_id, true);
+        first_run.remember_terminal_panel(1, session_id, true);
+
+        let mut restarted = app_with(true);
+        restarted.set_workspace_state_root(temp.path().to_path_buf());
+        restarted.restore_workspace_panels(42, session_id);
+
+        assert!(restarted.scratchpad_open.contains(&42));
+        assert!(restarted.terminal_open.contains(&42));
+        assert!(!restarted.scratchpad_open.contains(&1));
+        assert!(!restarted.terminal_open.contains(&1));
     }
 
     fn session(id: &str, project: &str, updated_at: &str) -> Session {
