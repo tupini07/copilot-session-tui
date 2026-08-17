@@ -54,7 +54,25 @@ copilot-session-tui --auto-filter false
 
 # Use a custom copilot config directory
 copilot-session-tui --copilot-home /path/to/.copilot
+
+# Open one exact session without visiting the picker
+copilot-session-tui --session <session-id>
+
+# Windows: open every inactive favorite in this Windows Terminal window
+copilot-session-tui --open-favorites
 ```
+
+### Favorite tabs in Windows Terminal
+
+On Windows, `cst --open-favorites` adds one tab to the current (most recently
+used) Windows Terminal window for each inactive favorite. Tabs open in their
+session directories, use the CST session names as stable titles, and start CST
+directly in those sessions. Favorites already active in another process are
+skipped and reported, preventing duplicate resumes.
+
+Each tab follows the saved `mux` setting. Pass `--mux` or `--no-mux` alongside
+`--open-favorites` to override it for all tabs opened by that invocation. The
+launcher requires Windows Terminal's `wt.exe` app execution alias.
 
 ### Shell integration (auto-cd into project directory)
 

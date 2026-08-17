@@ -11,9 +11,10 @@ mod terminal_pane;
 mod text;
 mod ui;
 mod updater;
+mod windows_terminal;
 mod workspace_state;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
@@ -25,7 +26,7 @@ use crossterm::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use app::{App, NewSessionRequest};
 use session::loader;
@@ -54,6 +55,14 @@ struct Cli {
     /// Launch sessions in the terminal and exit, overriding the `mux` config
     #[arg(long, overrides_with = "mux")]
     no_mux: bool,
+
+    /// Open an exact session directly instead of showing the session list
+    #[arg(long, value_name = "ID", conflicts_with = "open_favorites")]
+    session: Option<String>,
+
+    /// Open each inactive favorite in a Windows Terminal tab
+    #[arg(long, conflicts_with = "session")]
+    open_favorites: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -87,10 +96,31 @@ fn main() -> Result<()> {
         None => {}
     }
 
-    let copilot_home = cli.copilot_home.unwrap_or_else(loader::copilot_home);
+    let copilot_home = cli
+        .copilot_home
+        .clone()
+        .unwrap_or_else(loader::copilot_home);
+    // The path controls both CST's session loader and the Copilot process it resumes.
+    // Generated favorite tabs receive an explicit path, so export it before any child
+    // processes or background threads are started.
+    if cli.copilot_home.is_some() {
+        std::env::set_var("COPILOT_HOME", &copilot_home);
+    }
 
-    // Load sessions (may be empty — the TUI still lets you start a new session)
-    let sessions = loader::load_sessions(&copilot_home).unwrap_or_default();
+    // Normal picker startup tolerates an absent session directory so users can still
+    // create their first session. Targeted commands need the load error to be explicit.
+    let sessions = match loader::load_sessions(&copilot_home) {
+        Ok(sessions) => sessions,
+        Err(error) if cli.session.is_some() || cli.open_favorites => {
+            return Err(error).context("Failed to load Copilot sessions");
+        }
+        Err(_) => Vec::new(),
+    };
+    let startup_session = cli
+        .session
+        .as_deref()
+        .map(|id| resolve_startup_session(&sessions, id))
+        .transpose()?;
 
     let mut user_config = config::load();
     // CLI flags win for this invocation only; they are never written back to disk.
@@ -99,6 +129,35 @@ fn main() -> Result<()> {
         user_config.mux = true;
     } else if cli.no_mux {
         user_config.mux = false;
+    }
+
+    if cli.open_favorites {
+        let mux_override = if cli.mux {
+            Some(true)
+        } else if cli.no_mux {
+            Some(false)
+        } else {
+            None
+        };
+        return windows_terminal::open_favorites(
+            &sessions,
+            &user_config,
+            &copilot_home,
+            mux_override,
+        );
+    }
+
+    if let Some(session) = startup_session.as_ref().filter(|_| !user_config.mux) {
+        eprintln!(
+            "Resuming session {} in {}...",
+            short_session_id(&session.id),
+            session.cwd
+        );
+        manager::resume_session(&session.id, &session.cwd, &user_config)?;
+        if let Some(path) = &cli.last_dir_file {
+            let _ = std::fs::write(path, &session.cwd);
+        }
+        return Ok(());
     }
 
     let mut app = App::new(sessions, user_config);
@@ -111,9 +170,24 @@ fn main() -> Result<()> {
     // does not pay for it on the UI thread.
     manager::warm_copilot_lookup();
 
-    // Record the launch directory; auto-filters to its project when enabled
-    if let Ok(cwd) = std::env::current_dir() {
-        app.set_cwd_context(cwd.to_string_lossy().to_string(), cli.auto_filter);
+    // A direct session should detach into its own project list even when invoked from
+    // elsewhere. Normal startup continues to use the process launch directory.
+    let cwd_context = startup_session
+        .as_ref()
+        .map(|session| existing_or_current_dir(&session.cwd))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.to_string_lossy().to_string())
+        });
+    if let Some(cwd) = cwd_context {
+        app.set_cwd_context(cwd, cli.auto_filter);
+    }
+
+    if let Some(session) = startup_session {
+        let cwd = existing_or_current_dir(&session.cwd);
+        app.attach_session(&session.id, &cwd, session.title)?;
+        mux_input::sync_workspace_panels(&mut app);
     }
 
     // Setup terminal
@@ -160,7 +234,11 @@ fn main() -> Result<()> {
 
     // Resume session if requested
     if let Some((session_id, cwd)) = app.should_resume {
-        eprintln!("Resuming session {} in {}...", &session_id[..8], &cwd);
+        eprintln!(
+            "Resuming session {} in {}...",
+            short_session_id(&session_id),
+            &cwd
+        );
         last_dir = Some(cwd.clone());
         manager::resume_session(&session_id, &cwd, &app.config)?;
     }
@@ -213,6 +291,41 @@ fn main() -> Result<()> {
         let _ = std::fs::write(path, dir);
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupSession {
+    id: String,
+    cwd: String,
+    title: String,
+}
+
+fn resolve_startup_session(sessions: &[session::Session], id: &str) -> Result<StartupSession> {
+    let session = sessions
+        .iter()
+        .find(|session| session.id == id)
+        .with_context(|| format!("Session '{id}' was not found"))?;
+    if session.is_active {
+        anyhow::bail!("Session '{}' is already active", session.display_name());
+    }
+    Ok(StartupSession {
+        id: session.id.clone(),
+        cwd: session.cwd.clone(),
+        title: session.display_name().to_string(),
+    })
+}
+
+fn short_session_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn existing_or_current_dir(cwd: &str) -> String {
+    if Path::new(cwd).is_dir() {
+        return cwd.to_string();
+    }
+    std::env::current_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| cwd.to_string())
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -488,5 +601,83 @@ fn print_shell_init(shell: &str) {
             );
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn session(id: &str, name: &str, active: bool) -> session::Session {
+        session::Session {
+            id: id.to_string(),
+            cwd: r"C:\work\project".to_string(),
+            project_root: r"C:\work\project".to_string(),
+            summary: Some(name.to_string()),
+            created_at: None,
+            updated_at: Some(Utc.timestamp_opt(1, 0).unwrap()),
+            is_active: active,
+            dir_path: PathBuf::new(),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+        }
+    }
+
+    #[test]
+    fn direct_session_options_parse_and_conflict() {
+        let direct = Cli::try_parse_from(["cst", "--session", "session-1", "--mux"]).unwrap();
+        assert_eq!(direct.session.as_deref(), Some("session-1"));
+        assert!(direct.mux);
+
+        let favorites = Cli::try_parse_from(["cst", "--open-favorites", "--no-mux"]).unwrap();
+        assert!(favorites.open_favorites);
+        assert!(favorites.no_mux);
+
+        assert!(
+            Cli::try_parse_from(["cst", "--session", "session-1", "--open-favorites"]).is_err()
+        );
+    }
+
+    #[test]
+    fn startup_session_requires_an_exact_inactive_match() {
+        let sessions = vec![
+            session("session-1", "First", false),
+            session("session-2", "Second", true),
+        ];
+
+        assert_eq!(
+            resolve_startup_session(&sessions, "session-1").unwrap(),
+            StartupSession {
+                id: "session-1".to_string(),
+                cwd: r"C:\work\project".to_string(),
+                title: "First".to_string(),
+            }
+        );
+        assert!(resolve_startup_session(&sessions, "session").is_err());
+        assert!(resolve_startup_session(&sessions, "session-2")
+            .unwrap_err()
+            .to_string()
+            .contains("already active"));
+    }
+
+    #[test]
+    fn short_session_ids_do_not_panic() {
+        assert_eq!(short_session_id("short"), "short");
+        assert_eq!(short_session_id("123456789"), "12345678");
+    }
+
+    #[test]
+    fn direct_mux_startup_falls_back_when_saved_directory_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            existing_or_current_dir(&directory.path().to_string_lossy()),
+            directory.path().to_string_lossy()
+        );
+
+        let fallback = existing_or_current_dir(r"Z:\definitely\missing\cst-session");
+        assert!(Path::new(&fallback).is_dir());
     }
 }
