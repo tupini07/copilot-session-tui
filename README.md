@@ -41,7 +41,8 @@ The binary will be at `target/release/copilot-session-tui` (or `.exe` on Windows
 
 The TUI checks GitHub Releases for a newer version at startup, using a 12-hour cache.
 When an update is available, the status bar shows the current and latest versions.
-Press `u` to download and install the matching release asset, then restart the TUI.
+Press `u` to check GitHub immediately, download and install the matching release
+asset when available, then restart the TUI.
 
 ### Usage
 

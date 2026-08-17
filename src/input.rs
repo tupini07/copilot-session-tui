@@ -259,8 +259,12 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         KeyCode::Char('u') => {
             if app.update_info.is_some() {
                 app.should_update = true;
+            } else if !app.update_check_requested {
+                app.update_receiver = Some(crate::updater::force_check_for_updates_async());
+                app.update_check_requested = true;
+                app.status_message = Some("Checking for updates...".to_string());
             } else {
-                app.status_message = Some("No update available".to_string());
+                app.status_message = Some("Already checking for updates...".to_string());
             }
         }
         _ => {}

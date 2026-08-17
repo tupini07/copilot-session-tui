@@ -5,7 +5,7 @@ use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::terminal_pane::TerminalManager;
-use crate::updater::UpdateInfo;
+use crate::updater::{UpdateCheckResult, UpdateInfo};
 use crate::workspace_state;
 use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -128,7 +128,8 @@ pub struct App {
     pub status_message: Option<String>,
     pub visible_rows: usize,
     pub update_info: Option<UpdateInfo>,
-    pub update_receiver: Option<mpsc::Receiver<Option<UpdateInfo>>>,
+    pub update_receiver: Option<mpsc::Receiver<UpdateCheckResult>>,
+    pub update_check_requested: bool,
     pub should_update: bool,
     pub config: UserConfig,
     pub copilot_home: PathBuf,
@@ -213,6 +214,7 @@ impl App {
             visible_rows: 20,
             update_info: None,
             update_receiver: None,
+            update_check_requested: false,
             should_update: false,
             config,
             copilot_home: crate::session::loader::copilot_home(),
@@ -784,14 +786,41 @@ impl App {
     }
 
     pub fn poll_update(&mut self) {
-        if self.update_info.is_some() {
+        if self.update_info.is_some() && !self.update_check_requested {
             return;
         }
-        if let Some(ref rx) = self.update_receiver {
-            if let Ok(result) = rx.try_recv() {
+        let Some(rx) = self.update_receiver.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(result)) => {
                 self.update_info = result;
+                if self.update_check_requested {
+                    if self.update_info.is_some() {
+                        self.should_update = true;
+                    } else {
+                        self.status_message = Some("No update available".to_string());
+                    }
+                }
                 self.update_receiver = None;
+                self.update_check_requested = false;
             }
+            Ok(Err(error)) => {
+                if self.update_check_requested {
+                    self.status_message = Some(format!("Update check failed: {error}"));
+                }
+                self.update_receiver = None;
+                self.update_check_requested = false;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if self.update_check_requested {
+                    self.status_message =
+                        Some("Update check failed: background worker stopped".to_string());
+                }
+                self.update_receiver = None;
+                self.update_check_requested = false;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
     }
 }
@@ -1035,5 +1064,41 @@ mod tests {
         app.cycle_sort();
         assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
         assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
+    }
+
+    #[test]
+    fn requested_update_check_starts_an_available_update() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let (tx, rx) = mpsc::channel();
+        app.update_receiver = Some(rx);
+        app.update_check_requested = true;
+        tx.send(Ok(Some(UpdateInfo {
+            current_version: "0.9.0".to_string(),
+            latest_version: "0.10.0".to_string(),
+        })))
+        .unwrap();
+
+        app.poll_update();
+
+        assert!(app.should_update);
+        assert!(app.update_info.is_some());
+        assert!(!app.update_check_requested);
+        assert!(app.update_receiver.is_none());
+    }
+
+    #[test]
+    fn requested_update_check_reports_when_current() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let (tx, rx) = mpsc::channel();
+        app.update_receiver = Some(rx);
+        app.update_check_requested = true;
+        tx.send(Ok(None)).unwrap();
+
+        app.poll_update();
+
+        assert_eq!(app.status_message.as_deref(), Some("No update available"));
+        assert!(!app.should_update);
+        assert!(!app.update_check_requested);
+        assert!(app.update_receiver.is_none());
     }
 }
