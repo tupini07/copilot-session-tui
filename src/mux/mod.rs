@@ -124,6 +124,7 @@ pub enum PrefixCommand {
     PreviousPane,
     KillPane,
     PaneList,
+    Chat,
     Scratchpad,
     Terminal,
     SelectIndex(usize),
@@ -142,6 +143,7 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('p') => Some(PrefixCommand::PreviousPane),
         KeyCode::Char('x') => Some(PrefixCommand::KillPane),
         KeyCode::Char('w') => Some(PrefixCommand::PaneList),
+        KeyCode::Char('c') => Some(PrefixCommand::Chat),
         KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
         KeyCode::Char('t') => Some(PrefixCommand::Terminal),
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -278,6 +280,12 @@ impl MuxState {
         }
     }
 
+    pub fn resize_all_at(&mut self, x: u16, y: u16, rows: u16, cols: u16) {
+        for pane in &mut self.panes {
+            let _ = pane.resize_at(x, y, rows, cols);
+        }
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         for pane in &self.panes {
             let _ = pane.kill();
@@ -357,6 +365,10 @@ mod tests {
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('x'), none), &chord),
             Some(PrefixCommand::KillPane)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('c'), none), &chord),
+            Some(PrefixCommand::Chat)
         );
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('e'), none), &chord),

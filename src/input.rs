@@ -395,8 +395,7 @@ fn open_scratchpad(app: &mut App) {
         return;
     };
     let session_id = session.id.clone();
-    let session_name = session.display_name().to_string();
-    match crate::scratchpad::Scratchpad::open(&session_id, session_name) {
+    match crate::scratchpad::Scratchpad::open(&session_id) {
         Ok(scratchpad) => {
             app.scratchpad = Some(scratchpad);
             app.mode = Mode::Scratchpad;

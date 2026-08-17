@@ -279,6 +279,9 @@ mod tests {
         let ctrl_c = key_with(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(encode(&ctrl_c, false).unwrap(), vec![0x03]);
 
+        let ctrl_v = key_with(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert_eq!(encode(&ctrl_v, false).unwrap(), vec![0x16]);
+
         let ctrl_space = key_with(KeyCode::Char(' '), KeyModifiers::CONTROL);
         assert_eq!(encode(&ctrl_space, false).unwrap(), vec![0x00]);
     }

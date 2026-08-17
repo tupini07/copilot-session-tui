@@ -139,6 +139,7 @@ pub struct App {
     pub view: View,
     /// Rows/cols available to a pane, kept in sync with the terminal size.
     pub pane_size: (u16, u16),
+    pub pane_origin: (u16, u16),
     /// Set when the user tries to quit while panes are still running.
     pub confirm_quit: bool,
     /// Highlighted row in the pane switcher.
@@ -213,6 +214,7 @@ impl App {
             mux,
             view: View::List,
             pane_size: (24, 80),
+            pane_origin: (0, 0),
             confirm_quit: false,
             pane_selected: 0,
             mux_on_disk,

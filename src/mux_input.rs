@@ -93,6 +93,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 app.open_pane_list();
                 return;
             }
+            Some(PrefixCommand::Chat) => focus_chat(app),
             Some(PrefixCommand::Scratchpad) => toggle_attached_scratchpad(app),
             Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
             Some(PrefixCommand::SelectIndex(index)) => {
@@ -170,8 +171,13 @@ fn handle_terminal_event(app: &mut App, event: Event) {
     }
 }
 
+fn focus_chat(app: &mut App) {
+    app.workspace_focus = WorkspaceFocus::Chat;
+    app.terminal.unfocus();
+}
+
 fn toggle_attached_scratchpad(app: &mut App) {
-    let Some((pane_id, session_id, title, _)) = focused_workspace_context(app) else {
+    let Some((pane_id, session_id, _, _)) = focused_workspace_context(app) else {
         return;
     };
     if app.scratchpad_owner == Some(pane_id) && app.scratchpad.is_some() {
@@ -195,7 +201,7 @@ fn toggle_attached_scratchpad(app: &mut App) {
     if !close_scratchpad(app) {
         return;
     }
-    match crate::scratchpad::Scratchpad::open(&session_id, title) {
+    match crate::scratchpad::Scratchpad::open(&session_id) {
         Ok(scratchpad) => {
             app.scratchpad = Some(scratchpad);
             app.scratchpad_owner = Some(pane_id);
@@ -242,7 +248,7 @@ pub fn sync_workspace_panels(app: &mut App) {
         if !close_scratchpad(app) {
             return;
         }
-        match crate::scratchpad::Scratchpad::open(&session_id, title.clone()) {
+        match crate::scratchpad::Scratchpad::open(&session_id) {
             Ok(scratchpad) => {
                 app.scratchpad = Some(scratchpad);
                 app.scratchpad_owner = Some(pane_id);
@@ -353,6 +359,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         // sensible reading of these from the list is "show me what's running".
         Some(PrefixCommand::Detach) | Some(PrefixCommand::Literal) => app.open_pane_list(),
         Some(PrefixCommand::PaneList) => app.open_pane_list(),
+        Some(PrefixCommand::Chat) => {
+            attach_focused(app);
+            focus_chat(app);
+        }
         Some(PrefixCommand::Scratchpad) => {
             attach_focused(app);
             toggle_attached_scratchpad(app);
@@ -642,6 +652,20 @@ mod tests {
         assert!(!app.terminal.is_visible());
         assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
         app.terminal.shutdown();
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn prefix_c_returns_focus_to_chat_without_hiding_panels() {
+        let mut app = attached_mux_app("prefix-chat-test");
+        send_prefix_command(&mut app, 'e');
+        assert!(app.scratchpad.is_some());
+
+        send_prefix_command(&mut app, 'c');
+
+        assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        assert!(app.scratchpad.is_some());
+        app.scratchpad = None;
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
@@ -46,13 +46,25 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
     f.render_widget(Paragraph::new(lines), box_area);
 }
 
-pub fn draw_chat(f: &mut Frame, app: &App, terminal_area: Rect) {
+pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
     let Some(pane) = mux.focused_pane() else {
         return;
     };
+
+    let border_color = if app.workspace_focus == crate::app::WorkspaceFocus::Chat {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let block = Block::default()
+        .title(" Chat ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+    let terminal_area = block.inner(area);
+    f.render_widget(block, area);
 
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen);
@@ -98,7 +110,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" d list  e scratch  t terminal  w switch  n/p cycle  x end "),
+            Span::raw(" c chat  e scratch  t terminal  d list  w switch  n/p cycle  x end "),
         ],
         PaneStatus::Running => vec![
             Span::raw(" "),
@@ -286,10 +298,8 @@ mod tests {
         let id = pane.id;
         app.mux.as_mut().expect("mux").push(pane);
         app.view = crate::app::View::Attached(id);
-        app.scratchpad = Some(
-            crate::scratchpad::Scratchpad::open("workspace-render-test", "Notes".to_string())
-                .unwrap(),
-        );
+        app.scratchpad =
+            Some(crate::scratchpad::Scratchpad::open("workspace-render-test").unwrap());
         app.scratchpad_owner = Some(id);
         let directory = tempfile::tempdir().unwrap();
         app.terminal
@@ -305,7 +315,7 @@ mod tests {
         let text = render(&mut app);
 
         assert!(text.contains("Scratchpad"), "got:\n{text}");
-        assert!(text.contains("Terminal: Shell"), "got:\n{text}");
+        assert!(text.contains("Terminal [running]"), "got:\n{text}");
         assert!(text.contains("Starting Copilot"), "got:\n{text}");
         app.terminal.shutdown();
         let _ = app.mux.as_mut().expect("mux").shutdown();

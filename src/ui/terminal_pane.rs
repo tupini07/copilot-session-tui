@@ -19,10 +19,7 @@ pub fn draw(frame: &mut Frame, terminal: &TerminalPane, focused: bool, area: Rec
         TerminalStatus::Failed(_) => Color::Red,
     };
     let title = Line::styled(
-        format!(
-            " Terminal: {} [{}] - prefix t toggles ",
-            terminal.session_name, status
-        ),
+        format!(" Terminal [{status}] "),
         Style::default().fg(status_color),
     );
     let block = Block::default()

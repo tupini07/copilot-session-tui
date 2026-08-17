@@ -26,8 +26,8 @@ pub enum InputOutcome {
 }
 
 pub struct Scratchpad {
-    pub session_name: String,
     pub state: EditorState,
+    pub help_visible: bool,
     handler: EditorEventHandler,
     path: PathBuf,
     dirty: bool,
@@ -37,11 +37,11 @@ pub struct Scratchpad {
 }
 
 impl Scratchpad {
-    pub fn open(session_id: &str, session_name: String) -> Result<Self> {
-        Self::open_in(&scratchpad_root(), session_id, session_name)
+    pub fn open(session_id: &str) -> Result<Self> {
+        Self::open_in(&scratchpad_root(), session_id)
     }
 
-    fn open_in(root: &Path, session_id: &str, session_name: String) -> Result<Self> {
+    fn open_in(root: &Path, session_id: &str) -> Result<Self> {
         let path = scratchpad_path_in(root, session_id);
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
@@ -58,8 +58,8 @@ impl Scratchpad {
         state.set_clipboard(TextClipboard::new(Rc::clone(&clipboard_error)));
 
         Ok(Self {
-            session_name,
             state,
+            help_visible: false,
             handler: EditorEventHandler::emacs_mode(),
             path,
             dirty: false,
@@ -72,6 +72,16 @@ impl Scratchpad {
     pub fn handle_event(&mut self, event: Event) -> Result<InputOutcome> {
         if let Event::Key(key) = &event {
             if key.kind != KeyEventKind::Press {
+                return Ok(InputOutcome::Continue);
+            }
+            if is_alt(key, 'h') {
+                self.help_visible = !self.help_visible;
+                return Ok(InputOutcome::Continue);
+            }
+            if self.help_visible {
+                if key.code == KeyCode::Esc {
+                    self.help_visible = false;
+                }
                 return Ok(InputOutcome::Continue);
             }
             if key.code == KeyCode::Esc {
@@ -118,7 +128,6 @@ impl Scratchpad {
                 self.last_edit = Some(Instant::now());
                 return Err(error);
             }
-            self.status_message = Some("Autosaved".to_string());
         }
         Ok(())
     }
@@ -420,6 +429,12 @@ fn is_ctrl(key: &KeyEvent, character: char) -> bool {
         && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
 }
 
+fn is_alt(key: &KeyEvent, character: char) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::ALT | KeyModifiers::META)
+        && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
+}
+
 fn is_supported_key(key: KeyCode) -> bool {
     matches!(
         key,
@@ -555,8 +570,7 @@ mod tests {
 
     fn test_scratchpad(content: &str) -> (tempfile::TempDir, Scratchpad) {
         let temp = tempfile::tempdir().unwrap();
-        let mut scratchpad =
-            Scratchpad::open_in(temp.path(), "test-session", "Test session".to_string()).unwrap();
+        let mut scratchpad = Scratchpad::open_in(temp.path(), "test-session").unwrap();
         scratchpad.state.lines = Lines::from(content);
         (temp, scratchpad)
     }
@@ -646,6 +660,22 @@ mod tests {
     }
 
     #[test]
+    fn alt_h_toggles_help_without_editing() {
+        let (_temp, mut scratchpad) = test_scratchpad("text");
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('h'), KeyModifiers::ALT))
+            .unwrap();
+        assert!(scratchpad.help_visible);
+        assert_eq!(scratchpad.content(), "text");
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('h'), KeyModifiers::ALT))
+            .unwrap();
+        assert!(!scratchpad.help_visible);
+    }
+
+    #[test]
     fn shift_right_selects_one_character_for_replacement() {
         let (_temp, mut scratchpad) = test_scratchpad("abc");
         scratchpad.state.cursor = Index2::new(0, 1);
@@ -663,14 +693,12 @@ mod tests {
     #[test]
     fn scratchpad_round_trips_and_deletes() {
         let temp = tempfile::tempdir().unwrap();
-        let mut scratchpad =
-            Scratchpad::open_in(temp.path(), "session/id", "Test session".to_string()).unwrap();
+        let mut scratchpad = Scratchpad::open_in(temp.path(), "session/id").unwrap();
         scratchpad.state.lines = Lines::from("first\nsecond");
         scratchpad.dirty = true;
         scratchpad.save().unwrap();
 
-        let reopened =
-            Scratchpad::open_in(temp.path(), "session/id", "Test session".to_string()).unwrap();
+        let reopened = Scratchpad::open_in(temp.path(), "session/id").unwrap();
         assert_eq!(reopened.content(), "first\nsecond");
         assert!(delete_in(temp.path(), "session/id").unwrap());
         assert!(!delete_in(temp.path(), "session/id").unwrap());

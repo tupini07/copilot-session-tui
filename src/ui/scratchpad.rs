@@ -2,7 +2,7 @@ use edtui::{EditorTheme, EditorView, LineNumbers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::scratchpad::Scratchpad;
@@ -12,29 +12,14 @@ pub fn draw(f: &mut Frame, scratchpad: &mut Scratchpad) {
 }
 
 pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: bool) {
-    let [title_area, editor_area, status_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(2),
-    ])
-    .areas(area);
+    let [editor_area, status_area] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
 
     let dirty = if scratchpad.is_dirty() {
-        " • modified"
+        " [modified]"
     } else {
         ""
     };
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " Scratchpad ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("  {}{dirty}", scratchpad.session_name)),
-    ]));
-    f.render_widget(title, title_area);
 
     let border_color = if focused {
         Color::Yellow
@@ -46,6 +31,7 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
         .selection_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .block(
             Block::default()
+                .title(format!(" Scratchpad{dirty} "))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color)),
         )
@@ -57,17 +43,7 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
         .tab_width(2);
     f.render_widget(editor, editor_area);
 
-    let first_line = Line::from(vec![
-        key("Esc"),
-        Span::raw(" Save/close  "),
-        key("Ctrl+S"),
-        Span::raw(" Save  "),
-        key("Shift+Arrows"),
-        Span::raw(" Select  "),
-        key("Ctrl+C/X/V"),
-        Span::raw(" Copy/cut/paste"),
-    ]);
-    let second_line = if let Some(message) = &scratchpad.status_message {
+    let status = if let Some(message) = &scratchpad.status_message {
         Line::from(Span::styled(
             format!(" {message}"),
             Style::default().fg(Color::Yellow),
@@ -75,15 +51,61 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
     } else {
         Line::from(vec![
             Span::raw(" "),
-            key("Ctrl+Z/Y"),
-            Span::raw(" Undo/redo  "),
-            key("Ctrl+Shift+K"),
-            Span::raw(" Delete line  "),
-            key("Alt+↑/↓"),
-            Span::raw(" Move line"),
+            key("Alt+H"),
+            Span::raw(" Help  "),
+            key("Ctrl+S"),
+            Span::raw(" Save  "),
+            key("Esc"),
+            Span::raw(" Save/close"),
         ])
     };
-    f.render_widget(Paragraph::new(vec![first_line, second_line]), status_area);
+    f.render_widget(Paragraph::new(status), status_area);
+
+    if scratchpad.help_visible {
+        draw_help(f, area);
+    }
+}
+
+fn draw_help(f: &mut Frame, area: Rect) {
+    let width = area.width.saturating_sub(4).min(54);
+    let height = area.height.saturating_sub(2).min(16);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let lines = vec![
+        help_line("Alt+H / Esc", "Close help"),
+        help_line("Ctrl+S", "Save"),
+        help_line("Shift+Arrows", "Select text"),
+        help_line("Ctrl+A", "Select all"),
+        help_line("Ctrl+C/X/V", "Copy / cut / paste"),
+        help_line("Ctrl+Z/Y", "Undo / redo"),
+        help_line("Ctrl+Shift+K", "Delete current line"),
+        help_line("Alt+Up/Down", "Move current line"),
+        Line::from(""),
+        Line::from(" Enter continues bullets and numbered lists."),
+    ];
+    let block = Block::default()
+        .title(" Scratchpad Help ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+fn help_line(shortcut: &str, description: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!("{shortcut:<14}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(description.to_string()),
+    ])
 }
 
 fn key(value: &str) -> Span<'_> {

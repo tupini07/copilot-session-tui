@@ -112,6 +112,7 @@ autosaved after edits. They are removed when their session is deleted.
 | Key | Action |
 |-----|--------|
 | `Esc` / `Ctrl+S` | Save and close / save |
+| `Alt+H` | Toggle scratchpad shortcut help |
 | `Shift+Arrows` | Select text |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
@@ -175,6 +176,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 |-----|--------|
 | `prefix` `d` | Back to the session list — the session keeps running |
 | `prefix` `w` | Session switcher |
+| `prefix` `c` | Focus the main session chat |
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `n` / `p` | Next / previous session |

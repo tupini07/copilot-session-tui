@@ -521,6 +521,7 @@ pub fn draw_help(f: &mut Frame, app: &App) {
             "Back to the list (session keeps running)",
         ));
         text.push(help_line(&format!("{prefix} w"), "Session switcher"));
+        text.push(help_line(&format!("{prefix} c"), "Focus the session chat"));
         text.push(help_line(
             &format!("{prefix} e"),
             "Toggle/focus the session scratchpad",

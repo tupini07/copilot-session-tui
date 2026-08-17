@@ -17,7 +17,9 @@ use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -134,7 +136,8 @@ fn main() -> Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        SetTitle("")
     )?;
     terminal.show_cursor()?;
     app.terminal.shutdown();
@@ -228,8 +231,24 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         })
     });
     drop(terminal_events);
+    let mut terminal_title = String::new();
 
     loop {
+        let desired_title = match app.view {
+            app::View::Attached(_) => app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.focused_pane())
+                .map(|pane| pane.title.as_str())
+                .unwrap_or("Copilot Session Manager"),
+            app::View::List => "Copilot Session Manager",
+        };
+        if terminal_title != desired_title {
+            terminal_title.clear();
+            terminal_title.push_str(desired_title);
+            execute!(terminal.backend_mut(), SetTitle(&terminal_title))?;
+        }
+
         let size = terminal.size()?;
         let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
             ui::attached_layout(
@@ -263,12 +282,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 }
             }
 
-            let rows = layout.chat.height.max(1);
-            let cols = layout.chat.width.max(1);
-            if app.pane_size != (rows, cols) {
+            let chat = layout.chat.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let rows = chat.height.max(1);
+            let cols = chat.width.max(1);
+            if app.pane_size != (rows, cols) || app.pane_origin != (chat.x, chat.y) {
                 app.pane_size = (rows, cols);
+                app.pane_origin = (chat.x, chat.y);
                 if let Some(mux) = app.mux.as_mut() {
-                    mux.resize_all(rows, cols);
+                    mux.resize_all_at(chat.x, chat.y, rows, cols);
                 }
             }
         } else {
@@ -286,8 +310,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             if app.mux.is_some() {
                 let rows = size.height.saturating_sub(1).max(1);
                 let cols = size.width.max(1);
-                if app.pane_size != (rows, cols) {
+                if app.pane_size != (rows, cols) || app.pane_origin != (0, 0) {
                     app.pane_size = (rows, cols);
+                    app.pane_origin = (0, 0);
                     if let Some(mux) = app.mux.as_mut() {
                         mux.resize_all(rows, cols);
                     }

@@ -14,6 +14,31 @@ pub type PaneId = u64;
 
 type PaneParser = Arc<Mutex<vt100::Parser<PaneCallbacks>>>;
 
+#[derive(Debug, Clone, Copy)]
+struct Viewport {
+    x: u16,
+    y: u16,
+    rows: u16,
+    cols: u16,
+}
+
+impl Viewport {
+    fn coordinates(self, column: u16, row: u16) -> Option<(u16, u16)> {
+        let column = column.checked_sub(self.x)?;
+        let row = row.checked_sub(self.y)?;
+        (column < self.cols && row < self.rows).then_some((column + 1, row + 1))
+    }
+
+    fn clamped_coordinates(self, column: u16, row: u16) -> (u16, u16) {
+        let max_column = self.x.saturating_add(self.cols.saturating_sub(1));
+        let max_row = self.y.saturating_add(self.rows.saturating_sub(1));
+        (
+            column.clamp(self.x, max_column) - self.x + 1,
+            row.clamp(self.y, max_row) - self.y + 1,
+        )
+    }
+}
+
 /// Why a pane stopped running, if it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneStatus {
@@ -34,6 +59,7 @@ pub struct Pane {
     parser: PaneParser,
     pty: PtySession,
     mouse_captured: bool,
+    viewport: Viewport,
 }
 
 /// Everything needed to start a pane, grouped so callers don't juggle a long argument list.
@@ -101,6 +127,12 @@ impl Pane {
             parser,
             pty,
             mouse_captured: false,
+            viewport: Viewport {
+                x: 0,
+                y: 0,
+                rows: size.rows,
+                cols: size.cols,
+            },
         })
     }
 
@@ -196,21 +228,18 @@ impl Pane {
         if !self.is_running() {
             return Ok(());
         }
-        let Some((mode, encoding, rows, cols)) = self.with_screen(|screen| {
-            let (rows, cols) = screen.size();
+        let Some((mode, encoding)) = self.with_screen(|screen| {
             (
                 screen.mouse_protocol_mode(),
                 screen.mouse_protocol_encoding(),
-                rows,
-                cols,
             )
         }) else {
             return Ok(());
         };
-        let inside = event.column < cols && event.row < rows;
+        let coordinates = self.viewport.coordinates(event.column, event.row);
 
         if mode == vt100::MouseProtocolMode::None {
-            if inside {
+            if coordinates.is_some() {
                 match event.kind {
                     MouseEventKind::ScrollUp => self.scroll(3),
                     MouseEventKind::ScrollDown => self.scroll(-3),
@@ -220,21 +249,14 @@ impl Pane {
                 Ok(())
             }
         } else {
-            if matches!(event.kind, MouseEventKind::Down(_)) && inside {
+            if matches!(event.kind, MouseEventKind::Down(_)) && coordinates.is_some() {
                 self.mouse_captured = true;
             }
-            let coordinates = if inside {
-                Some((event.column + 1, event.row + 1))
-            } else if self.mouse_captured
-                && matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
-            {
-                Some((
-                    event.column.clamp(0, cols.saturating_sub(1)) + 1,
-                    event.row.clamp(0, rows.saturating_sub(1)) + 1,
-                ))
-            } else {
-                None
-            };
+            let coordinates = coordinates.or_else(|| {
+                (self.mouse_captured
+                    && matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)))
+                .then(|| self.viewport.clamped_coordinates(event.column, event.row))
+            });
             let sequence = coordinates
                 .and_then(|position| keys::encode_mouse(event, position, mode, encoding));
             if matches!(event.kind, MouseEventKind::Up(_)) {
@@ -263,11 +285,22 @@ impl Pane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        self.resize_at(0, 0, rows, cols)
+    }
+
+    pub fn resize_at(&mut self, x: u16, y: u16, rows: u16, cols: u16) -> Result<()> {
         let size = pty_size(rows, cols);
         if let Ok(mut parser) = self.parser.lock() {
             parser.screen_mut().set_size(size.rows, size.cols);
         }
-        self.pty.resize(size)
+        self.pty.resize(size)?;
+        self.viewport = Viewport {
+            x,
+            y,
+            rows: size.rows,
+            cols: size.cols,
+        };
+        Ok(())
     }
 
     pub fn kill(&self) -> Result<()> {
@@ -290,6 +323,21 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn viewport_translates_outer_mouse_coordinates() {
+        let viewport = Viewport {
+            x: 2,
+            y: 1,
+            rows: 10,
+            cols: 20,
+        };
+
+        assert_eq!(viewport.coordinates(2, 1), Some((1, 1)));
+        assert_eq!(viewport.coordinates(21, 10), Some((20, 10)));
+        assert_eq!(viewport.coordinates(1, 1), None);
+        assert_eq!(viewport.clamped_coordinates(99, 99), (20, 10));
+    }
 
     fn shell_command(script: &str) -> (String, Vec<String>) {
         if cfg!(windows) {
