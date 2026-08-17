@@ -23,6 +23,20 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
 /// Split out from `handle_input` so the multiplexer's event thread — which owns the
 /// only reader of the terminal — can route events here instead of polling separately.
 pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    if app.workspace_help.is_some() {
+        if matches!(
+            event,
+            Event::Key(crossterm::event::KeyEvent {
+                code: KeyCode::Esc,
+                kind: KeyEventKind::Press,
+                ..
+            })
+        ) {
+            app.workspace_help = None;
+        }
+        return Ok(());
+    }
+
     if app.mode == Mode::Scratchpad {
         handle_scratchpad(app, event);
         return Ok(());

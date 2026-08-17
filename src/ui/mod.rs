@@ -10,7 +10,7 @@ pub mod terminal_pane;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
-use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus};
+use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus, WorkspaceHelp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachedLayout {
@@ -59,6 +59,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             );
         }
         pane::draw_status(f, app, layout.status);
+        if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
+            scratchpad::draw_help(f, size);
+        }
         return;
     }
 
@@ -158,6 +161,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::BranchName => popups::draw_branch_name(f, app),
         Mode::PaneList => popups::draw_pane_list(f, app),
         _ => {}
+    }
+    if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
+        scratchpad::draw_help(f, size);
     }
 
     if app.confirm_quit {

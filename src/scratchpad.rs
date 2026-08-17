@@ -27,7 +27,6 @@ pub enum InputOutcome {
 
 pub struct Scratchpad {
     pub state: EditorState,
-    pub help_visible: bool,
     handler: EditorEventHandler,
     path: PathBuf,
     dirty: bool,
@@ -59,7 +58,6 @@ impl Scratchpad {
 
         Ok(Self {
             state,
-            help_visible: false,
             handler: EditorEventHandler::emacs_mode(),
             path,
             dirty: false,
@@ -72,16 +70,6 @@ impl Scratchpad {
     pub fn handle_event(&mut self, event: Event) -> Result<InputOutcome> {
         if let Event::Key(key) = &event {
             if key.kind != KeyEventKind::Press {
-                return Ok(InputOutcome::Continue);
-            }
-            if is_alt(key, 'h') {
-                self.help_visible = !self.help_visible;
-                return Ok(InputOutcome::Continue);
-            }
-            if self.help_visible {
-                if key.code == KeyCode::Esc {
-                    self.help_visible = false;
-                }
                 return Ok(InputOutcome::Continue);
             }
             if key.code == KeyCode::Esc {
@@ -429,12 +417,6 @@ fn is_ctrl(key: &KeyEvent, character: char) -> bool {
         && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
 }
 
-fn is_alt(key: &KeyEvent, character: char) -> bool {
-    key.modifiers
-        .intersects(KeyModifiers::ALT | KeyModifiers::META)
-        && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
-}
-
 fn is_supported_key(key: KeyCode) -> bool {
     matches!(
         key,
@@ -657,22 +639,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(scratchpad.content(), "text");
-    }
-
-    #[test]
-    fn alt_h_toggles_help_without_editing() {
-        let (_temp, mut scratchpad) = test_scratchpad("text");
-
-        scratchpad
-            .handle_event(key(KeyCode::Char('h'), KeyModifiers::ALT))
-            .unwrap();
-        assert!(scratchpad.help_visible);
-        assert_eq!(scratchpad.content(), "text");
-
-        scratchpad
-            .handle_event(key(KeyCode::Char('h'), KeyModifiers::ALT))
-            .unwrap();
-        assert!(!scratchpad.help_visible);
     }
 
     #[test]

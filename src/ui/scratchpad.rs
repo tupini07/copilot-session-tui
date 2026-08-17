@@ -1,5 +1,5 @@
 use edtui::{EditorTheme, EditorView, LineNumbers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -12,14 +12,16 @@ pub fn draw(f: &mut Frame, scratchpad: &mut Scratchpad) {
 }
 
 pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: bool) {
-    let [editor_area, status_area] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
-
     let dirty = if scratchpad.is_dirty() {
         " [modified]"
     } else {
         ""
     };
+    let status = scratchpad
+        .status_message
+        .as_deref()
+        .map(|message| format!(" — {message}"))
+        .unwrap_or_default();
 
     let border_color = if focused {
         Color::Yellow
@@ -31,7 +33,7 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
         .selection_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .block(
             Block::default()
-                .title(format!(" Scratchpad{dirty} "))
+                .title(format!(" Scratchpad{dirty}{status} "))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color)),
         )
@@ -41,32 +43,10 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
         .line_numbers(LineNumbers::None)
         .wrap(true)
         .tab_width(2);
-    f.render_widget(editor, editor_area);
-
-    let status = if let Some(message) = &scratchpad.status_message {
-        Line::from(Span::styled(
-            format!(" {message}"),
-            Style::default().fg(Color::Yellow),
-        ))
-    } else {
-        Line::from(vec![
-            Span::raw(" "),
-            key("Alt+H"),
-            Span::raw(" Help  "),
-            key("Ctrl+S"),
-            Span::raw(" Save  "),
-            key("Esc"),
-            Span::raw(" Save/close"),
-        ])
-    };
-    f.render_widget(Paragraph::new(status), status_area);
-
-    if scratchpad.help_visible {
-        draw_help(f, area);
-    }
+    f.render_widget(editor, area);
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
+pub fn draw_help(f: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(54);
     let height = area.height.saturating_sub(2).min(16);
     let popup = Rect {
@@ -76,7 +56,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         height,
     };
     let lines = vec![
-        help_line("Alt+H / Esc", "Close help"),
+        help_line("Esc", "Close help"),
         help_line("Ctrl+S", "Save"),
         help_line("Shift+Arrows", "Select text"),
         help_line("Ctrl+A", "Select all"),
@@ -106,13 +86,4 @@ fn help_line(shortcut: &str, description: &str) -> Line<'static> {
         ),
         Span::raw(description.to_string()),
     ])
-}
-
-fn key(value: &str) -> Span<'_> {
-    Span::styled(
-        value,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
 }

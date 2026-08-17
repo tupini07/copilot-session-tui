@@ -102,6 +102,16 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // The hint is fixed-width and reserved first; tabs take whatever is left, so a long
     // session name can never push the prefix reminder off screen.
     let hint: Vec<Span> = match pane.status {
+        PaneStatus::Running if mux.help_pending => vec![
+            Span::styled(
+                " Help ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" e scratchpad  Esc cancel "),
+        ],
         PaneStatus::Running if mux.prefix_pending => vec![
             Span::styled(
                 format!(" {prefix} "),
@@ -110,7 +120,9 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" c chat  e scratch  t terminal  d list  w switch  n/p cycle  x end "),
+            Span::raw(
+                " c chat  e scratch  t terminal  C-h help  d list  w switch  n/p cycle  x end ",
+            ),
         ],
         PaneStatus::Running => vec![
             Span::raw(" "),
@@ -320,6 +332,14 @@ mod tests {
         assert!(text.contains("Scratchpad"), "got:\n{text}");
         assert!(text.contains("Terminal [running]"), "got:\n{text}");
         assert!(text.contains("Starting Copilot"), "got:\n{text}");
+        assert!(!text.contains("Alt+H"), "got:\n{text}");
+        assert!(!text.contains("Save/close"), "got:\n{text}");
+
+        app.workspace_help = Some(crate::app::WorkspaceHelp::Scratchpad);
+        let text = render(&mut app);
+        assert!(text.contains("Scratchpad Help"), "got:\n{text}");
+        assert!(text.contains("Ctrl+Shift+K"), "got:\n{text}");
+
         app.terminal.shutdown();
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }

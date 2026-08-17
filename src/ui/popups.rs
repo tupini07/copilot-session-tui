@@ -531,6 +531,10 @@ pub fn draw_help(f: &mut Frame, app: &App) {
             "Toggle/focus the session terminal",
         ));
         text.push(help_line(
+            &format!("{prefix} C-h e"),
+            "Open scratchpad shortcut help",
+        ));
+        text.push(help_line(
             &format!("{prefix} n/p"),
             "Next / previous session",
         ));

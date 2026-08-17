@@ -52,7 +52,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 ];
                 if let Some(prefix) = app.prefix_label() {
                     spans.push(Span::raw("  │  "));
-                    if app.prefix_pending() {
+                    if app.help_pending() {
+                        spans.push(Span::styled(
+                            "Help: e scratchpad  Esc cancel",
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else if app.prefix_pending() {
                         spans.push(Span::styled(
                             format!("{prefix} …"),
                             Style::default()

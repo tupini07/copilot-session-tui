@@ -1,5 +1,7 @@
-use crate::app::{App, View, WorkspaceFocus};
-use crate::mux::{resolve_prefix_command, MuxEvent, PrefixCommand};
+use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
+use crate::mux::{
+    resolve_help_command, resolve_prefix_command, HelpCommand, MuxEvent, PrefixCommand,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -8,6 +10,20 @@ use ratatui::layout::Rect;
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    if app.workspace_help.is_some() {
+        if matches!(
+            event,
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc,
+                kind: KeyEventKind::Press,
+                ..
+            })
+        ) {
+            app.workspace_help = None;
+        }
+        return;
+    }
+
     if let Event::Key(key) = &event {
         if key.kind != KeyEventKind::Press {
             return;
@@ -15,7 +31,7 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         let is_prefix = app
             .mux
             .as_ref()
-            .is_some_and(|mux| mux.prefix_pending || mux.prefix.matches(key));
+            .is_some_and(|mux| mux.prefix_pending || mux.help_pending || mux.prefix.matches(key));
         if is_prefix {
             handle_attached_key(app, *key);
             return;
@@ -62,6 +78,16 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     };
 
+    if mux.help_pending {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.help_pending = false;
+        }
+        if matches!(resolve_help_command(&key), Some(HelpCommand::Scratchpad)) {
+            app.workspace_help = Some(WorkspaceHelp::Scratchpad);
+        }
+        return;
+    }
+
     if mux.prefix_pending {
         let prefix = mux.prefix;
         let command = resolve_prefix_command(&key, &prefix);
@@ -96,6 +122,11 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             Some(PrefixCommand::Chat) => focus_chat(app),
             Some(PrefixCommand::Scratchpad) => toggle_attached_scratchpad(app),
             Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
+            Some(PrefixCommand::Help) => {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.help_pending = true;
+                }
+            }
             Some(PrefixCommand::SelectIndex(index)) => {
                 // Panes are labelled from 1 in the UI.
                 if let Some(mux) = app.mux.as_mut() {
@@ -366,6 +397,14 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         return false;
     };
 
+    if mux.help_pending {
+        mux.help_pending = false;
+        if matches!(resolve_help_command(&key), Some(HelpCommand::Scratchpad)) {
+            app.workspace_help = Some(WorkspaceHelp::Scratchpad);
+        }
+        return true;
+    }
+
     if !mux.prefix_pending {
         if mux.prefix.matches(&key) {
             mux.prefix_pending = true;
@@ -375,13 +414,18 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
     }
 
     mux.prefix_pending = false;
+    let prefix = mux.prefix;
+    let command = resolve_prefix_command(&key, &prefix);
+    if matches!(command, Some(PrefixCommand::Help)) {
+        mux.help_pending = true;
+        return true;
+    }
     if mux.panes.is_empty() {
         app.status_message = Some("No sessions are running".to_string());
         return true;
     }
 
-    let prefix = mux.prefix;
-    match resolve_prefix_command(&key, &prefix) {
+    match command {
         // There is no child to re-attach to and nothing to detach from, so the only
         // sensible reading of these from the list is "show me what's running".
         Some(PrefixCommand::Detach) | Some(PrefixCommand::Literal) => app.open_pane_list(),
@@ -398,6 +442,7 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             attach_focused(app);
             toggle_attached_terminal(app);
         }
+        Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::NextPane) => {
             mux.cycle(true);
             attach_focused(app);
@@ -643,6 +688,22 @@ mod tests {
     }
 
     #[test]
+    fn scratchpad_help_is_available_from_the_list_without_running_sessions() {
+        let mut app = mux_app();
+        app.view = View::List;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        ] {
+            assert!(handle_list_prefix(&mut app, key));
+        }
+
+        assert_eq!(app.workspace_help, Some(WorkspaceHelp::Scratchpad));
+    }
+
+    #[test]
     fn an_unknown_prefix_command_clears_the_pending_state() {
         let mut app = mux_app();
         handle_attached_key(
@@ -671,6 +732,36 @@ mod tests {
         assert_eq!(app.scratchpad_owner, Some(1));
         assert_eq!(app.workspace_focus, WorkspaceFocus::Scratchpad);
         app.scratchpad = None;
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn prefix_ctrl_h_e_opens_scratchpad_help() {
+        let mut app = attached_mux_app("prefix-scratchpad-help-test");
+
+        handle_attached_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        handle_attached_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        );
+        assert!(app.mux.as_ref().unwrap().help_pending);
+
+        handle_attached_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.workspace_help, Some(WorkspaceHelp::Scratchpad));
+        assert!(!app.mux.as_ref().unwrap().help_pending);
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.workspace_help, None);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

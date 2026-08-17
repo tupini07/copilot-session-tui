@@ -127,6 +127,7 @@ pub enum PrefixCommand {
     Chat,
     Scratchpad,
     Terminal,
+    Help,
     SelectIndex(usize),
     /// `prefix prefix` — send a literal prefix keystroke to the child.
     Literal,
@@ -146,10 +147,31 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('c') => Some(PrefixCommand::Chat),
         KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
         KeyCode::Char('t') => Some(PrefixCommand::Terminal),
+        KeyCode::Char(character)
+            if character.eq_ignore_ascii_case(&'h')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(PrefixCommand::Help)
+        }
+        KeyCode::Backspace => Some(PrefixCommand::Help),
         KeyCode::Char(c) if c.is_ascii_digit() => {
             Some(PrefixCommand::SelectIndex(c.to_digit(10)? as usize))
         }
         KeyCode::Esc => Some(PrefixCommand::Cancel),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpCommand {
+    Scratchpad,
+    Cancel,
+}
+
+pub fn resolve_help_command(key: &KeyEvent) -> Option<HelpCommand> {
+    match key.code {
+        KeyCode::Char('e') => Some(HelpCommand::Scratchpad),
+        KeyCode::Esc => Some(HelpCommand::Cancel),
         _ => None,
     }
 }
@@ -160,6 +182,7 @@ pub struct MuxState {
     pub focused: Option<PaneId>,
     pub prefix: KeyChord,
     pub prefix_pending: bool,
+    pub help_pending: bool,
     next_id: PaneId,
     pub events: Sender<MuxEvent>,
     pub receiver: Receiver<MuxEvent>,
@@ -173,6 +196,7 @@ impl MuxState {
             focused: None,
             prefix,
             prefix_pending: false,
+            help_pending: false,
             next_id: 1,
             events,
             receiver,
@@ -379,12 +403,32 @@ mod tests {
             Some(PrefixCommand::Terminal)
         );
         assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('h'), KeyModifiers::CONTROL), &chord),
+            Some(PrefixCommand::Help)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Backspace, none), &chord),
+            Some(PrefixCommand::Help)
+        );
+        assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('2'), none), &chord),
             Some(PrefixCommand::SelectIndex(2))
         );
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('z'), none), &chord),
             None
+        );
+    }
+
+    #[test]
+    fn help_commands_map_to_topics() {
+        assert_eq!(
+            resolve_help_command(&key(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(HelpCommand::Scratchpad)
+        );
+        assert_eq!(
+            resolve_help_command(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(HelpCommand::Cancel)
         );
     }
 }

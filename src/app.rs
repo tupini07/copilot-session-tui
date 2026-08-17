@@ -28,6 +28,11 @@ pub enum WorkspaceFocus {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceHelp {
+    Scratchpad,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceAreas {
     pub chat: Rect,
@@ -160,6 +165,7 @@ pub struct App {
     pub terminal_owner: Option<crate::mux::PaneId>,
     pub terminal_open: HashSet<crate::mux::PaneId>,
     pub workspace_focus: WorkspaceFocus,
+    pub workspace_help: Option<WorkspaceHelp>,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
 }
@@ -231,6 +237,7 @@ impl App {
             terminal_owner: None,
             terminal_open: HashSet::new(),
             workspace_focus: WorkspaceFocus::Chat,
+            workspace_help: None,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
         };
@@ -275,7 +282,13 @@ impl App {
 
     /// True while the prefix has been pressed and a command key is awaited.
     pub fn prefix_pending(&self) -> bool {
-        self.mux.as_ref().is_some_and(|mux| mux.prefix_pending)
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.prefix_pending || mux.help_pending)
+    }
+
+    pub fn help_pending(&self) -> bool {
+        self.mux.as_ref().is_some_and(|mux| mux.help_pending)
     }
 
     /// Live panes owned by this instance, for the session list footer.
