@@ -131,6 +131,7 @@ pub struct App {
     pub update_receiver: Option<mpsc::Receiver<Option<UpdateInfo>>>,
     pub should_update: bool,
     pub config: UserConfig,
+    pub copilot_home: PathBuf,
     pub settings_selected: usize,
     pub settings_editing: Option<SettingsEditField>,
     pub settings_input: String,
@@ -214,6 +215,7 @@ impl App {
             update_receiver: None,
             should_update: false,
             config,
+            copilot_home: crate::session::loader::copilot_home(),
             settings_selected: 0,
             settings_editing: None,
             settings_input: String::new(),
@@ -316,10 +318,42 @@ impl App {
             && self.terminal.is_visible()
     }
 
-    pub fn list_terminal_visible(&self) -> bool {
-        matches!(self.view, View::List)
-            && self.terminal_owner.is_none()
-            && self.terminal.is_visible()
+    pub fn collapse_stopped_terminals(&mut self) {
+        let stopped: HashSet<String> = self.terminal.stopped_session_ids().into_iter().collect();
+        if stopped.is_empty() {
+            return;
+        }
+
+        let open_stopped_panels: Vec<(crate::mux::PaneId, String)> = self
+            .mux
+            .as_ref()
+            .map(|mux| {
+                mux.panes
+                    .iter()
+                    .filter_map(|pane| {
+                        let session_id = pane.session_id.as_ref()?;
+                        (self.terminal_open.contains(&pane.id) && stopped.contains(session_id))
+                            .then(|| (pane.id, session_id.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for (pane_id, session_id) in &open_stopped_panels {
+            self.remember_terminal_panel(*pane_id, session_id, false);
+        }
+
+        let active_stopped = self
+            .terminal
+            .active_session_id()
+            .is_some_and(|session_id| stopped.contains(session_id));
+        if active_stopped {
+            self.terminal.hide();
+            self.terminal_owner = None;
+            if self.workspace_focus == WorkspaceFocus::Terminal {
+                self.workspace_focus = WorkspaceFocus::Chat;
+            }
+        }
     }
 
     pub fn forget_workspace_panels(&mut self, pane_id: crate::mux::PaneId) -> bool {
@@ -851,6 +885,88 @@ mod tests {
         assert!(restarted.terminal_open.contains(&42));
         assert!(!restarted.scratchpad_open.contains(&1));
         assert!(!restarted.terminal_open.contains(&1));
+    }
+
+    #[test]
+    fn stopped_attached_terminal_collapses_and_clears_persisted_open_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_root = directory.path().join("state");
+        let session_id = "terminal-exit-session";
+        let mut app = app_with(true);
+        app.set_workspace_state_root(state_root.clone());
+
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let pane = crate::mux::Pane::spawn(
+            crate::mux::PaneSpec {
+                id: 42,
+                title: "Session".to_string(),
+                cwd: directory.path().to_path_buf(),
+                session_id: Some(session_id.to_string()),
+                program,
+                args,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = View::Attached(42);
+
+        app.terminal
+            .activate(
+                session_id.to_string(),
+                "Terminal".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &app.config.terminal,
+            )
+            .unwrap();
+        app.terminal_owner = Some(42);
+        app.remember_terminal_panel(42, session_id, true);
+        app.workspace_focus = WorkspaceFocus::Terminal;
+        app.terminal.exit_active_for_test().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && app.terminal.stopped_session_ids().is_empty()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.collapse_stopped_terminals();
+
+        assert!(!app.terminal.is_visible());
+        assert_eq!(app.terminal_owner, None);
+        assert!(!app.terminal_open.contains(&42));
+        assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        assert!(
+            !crate::workspace_state::load_in(&state_root, session_id)
+                .unwrap()
+                .terminal_open
+        );
+        assert_eq!(
+            app.terminal
+                .activate(
+                    session_id.to_string(),
+                    "Terminal".to_string(),
+                    directory.path().to_string_lossy().to_string(),
+                    &app.config.terminal,
+                )
+                .unwrap(),
+            crate::terminal_pane::Activation::Restarted
+        );
+
+        app.terminal.shutdown();
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     fn session(id: &str, project: &str, updated_at: &str) -> Session {

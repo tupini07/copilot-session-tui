@@ -476,15 +476,6 @@ impl TerminalManager {
         Ok(activation)
     }
 
-    pub fn restart_active(&mut self, config: &TerminalConfig) -> Result<()> {
-        self.active_mut()
-            .context("No active terminal")?
-            .restart(config)?;
-        self.visible = true;
-        self.focused = true;
-        Ok(())
-    }
-
     pub fn active(&self) -> Option<&TerminalPane> {
         self.active_id
             .as_ref()
@@ -501,12 +492,28 @@ impl TerminalManager {
         self.active_id.as_deref()
     }
 
-    pub fn is_visible(&self) -> bool {
-        self.visible && self.active().is_some()
+    pub fn stopped_session_ids(&self) -> Vec<String> {
+        self.panes
+            .iter()
+            .filter(|(_, pane)| !pane.is_running())
+            .map(|(session_id, _)| session_id.clone())
+            .collect()
     }
 
-    pub fn is_focused(&self) -> bool {
-        self.is_visible() && self.focused
+    #[cfg(test)]
+    pub fn exit_active_for_test(&mut self) -> Result<()> {
+        self.active_mut()
+            .context("No active terminal")?
+            .process
+            .send(if cfg!(windows) {
+                b"exit\r\n".to_vec()
+            } else {
+                b"exit\n".to_vec()
+            })
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.visible && self.active().is_some()
     }
 
     pub fn hide(&mut self) {
@@ -855,6 +862,53 @@ mod tests {
         manager.shutdown();
         assert!(manager.panes.is_empty());
         assert!(!manager.is_visible());
+    }
+
+    #[test]
+    fn stopped_terminal_is_detected_and_restarts_when_reopened() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().to_string_lossy().to_string();
+        let config = TerminalConfig::default();
+        let mut manager = TerminalManager::default();
+
+        assert_eq!(
+            manager
+                .activate(
+                    "session-a".to_string(),
+                    "A".to_string(),
+                    cwd.clone(),
+                    &config,
+                )
+                .unwrap(),
+            Activation::Opened
+        );
+        manager
+            .active_mut()
+            .unwrap()
+            .process
+            .send(if cfg!(windows) {
+                b"exit\r\n".to_vec()
+            } else {
+                b"exit\n".to_vec()
+            })
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && manager.active().unwrap().is_running() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(manager.stopped_session_ids(), vec!["session-a"]);
+        manager.hide();
+        assert!(!manager.is_visible());
+        assert_eq!(
+            manager
+                .activate("session-a".to_string(), "A".to_string(), cwd, &config,)
+                .unwrap(),
+            Activation::Restarted
+        );
+        assert!(manager.active().unwrap().is_running());
+        manager.shutdown();
     }
 
     #[test]

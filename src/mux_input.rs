@@ -184,20 +184,6 @@ fn handle_scratchpad_event(app: &mut App, event: Event) {
 }
 
 fn handle_terminal_event(app: &mut App, event: Event) {
-    if let Event::Key(key) = &event {
-        if key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Enter
-            && app
-                .terminal
-                .active()
-                .is_some_and(|terminal| !terminal.is_running())
-        {
-            if let Err(error) = app.terminal.restart_active(&app.config.terminal) {
-                app.status_message = Some(format!("Cannot restart terminal: {error}"));
-            }
-            return;
-        }
-    }
     if let Some(terminal) = app.terminal.active_mut() {
         if let Err(error) = terminal.handle_event(event) {
             app.status_message = Some(format!("Terminal input failed: {error}"));
@@ -799,7 +785,6 @@ mod tests {
         assert_eq!(app.mode, crate::app::Mode::PaneList);
         assert!(!app.attached_scratchpad_visible());
         assert!(!app.attached_terminal_visible());
-        assert!(!app.list_terminal_visible());
         assert!(app.scratchpad_open.contains(&1));
         assert!(app.terminal_open.contains(&1));
 

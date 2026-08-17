@@ -12,11 +12,6 @@ pub fn draw(f: &mut Frame, scratchpad: &mut Scratchpad) {
 }
 
 pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: bool) {
-    let dirty = if scratchpad.is_dirty() {
-        " [modified]"
-    } else {
-        ""
-    };
     let status = scratchpad
         .status_message
         .as_deref()
@@ -33,7 +28,7 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
         .selection_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .block(
             Block::default()
-                .title(format!(" Scratchpad{dirty}{status} "))
+                .title(format!(" Scratchpad{status} "))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color)),
         )
@@ -62,10 +57,11 @@ pub fn draw_help(f: &mut Frame, area: Rect) {
         help_line("Ctrl+A", "Select all"),
         help_line("Ctrl+C/X/V", "Copy / cut / paste"),
         help_line("Ctrl+Z/Y", "Undo / redo"),
+        help_line("Ctrl/Alt+L", "Add / toggle checkbox"),
         help_line("Ctrl+Shift+K", "Delete current line"),
         help_line("Alt+Up/Down", "Move current line"),
         Line::from(""),
-        Line::from(" Enter continues bullets and numbered lists."),
+        Line::from(" Enter continues bullets, tasks, and numbered lists."),
     ];
     let block = Block::default()
         .title(" Scratchpad Help ")

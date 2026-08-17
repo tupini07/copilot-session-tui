@@ -149,6 +149,7 @@ impl Scratchpad {
         )
     }
 
+    #[cfg(test)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -238,6 +239,10 @@ impl Scratchpad {
         }
         if is_ctrl(key, 'y') {
             self.state.execute(Redo);
+            return true;
+        }
+        if is_ctrl(key, 'l') || is_alt(key, 'l') {
+            self.toggle_checkbox();
             return true;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -330,6 +335,21 @@ impl Scratchpad {
             self.state.execute(LineBreak(1));
         }
         true
+    }
+
+    fn toggle_checkbox(&mut self) {
+        let row = self.state.cursor.row;
+        let Some(line) = self.state.lines.get(RowIndex::new(row)) else {
+            return;
+        };
+        let (replacement, cursor_col) = toggle_checkbox_line(line, self.state.cursor.col);
+
+        capture_custom_edit(&mut self.state);
+        if let Some(line) = self.state.lines.get_mut(RowIndex::new(row)) {
+            *line = replacement;
+        }
+        self.state.cursor.col = cursor_col;
+        self.state.selection = None;
     }
 
     fn move_line(&mut self, direction: isize) {
@@ -436,6 +456,11 @@ fn is_ctrl(key: &KeyEvent, character: char) -> bool {
         && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
 }
 
+fn is_alt(key: &KeyEvent, character: char) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&character))
+}
+
 fn is_supported_key(key: KeyCode) -> bool {
     matches!(
         key,
@@ -462,6 +487,55 @@ struct ListPrefix {
     has_content: bool,
 }
 
+fn toggle_checkbox_line(line: &[char], cursor_col: usize) -> (Vec<char>, usize) {
+    let indent_end = line
+        .iter()
+        .position(|character| !matches!(character, ' ' | '\t'))
+        .unwrap_or(line.len());
+    let has_list_marker = line
+        .get(indent_end)
+        .is_some_and(|character| matches!(character, '-' | '*' | '+'))
+        && line
+            .get(indent_end + 1)
+            .is_some_and(|character| character.is_whitespace());
+    let checkbox_start = if has_list_marker {
+        indent_end + 2
+    } else {
+        indent_end
+    };
+
+    if let Some(checked) = checkbox_marker(line, checkbox_start) {
+        let mut replacement = line.to_vec();
+        replacement[checkbox_start + 1] = if checked { ' ' } else { 'x' };
+        return (replacement, cursor_col);
+    }
+
+    let marker: Vec<char> = if has_list_marker {
+        "[ ] ".chars().collect()
+    } else {
+        "- [ ] ".chars().collect()
+    };
+    let mut replacement = line.to_vec();
+    replacement.splice(checkbox_start..checkbox_start, marker.iter().copied());
+    let cursor_col = if cursor_col >= checkbox_start {
+        cursor_col + marker.len()
+    } else {
+        cursor_col
+    };
+    (replacement, cursor_col)
+}
+
+fn checkbox_marker(line: &[char], start: usize) -> Option<bool> {
+    if line.get(start) != Some(&'[') || line.get(start + 2) != Some(&']') {
+        return None;
+    }
+    match line.get(start + 1) {
+        Some(' ') => Some(false),
+        Some('x' | 'X') => Some(true),
+        _ => None,
+    }
+}
+
 fn list_prefix(line: &[char]) -> Option<ListPrefix> {
     let mut index = line
         .iter()
@@ -479,7 +553,16 @@ fn list_prefix(line: &[char]) -> Option<ListPrefix> {
     {
         let marker = line[index];
         index += 2;
-        format!("{indent}{marker} ")
+        if checkbox_marker(line, index).is_some()
+            && line
+                .get(index + 3)
+                .is_some_and(|character| character.is_whitespace())
+        {
+            index += 4;
+            format!("{indent}{marker} [ ] ")
+        } else {
+            format!("{indent}{marker} ")
+        }
     } else if line[index].is_ascii_digit() {
         let number_start = index;
         while line.get(index).is_some_and(char::is_ascii_digit) {
@@ -630,6 +713,61 @@ mod tests {
 
         assert_eq!(scratchpad.content(), "");
         assert_eq!(scratchpad.state.cursor, Index2::new(0, 0));
+    }
+
+    #[test]
+    fn checkbox_shortcuts_add_and_toggle_task_markers() {
+        let (_temp, mut scratchpad) = test_scratchpad("  write tests");
+        scratchpad.state.cursor = Index2::new(0, 8);
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "  - [ ] write tests");
+        assert_eq!(scratchpad.state.cursor.col, 14);
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('l'), KeyModifiers::ALT))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "  - [x] write tests");
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('L'), KeyModifiers::ALT))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "  - [ ] write tests");
+    }
+
+    #[test]
+    fn checkbox_shortcut_preserves_existing_list_marker_and_is_undoable() {
+        let (_temp, mut scratchpad) = test_scratchpad("* write tests");
+        scratchpad.state.cursor = Index2::new(0, 7);
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "* [ ] write tests");
+        assert_eq!(scratchpad.state.cursor.col, 11);
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('z'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "* write tests");
+    }
+
+    #[test]
+    fn enter_continues_and_ends_checkbox_lists() {
+        let (_temp, mut scratchpad) = test_scratchpad("- [x] first");
+        scratchpad.state.cursor = Index2::new(0, 11);
+
+        scratchpad
+            .handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "- [x] first\n- [ ] ");
+
+        scratchpad
+            .handle_event(key(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(scratchpad.content(), "- [x] first\n");
     }
 
     #[test]

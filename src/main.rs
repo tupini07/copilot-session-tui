@@ -162,6 +162,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new(sessions, user_config);
     app.mux_on_disk = mux_on_disk;
+    app.copilot_home = copilot_home;
 
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
@@ -348,6 +349,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     let mut terminal_title = String::new();
 
     loop {
+        app.collapse_stopped_terminals();
+
         let desired_title = match app.view {
             app::View::Attached(_) => app
                 .mux
@@ -371,12 +374,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 app.attached_terminal_visible(),
             )
         });
-        let terminal_height = if attached_layout.is_none() && app.list_terminal_visible() {
-            ui::terminal_panel_height(size.height.saturating_sub(3))
-        } else {
-            0
-        };
-        update_layout_metrics(app, size.height, terminal_height);
+        update_layout_metrics(app, size.height);
 
         if let Some(layout) = attached_layout {
             app.workspace_areas = app::WorkspaceAreas {
@@ -410,17 +408,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 }
             }
         } else {
-            if let Some(terminal_pane) = app.terminal.active_mut().filter(|_| terminal_height > 0) {
-                if let Err(error) = terminal_pane.resize(
-                    1,
-                    size.height.saturating_sub(terminal_height + 1),
-                    terminal_height.saturating_sub(2),
-                    size.width.saturating_sub(2),
-                ) {
-                    app.status_message = Some(format!("Terminal resize failed: {error}"));
-                }
-            }
-
             if app.mux.is_some() {
                 let rows = size.height.saturating_sub(1).max(1);
                 let cols = size.width.max(1);
@@ -492,13 +479,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     Ok(())
 }
 
-fn update_layout_metrics(app: &mut App, height: u16, terminal_height: u16) {
+fn update_layout_metrics(app: &mut App, height: u16) {
     // visible_rows must match the session_list take() count:
     // inner height = total height - 6 (title + borders + status)
     // each item = 2 lines normally, 1 line when project filter is active
     let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
-    app.visible_rows =
-        (height as usize).saturating_sub(6 + terminal_height as usize) / lines_per_item;
+    app.visible_rows = (height as usize).saturating_sub(6) / lines_per_item;
 
     // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
     let popup_percent = 80u16

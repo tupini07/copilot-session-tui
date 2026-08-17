@@ -312,6 +312,16 @@ mod tests {
         app.view = crate::app::View::Attached(id);
         app.scratchpad =
             Some(crate::scratchpad::Scratchpad::open("workspace-render-test").unwrap());
+        app.scratchpad
+            .as_mut()
+            .unwrap()
+            .handle_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('x'),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ))
+            .unwrap();
         app.scratchpad_owner = Some(id);
         app.scratchpad_open.insert(id);
         let directory = tempfile::tempdir().unwrap();
@@ -330,7 +340,9 @@ mod tests {
         let text = render(&mut app);
 
         assert!(text.contains("Scratchpad"), "got:\n{text}");
-        assert!(text.contains("Terminal [running]"), "got:\n{text}");
+        assert!(!text.contains("[modified]"), "got:\n{text}");
+        assert!(text.contains("Terminal"), "got:\n{text}");
+        assert!(!text.contains("Terminal ["), "got:\n{text}");
         assert!(text.contains("Starting Copilot"), "got:\n{text}");
         assert!(!text.contains("Alt+H"), "got:\n{text}");
         assert!(!text.contains("Save/close"), "got:\n{text}");
@@ -338,6 +350,7 @@ mod tests {
         app.workspace_help = Some(crate::app::WorkspaceHelp::Scratchpad);
         let text = render(&mut app);
         assert!(text.contains("Scratchpad Help"), "got:\n{text}");
+        assert!(text.contains("Ctrl/Alt+L"), "got:\n{text}");
         assert!(text.contains("Ctrl+Shift+K"), "got:\n{text}");
 
         app.terminal.shutdown();

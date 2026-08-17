@@ -42,11 +42,6 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
-    if app.terminal.is_focused() {
-        handle_terminal(app, event);
-        return Ok(());
-    }
-
     let Event::Key(key) = event else {
         return Ok(());
     };
@@ -210,7 +205,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('e') => open_scratchpad(app),
-        KeyCode::Char('t') => toggle_terminal(app),
+        KeyCode::Char('T') => open_favorite_tabs(app),
         KeyCode::Char(' ') => match app.toggle_selected_favorite() {
             Ok(Some(true)) => app.status_message = Some("Added to favorites".to_string()),
             Ok(Some(false)) => app.status_message = Some("Removed from favorites".to_string()),
@@ -272,6 +267,20 @@ fn handle_normal(app: &mut App, key: KeyCode) {
     }
 }
 
+fn open_favorite_tabs(app: &mut App) {
+    app.status_message = Some(
+        match crate::windows_terminal::launch_favorites(
+            &app.sessions,
+            &app.config,
+            &app.copilot_home,
+            None,
+        ) {
+            Ok(report) => report.status_message(),
+            Err(error) => format!("Cannot open favorite tabs: {error}"),
+        },
+    );
+}
+
 fn resume_selected(app: &mut App) {
     let Some(session) = app.selected_session() else {
         return;
@@ -309,80 +318,6 @@ fn project_title(cwd: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(cwd)
         .to_string()
-}
-
-fn toggle_terminal(app: &mut App) {
-    let Some(session) = app.selected_session() else {
-        return;
-    };
-    let session_id = session.id.clone();
-    let session_name = session.display_name().to_string();
-    let cwd = session.cwd.clone();
-
-    if app.list_terminal_visible() && app.terminal.active_session_id() == Some(session_id.as_str())
-    {
-        app.terminal.hide();
-        app.status_message = Some("Terminal hidden; shell is still running".to_string());
-        return;
-    }
-
-    match app
-        .terminal
-        .activate(session_id, session_name, cwd, &app.config.terminal)
-    {
-        Ok(crate::terminal_pane::Activation::Opened) => {
-            app.terminal_owner = None;
-            app.status_message = Some("Terminal opened in session directory".to_string())
-        }
-        Ok(crate::terminal_pane::Activation::Focused) => {
-            app.terminal_owner = None;
-            app.status_message = Some("Terminal focused".to_string())
-        }
-        Ok(crate::terminal_pane::Activation::Restarted) => {
-            app.terminal_owner = None;
-            app.status_message = Some("Terminal shell restarted".to_string())
-        }
-        Err(error) => {
-            app.status_message = Some(format!("Cannot open terminal: {error}"));
-        }
-    }
-}
-
-fn handle_terminal(app: &mut App, event: Event) {
-    if let Event::Key(key) = &event {
-        if key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Char('b')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            app.terminal.unfocus();
-            app.status_message = Some("Terminal remains open; press t to hide it".to_string());
-            return;
-        }
-
-        if key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Enter
-            && app
-                .terminal
-                .active()
-                .is_some_and(|terminal| !terminal.is_running())
-        {
-            match app.terminal.restart_active(&app.config.terminal) {
-                Ok(()) => {
-                    app.status_message = Some("Terminal shell restarted".to_string());
-                }
-                Err(error) => {
-                    app.status_message = Some(format!("Cannot restart terminal: {error}"));
-                }
-            }
-            return;
-        }
-    }
-
-    if let Some(terminal) = app.terminal.active_mut() {
-        if let Err(error) = terminal.handle_event(event) {
-            app.status_message = Some(format!("Terminal input failed: {error}"));
-        }
-    }
 }
 
 fn begin_delete(app: &mut App) {
@@ -1073,6 +1008,31 @@ pub fn maybe_load_details(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_shortcut_is_inert_on_session_list() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('t'));
+
+        assert!(app.terminal.active_session_id().is_none());
+        assert!(!app.terminal.is_visible());
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn favorite_tabs_shortcut_reports_its_result_in_the_status_bar() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('T'));
+
+        let message = app.status_message.unwrap();
+        if cfg!(windows) {
+            assert_eq!(message, "No favorite sessions configured");
+        } else {
+            assert!(message.contains("supported only on Windows"));
+        }
+    }
 
     #[test]
     fn cancelling_inherited_project_edits_does_not_create_overrides() {

@@ -1,7 +1,6 @@
-use crate::terminal_pane::{TerminalPane, TerminalStatus};
+use crate::terminal_pane::TerminalPane;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use tui_term::widget::{Cursor, PseudoTerminal};
@@ -12,18 +11,8 @@ pub fn draw(frame: &mut Frame, terminal: &TerminalPane, focused: bool, area: Rec
     } else {
         Color::DarkGray
     };
-    let status = terminal.status();
-    let status_color = match status {
-        TerminalStatus::Running => Color::Green,
-        TerminalStatus::Exited(_) => Color::Yellow,
-        TerminalStatus::Failed(_) => Color::Red,
-    };
-    let title = Line::styled(
-        format!(" Terminal [{status}] "),
-        Style::default().fg(status_color),
-    );
     let block = Block::default()
-        .title(title)
+        .title(" Terminal ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 

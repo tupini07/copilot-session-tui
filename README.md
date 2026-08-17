@@ -105,8 +105,8 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `Home` / `End` | Jump to first/last |
 | `Enter` | Resume selected session |
 | `Space` | Toggle selected session favorite |
+| `T` | Open inactive favorites in Windows Terminal tabs |
 | `e` | Open selected session scratchpad |
-| `t` | Toggle and focus the selected session terminal |
 | `n` | New session in the filtered project (or the current directory's project) |
 | `N` | New isolated worktree session with an editable branch name |
 | `r` | Rename session |
@@ -135,22 +135,24 @@ They are removed when their session is deleted.
 | `Ctrl+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+L` / `Alt+L` | Add or toggle a checkbox on the current line |
 | `Ctrl+Shift+K` | Delete current line |
 | `Alt+↑` / `Alt+↓` | Move current line |
 
-Pressing Enter after a bullet or numbered item continues the list. Pressing
-Enter on an empty list marker ends the list.
+Pressing Enter after a bullet, checkbox, or numbered item continues the list.
+Pressing Enter on an empty list marker ends the list.
 
 ### Session terminal
 
-Press `t` in the session list, or `prefix` `t` while attached, to open a shell
-in the selected session's exact working directory.
+Press `prefix` `t` while attached to open a shell in that session's exact
+working directory.
 Each session keeps its own shell process while CST is running, including when
 its panel is hidden. In mux mode the terminal remains below the conversation,
 and `prefix` `e` opens the scratchpad beside it. Repeating either command hides
 its focused panel; invoking it from another panel moves focus there. While the
 terminal is focused, all keys (including `Ctrl+C`) and paste events are sent to
-the shell. If the shell exits, press Enter while focused to restart it.
+the shell. If the shell exits, its panel closes automatically; opening it again
+starts a fresh shell.
 
 CST remembers which mux panels were open for each session and restores them the
 next time that session is attached, including after a restart. Restored terminal
