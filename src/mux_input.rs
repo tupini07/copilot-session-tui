@@ -209,8 +209,11 @@ fn handle_github_inspector_event(app: &mut App, event: Event) {
             }
         }
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => scroll_github_inspector(app, -3),
-            MouseEventKind::ScrollDown => scroll_github_inspector(app, 3),
+            MouseEventKind::ScrollUp => scroll_github_at(app, mouse.column, mouse.row, -3),
+            MouseEventKind::ScrollDown => scroll_github_at(app, mouse.column, mouse.row, 3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                click_github_inspector(app, mouse.column, mouse.row)
+            }
             _ => {}
         },
         Event::Key(key) if key.kind == KeyEventKind::Press => handle_github_inspector_key(app, key),
@@ -261,6 +264,12 @@ fn handle_github_inspector_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
+    let files_tab = app.github_inspector.as_ref().is_some_and(|inspector| {
+        inspector.tab == crate::app::GithubTab::Files
+            && inspector
+                .ready_item()
+                .is_some_and(|item| item.is_pull_request())
+    });
     match key.code {
         KeyCode::Tab
             if key
@@ -282,15 +291,13 @@ fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            let diff_open = app
+            let in_diff = app
                 .github_inspector
                 .as_ref()
-                .is_some_and(|inspector| inspector.diff_open);
-            if diff_open {
+                .is_some_and(|inspector| inspector.files_pane == crate::app::FilesPane::Diff);
+            if files_tab && in_diff {
                 if let Some(inspector) = app.github_inspector.as_mut() {
-                    inspector.diff_open = false;
-                    inspector.diff_scroll = 0;
-                    inspector.diff_horizontal = 0;
+                    inspector.files_pane = crate::app::FilesPane::Tree;
                 }
             } else {
                 app.close_github_inspector();
@@ -302,92 +309,283 @@ fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => scroll_github_inspector(app, 10),
         KeyCode::Home => set_github_scroll_boundary(app, false),
         KeyCode::End => set_github_scroll_boundary(app, true),
+        KeyCode::Left if files_tab => collapse_or_ascend_github_tree(app),
+        KeyCode::Right if files_tab => expand_or_enter_github_tree(app),
         KeyCode::Left => scroll_github_diff_horizontal(app, -4),
         KeyCode::Right => scroll_github_diff_horizontal(app, 4),
-        KeyCode::Enter => {
-            let can_open = app.github_inspector.as_ref().is_some_and(|inspector| {
-                inspector.tab == crate::app::GithubTab::Files
-                    && !inspector.diff_open
-                    && inspector
-                        .ready_item()
-                        .is_some_and(|item| !item.files().is_empty())
-            });
-            if can_open {
-                if let Some(inspector) = app.github_inspector.as_mut() {
-                    inspector.diff_open = true;
-                    inspector.diff_scroll = 0;
-                    inspector.diff_horizontal = 0;
-                }
-            }
-        }
+        KeyCode::Enter if files_tab => activate_github_tree_row(app),
         _ => {}
     }
 }
 
-fn scroll_github_inspector(app: &mut App, amount: isize) {
+/// Scroll whichever pane the pointer is over, so the wheel works without
+/// changing focus first.
+fn scroll_github_at(app: &mut App, column: u16, row: u16, amount: isize) {
+    let target = app.github_inspector.as_ref().and_then(|inspector| {
+        if inspector.tab != crate::app::GithubTab::Files {
+            return None;
+        }
+        if contains(inspector.diff_area, column, row) {
+            Some(crate::app::FilesPane::Diff)
+        } else if contains(inspector.tree_area, column, row) {
+            Some(crate::app::FilesPane::Tree)
+        } else {
+            None
+        }
+    });
+
+    match target {
+        Some(crate::app::FilesPane::Diff) => scroll_github_diff(app, amount),
+        // The tree scrolls under the pointer without dragging the selection along.
+        Some(crate::app::FilesPane::Tree) => scroll_github_tree_view(app, amount),
+        None => scroll_github_inspector(app, amount),
+    }
+}
+
+fn scroll_github_tree_view(app: &mut App, amount: isize) {
+    let row_count = github_tree_rows(app).len();
     let Some(inspector) = app.github_inspector.as_mut() else {
         return;
     };
-    if inspector.diff_open {
-        let next = if amount < 0 {
-            inspector.diff_scroll.saturating_sub(amount.unsigned_abs())
-        } else {
-            inspector.diff_scroll.saturating_add(amount as usize)
-        };
-        inspector.diff_scroll = next.min(inspector.max_diff_scroll);
+    let max_offset = row_count.saturating_sub(inspector.visible_tree_rows.max(1));
+    let next = if amount < 0 {
+        inspector.tree_offset.saturating_sub(amount.unsigned_abs())
+    } else {
+        inspector.tree_offset.saturating_add(amount as usize)
+    };
+    inspector.tree_offset = next.min(max_offset);
+}
+
+/// Clicking a pane focuses it, and clicking a tree row selects that row.
+fn click_github_inspector(app: &mut App, column: u16, row: u16) {
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    if inspector.tab != crate::app::GithubTab::Files {
+        return;
+    }
+    if contains(inspector.diff_area, column, row) {
+        if let Some(inspector) = app.github_inspector.as_mut() {
+            inspector.files_pane = crate::app::FilesPane::Diff;
+        }
+        return;
+    }
+    if !contains(inspector.tree_area, column, row) {
         return;
     }
 
-    if inspector.tab == crate::app::GithubTab::Files {
-        let count = inspector
-            .ready_item()
-            .map(|item| item.files().len())
-            .unwrap_or(0);
-        if count == 0 {
+    let clicked = inspector.tree_offset + (row - inspector.tree_area.y) as usize;
+    if let Some(inspector) = app.github_inspector.as_mut() {
+        inspector.files_pane = crate::app::FilesPane::Tree;
+    }
+    select_github_tree_row(app, clicked);
+}
+
+/// Rows of the changed-file tree as currently displayed.
+fn github_tree_rows(app: &App) -> Vec<crate::ui::file_tree::TreeRow> {
+    app.github_inspector
+        .as_ref()
+        .and_then(|inspector| {
+            inspector.ready_item().map(|item| {
+                crate::ui::file_tree::build_rows(item.files(), &inspector.collapsed_dirs)
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Move the tree cursor, keeping the diff pane showing the selected file.
+fn select_github_tree_row(app: &mut App, row: usize) {
+    let rows = github_tree_rows(app);
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let row = row.min(rows.len() - 1);
+    inspector.tree_selected = row;
+    if let Some(index) = rows[row].file_index() {
+        if inspector.selected_file != index {
+            inspector.selected_file = index;
+            inspector.diff_scroll = 0;
+            inspector.diff_horizontal = 0;
+        }
+    }
+}
+
+fn collapse_or_ascend_github_tree(app: &mut App) {
+    let in_diff = app
+        .github_inspector
+        .as_ref()
+        .is_some_and(|inspector| inspector.files_pane == crate::app::FilesPane::Diff);
+    if in_diff {
+        scroll_github_diff_horizontal(app, -4);
+        return;
+    }
+
+    let rows = github_tree_rows(app);
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    let selected = inspector.tree_selected;
+    let Some(row) = rows.get(selected) else {
+        return;
+    };
+
+    // An open directory folds; anything else steps out to its parent.
+    if let crate::ui::file_tree::RowKind::Directory { path, expanded, .. } = &row.kind {
+        if *expanded {
+            let path = path.clone();
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.collapsed_dirs.insert(path);
+            }
             return;
         }
-        let next = if amount < 0 {
-            inspector
-                .selected_file
-                .saturating_sub(amount.unsigned_abs())
+    }
+    if let Some(parent) = crate::ui::file_tree::parent_row(&rows, selected) {
+        select_github_tree_row(app, parent);
+    }
+}
+
+fn expand_or_enter_github_tree(app: &mut App) {
+    let in_diff = app
+        .github_inspector
+        .as_ref()
+        .is_some_and(|inspector| inspector.files_pane == crate::app::FilesPane::Diff);
+    if in_diff {
+        scroll_github_diff_horizontal(app, 4);
+        return;
+    }
+
+    let rows = github_tree_rows(app);
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    let selected = inspector.tree_selected;
+    let Some(row) = rows.get(selected) else {
+        return;
+    };
+
+    match &row.kind {
+        crate::ui::file_tree::RowKind::Directory { path, expanded, .. } => {
+            if *expanded {
+                select_github_tree_row(app, selected + 1);
+            } else {
+                let path = path.clone();
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.collapsed_dirs.remove(&path);
+                }
+            }
+        }
+        crate::ui::file_tree::RowKind::File { .. } => {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.files_pane = crate::app::FilesPane::Diff;
+            }
+        }
+    }
+}
+
+/// Enter folds a directory or moves focus into the diff.
+fn activate_github_tree_row(app: &mut App) {
+    let in_diff = app
+        .github_inspector
+        .as_ref()
+        .is_some_and(|inspector| inspector.files_pane == crate::app::FilesPane::Diff);
+    if in_diff {
+        return;
+    }
+
+    let rows = github_tree_rows(app);
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    let Some(row) = rows.get(inspector.tree_selected) else {
+        return;
+    };
+    match &row.kind {
+        crate::ui::file_tree::RowKind::Directory { path, expanded, .. } => {
+            let (path, expanded) = (path.clone(), *expanded);
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                if expanded {
+                    inspector.collapsed_dirs.insert(path);
+                } else {
+                    inspector.collapsed_dirs.remove(&path);
+                }
+            }
+        }
+        crate::ui::file_tree::RowKind::File { .. } => {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.files_pane = crate::app::FilesPane::Diff;
+            }
+        }
+    }
+}
+
+fn scroll_github_inspector(app: &mut App, amount: isize) {
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    let files_tab = inspector.tab == crate::app::GithubTab::Files
+        && inspector
+            .ready_item()
+            .is_some_and(|item| item.is_pull_request());
+
+    if files_tab {
+        if inspector.files_pane == crate::app::FilesPane::Diff {
+            scroll_github_diff(app, amount);
         } else {
-            inspector.selected_file.saturating_add(amount as usize)
-        };
-        inspector.selected_file = next.min(count - 1);
-        if inspector.selected_file < inspector.file_list_offset {
-            inspector.file_list_offset = inspector.selected_file;
-        } else if inspector.visible_files > 0
-            && inspector.selected_file >= inspector.file_list_offset + inspector.visible_files
-        {
-            inspector.file_list_offset =
-                inspector.selected_file - inspector.visible_files.saturating_sub(1);
+            let selected = inspector.tree_selected;
+            let next = if amount < 0 {
+                selected.saturating_sub(amount.unsigned_abs())
+            } else {
+                selected.saturating_add(amount as usize)
+            };
+            select_github_tree_row(app, next);
         }
         return;
     }
 
-    inspector.scroll_active_by(amount);
+    if let Some(inspector) = app.github_inspector.as_mut() {
+        inspector.scroll_active_by(amount);
+    }
+}
+
+fn scroll_github_diff(app: &mut App, amount: isize) {
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    let next = if amount < 0 {
+        inspector.diff_scroll.saturating_sub(amount.unsigned_abs())
+    } else {
+        inspector.diff_scroll.saturating_add(amount as usize)
+    };
+    inspector.diff_scroll = next.min(inspector.max_diff_scroll);
 }
 
 fn set_github_scroll_boundary(app: &mut App, end: bool) {
-    let Some(inspector) = app.github_inspector.as_mut() else {
+    let Some(inspector) = app.github_inspector.as_ref() else {
         return;
     };
-    if inspector.diff_open {
-        inspector.diff_scroll = if end { inspector.max_diff_scroll } else { 0 };
-    } else if inspector.tab == crate::app::GithubTab::Files {
-        let count = inspector
+    let files_tab = inspector.tab == crate::app::GithubTab::Files
+        && inspector
             .ready_item()
-            .map(|item| item.files().len())
-            .unwrap_or(0);
-        if count > 0 {
-            inspector.selected_file = if end { count - 1 } else { 0 };
-            inspector.file_list_offset = if end {
-                count.saturating_sub(inspector.visible_files.max(1))
-            } else {
-                0
-            };
+            .is_some_and(|item| item.is_pull_request());
+
+    if files_tab {
+        if inspector.files_pane == crate::app::FilesPane::Diff {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.diff_scroll = if end { inspector.max_diff_scroll } else { 0 };
+            }
+        } else {
+            let rows = github_tree_rows(app);
+            if !rows.is_empty() {
+                select_github_tree_row(app, if end { rows.len() - 1 } else { 0 });
+            }
         }
-    } else {
+        return;
+    }
+
+    if let Some(inspector) = app.github_inspector.as_mut() {
         inspector.set_active_scroll(if end { inspector.max_scroll } else { 0 });
     }
 }
@@ -396,9 +594,6 @@ fn scroll_github_diff_horizontal(app: &mut App, amount: isize) {
     let Some(inspector) = app.github_inspector.as_mut() else {
         return;
     };
-    if !inspector.diff_open {
-        return;
-    }
     let next = if amount < 0 {
         inspector
             .diff_horizontal
@@ -976,6 +1171,190 @@ mod tests {
         );
         assert!(app.github_inspector.is_none());
         let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// A pull request whose tree is `src/{ui/pane.rs, lib.rs}`, so there is a
+    /// nested directory to fold and two files to move between.
+    fn pull_request_app() -> App {
+        use crate::github::{Author, ChangedFile, ItemCommon, Label, PullRequest, RepositoryRef};
+
+        let changed = |path: &str| ChangedFile {
+            path: path.to_string(),
+            status: "modified".to_string(),
+            additions: 1,
+            deletions: 1,
+            changes: 2,
+            patch: Some(format!("@@ -1 +1 @@\n-old {path}\n+new {path}")),
+        };
+        let item = crate::github::GithubItem::PullRequest(PullRequest {
+            common: ItemCommon {
+                repository: RepositoryRef {
+                    host: "github.com".to_string(),
+                    owner: "octo".to_string(),
+                    name: "widgets".to_string(),
+                },
+                number: 7,
+                title: "Tree navigation".to_string(),
+                state: "open".to_string(),
+                author: Author {
+                    login: "monalisa".to_string(),
+                },
+                labels: Vec::<Label>::new(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-02T00:00:00Z".to_string(),
+                url: "https://github.com/octo/widgets/pull/7".to_string(),
+                body: String::new(),
+            },
+            draft: false,
+            merged: false,
+            mergeable_state: None,
+            base_ref: "main".to_string(),
+            head_ref: "feature".to_string(),
+            additions: 2,
+            deletions: 2,
+            changed_files: 2,
+            discussion: Vec::new(),
+            files: vec![changed("src/ui/pane.rs"), changed("src/lib.rs")],
+        });
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut inspector = crate::app::GithubInspector::number_prompt();
+        inspector.screen = crate::app::GithubInspectorScreen::Ready(item);
+        inspector.tab = crate::app::GithubTab::Files;
+        inspector.select_first_tree_file();
+        app.github_inspector = Some(inspector);
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_github_inspector_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn tree_labels(app: &App) -> Vec<String> {
+        github_tree_rows(app)
+            .iter()
+            .map(|row| row.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_files_tree_opens_on_the_first_file_not_a_directory() {
+        let app = pull_request_app();
+        let inspector = app.github_inspector.as_ref().unwrap();
+
+        // rows: [src, ui, pane.rs, lib.rs] — the cursor skips to `pane.rs`.
+        assert_eq!(tree_labels(&app), vec!["src", "ui", "pane.rs", "lib.rs"]);
+        assert_eq!(inspector.tree_selected, 2);
+        assert_eq!(inspector.selected_file, 0);
+    }
+
+    #[test]
+    fn moving_through_the_tree_updates_the_diff_without_pressing_enter() {
+        let mut app = pull_request_app();
+
+        press(&mut app, KeyCode::Down);
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.tree_selected, 3);
+        assert_eq!(inspector.selected_file, 1, "the diff follows the cursor");
+        assert_eq!(inspector.files_pane, crate::app::FilesPane::Tree);
+    }
+
+    #[test]
+    fn left_folds_a_directory_and_right_unfolds_it() {
+        let mut app = pull_request_app();
+
+        // From `pane.rs`, Left steps out to `ui`, then Left folds it.
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.github_inspector.as_ref().unwrap().tree_selected, 1);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(tree_labels(&app), vec!["src", "ui", "lib.rs"]);
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(tree_labels(&app), vec!["src", "ui", "pane.rs", "lib.rs"]);
+    }
+
+    #[test]
+    fn enter_moves_focus_to_the_diff_and_esc_brings_it_back() {
+        let mut app = pull_request_app();
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().files_pane,
+            crate::app::FilesPane::Diff
+        );
+
+        // Arrows now scroll the patch instead of moving the tree cursor.
+        press(&mut app, KeyCode::Down);
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.tree_selected, 2, "the tree cursor stays put");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().files_pane,
+            crate::app::FilesPane::Tree,
+            "Esc returns to the tree before closing the inspector"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.github_inspector.is_none());
+    }
+
+    #[test]
+    fn enter_on_a_directory_folds_it_instead_of_focusing_the_diff() {
+        let mut app = pull_request_app();
+        app.github_inspector.as_mut().unwrap().tree_selected = 0;
+
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(tree_labels(&app), vec!["src"]);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().files_pane,
+            crate::app::FilesPane::Tree
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_whichever_pane_it_is_over() {
+        let mut app = pull_request_app();
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.tree_area = Rect::new(0, 4, 30, 10);
+            inspector.diff_area = Rect::new(31, 4, 60, 10);
+            inspector.visible_tree_rows = 2;
+            // Normally set while drawing; the wheel clamps against it.
+            inspector.max_diff_scroll = 10;
+        }
+
+        // Over the diff: the patch scrolls and the tree cursor is untouched.
+        scroll_github_at(&mut app, 40, 6, 3);
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.diff_scroll, 3);
+        assert_eq!(inspector.tree_selected, 2);
+
+        // Over the tree: the view scrolls without dragging the selection.
+        scroll_github_at(&mut app, 5, 6, 3);
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.tree_offset, 2, "clamped to the last full page");
+        assert_eq!(inspector.tree_selected, 2);
+    }
+
+    #[test]
+    fn clicking_a_tree_row_selects_it_and_focuses_the_tree() {
+        let mut app = pull_request_app();
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.tree_area = Rect::new(0, 4, 30, 10);
+            inspector.diff_area = Rect::new(31, 4, 60, 10);
+            inspector.files_pane = crate::app::FilesPane::Diff;
+        }
+
+        click_github_inspector(&mut app, 5, 7);
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.files_pane, crate::app::FilesPane::Tree);
+        assert_eq!(inspector.tree_selected, 3, "row 3 of the tree");
+        assert_eq!(inspector.selected_file, 1);
     }
 
     #[test]

@@ -121,6 +121,12 @@ impl GithubTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesPane {
+    Tree,
+    Diff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GithubInspectorScreen {
     NumberPrompt,
@@ -138,9 +144,17 @@ pub struct GithubInspector {
     pub scroll_offsets: [usize; 3],
     pub max_scroll: usize,
     pub selected_file: usize,
-    pub file_list_offset: usize,
-    pub visible_files: usize,
-    pub diff_open: bool,
+    /// Which half of the Files tab receives keys.
+    pub files_pane: FilesPane,
+    /// Selected row of the flattened changed-file tree.
+    pub tree_selected: usize,
+    pub tree_offset: usize,
+    pub visible_tree_rows: usize,
+    /// Directories the user collapsed; everything else stays expanded.
+    pub collapsed_dirs: std::collections::BTreeSet<String>,
+    /// Pane rectangles from the last draw, so the mouse can target them.
+    pub tree_area: Rect,
+    pub diff_area: Rect,
     pub diff_scroll: usize,
     pub diff_horizontal: usize,
     pub max_diff_scroll: usize,
@@ -160,9 +174,13 @@ impl GithubInspector {
             scroll_offsets: [0; 3],
             max_scroll: 0,
             selected_file: 0,
-            file_list_offset: 0,
-            visible_files: 0,
-            diff_open: false,
+            files_pane: FilesPane::Tree,
+            tree_selected: 0,
+            tree_offset: 0,
+            visible_tree_rows: 0,
+            collapsed_dirs: std::collections::BTreeSet::new(),
+            tree_area: Rect::default(),
+            diff_area: Rect::default(),
             diff_scroll: 0,
             diff_horizontal: 0,
             max_diff_scroll: 0,
@@ -205,7 +223,7 @@ impl GithubInspector {
             _ => GithubTab::Files,
         };
         self.max_scroll = 0;
-        self.diff_open = false;
+        self.files_pane = FilesPane::Tree;
     }
 
     pub fn active_scroll(&self) -> usize {
@@ -226,14 +244,31 @@ impl GithubInspector {
         self.set_active_scroll(next);
     }
 
+    /// Put the tree cursor on the first file so the diff pane has something to
+    /// show as soon as a pull request opens.
+    pub fn select_first_tree_file(&mut self) {
+        let Some(item) = self.ready_item() else {
+            return;
+        };
+        let rows = crate::ui::file_tree::build_rows(item.files(), &self.collapsed_dirs);
+        if let Some(row) = rows.iter().position(|row| row.file_index().is_some()) {
+            self.tree_selected = row;
+            self.selected_file = rows[row].file_index().unwrap_or(0);
+        }
+    }
+
     fn reset_navigation(&mut self) {
         self.tab = GithubTab::Overview;
         self.scroll_offsets = [0; 3];
         self.max_scroll = 0;
         self.selected_file = 0;
-        self.file_list_offset = 0;
-        self.visible_files = 0;
-        self.diff_open = false;
+        self.files_pane = FilesPane::Tree;
+        self.tree_selected = 0;
+        self.tree_offset = 0;
+        self.visible_tree_rows = 0;
+        self.collapsed_dirs.clear();
+        self.tree_area = Rect::default();
+        self.diff_area = Rect::default();
         self.diff_scroll = 0;
         self.diff_horizontal = 0;
         self.max_diff_scroll = 0;
@@ -601,6 +636,7 @@ impl App {
                     Ok(item) => GithubInspectorScreen::Ready(item),
                     Err(error) => GithubInspectorScreen::Error(error.to_string()),
                 };
+                inspector.select_first_tree_file();
                 inspector.reset_navigation();
             }
             Err(mpsc::TryRecvError::Disconnected) => {

@@ -1,6 +1,7 @@
-use crate::app::{App, GithubInspector, GithubInspectorScreen, GithubTab};
+use crate::app::{App, FilesPane, GithubInspector, GithubInspectorScreen, GithubTab};
 use crate::github::{DiscussionKind, GithubItem};
 use crate::text;
+use crate::ui::file_tree;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -161,76 +162,321 @@ fn draw_ready(f: &mut Frame, app: &mut App) {
     draw_header(f, item, sections[0]);
     draw_tabs(f, inspector, item, sections[1]);
 
+    if inspector.tab == GithubTab::Files && item.is_pull_request() {
+        draw_files_tab(f, app, sections[2]);
+        let inspector = app.github_inspector.as_ref().expect("inspector is active");
+        draw_footer(f, inspector, sections[3]);
+        return;
+    }
+
     let content = sections[2];
     let viewport_width = content.width.saturating_sub(1) as usize;
     let viewport_height = content.height as usize;
-    let (lines, _offset, horizontal, is_diff) = build_active_lines(inspector, item, viewport_width);
+    let lines = build_active_lines(inspector, item, viewport_width);
     let line_count = lines.len();
     let max_scroll = line_count.saturating_sub(viewport_height);
-    let max_horizontal = if is_diff {
-        lines
-            .iter()
-            .map(line_width)
-            .max()
-            .unwrap_or_default()
-            .saturating_sub(viewport_width)
-    } else {
-        0
-    };
 
     if let Some(inspector) = app.github_inspector.as_mut() {
-        if inspector.diff_open {
-            inspector.max_diff_scroll = max_scroll;
-            inspector.max_diff_horizontal = max_horizontal;
-            inspector.diff_scroll = inspector.diff_scroll.min(max_scroll);
-            inspector.diff_horizontal = inspector.diff_horizontal.min(max_horizontal);
-        } else {
-            inspector.max_scroll = max_scroll;
-            let tab = inspector.tab.index();
-            inspector.scroll_offsets[tab] = inspector.scroll_offsets[tab].min(max_scroll);
-            if inspector.tab == GithubTab::Files {
-                let file_count = inspector
-                    .ready_item()
-                    .map(|item| item.files().len())
-                    .unwrap_or(0);
-                inspector.visible_files = viewport_height;
-                inspector.selected_file = inspector.selected_file.min(file_count.saturating_sub(1));
-                let max_offset = file_count.saturating_sub(viewport_height.max(1));
-                inspector.file_list_offset = inspector.file_list_offset.min(max_offset);
-            }
-        }
+        inspector.max_scroll = max_scroll;
+        let tab = inspector.tab.index();
+        inspector.scroll_offsets[tab] = inspector.scroll_offsets[tab].min(max_scroll);
     }
 
     let actual_offset = app
         .github_inspector
         .as_ref()
-        .map(|inspector| {
-            if is_diff {
-                inspector.diff_scroll
-            } else if inspector.tab == GithubTab::Files {
-                inspector.file_list_offset
-            } else {
-                inspector.active_scroll()
-            }
-        })
+        .map(|inspector| inspector.active_scroll())
         .unwrap_or_default();
-    let actual_horizontal = if is_diff {
-        app.github_inspector
-            .as_ref()
-            .map(|inspector| inspector.diff_horizontal)
-            .unwrap_or_default()
-    } else {
-        horizontal
-    };
-    let paragraph = Paragraph::new(lines).scroll((
-        actual_offset.min(u16::MAX as usize) as u16,
-        actual_horizontal.min(u16::MAX as usize) as u16,
-    ));
+    let paragraph = Paragraph::new(lines).scroll((actual_offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(paragraph, content);
     draw_scrollbar(f, content, line_count, viewport_height, actual_offset);
 
     let inspector = app.github_inspector.as_ref().expect("inspector is active");
     draw_footer(f, inspector, sections[3]);
+}
+
+/// Minimum content width before the changed-file tree and the diff can usefully
+/// share a row; below it only the focused pane is shown.
+const SPLIT_MIN_WIDTH: u16 = 76;
+const TREE_MIN_WIDTH: u16 = 26;
+const TREE_MAX_WIDTH: u16 = 52;
+
+/// Draw the tree of changed files beside the selected file's diff.
+fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    let Some(item) = inspector.ready_item() else {
+        return;
+    };
+    let rows = file_tree::build_rows(item.files(), &inspector.collapsed_dirs);
+    let split = area.width >= SPLIT_MIN_WIDTH && !rows.is_empty();
+    let focus = inspector.files_pane;
+
+    let (tree_area, diff_area) = if split {
+        let tree_width = (area.width / 3).clamp(TREE_MIN_WIDTH, TREE_MAX_WIDTH);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(tree_width), Constraint::Min(1)])
+            .split(area);
+        (chunks[0], chunks[1])
+    } else if focus == FilesPane::Diff {
+        (Rect::default(), area)
+    } else {
+        (area, Rect::default())
+    };
+
+    // A divider doubles as a focus cue, so it is obvious which pane takes keys.
+    let tree_body = if split {
+        let divider = Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(Style::default().fg(if focus == FilesPane::Tree {
+                Color::Magenta
+            } else {
+                Color::DarkGray
+            }));
+        let inner = divider.inner(tree_area);
+        f.render_widget(divider, tree_area);
+        inner
+    } else {
+        tree_area
+    };
+
+    let tree_lines = tree_row_lines(
+        &rows,
+        item.files(),
+        inspector,
+        tree_body.width as usize,
+        focus,
+    );
+    let diff_width = diff_area.width.saturating_sub(1) as usize;
+    let diff_content = diff_lines_for_selection(inspector, item, &rows, diff_width);
+    let diff_height = diff_area.height as usize;
+    let max_diff_scroll = diff_content.len().saturating_sub(diff_height);
+    let max_diff_horizontal = diff_content
+        .iter()
+        .map(line_width)
+        .max()
+        .unwrap_or_default()
+        .saturating_sub(diff_width);
+
+    if let Some(inspector) = app.github_inspector.as_mut() {
+        inspector.tree_area = tree_body;
+        inspector.diff_area = diff_area;
+        inspector.visible_tree_rows = tree_body.height as usize;
+        inspector.max_diff_scroll = max_diff_scroll;
+        inspector.max_diff_horizontal = max_diff_horizontal;
+        inspector.diff_scroll = inspector.diff_scroll.min(max_diff_scroll);
+        inspector.diff_horizontal = inspector.diff_horizontal.min(max_diff_horizontal);
+        inspector.tree_selected = inspector.tree_selected.min(rows.len().saturating_sub(1));
+        clamp_tree_offset(inspector, rows.len());
+    }
+
+    let inspector = app.github_inspector.as_ref().expect("inspector is active");
+    if tree_body.width > 0 && tree_body.height > 0 {
+        f.render_widget(
+            Paragraph::new(tree_lines)
+                .scroll((inspector.tree_offset.min(u16::MAX as usize) as u16, 0)),
+            tree_body,
+        );
+        draw_scrollbar(
+            f,
+            tree_body,
+            rows.len(),
+            tree_body.height as usize,
+            inspector.tree_offset,
+        );
+    }
+    if diff_area.width > 0 && diff_area.height > 0 {
+        // Inset the text so it does not touch the divider; clicks on the gutter
+        // still land in `diff_area` and focus the pane.
+        let diff_body = Rect {
+            x: diff_area.x + 1,
+            width: diff_area.width.saturating_sub(1),
+            ..diff_area
+        };
+        f.render_widget(
+            Paragraph::new(diff_content).scroll((
+                inspector.diff_scroll.min(u16::MAX as usize) as u16,
+                inspector.diff_horizontal.min(u16::MAX as usize) as u16,
+            )),
+            diff_body,
+        );
+        draw_scrollbar(
+            f,
+            diff_area,
+            max_diff_scroll + diff_height,
+            diff_height,
+            inspector.diff_scroll,
+        );
+    }
+}
+
+/// Keep the selected row on screen.
+fn clamp_tree_offset(inspector: &mut GithubInspector, row_count: usize) {
+    let height = inspector.visible_tree_rows;
+    if height == 0 {
+        return;
+    }
+    let max_offset = row_count.saturating_sub(height);
+    if inspector.tree_selected < inspector.tree_offset {
+        inspector.tree_offset = inspector.tree_selected;
+    } else if inspector.tree_selected >= inspector.tree_offset + height {
+        inspector.tree_offset = inspector.tree_selected + 1 - height;
+    }
+    inspector.tree_offset = inspector.tree_offset.min(max_offset);
+}
+
+fn tree_row_lines(
+    rows: &[file_tree::TreeRow],
+    files: &[crate::github::ChangedFile],
+    inspector: &GithubInspector,
+    width: usize,
+    focus: FilesPane,
+) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return vec![Line::from(Span::styled(
+            " No changed files",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            tree_row_line(row, files, index == inspector.tree_selected, focus, width)
+        })
+        .collect()
+}
+
+/// Single-letter status marker, so the path keeps as much width as possible.
+fn status_marker(status: &str) -> (&'static str, Color) {
+    match status {
+        "added" => ("A", Color::Green),
+        "removed" => ("D", Color::Red),
+        "modified" => ("M", Color::Yellow),
+        "renamed" => ("R", Color::Magenta),
+        _ => ("·", Color::DarkGray),
+    }
+}
+
+fn tree_row_line(
+    row: &file_tree::TreeRow,
+    files: &[crate::github::ChangedFile],
+    selected: bool,
+    focus: FilesPane,
+    width: usize,
+) -> Line<'static> {
+    let indent = " ".repeat(row.depth * 2 + 1);
+    let (marker, marker_color, name_color, stats) = match &row.kind {
+        file_tree::RowKind::Directory {
+            expanded,
+            additions,
+            deletions,
+            files: count,
+            ..
+        } => (
+            if *expanded { "▾" } else { "▸" }.to_string(),
+            Color::Blue,
+            Color::Blue,
+            format!("{count} · +{additions} -{deletions}"),
+        ),
+        file_tree::RowKind::File { index } => {
+            let file = files.get(*index);
+            let (marker, color) = file
+                .map(|file| status_marker(&file.status))
+                .unwrap_or(("·", Color::DarkGray));
+            let stats = file
+                .map(|file| format!("+{} -{}", file.additions, file.deletions))
+                .unwrap_or_default();
+            (marker.to_string(), color, Color::White, stats)
+        }
+    };
+
+    // Reserve the stats column, then fit the name into whatever is left.
+    let prefix = format!("{indent}{marker} ");
+    let prefix_width = text::display_width(&prefix);
+    let stats_width = if stats.is_empty() { 0 } else { stats.len() + 1 };
+    let name_budget = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(stats_width)
+        .max(1);
+    let name = text::truncate_to_width(&row.label, name_budget);
+    let padding = width
+        .saturating_sub(prefix_width + text::display_width(&name) + stats.len())
+        .max(1);
+
+    let (base, name_style, stats_style) = if selected {
+        // The unfocused pane keeps a dimmer cursor so focus is never ambiguous.
+        let highlight = if focus == FilesPane::Tree {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White).bg(Color::Rgb(60, 60, 80))
+        }
+        .add_modifier(Modifier::BOLD);
+        (highlight, highlight, highlight)
+    } else {
+        (
+            Style::default().fg(marker_color),
+            Style::default().fg(name_color),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+
+    let mut spans = vec![Span::styled(prefix, base), Span::styled(name, name_style)];
+    if !stats.is_empty() {
+        spans.push(Span::styled(" ".repeat(padding), stats_style));
+        spans.push(Span::styled(stats, stats_style));
+    }
+    Line::from(spans)
+}
+
+/// Diff for the selected row: a file's patch, or a summary for a directory.
+fn diff_lines_for_selection(
+    inspector: &GithubInspector,
+    item: &GithubItem,
+    rows: &[file_tree::TreeRow],
+    width: usize,
+) -> Vec<Line<'static>> {
+    match rows.get(inspector.tree_selected).map(|row| &row.kind) {
+        Some(file_tree::RowKind::Directory {
+            path,
+            files,
+            additions,
+            deletions,
+            ..
+        }) => vec![
+            Line::from(Span::styled(
+                format!(" {path}/ "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            summary_line(
+                "Directory",
+                format!("{files} changed files · +{additions} -{deletions}"),
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Select a file to see its diff.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        _ => diff_lines(inspector, item, width),
+    }
+}
+
+/// Like `field`, but flush left: the diff pane already has a one-column gutter.
+fn summary_line(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label}: "),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(value, Style::default().fg(Color::White)),
+    ])
 }
 
 fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect) {
@@ -311,34 +557,15 @@ fn build_active_lines(
     inspector: &GithubInspector,
     item: &GithubItem,
     width: usize,
-) -> (Vec<Line<'static>>, usize, usize, bool) {
-    if inspector.diff_open {
-        return (
-            diff_lines(inspector, item),
-            inspector.diff_scroll,
-            inspector.diff_horizontal,
-            true,
-        );
-    }
+) -> Vec<Line<'static>> {
     match inspector.tab {
-        GithubTab::Overview => (
-            overview_lines(item, width),
-            inspector.active_scroll(),
-            0,
-            false,
-        ),
-        GithubTab::Comments => (
-            comment_lines(item, width),
-            inspector.active_scroll(),
-            0,
-            false,
-        ),
-        GithubTab::Files => (
-            file_lines(inspector, item),
-            inspector.file_list_offset,
-            0,
-            false,
-        ),
+        GithubTab::Overview => overview_lines(item, width),
+        GithubTab::Comments => comment_lines(item, width),
+        // The Files tab draws its own split panes; an item without files has none.
+        GithubTab::Files => vec![Line::from(Span::styled(
+            " No changed files",
+            Style::default().fg(Color::DarkGray),
+        ))],
     }
 }
 
@@ -452,50 +679,22 @@ fn comment_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn file_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'static>> {
-    let files = item.files();
-    if files.is_empty() {
+fn diff_lines(inspector: &GithubInspector, item: &GithubItem, width: usize) -> Vec<Line<'static>> {
+    let Some(file) = item.files().get(inspector.selected_file) else {
         return vec![Line::from(Span::styled(
-            " No changed files",
+            "Select a file to see its diff.",
             Style::default().fg(Color::DarkGray),
         ))];
-    }
-    files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| {
-            let style = if index == inspector.selected_file {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            Line::from(Span::styled(
-                format!(
-                    " {:<9}  +{:<5} -{:<5} {}",
-                    file.status, file.additions, file.deletions, file.path
-                ),
-                style,
-            ))
-        })
-        .collect()
-}
-
-fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'static>> {
-    let Some(file) = item.files().get(inspector.selected_file) else {
-        return vec![Line::from(" No file selected")];
     };
     let mut lines = vec![
         Line::from(Span::styled(
-            format!(" {} ", file.path),
+            format!(" {} ", text::truncate_to_width(&file.path, width.max(1))),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        field(
+        summary_line(
             "File",
             format!(
                 "{} · +{} -{} · {} changed lines",
@@ -506,7 +705,7 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'stati
     ];
     let Some(patch) = &file.patch else {
         lines.push(Line::from(Span::styled(
-            " Diff unavailable: GitHub omitted the patch (the file may be binary or too large).",
+            "Diff unavailable: GitHub omitted the patch (the file may be binary or too large).",
             Style::default().fg(Color::Yellow),
         )));
         return lines;
@@ -531,31 +730,38 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'stati
 }
 
 fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect) {
-    let mut spans = vec![
-        Span::raw(" "),
-        key("Tab/Shift+Tab"),
-        Span::raw(" tabs  "),
-        key("↑↓/PgUp/PgDn"),
-        Span::raw(" navigate  "),
-        key("wheel"),
-        Span::raw(" scroll  "),
-    ];
-    if inspector.diff_open {
+    let mut spans = vec![Span::raw(" "), key("Tab/Shift+Tab"), Span::raw(" tabs  ")];
+    if inspector.tab == GithubTab::Files {
+        if inspector.files_pane == FilesPane::Diff {
+            spans.extend([
+                key("↑↓/PgUp/PgDn"),
+                Span::raw(" scroll  "),
+                key("←→"),
+                Span::raw(" horizontal  "),
+                key("Esc"),
+                Span::raw(" files"),
+            ]);
+        } else {
+            spans.extend([
+                key("↑↓"),
+                Span::raw(" select  "),
+                key("←→"),
+                Span::raw(" fold  "),
+                key("Enter"),
+                Span::raw(" diff  "),
+                key("Esc"),
+                Span::raw(" close"),
+            ]);
+        }
+    } else {
         spans.extend([
-            key("←→"),
-            Span::raw(" horizontal  "),
-            key("Esc"),
-            Span::raw(" files"),
-        ]);
-    } else if inspector.tab == GithubTab::Files {
-        spans.extend([
-            key("Enter"),
-            Span::raw(" diff  "),
+            key("↑↓/PgUp/PgDn"),
+            Span::raw(" navigate  "),
+            key("wheel"),
+            Span::raw(" scroll  "),
             key("Esc"),
             Span::raw(" close"),
         ]);
-    } else {
-        spans.extend([key("Esc"), Span::raw(" close")]);
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40))),
@@ -722,6 +928,7 @@ mod tests {
         let mut app = App::new(Vec::new(), UserConfig::default());
         let mut inspector = GithubInspector::number_prompt();
         inspector.screen = GithubInspectorScreen::Ready(item);
+        inspector.select_first_tree_file();
         app.github_inspector = Some(inspector);
         app
     }
@@ -739,6 +946,96 @@ mod tests {
             .collect()
     }
 
+    /// The rendered screen split into rows, for assertions that care about
+    /// column alignment rather than just the presence of text.
+    fn render_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Locks in the shape of the tree: aggregated directory totals, status
+    /// letters, per-file stats, and an automatically selected first file.
+    #[test]
+    fn the_tree_summarizes_directories_and_marks_file_status() {
+        let mut item = pull(Some("@@ -1,2 +1,2 @@\n-old\n+new"));
+        if let GithubItem::PullRequest(pull) = &mut item {
+            for (path, status, add, del) in [
+                ("src/ui/github_inspector.rs", "modified", 120, 44),
+                ("src/ui/file_tree.rs", "added", 210, 0),
+                ("docs/old.md", "removed", 0, 31),
+            ] {
+                pull.files.push(ChangedFile {
+                    path: path.to_string(),
+                    status: status.to_string(),
+                    additions: add,
+                    deletions: del,
+                    changes: add + del,
+                    patch: Some("@@ -1 +1 @@".to_string()),
+                });
+            }
+        }
+        let mut app = app_with(item);
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Files;
+
+        let rows = render_rows(&mut app, 110, 24);
+        // Each row is `│<tree>│<diff>│`; split on the interior divider.
+        let split = |row: &String| -> (String, String) {
+            let chars: Vec<char> = row.chars().skip(1).collect();
+            let divider = chars.iter().position(|c| *c == '│').unwrap_or(chars.len());
+            (
+                chars[..divider]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string(),
+                chars[divider..].iter().collect(),
+            )
+        };
+        let tree: Vec<String> = rows
+            .iter()
+            .skip(4)
+            .map(|row| split(row).0)
+            .take_while(|row| !row.is_empty())
+            .collect();
+
+        assert_eq!(
+            tree,
+            vec![
+                "▾ docs                 1 · +0 -31",
+                "D old.md                  +0 -31",
+                "▾ src                3 · +332 -45",
+                "▾ ui               2 · +330 -44",
+                "A file_tree.rs         +210 -0",
+                "M github_inspector.rs +120 -44",
+                "M lib.rs                   +2 -1",
+            ],
+            "rendered:\n{}",
+            rows.join("\n")
+        );
+
+        // `docs/old.md` sorts first, so its diff is already on screen.
+        let diff: String = rows.iter().map(|row| split(row).1).collect();
+        assert!(
+            diff.contains("docs/old.md"),
+            "rendered:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            diff.contains("File: removed"),
+            "rendered:\n{}",
+            rows.join("\n")
+        );
+    }
+
     #[test]
     fn issue_renders_only_overview_and_comments_tabs() {
         let mut app = app_with(issue());
@@ -752,15 +1049,15 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_diff_renders_unified_patch() {
+    fn pull_request_files_show_a_tree_beside_the_diff() {
         let mut app = app_with(pull(Some("@@ -1,2 +1,3 @@\n-old\n+new\n context")));
         let inspector = app.github_inspector.as_mut().unwrap();
         inspector.tab = GithubTab::Files;
-        inspector.diff_open = true;
 
         let text = render(&mut app, 100, 28);
 
-        assert!(text.contains("src/lib.rs"), "got:\n{text}");
+        // Tree on the left, and the selected file's diff without pressing Enter.
+        assert!(text.contains("lib.rs"), "got:\n{text}");
         assert!(text.contains("@@ -1,2 +1,3 @@"), "got:\n{text}");
         assert!(text.contains("+new"), "got:\n{text}");
     }
@@ -770,11 +1067,51 @@ mod tests {
         let mut app = app_with(pull(None));
         let inspector = app.github_inspector.as_mut().unwrap();
         inspector.tab = GithubTab::Files;
-        inspector.diff_open = true;
 
-        let text = render(&mut app, 80, 20);
+        let text = render(&mut app, 100, 20);
 
         assert!(text.contains("Diff unavailable"), "got:\n{text}");
+    }
+
+    #[test]
+    fn narrow_files_tab_shows_only_the_focused_pane() {
+        let mut app = app_with(pull(Some("@@ -1,2 +1,3 @@\n+new")));
+        let inspector = app.github_inspector.as_mut().unwrap();
+        inspector.tab = GithubTab::Files;
+
+        // Too narrow to split: the tree owns the width.
+        let tree_only = render(&mut app, 60, 20);
+        assert!(tree_only.contains("lib.rs"), "got:\n{tree_only}");
+        assert!(!tree_only.contains("@@"), "got:\n{tree_only}");
+
+        // Focusing the diff hands the same width to the patch.
+        app.github_inspector.as_mut().unwrap().files_pane = FilesPane::Diff;
+        let diff_only = render(&mut app, 60, 20);
+        assert!(diff_only.contains("@@"), "got:\n{diff_only}");
+    }
+
+    #[test]
+    fn directory_rows_summarize_instead_of_showing_a_diff() {
+        let mut item = pull(Some("@@ -1 +1 @@"));
+        if let GithubItem::PullRequest(pull) = &mut item {
+            pull.files.push(crate::github::ChangedFile {
+                path: "src/other.rs".to_string(),
+                status: "added".to_string(),
+                additions: 7,
+                deletions: 0,
+                changes: 7,
+                patch: Some("@@ -0,0 +1 @@".to_string()),
+            });
+        }
+        let mut app = app_with(item);
+        let inspector = app.github_inspector.as_mut().unwrap();
+        inspector.tab = GithubTab::Files;
+        // Row 0 is the `src` directory holding both files.
+        inspector.tree_selected = 0;
+
+        let text = render(&mut app, 100, 20);
+
+        assert!(text.contains("2 changed files"), "got:\n{text}");
     }
 
     #[test]
@@ -784,5 +1121,16 @@ mod tests {
         let text = render(&mut app, 24, 8);
 
         assert!(text.contains("GitHub"), "got:\n{text}");
+    }
+
+    #[test]
+    fn tiny_files_tab_does_not_panic() {
+        let mut app = app_with(pull(Some("@@ -1 +1 @@\n+x")));
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Files;
+
+        for (width, height) in [(20, 6), (30, 4), (76, 5), (200, 60)] {
+            let text = render(&mut app, width, height);
+            assert!(!text.is_empty());
+        }
     }
 }
