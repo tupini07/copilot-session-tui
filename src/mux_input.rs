@@ -1,8 +1,9 @@
 use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
 use crate::mux::{
-    resolve_help_command, resolve_prefix_command, HelpCommand, MuxEvent, PrefixCommand,
+    resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
+    HelpCommand, MuxEvent, PrefixCommand, PrefixState,
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
 /// Route a terminal event while a pane is focused.
@@ -10,6 +11,11 @@ use ratatui::layout::Rect;
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    if app.github_inspector.is_some() {
+        handle_github_inspector_event(app, event);
+        return;
+    }
+
     if app.workspace_help.is_some() {
         if matches!(
             event,
@@ -31,7 +37,7 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         let is_prefix = app
             .mux
             .as_ref()
-            .is_some_and(|mux| mux.prefix_pending || mux.help_pending || mux.prefix.matches(key));
+            .is_some_and(|mux| mux.prefix_state != PrefixState::Idle || mux.prefix.matches(key));
         if is_prefix {
             handle_attached_key(app, *key);
             return;
@@ -39,6 +45,17 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
     }
 
     if let Event::Mouse(mouse) = &event {
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let reference = app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.focused_pane())
+                .and_then(|pane| pane.github_reference_at(mouse.column, mouse.row));
+            if let Some(number) = reference {
+                app.inspect_github_item(number);
+                return;
+            }
+        }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
             focus_clicked_workspace(app, mouse.column, mouse.row);
         }
@@ -74,13 +91,14 @@ fn handle_chat_event(app: &mut App, event: Event) {
 }
 
 fn handle_attached_key(app: &mut App, key: KeyEvent) {
-    let Some(mux) = app.mux.as_ref() else {
+    let Some((prefix_state, prefix)) = app.mux.as_ref().map(|mux| (mux.prefix_state, mux.prefix))
+    else {
         return;
     };
 
-    if mux.help_pending {
+    if prefix_state == PrefixState::Help {
         if let Some(mux) = app.mux.as_mut() {
-            mux.help_pending = false;
+            mux.prefix_state = PrefixState::Idle;
         }
         if matches!(resolve_help_command(&key), Some(HelpCommand::Scratchpad)) {
             app.workspace_help = Some(WorkspaceHelp::Scratchpad);
@@ -88,11 +106,20 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if mux.prefix_pending {
-        let prefix = mux.prefix;
+    if prefix_state == PrefixState::Github {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if matches!(resolve_github_command(&key), Some(GithubCommand::Inspect)) {
+            app.open_github_inspector();
+        }
+        return;
+    }
+
+    if prefix_state == PrefixState::Root {
         let command = resolve_prefix_command(&key, &prefix);
         if let Some(mux) = app.mux.as_mut() {
-            mux.prefix_pending = false;
+            mux.prefix_state = PrefixState::Idle;
         }
         match command {
             Some(PrefixCommand::Literal) => {
@@ -124,7 +151,12 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
             Some(PrefixCommand::Help) => {
                 if let Some(mux) = app.mux.as_mut() {
-                    mux.help_pending = true;
+                    mux.prefix_state = PrefixState::Help;
+                }
+            }
+            Some(PrefixCommand::Github) => {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.prefix_state = PrefixState::Github;
                 }
             }
             Some(PrefixCommand::SelectIndex(index)) => {
@@ -140,9 +172,9 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if mux.prefix.matches(&key) {
+    if prefix.matches(&key) {
         if let Some(mux) = app.mux.as_mut() {
-            mux.prefix_pending = true;
+            mux.prefix_state = PrefixState::Root;
         }
         return;
     }
@@ -158,6 +190,223 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             kill_focused(app);
         }
     }
+}
+
+fn handle_github_inspector_event(app: &mut App, event: Event) {
+    match event {
+        Event::Paste(text) => {
+            let Some(inspector) = app.github_inspector.as_mut() else {
+                return;
+            };
+            if matches!(
+                inspector.screen,
+                crate::app::GithubInspectorScreen::NumberPrompt
+            ) {
+                inspector
+                    .input
+                    .extend(text.chars().filter(char::is_ascii_digit));
+                inspector.prompt_error = None;
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => scroll_github_inspector(app, -3),
+            MouseEventKind::ScrollDown => scroll_github_inspector(app, 3),
+            _ => {}
+        },
+        Event::Key(key) if key.kind == KeyEventKind::Press => handle_github_inspector_key(app, key),
+        _ => {}
+    }
+}
+
+fn handle_github_inspector_key(app: &mut App, key: KeyEvent) {
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return;
+    };
+    match inspector.screen {
+        crate::app::GithubInspectorScreen::NumberPrompt => match key.code {
+            KeyCode::Esc => app.close_github_inspector(),
+            KeyCode::Enter => app.submit_github_number(),
+            KeyCode::Backspace => {
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.input.pop();
+                    inspector.prompt_error = None;
+                }
+            }
+            KeyCode::Char(character)
+                if character.is_ascii_digit()
+                    && !key.modifiers.intersects(
+                        crossterm::event::KeyModifiers::CONTROL
+                            | crossterm::event::KeyModifiers::ALT,
+                    ) =>
+            {
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.input.push(character);
+                    inspector.prompt_error = None;
+                }
+            }
+            _ => {}
+        },
+        crate::app::GithubInspectorScreen::Loading => {
+            if key.code == KeyCode::Esc {
+                app.close_github_inspector();
+            }
+        }
+        crate::app::GithubInspectorScreen::Error(_) => match key.code {
+            KeyCode::Esc => app.close_github_inspector(),
+            KeyCode::Char('r') => app.retry_github_request(),
+            _ => {}
+        },
+        crate::app::GithubInspectorScreen::Ready(_) => handle_ready_github_key(app, key),
+    }
+}
+
+fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::SHIFT) =>
+        {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.cycle_tab(false);
+            }
+        }
+        KeyCode::Tab => {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.cycle_tab(true);
+            }
+        }
+        KeyCode::BackTab => {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.cycle_tab(false);
+            }
+        }
+        KeyCode::Esc => {
+            let diff_open = app
+                .github_inspector
+                .as_ref()
+                .is_some_and(|inspector| inspector.diff_open);
+            if diff_open {
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.diff_open = false;
+                    inspector.diff_scroll = 0;
+                    inspector.diff_horizontal = 0;
+                }
+            } else {
+                app.close_github_inspector();
+            }
+        }
+        KeyCode::Up => scroll_github_inspector(app, -1),
+        KeyCode::Down => scroll_github_inspector(app, 1),
+        KeyCode::PageUp => scroll_github_inspector(app, -10),
+        KeyCode::PageDown => scroll_github_inspector(app, 10),
+        KeyCode::Home => set_github_scroll_boundary(app, false),
+        KeyCode::End => set_github_scroll_boundary(app, true),
+        KeyCode::Left => scroll_github_diff_horizontal(app, -4),
+        KeyCode::Right => scroll_github_diff_horizontal(app, 4),
+        KeyCode::Enter => {
+            let can_open = app.github_inspector.as_ref().is_some_and(|inspector| {
+                inspector.tab == crate::app::GithubTab::Files
+                    && !inspector.diff_open
+                    && inspector
+                        .ready_item()
+                        .is_some_and(|item| !item.files().is_empty())
+            });
+            if can_open {
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.diff_open = true;
+                    inspector.diff_scroll = 0;
+                    inspector.diff_horizontal = 0;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scroll_github_inspector(app: &mut App, amount: isize) {
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    if inspector.diff_open {
+        let next = if amount < 0 {
+            inspector.diff_scroll.saturating_sub(amount.unsigned_abs())
+        } else {
+            inspector.diff_scroll.saturating_add(amount as usize)
+        };
+        inspector.diff_scroll = next.min(inspector.max_diff_scroll);
+        return;
+    }
+
+    if inspector.tab == crate::app::GithubTab::Files {
+        let count = inspector
+            .ready_item()
+            .map(|item| item.files().len())
+            .unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let next = if amount < 0 {
+            inspector
+                .selected_file
+                .saturating_sub(amount.unsigned_abs())
+        } else {
+            inspector.selected_file.saturating_add(amount as usize)
+        };
+        inspector.selected_file = next.min(count - 1);
+        if inspector.selected_file < inspector.file_list_offset {
+            inspector.file_list_offset = inspector.selected_file;
+        } else if inspector.visible_files > 0
+            && inspector.selected_file >= inspector.file_list_offset + inspector.visible_files
+        {
+            inspector.file_list_offset =
+                inspector.selected_file - inspector.visible_files.saturating_sub(1);
+        }
+        return;
+    }
+
+    inspector.scroll_active_by(amount);
+}
+
+fn set_github_scroll_boundary(app: &mut App, end: bool) {
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    if inspector.diff_open {
+        inspector.diff_scroll = if end { inspector.max_diff_scroll } else { 0 };
+    } else if inspector.tab == crate::app::GithubTab::Files {
+        let count = inspector
+            .ready_item()
+            .map(|item| item.files().len())
+            .unwrap_or(0);
+        if count > 0 {
+            inspector.selected_file = if end { count - 1 } else { 0 };
+            inspector.file_list_offset = if end {
+                count.saturating_sub(inspector.visible_files.max(1))
+            } else {
+                0
+            };
+        }
+    } else {
+        inspector.set_active_scroll(if end { inspector.max_scroll } else { 0 });
+    }
+}
+
+fn scroll_github_diff_horizontal(app: &mut App, amount: isize) {
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    if !inspector.diff_open {
+        return;
+    }
+    let next = if amount < 0 {
+        inspector
+            .diff_horizontal
+            .saturating_sub(amount.unsigned_abs())
+    } else {
+        inspector.diff_horizontal.saturating_add(amount as usize)
+    };
+    inspector.diff_horizontal = next.min(inspector.max_diff_horizontal);
 }
 
 fn handle_scratchpad_event(app: &mut App, event: Event) {
@@ -384,34 +633,58 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
 /// Returns true when the key was consumed, so panes remain reachable from the list
 /// instead of only from inside an attached pane.
 pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
-    let Some(mux) = app.mux.as_mut() else {
+    let Some((state, prefix)) = app.mux.as_ref().map(|mux| (mux.prefix_state, mux.prefix)) else {
         return false;
     };
 
-    if mux.help_pending {
-        mux.help_pending = false;
+    if state == PrefixState::Help {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
         if matches!(resolve_help_command(&key), Some(HelpCommand::Scratchpad)) {
             app.workspace_help = Some(WorkspaceHelp::Scratchpad);
         }
         return true;
     }
 
-    if !mux.prefix_pending {
-        if mux.prefix.matches(&key) {
-            mux.prefix_pending = true;
+    if state == PrefixState::Github {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if matches!(resolve_github_command(&key), Some(GithubCommand::Inspect)) {
+            app.status_message =
+                Some("Attach to a session before inspecting a GitHub item".to_string());
+        }
+        return true;
+    }
+
+    if state == PrefixState::Idle {
+        if prefix.matches(&key) {
+            if let Some(mux) = app.mux.as_mut() {
+                mux.prefix_state = PrefixState::Root;
+            }
             return true;
         }
         return false;
     }
 
-    mux.prefix_pending = false;
-    let prefix = mux.prefix;
+    if let Some(mux) = app.mux.as_mut() {
+        mux.prefix_state = PrefixState::Idle;
+    }
     let command = resolve_prefix_command(&key, &prefix);
     if matches!(command, Some(PrefixCommand::Help)) {
-        mux.help_pending = true;
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Help;
+        }
         return true;
     }
-    if mux.panes.is_empty() {
+    if matches!(command, Some(PrefixCommand::Github)) {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Github;
+        }
+        return true;
+    }
+    if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
         app.status_message = Some("No sessions are running".to_string());
         return true;
     }
@@ -434,17 +707,24 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             toggle_attached_terminal(app);
         }
         Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
+        Some(PrefixCommand::Github) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::NextPane) => {
-            mux.cycle(true);
+            if let Some(mux) = app.mux.as_mut() {
+                mux.cycle(true);
+            }
             attach_focused(app);
         }
         Some(PrefixCommand::PreviousPane) => {
-            mux.cycle(false);
+            if let Some(mux) = app.mux.as_mut() {
+                mux.cycle(false);
+            }
             attach_focused(app);
         }
         Some(PrefixCommand::SelectIndex(index)) => {
             // Panes are labelled from 1 in the UI.
-            mux.select_index(index.saturating_sub(1));
+            if let Some(mux) = app.mux.as_mut() {
+                mux.select_index(index.saturating_sub(1));
+            }
             attach_focused(app);
         }
         Some(PrefixCommand::KillPane) => kill_focused(app),
@@ -608,7 +888,7 @@ mod tests {
 
         handle_attached_key(&mut app, prefix);
 
-        assert!(app.mux.as_ref().unwrap().prefix_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Root);
     }
 
     #[test]
@@ -626,7 +906,76 @@ mod tests {
         );
 
         assert_eq!(app.view, View::List);
-        assert!(!app.mux.as_ref().unwrap().prefix_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+    }
+
+    #[test]
+    fn github_namespace_opens_the_number_prompt_while_attached() {
+        let mut app = attached_mux_app("github-inspector-test");
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        ] {
+            handle_attached_key(&mut app, key);
+        }
+
+        assert!(matches!(
+            app.github_inspector
+                .as_ref()
+                .map(|inspector| &inspector.screen),
+            Some(crate::app::GithubInspectorScreen::NumberPrompt)
+        ));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn github_inspection_from_the_list_explains_that_attachment_is_required() {
+        let mut app = mux_app();
+        app.view = View::List;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        ] {
+            assert!(handle_list_prefix(&mut app, key));
+        }
+
+        assert!(app.github_inspector.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Attach to a session before inspecting a GitHub item")
+        );
+    }
+
+    #[test]
+    fn github_number_prompt_accepts_only_digits_and_backspace() {
+        let mut app = attached_mux_app("github-number-test");
+        app.open_github_inspector();
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        ] {
+            handle_github_inspector_event(&mut app, Event::Key(key));
+        }
+
+        assert_eq!(
+            app.github_inspector
+                .as_ref()
+                .map(|inspector| inspector.input.as_str()),
+            Some("1")
+        );
+        handle_github_inspector_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(app.github_inspector.is_none());
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]
@@ -643,7 +992,7 @@ mod tests {
             consumed,
             "the prefix must not fall through to list bindings"
         );
-        assert!(app.mux.as_ref().unwrap().prefix_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Root);
     }
 
     #[test]
@@ -677,7 +1026,7 @@ mod tests {
         );
 
         assert!(consumed);
-        assert!(!app.mux.as_ref().unwrap().prefix_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
         assert_eq!(app.mode, crate::app::Mode::Normal, "no panes, no switcher");
         assert!(app.status_message.is_some());
     }
@@ -712,7 +1061,7 @@ mod tests {
         );
 
         assert!(
-            !app.mux.as_ref().unwrap().prefix_pending,
+            app.mux.as_ref().unwrap().prefix_state == PrefixState::Idle,
             "a stray prefix must not swallow every later keystroke"
         );
     }
@@ -742,7 +1091,7 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
         );
-        assert!(app.mux.as_ref().unwrap().help_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Help);
 
         handle_attached_key(
             &mut app,
@@ -750,7 +1099,7 @@ mod tests {
         );
 
         assert_eq!(app.workspace_help, Some(WorkspaceHelp::Scratchpad));
-        assert!(!app.mux.as_ref().unwrap().help_pending);
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
 
         handle_attached_event(
             &mut app,

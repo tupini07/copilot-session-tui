@@ -51,6 +51,80 @@ pub fn pad_to_width(text: &str, width: usize) -> String {
     format!("{truncated}{}", " ".repeat(padding))
 }
 
+/// Wrap text to terminal columns while preserving source line breaks and indentation.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return text.lines().map(str::to_string).collect();
+    }
+    let mut output = Vec::new();
+    for source in text.split('\n') {
+        if source.is_empty() {
+            output.push(String::new());
+            continue;
+        }
+        if display_width(source) <= width {
+            output.push(source.to_string());
+            continue;
+        }
+
+        let indent: String = source
+            .chars()
+            .take_while(|character| matches!(character, ' ' | '\t'))
+            .collect();
+        let mut current = indent.clone();
+        let content = &source[indent.len()..];
+        for segment in content.split_word_bounds() {
+            if display_width(&current) + display_width(segment) <= width {
+                current.push_str(segment);
+                continue;
+            }
+            if display_width(&current) > display_width(&indent) {
+                output.push(current.trim_end_matches([' ', '\t']).to_string());
+                current = indent.clone();
+            }
+            if display_width(&indent) + display_width(segment) <= width {
+                current.push_str(segment);
+                continue;
+            }
+
+            let available = width.saturating_sub(display_width(&indent)).max(1);
+            let chunks = hard_wrap(segment, available);
+            let last = chunks.len().saturating_sub(1);
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                if index == last {
+                    current.push_str(&chunk);
+                } else {
+                    output.push(format!("{indent}{chunk}"));
+                }
+            }
+        }
+        if !current.is_empty() {
+            output.push(current);
+        }
+    }
+    output
+}
+
+fn hard_wrap(text: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if !chunk.is_empty() && used + grapheme_width > width {
+            chunks.push(chunk);
+            chunk = String::new();
+            used = 0;
+        }
+        chunk.push_str(grapheme);
+        used += grapheme_width;
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +170,25 @@ mod tests {
     #[test]
     fn a_zero_budget_yields_nothing() {
         assert_eq!(truncate_to_width("🚀", 0), "");
+    }
+
+    #[test]
+    fn wrapping_preserves_paragraphs_and_indentation() {
+        assert_eq!(
+            wrap_text("  one two three\n\nnext", 11),
+            vec!["  one two", "  three", "", "next"]
+        );
+    }
+
+    #[test]
+    fn wrapping_breaks_long_unicode_words_on_graphemes() {
+        let wrapped = wrap_text("🚀🚀🚀", 4);
+
+        assert_eq!(wrapped, vec!["🚀🚀", "🚀"]);
+    }
+
+    #[test]
+    fn wrapping_does_not_collapse_preformatted_whitespace() {
+        assert_eq!(wrap_text("a  b\tc", 80), vec!["a  b\tc"]);
     }
 }

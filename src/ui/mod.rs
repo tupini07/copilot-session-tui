@@ -1,3 +1,4 @@
+pub mod github_inspector;
 pub mod pane;
 pub mod popups;
 pub mod scratchpad;
@@ -21,6 +22,11 @@ pub struct AttachedLayout {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    if app.github_inspector.is_some() && !github_inspector::is_prompt(app) {
+        github_inspector::draw(f, app);
+        return;
+    }
+
     if app.mode == Mode::Scratchpad {
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             scratchpad::draw(f, scratchpad);
@@ -59,6 +65,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             );
         }
         pane::draw_status(f, app, layout.status);
+        if github_inspector::is_prompt(app) {
+            github_inspector::draw(f, app);
+        }
         if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
             scratchpad::draw_help(f, size);
         }

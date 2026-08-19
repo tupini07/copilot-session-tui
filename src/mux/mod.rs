@@ -128,6 +128,7 @@ pub enum PrefixCommand {
     Scratchpad,
     Terminal,
     Help,
+    Github,
     SelectIndex(usize),
     /// `prefix prefix` — send a literal prefix keystroke to the child.
     Literal,
@@ -153,6 +154,12 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         {
             Some(PrefixCommand::Help)
         }
+        KeyCode::Char(character)
+            if character.eq_ignore_ascii_case(&'g')
+                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            Some(PrefixCommand::Github)
+        }
         KeyCode::Backspace => Some(PrefixCommand::Help),
         KeyCode::Char(c) if c.is_ascii_digit() => {
             Some(PrefixCommand::SelectIndex(c.to_digit(10)? as usize))
@@ -176,13 +183,34 @@ pub fn resolve_help_command(key: &KeyEvent) -> Option<HelpCommand> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubCommand {
+    Inspect,
+    Cancel,
+}
+
+pub fn resolve_github_command(key: &KeyEvent) -> Option<GithubCommand> {
+    match key.code {
+        KeyCode::Char('i') => Some(GithubCommand::Inspect),
+        KeyCode::Esc => Some(GithubCommand::Cancel),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixState {
+    Idle,
+    Root,
+    Help,
+    Github,
+}
+
 /// All panes owned by this CST instance.
 pub struct MuxState {
     pub panes: Vec<Pane>,
     pub focused: Option<PaneId>,
     pub prefix: KeyChord,
-    pub prefix_pending: bool,
-    pub help_pending: bool,
+    pub prefix_state: PrefixState,
     next_id: PaneId,
     pub events: Sender<MuxEvent>,
     pub receiver: Receiver<MuxEvent>,
@@ -195,8 +223,7 @@ impl MuxState {
             panes: Vec::new(),
             focused: None,
             prefix,
-            prefix_pending: false,
-            help_pending: false,
+            prefix_state: PrefixState::Idle,
             next_id: 1,
             events,
             receiver,
@@ -407,6 +434,10 @@ mod tests {
             Some(PrefixCommand::Help)
         );
         assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('g'), KeyModifiers::CONTROL), &chord),
+            Some(PrefixCommand::Github)
+        );
+        assert_eq!(
             resolve_prefix_command(&key(KeyCode::Backspace, none), &chord),
             Some(PrefixCommand::Help)
         );
@@ -429,6 +460,18 @@ mod tests {
         assert_eq!(
             resolve_help_command(&key(KeyCode::Esc, KeyModifiers::NONE)),
             Some(HelpCommand::Cancel)
+        );
+    }
+
+    #[test]
+    fn github_commands_map_to_inspection() {
+        assert_eq!(
+            resolve_github_command(&key(KeyCode::Char('i'), KeyModifiers::NONE)),
+            Some(GithubCommand::Inspect)
+        );
+        assert_eq!(
+            resolve_github_command(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(GithubCommand::Cancel)
         );
     }
 }

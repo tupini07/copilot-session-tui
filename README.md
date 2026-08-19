@@ -211,10 +211,24 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `Ctrl+H` `e` | Open scratchpad shortcut help |
+| `prefix` `Ctrl+G` `i` | Inspect a GitHub issue or pull request |
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
+
+GitHub inspection is available while attached to a mux session. Enter an issue or pull
+request number and CST resolves the repository from that session's working directory.
+Issues have **Overview** and **Comments** tabs; pull requests add **Files**, where Enter
+opens the selected file's unified patch. Use Tab / Shift+Tab between tabs, arrow keys or
+PageUp/PageDown/Home/End to navigate, the mouse wheel to scroll, and Esc to return. In a
+diff, Left/Right scrolls long lines horizontally and Esc returns to the file list.
+GitHub references such as `#2029` shown in the attached chat can also be opened directly
+with a left click.
+
+The inspector requires the [`gh` CLI](https://cli.github.com/) to be installed and
+authenticated. It uses the host from the repository remote, including GitHub Enterprise
+hosts; run `gh auth login --hostname HOST` if CST reports an authentication error.
 
 Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;4 progress
 states are forwarded through the mux so Copilot retains the outer terminal's scrolling,

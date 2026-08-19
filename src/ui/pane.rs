@@ -7,7 +7,7 @@ use std::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
 use crate::app::App;
-use crate::mux::PaneStatus;
+use crate::mux::{PaneStatus, PrefixState};
 use crate::text;
 use crate::ui::tabs;
 
@@ -102,7 +102,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // The hint is fixed-width and reserved first; tabs take whatever is left, so a long
     // session name can never push the prefix reminder off screen.
     let hint: Vec<Span> = match pane.status {
-        PaneStatus::Running if mux.help_pending => vec![
+        PaneStatus::Running if mux.prefix_state == PrefixState::Help => vec![
             Span::styled(
                 " Help ",
                 Style::default()
@@ -112,7 +112,17 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(" e scratchpad  Esc cancel "),
         ],
-        PaneStatus::Running if mux.prefix_pending => vec![
+        PaneStatus::Running if mux.prefix_state == PrefixState::Github => vec![
+            Span::styled(
+                " GitHub ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" i inspect  Esc cancel "),
+        ],
+        PaneStatus::Running if mux.prefix_state == PrefixState::Root => vec![
             Span::styled(
                 format!(" {prefix} "),
                 Style::default()
@@ -121,7 +131,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(
-                " c chat  e scratch  t terminal  C-h help  d list  w switch  n/p cycle  x end ",
+                " c chat  e scratch  t terminal  C-h help  C-g github  d list  w switch  n/p cycle  x end ",
             ),
         ],
         PaneStatus::Running => vec![

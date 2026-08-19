@@ -49,6 +49,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                             .bg(Color::Magenta)
                             .add_modifier(Modifier::BOLD),
                     ));
+                } else if app.github_prefix_pending() {
+                    spans.push(Span::styled(
+                        "GitHub: i inspect  Esc cancel",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ));
                 } else if app.prefix_pending() {
                     spans.push(Span::styled(
                         format!("{prefix} …"),

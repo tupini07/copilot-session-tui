@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod debug_keys;
 mod events;
+mod github;
 mod host_terminal;
 mod input;
 mod mux;
@@ -428,6 +429,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
         input::maybe_load_details(app);
         app.poll_update();
+        app.poll_github();
 
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             if let Err(error) = scratchpad.autosave_if_due() {
@@ -514,7 +516,8 @@ fn pump_mux(app: &mut App) -> Result<()> {
     let animating = mux
         .panes
         .iter()
-        .any(|pane| pane.is_running() && pane.is_blank());
+        .any(|pane| pane.is_running() && pane.is_blank())
+        || app.github_loading();
     let timeout = if animating { 100 } else { 250 };
 
     let first = match mux

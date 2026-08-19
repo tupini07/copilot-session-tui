@@ -1,5 +1,6 @@
 use crate::config::{self, EffectiveWorktreeConfig, ProjectSettings, UserConfig};
-use crate::mux::{KeyChord, MuxState, Pane, PaneSpec};
+use crate::github::{GithubError, GithubItem};
+use crate::mux::{KeyChord, MuxState, Pane, PaneSpec, PrefixState};
 use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
@@ -13,7 +14,9 @@ use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 /// Which surface the user is looking at: the session list, or a live session pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +104,148 @@ pub enum SettingsEditField {
     TerminalShell,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubTab {
+    Overview,
+    Comments,
+    Files,
+}
+
+impl GithubTab {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Overview => 0,
+            Self::Comments => 1,
+            Self::Files => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubInspectorScreen {
+    NumberPrompt,
+    Loading,
+    Ready(GithubItem),
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubInspector {
+    pub screen: GithubInspectorScreen,
+    pub input: String,
+    pub prompt_error: Option<String>,
+    pub tab: GithubTab,
+    pub scroll_offsets: [usize; 3],
+    pub max_scroll: usize,
+    pub selected_file: usize,
+    pub file_list_offset: usize,
+    pub visible_files: usize,
+    pub diff_open: bool,
+    pub diff_scroll: usize,
+    pub diff_horizontal: usize,
+    pub max_diff_scroll: usize,
+    pub max_diff_horizontal: usize,
+    pub request_id: u64,
+    pub request_cwd: Option<PathBuf>,
+    pub number: Option<u64>,
+}
+
+impl GithubInspector {
+    pub fn number_prompt() -> Self {
+        Self {
+            screen: GithubInspectorScreen::NumberPrompt,
+            input: String::new(),
+            prompt_error: None,
+            tab: GithubTab::Overview,
+            scroll_offsets: [0; 3],
+            max_scroll: 0,
+            selected_file: 0,
+            file_list_offset: 0,
+            visible_files: 0,
+            diff_open: false,
+            diff_scroll: 0,
+            diff_horizontal: 0,
+            max_diff_scroll: 0,
+            max_diff_horizontal: 0,
+            request_id: 0,
+            request_cwd: None,
+            number: None,
+        }
+    }
+
+    pub fn ready_item(&self) -> Option<&GithubItem> {
+        match &self.screen {
+            GithubInspectorScreen::Ready(item) => Some(item),
+            _ => None,
+        }
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.ready_item()
+            .map(|item| if item.is_pull_request() { 3 } else { 2 })
+            .unwrap_or(0)
+    }
+
+    pub fn cycle_tab(&mut self, forward: bool) {
+        let count = self.tab_count();
+        if count == 0 {
+            return;
+        }
+        let current = self.tab.index().min(count - 1);
+        let next = if forward {
+            (current + 1) % count
+        } else if current == 0 {
+            count - 1
+        } else {
+            current - 1
+        };
+        self.tab = match next {
+            0 => GithubTab::Overview,
+            1 => GithubTab::Comments,
+            _ => GithubTab::Files,
+        };
+        self.max_scroll = 0;
+        self.diff_open = false;
+    }
+
+    pub fn active_scroll(&self) -> usize {
+        self.scroll_offsets[self.tab.index()]
+    }
+
+    pub fn set_active_scroll(&mut self, offset: usize) {
+        self.scroll_offsets[self.tab.index()] = offset.min(self.max_scroll);
+    }
+
+    pub fn scroll_active_by(&mut self, amount: isize) {
+        let current = self.active_scroll();
+        let next = if amount < 0 {
+            current.saturating_sub(amount.unsigned_abs())
+        } else {
+            current.saturating_add(amount as usize)
+        };
+        self.set_active_scroll(next);
+    }
+
+    fn reset_navigation(&mut self) {
+        self.tab = GithubTab::Overview;
+        self.scroll_offsets = [0; 3];
+        self.max_scroll = 0;
+        self.selected_file = 0;
+        self.file_list_offset = 0;
+        self.visible_files = 0;
+        self.diff_open = false;
+        self.diff_scroll = 0;
+        self.diff_horizontal = 0;
+        self.max_diff_scroll = 0;
+        self.max_diff_horizontal = 0;
+    }
+}
+
+pub struct GithubLoadResult {
+    request_id: u64,
+    result: std::result::Result<GithubItem, GithubError>,
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
     pub filtered_indices: Vec<usize>,
@@ -171,6 +316,10 @@ pub struct App {
     pub workspace_help: Option<WorkspaceHelp>,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
+    pub github_inspector: Option<GithubInspector>,
+    github_request_receiver: Option<mpsc::Receiver<GithubLoadResult>>,
+    github_request_cancel: Option<Arc<AtomicBool>>,
+    next_github_request_id: u64,
     workspace_state_enabled: bool,
     workspace_state_root: PathBuf,
 }
@@ -247,6 +396,10 @@ impl App {
             workspace_help: None,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
+            github_inspector: None,
+            github_request_receiver: None,
+            github_request_cancel: None,
+            next_github_request_id: 1,
             workspace_state_enabled: true,
             workspace_state_root: workspace_state::workspace_root(),
         };
@@ -293,11 +446,19 @@ impl App {
     pub fn prefix_pending(&self) -> bool {
         self.mux
             .as_ref()
-            .is_some_and(|mux| mux.prefix_pending || mux.help_pending)
+            .is_some_and(|mux| mux.prefix_state != PrefixState::Idle)
     }
 
     pub fn help_pending(&self) -> bool {
-        self.mux.as_ref().is_some_and(|mux| mux.help_pending)
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.prefix_state == PrefixState::Help)
+    }
+
+    pub fn github_prefix_pending(&self) -> bool {
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.prefix_state == PrefixState::Github)
     }
 
     /// Live panes owned by this instance, for the session list footer.
@@ -306,6 +467,152 @@ impl App {
             .as_ref()
             .map(|mux| mux.panes.iter().filter(|pane| pane.is_running()).count())
             .unwrap_or(0)
+    }
+
+    pub fn open_github_inspector(&mut self) {
+        if !matches!(self.view, View::Attached(_)) {
+            self.status_message =
+                Some("Attach to a session before inspecting a GitHub item".to_string());
+            return;
+        }
+        self.cancel_github_request();
+        self.github_inspector = Some(GithubInspector::number_prompt());
+    }
+
+    pub fn inspect_github_item(&mut self, number: u64) {
+        let Some(cwd) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.cwd.clone())
+        else {
+            self.status_message = Some("The focused session has no working directory".to_string());
+            return;
+        };
+        self.github_inspector = Some(GithubInspector::number_prompt());
+        self.start_github_request(cwd, number);
+    }
+
+    pub fn close_github_inspector(&mut self) {
+        self.cancel_github_request();
+        self.github_inspector = None;
+    }
+
+    pub fn github_loading(&self) -> bool {
+        self.github_inspector
+            .as_ref()
+            .is_some_and(|inspector| matches!(inspector.screen, GithubInspectorScreen::Loading))
+    }
+
+    pub fn submit_github_number(&mut self) {
+        let number = {
+            let Some(inspector) = self.github_inspector.as_mut() else {
+                return;
+            };
+            let Ok(number) = inspector.input.parse::<u64>() else {
+                inspector.prompt_error = Some("Enter a positive issue or PR number".to_string());
+                return;
+            };
+            if number == 0 {
+                inspector.prompt_error = Some("Item numbers start at 1".to_string());
+                return;
+            }
+            number
+        };
+        let Some(cwd) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.cwd.clone())
+        else {
+            if let Some(inspector) = self.github_inspector.as_mut() {
+                inspector.prompt_error =
+                    Some("The focused session has no working directory".to_string());
+            }
+            return;
+        };
+        self.start_github_request(cwd, number);
+    }
+
+    pub fn retry_github_request(&mut self) {
+        let Some((cwd, number)) = self
+            .github_inspector
+            .as_ref()
+            .and_then(|inspector| Some((inspector.request_cwd.clone()?, inspector.number?)))
+        else {
+            return;
+        };
+        self.start_github_request(cwd, number);
+    }
+
+    fn start_github_request(&mut self, cwd: PathBuf, number: u64) {
+        self.cancel_github_request();
+        let request_id = self.next_github_request_id;
+        self.next_github_request_id = self.next_github_request_id.wrapping_add(1).max(1);
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker_cwd = cwd.clone();
+        std::thread::spawn(move || {
+            let result = crate::github::fetch_item(worker_cwd, number, worker_cancelled);
+            let _ = sender.send(GithubLoadResult { request_id, result });
+        });
+
+        let inspector = self
+            .github_inspector
+            .get_or_insert_with(GithubInspector::number_prompt);
+        inspector.screen = GithubInspectorScreen::Loading;
+        inspector.prompt_error = None;
+        inspector.request_id = request_id;
+        inspector.request_cwd = Some(cwd);
+        inspector.number = Some(number);
+        inspector.reset_navigation();
+        self.github_request_receiver = Some(receiver);
+        self.github_request_cancel = Some(cancelled);
+    }
+
+    fn cancel_github_request(&mut self) {
+        if let Some(cancelled) = self.github_request_cancel.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.github_request_receiver = None;
+    }
+
+    pub fn poll_github(&mut self) {
+        let Some(receiver) = self.github_request_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.github_request_receiver = None;
+                self.github_request_cancel = None;
+                let Some(inspector) = self.github_inspector.as_mut() else {
+                    return;
+                };
+                if inspector.request_id != result.request_id
+                    || !matches!(inspector.screen, GithubInspectorScreen::Loading)
+                {
+                    return;
+                }
+                inspector.screen = match result.result {
+                    Ok(item) => GithubInspectorScreen::Ready(item),
+                    Err(error) => GithubInspectorScreen::Error(error.to_string()),
+                };
+                inspector.reset_navigation();
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_request_receiver = None;
+                self.github_request_cancel = None;
+                if let Some(inspector) = self.github_inspector.as_mut() {
+                    if matches!(inspector.screen, GithubInspectorScreen::Loading) {
+                        inspector.screen = GithubInspectorScreen::Error(
+                            "GitHub loader stopped before returning a result".to_string(),
+                        );
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
     }
 
     pub fn attached_scratchpad_visible(&self) -> bool {
@@ -755,7 +1062,7 @@ impl App {
         self.workspace_focus = WorkspaceFocus::Chat;
         self.view = View::List;
         if let Some(mux) = self.mux.as_mut() {
-            mux.prefix_pending = false;
+            mux.prefix_state = PrefixState::Idle;
         }
     }
 

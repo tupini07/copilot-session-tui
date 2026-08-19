@@ -37,6 +37,12 @@ impl Viewport {
             row.clamp(self.y, max_row) - self.y + 1,
         )
     }
+
+    fn cell_coordinates(self, column: u16, row: u16) -> Option<(u16, u16)> {
+        let column = column.checked_sub(self.x)?;
+        let row = row.checked_sub(self.y)?;
+        (column < self.cols && row < self.rows).then_some((row, column))
+    }
 }
 
 /// Why a pane stopped running, if it has.
@@ -179,6 +185,13 @@ impl Pane {
             .unwrap_or(false)
     }
 
+    /// GitHub issue/PR reference under an outer-terminal coordinate, if any.
+    pub fn github_reference_at(&self, column: u16, row: u16) -> Option<u64> {
+        let (row, column) = self.viewport.cell_coordinates(column, row)?;
+        self.with_screen(|screen| github_reference_at(screen, row, column))
+            .flatten()
+    }
+
     /// Cursor position and visibility, for mirroring into the outer terminal.
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.with_screen(|screen| {
@@ -203,6 +216,7 @@ impl Pane {
                 self.title = title;
             }
         }
+
         callbacks.take_bell()
     }
 
@@ -317,6 +331,48 @@ impl Pane {
     }
 }
 
+fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<u64> {
+    let (_, cols) = screen.size();
+    let characters: Vec<char> = (0..cols)
+        .map(|col| {
+            screen
+                .cell(row, col)
+                .and_then(|cell| cell.contents().chars().next())
+                .unwrap_or(' ')
+        })
+        .collect();
+    let clicked = *characters.get(column as usize)?;
+    if clicked != '#' && !clicked.is_ascii_digit() {
+        return None;
+    }
+
+    let mut hash = column as usize;
+    if clicked.is_ascii_digit() {
+        while hash > 0 && characters[hash - 1].is_ascii_digit() {
+            hash -= 1;
+        }
+        hash = hash.checked_sub(1)?;
+    }
+    if characters.get(hash) != Some(&'#') {
+        return None;
+    }
+
+    let start = hash + 1;
+    let mut end = start;
+    while characters.get(end).is_some_and(char::is_ascii_digit) {
+        end += 1;
+    }
+    if end == start || column as usize >= end {
+        return None;
+    }
+    characters[start..end]
+        .iter()
+        .collect::<String>()
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +393,31 @@ mod tests {
         assert_eq!(viewport.coordinates(21, 10), Some((20, 10)));
         assert_eq!(viewport.coordinates(1, 1), None);
         assert_eq!(viewport.clamped_coordinates(99, 99), (20, 10));
+        assert_eq!(viewport.cell_coordinates(2, 1), Some((0, 0)));
+        assert_eq!(viewport.cell_coordinates(21, 10), Some((9, 19)));
+    }
+
+    #[test]
+    fn github_reference_is_detected_on_hash_or_digits() {
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(b"Findings posted to #2029 and #77.");
+        let screen = parser.screen();
+
+        for column in 19..=23 {
+            assert_eq!(github_reference_at(screen, 0, column), Some(2029));
+        }
+        assert_eq!(github_reference_at(screen, 0, 18), None);
+        assert_eq!(github_reference_at(screen, 0, 24), None);
+        assert_eq!(github_reference_at(screen, 0, 30), Some(77));
+    }
+
+    #[test]
+    fn ordinary_numbers_are_not_github_references() {
+        let mut parser = vt100::Parser::new(2, 30, 0);
+        parser.process(b"room 376 still 126");
+
+        assert_eq!(github_reference_at(parser.screen(), 0, 6), None);
+        assert_eq!(github_reference_at(parser.screen(), 0, 16), None);
     }
 
     fn shell_command(script: &str) -> (String, Vec<String>) {
