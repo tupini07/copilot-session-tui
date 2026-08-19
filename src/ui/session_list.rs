@@ -135,6 +135,7 @@ pub mod tests {
             last_user_message: None,
             turn_count: 0,
             tool_call_count: 0,
+            details_parsed_len: 0,
         }
     }
 

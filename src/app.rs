@@ -267,6 +267,8 @@ pub struct App {
     pub project_search_query: String,
     pub sort_field: SortField,
     pub detail_loaded_for: Option<String>,
+    /// Selection waiting out a settle delay before its (large) event log is read.
+    pub detail_pending: Option<(String, std::time::Instant)>,
     pub should_quit: bool,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
     pub should_new_session: Option<NewSessionRequest>,
@@ -356,6 +358,7 @@ impl App {
             project_search_query: String::new(),
             sort_field: SortField::LastUsed,
             detail_loaded_for: None,
+            detail_pending: None,
             should_quit: false,
             should_resume: None,
             should_new_session: None,
@@ -1323,6 +1326,7 @@ mod tests {
             last_user_message: None,
             turn_count: 0,
             tool_call_count: 0,
+            details_parsed_len: 0,
         }
     }
 

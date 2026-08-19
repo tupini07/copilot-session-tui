@@ -996,17 +996,48 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
     }
 }
 
+/// Unread event bytes below which a session is summarized immediately.
+///
+/// Reading this much is imperceptible, so the common case keeps its instant details.
+const DETAIL_INSTANT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// How long the selection must hold still before a large event log is read.
+const DETAIL_SETTLE: std::time::Duration = std::time::Duration::from_millis(90);
+
 /// Load details for the currently selected session if not already loaded.
 pub fn maybe_load_details(app: &mut App) {
-    if let Some(session) = app.selected_session() {
-        let id = session.id.clone();
-        if app.detail_loaded_for.as_deref() != Some(&id) {
-            if let Some(idx) = app.selected_real_index() {
-                let _ = loader::load_session_details(&mut app.sessions[idx]);
-                app.detail_loaded_for = Some(id);
+    let Some(id) = app.selected_session().map(|session| session.id.clone()) else {
+        app.detail_pending = None;
+        return;
+    };
+    if app.detail_loaded_for.as_deref() == Some(&id) {
+        app.detail_pending = None;
+        return;
+    }
+    let Some(index) = app.selected_real_index() else {
+        return;
+    };
+
+    // Holding an arrow key sweeps the selection across sessions that are never read.
+    // Summarizing a multi-hundred-megabyte event log for each one is what makes that
+    // scrolling drag, so only expensive sessions wait for the selection to settle.
+    if loader::pending_detail_bytes(&app.sessions[index]) > DETAIL_INSTANT_BYTES {
+        match &app.detail_pending {
+            Some((pending, since)) if *pending == id => {
+                if since.elapsed() < DETAIL_SETTLE {
+                    return;
+                }
+            }
+            _ => {
+                app.detail_pending = Some((id, std::time::Instant::now()));
+                return;
             }
         }
     }
+
+    let _ = loader::load_session_details(&mut app.sessions[index]);
+    app.detail_loaded_for = Some(id);
+    app.detail_pending = None;
 }
 
 #[cfg(test)]

@@ -20,6 +20,9 @@ pub struct Session {
     pub last_user_message: Option<String>,
     pub turn_count: usize,
     pub tool_call_count: usize,
+    /// Bytes of this session's `events.jsonl` already summarized, so reselecting it
+    /// only has to read whatever was appended since.
+    pub details_parsed_len: u64,
 }
 
 /// Raw workspace.yaml structure

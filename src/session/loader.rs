@@ -102,20 +102,47 @@ fn load_single_session(dir: &Path) -> Result<Session> {
         last_user_message: None,
         turn_count: 0,
         tool_call_count: 0,
+        details_parsed_len: 0,
     })
 }
 
-/// Load detail data (edited files, messages) for a single session — lazy/on-demand
+/// Load detail data (edited files, messages) for a single session — lazy/on-demand.
+///
+/// Resumes from whatever was already summarized, so reselecting a session costs a
+/// stat, and a session that is still running only pays for its newly appended events.
 pub fn load_session_details(session: &mut Session) -> Result<()> {
     let events_path = session.dir_path.join("events.jsonl");
-    if events_path.exists() {
-        let details = parser::parse_events(&events_path)?;
-        session.edited_files = details.edited_files;
-        session.last_user_message = details.last_user_message;
-        session.turn_count = details.turn_count;
-        session.tool_call_count = details.tool_call_count;
+    if !events_path.exists() {
+        return Ok(());
     }
-    Ok(())
+
+    let mut details = parser::SessionDetails {
+        edited_files: std::mem::take(&mut session.edited_files),
+        last_user_message: session.last_user_message.take(),
+        turn_count: session.turn_count,
+        tool_call_count: session.tool_call_count,
+        parsed_len: session.details_parsed_len,
+    };
+
+    let result = parser::parse_events_into(&events_path, &mut details);
+
+    session.edited_files = details.edited_files;
+    session.last_user_message = details.last_user_message;
+    session.turn_count = details.turn_count;
+    session.tool_call_count = details.tool_call_count;
+    session.details_parsed_len = details.parsed_len;
+
+    result
+}
+
+/// Bytes of a session's event log that have not been summarized yet.
+///
+/// Used to decide whether details are cheap enough to load immediately or should
+/// wait for the selection to settle.
+pub fn pending_detail_bytes(session: &Session) -> u64 {
+    fs::metadata(session.dir_path.join("events.jsonl"))
+        .map(|meta| meta.len().saturating_sub(session.details_parsed_len))
+        .unwrap_or(0)
 }
 
 /// Canonicalize a path to get consistent casing/representation, falling back to lossy string
