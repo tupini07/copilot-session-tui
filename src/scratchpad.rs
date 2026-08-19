@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use edtui::actions::cpaste::PasteOverSelection;
 use edtui::actions::motion::MoveToLastRow;
 use edtui::actions::{
@@ -81,6 +81,11 @@ impl Scratchpad {
     }
 
     pub fn handle_event(&mut self, event: Event) -> Result<InputOutcome> {
+        let is_mouse_drag = matches!(
+            &event,
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Drag(_))
+        );
+
         if let Event::Key(key) = &event {
             if key.kind != KeyEventKind::Press {
                 return Ok(InputOutcome::Continue);
@@ -107,7 +112,7 @@ impl Scratchpad {
         if !self.handle_shortcut(&event) {
             self.prepare_selection_for_input(&event);
             self.handler.on_event(event, &mut self.state);
-            if self.state.mode != EditorMode::Insert {
+            if self.state.mode != EditorMode::Insert && !is_mouse_drag {
                 self.state.mode = EditorMode::Insert;
             }
         }
@@ -211,7 +216,7 @@ impl Scratchpad {
             }
         }
 
-        if is_ctrl(key, 'a') {
+        if is_ctrl(key, 'a') || is_alt(key, 'a') {
             self.state.cursor = Index2::new(0, 0);
             self.state.execute(SwitchMode(EditorMode::Visual));
             self.state.execute(MoveToLastRow());
@@ -1085,6 +1090,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(scratchpad.content(), "aXc");
+    }
+
+    #[test]
+    fn ctrl_or_alt_a_selects_the_entire_buffer() {
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let (_temp, mut scratchpad) = test_scratchpad("first\nsecond");
+            scratchpad.state.cursor = Index2::new(0, 3);
+
+            scratchpad
+                .handle_event(key(KeyCode::Char('a'), modifiers))
+                .unwrap();
+
+            let selection = scratchpad.state.selection.as_ref().unwrap();
+            assert_eq!(selection.start, Index2::new(0, 0));
+            assert_eq!(selection.end, Index2::new(1, 6));
+            assert_eq!(scratchpad.state.mode, EditorMode::Insert);
+        }
     }
 
     #[test]
