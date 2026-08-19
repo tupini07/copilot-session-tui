@@ -66,7 +66,7 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
 
 pub fn draw_help(f: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(4).min(54);
-    let height = area.height.saturating_sub(2).min(16);
+    let height = area.height.saturating_sub(2).min(17);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -76,8 +76,9 @@ pub fn draw_help(f: &mut Frame, area: Rect) {
     let lines = vec![
         help_line("Esc", "Close help"),
         help_line("Ctrl+S", "Save"),
+        help_line("Mouse drag", "Select text"),
         help_line("Shift+Arrows", "Select text"),
-        help_line("Ctrl+A", "Select all"),
+        help_line("Ctrl/Alt+A", "Select all"),
         help_line("Ctrl+C/X/V", "Copy / cut / paste"),
         help_line("Ctrl+Z/Y", "Undo / redo"),
         help_line("Ctrl+W/Ctrl+BS", "Delete previous word"),
@@ -113,8 +114,10 @@ fn help_line(shortcut: &str, description: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use edtui::{Index2, Lines};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use edtui::{EditorMode, Index2, Lines};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -201,5 +204,48 @@ mod tests {
             .handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)))
             .unwrap();
         assert_eq!(scratchpad.state.cursor, Index2::new(0, 5));
+    }
+
+    #[test]
+    fn mouse_drag_preserves_selection_anchor_until_release() {
+        let mut scratchpad = Scratchpad::open("mouse-selection-test").unwrap();
+        scratchpad.state.lines = Lines::from("abcdefghij");
+        let backend = TestBackend::new(20, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut scratchpad)).unwrap();
+
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 2),
+            (MouseEventKind::Drag(MouseButton::Left), 5),
+            (MouseEventKind::Drag(MouseButton::Left), 9),
+        ] {
+            scratchpad
+                .handle_event(Event::Mouse(MouseEvent {
+                    kind,
+                    column,
+                    row: 1,
+                    modifiers: KeyModifiers::NONE,
+                }))
+                .unwrap();
+        }
+
+        let selection = scratchpad.state.selection.as_ref().unwrap();
+        assert_eq!(selection.start, Index2::new(0, 1));
+        assert_eq!(selection.end, Index2::new(0, 8));
+        assert_eq!(scratchpad.state.mode, EditorMode::Visual);
+
+        scratchpad
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 9,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+
+        let selection = scratchpad.state.selection.as_ref().unwrap();
+        assert_eq!(selection.start, Index2::new(0, 1));
+        assert_eq!(selection.end, Index2::new(0, 8));
+        assert_eq!(scratchpad.state.mode, EditorMode::Insert);
     }
 }

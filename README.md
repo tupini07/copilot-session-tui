@@ -134,8 +134,9 @@ when their session is deleted.
 | Key | Action |
 |-----|--------|
 | `Esc` / `Ctrl+S` | Save and close / save |
+| Mouse drag | Select text |
 | `Shift+Arrows` | Select text |
-| `Ctrl+A` | Select all |
+| `Ctrl+A` / `Alt+A` | Select all |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `Ctrl+W` / `Ctrl+Backspace` | Delete the previous word |
