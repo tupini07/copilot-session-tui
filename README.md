@@ -237,7 +237,12 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
+| `prefix` `q` | End the focused session and quit CST together |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
+
+`prefix` `q` is the one-step exit: it ends the attached session and quits CST without a
+detour through the session list. Because quitting also kills every other pane, it asks
+for confirmation when a session other than the one on screen is still running.
 
 GitHub inspection is available while attached to a mux session. Enter an issue or pull
 request number and CST resolves the repository from that session's working directory.

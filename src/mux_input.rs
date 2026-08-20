@@ -1,4 +1,5 @@
 use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
+use crate::input::{handle_quit_confirm, request_quit};
 use crate::mux::{
     resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
     HelpCommand, MuxEvent, PrefixCommand, PrefixState,
@@ -11,6 +12,21 @@ use ratatui::layout::Rect;
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    if app.confirm_quit {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press {
+                handle_quit_confirm(app, key.code);
+                // The attached status bar has nowhere to show the shared "Quit
+                // cancelled" notice, and leaving it set would surface it stale on a
+                // later detach.
+                if !app.should_quit {
+                    app.status_message = None;
+                }
+            }
+        }
+        return;
+    }
+
     if app.github_inspector.is_some() {
         handle_github_inspector_event(app, event);
         return;
@@ -142,6 +158,10 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 sync_workspace_panels(app);
             }
             Some(PrefixCommand::KillPane) => kill_focused(app),
+            Some(PrefixCommand::Quit) => {
+                app.request_quit_from_pane();
+                return;
+            }
             Some(PrefixCommand::PaneList) => {
                 app.open_pane_list();
                 return;
@@ -879,6 +899,12 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         }
         return true;
     }
+    // Quitting is meaningful with or without panes, so it is resolved before the
+    // "nothing is running" guard below.
+    if matches!(command, Some(PrefixCommand::Quit)) {
+        request_quit(app);
+        return true;
+    }
     if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
         app.status_message = Some("No sessions are running".to_string());
         return true;
@@ -903,6 +929,7 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         }
         Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Github) => unreachable!("handled before pane availability"),
+        Some(PrefixCommand::Quit) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::NextPane) => {
             if let Some(mux) = app.mux.as_mut() {
                 mux.cycle(true);
@@ -1102,6 +1129,78 @@ mod tests {
 
         assert_eq!(app.view, View::List);
         assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+    }
+
+    #[test]
+    fn prefix_q_ends_a_lone_session_and_cst_without_confirming() {
+        let mut app = attached_mux_app("quit-lone-session");
+
+        send_prefix_command(&mut app, 'q');
+
+        assert!(app.should_quit);
+        assert!(!app.confirm_quit);
+    }
+
+    #[test]
+    fn prefix_q_confirms_when_other_sessions_would_die_unseen() {
+        let mut app = attached_mux_app("quit-visible-session");
+        // Pushing focuses the new pane, so the first one becomes the background
+        // session the user cannot see.
+        push_test_pane(&mut app, 2, "quit-background-session");
+        app.view = View::Attached(2);
+
+        send_prefix_command(&mut app, 'q');
+
+        assert!(app.confirm_quit);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn confirming_the_quit_prompt_from_a_pane_quits() {
+        let mut app = mux_app();
+        app.view = View::Attached(1);
+        app.confirm_quit = true;
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        );
+
+        assert!(app.should_quit);
+        assert!(!app.confirm_quit);
+    }
+
+    #[test]
+    fn declining_the_quit_prompt_returns_to_the_pane_without_a_stale_notice() {
+        let mut app = mux_app();
+        app.view = View::Attached(1);
+        app.confirm_quit = true;
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+        );
+
+        assert!(!app.should_quit);
+        assert!(!app.confirm_quit);
+        assert_eq!(app.view, View::Attached(1));
+        assert_eq!(app.status_message, None);
+    }
+
+    #[test]
+    fn the_quit_prompt_swallows_keys_instead_of_forwarding_them_to_the_child() {
+        let mut app = mux_app();
+        app.view = View::Attached(1);
+        app.confirm_quit = true;
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        assert!(!app.confirm_quit);
+        assert!(!app.should_quit);
     }
 
     #[test]

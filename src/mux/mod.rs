@@ -129,6 +129,8 @@ pub enum PrefixCommand {
     Terminal,
     Help,
     Github,
+    /// `prefix q` — end the focused session and CST together.
+    Quit,
     SelectIndex(usize),
     /// `prefix prefix` — send a literal prefix keystroke to the child.
     Literal,
@@ -148,6 +150,7 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('c') => Some(PrefixCommand::Chat),
         KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
         KeyCode::Char('t') => Some(PrefixCommand::Terminal),
+        KeyCode::Char('q') => Some(PrefixCommand::Quit),
         KeyCode::Char(character)
             if character.eq_ignore_ascii_case(&'h')
                 && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -312,6 +315,15 @@ impl MuxState {
         self.panes.iter().filter(|pane| pane.is_running()).count()
     }
 
+    /// Running panes other than the focused one — the sessions a quit would end
+    /// without the user seeing them go.
+    pub fn background_running_count(&self) -> usize {
+        self.panes
+            .iter()
+            .filter(|pane| pane.is_running() && Some(pane.id) != self.focused)
+            .count()
+    }
+
     /// Catch exits whose notification never reached the event loop, so a quit
     /// confirmation never lists sessions that are already gone.
     pub fn reap(&mut self) {
@@ -436,6 +448,10 @@ mod tests {
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('g'), KeyModifiers::CONTROL), &chord),
             Some(PrefixCommand::Github)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('q'), none), &chord),
+            Some(PrefixCommand::Quit)
         );
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Backspace, none), &chord),

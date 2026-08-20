@@ -102,7 +102,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
 }
 
 /// Quitting kills every pane, so confirm while sessions are still running.
-fn request_quit(app: &mut App) {
+pub(crate) fn request_quit(app: &mut App) {
     let running = app
         .mux
         .as_mut()
@@ -118,7 +118,7 @@ fn request_quit(app: &mut App) {
     }
 }
 
-fn handle_quit_confirm(app: &mut App, key: KeyCode) {
+pub(crate) fn handle_quit_confirm(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.confirm_quit = false;

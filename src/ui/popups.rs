@@ -547,6 +547,10 @@ pub fn draw_help(f: &mut Frame, app: &App) {
             "End the focused session for good",
         ));
         text.push(help_line(
+            &format!("{prefix} q"),
+            "End the focused session and quit CST",
+        ));
+        text.push(help_line(
             &format!("{prefix} {prefix}"),
             "Send the prefix key itself",
         ));

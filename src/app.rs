@@ -1105,6 +1105,27 @@ impl App {
         }
     }
 
+    /// `prefix q` — end the focused session and CST in one step.
+    ///
+    /// Quitting kills every pane, so this confirms when panes *other* than the one on
+    /// screen would go with it. The focused session is the one the user just asked to
+    /// end, so ending it alone needs no second keystroke.
+    pub fn request_quit_from_pane(&mut self) {
+        let background = self
+            .mux
+            .as_mut()
+            .map(|mux| {
+                mux.reap();
+                mux.background_running_count()
+            })
+            .unwrap_or(0);
+        if background > 0 {
+            self.confirm_quit = true;
+        } else {
+            self.should_quit = true;
+        }
+    }
+
     /// Panes owned by this instance, for marking rows in the session list.
     pub fn pane_for_session(&self, session_id: &str) -> Option<crate::mux::PaneId> {
         self.mux

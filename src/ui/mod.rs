@@ -72,6 +72,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
             scratchpad::draw_help(f, size);
         }
+        // `prefix q` can raise this without leaving the pane, so it has to be drawn
+        // here too — the list view below is never reached while attached.
+        if app.confirm_quit {
+            popups::draw_quit_confirm(f, app);
+        }
         return;
     }
 

@@ -131,7 +131,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(
-                " c chat  e scratch  t terminal  C-h help  C-g github  d list  w switch  n/p cycle  x end ",
+                " c chat  e scratch  t terminal  C-h help  C-g github  d list  w switch  n/p cycle  x end  q quit ",
             ),
         ],
         PaneStatus::Running => vec![
@@ -302,6 +302,25 @@ mod tests {
             "the spinner must disappear as soon as the child draws, got:\n{text}"
         );
         assert!(text.contains("hello from copilot"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn the_quit_prompt_is_visible_without_leaving_the_attached_pane() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.confirm_quit = true;
+
+        let text = render(&mut app);
+
+        assert!(
+            text.contains("Quit and end 1 running session(s)?"),
+            "prefix q must be answerable from the pane it was pressed in, got:\n{text}"
+        );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 
