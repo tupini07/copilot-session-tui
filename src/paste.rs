@@ -237,4 +237,173 @@ mod tests {
             "a carriage return would submit the message mid-paste"
         );
     }
+
+    /// Text a paste has to survive: several lines, a blank line, and no trailing break.
+    const PASTED_TEXT: &str = "first pasted line\nsecond pasted line\n\nfourth pasted line";
+
+    /// The child half of the console round-trip below.
+    ///
+    /// Ignored so it never runs as part of an ordinary suite, and it exits immediately
+    /// unless the parent asked for it, so `--ignored` runs stay fast.
+    #[test]
+    #[ignore = "spawned by paste_bursts_survive_a_real_windows_console"]
+    fn console_paste_probe_child() {
+        use std::io::Write;
+
+        if std::env::var("CST_PASTE_PROBE").is_err() {
+            return;
+        }
+
+        let mut stdout = std::io::stdout();
+        crossterm::terminal::enable_raw_mode().expect("raw mode");
+        // Advertise bracketed paste exactly as the real UI does, so the console layer
+        // makes the same decisions about the incoming paste that it makes for CST.
+        write!(stdout, "\x1b[?2004h").unwrap();
+        write!(stdout, "PROBE-READY\r\n").unwrap();
+        stdout.flush().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => break,
+            }
+            let Ok(events) = read_events() else { break };
+            let mut saw_paste = false;
+            for event in events {
+                saw_paste |= matches!(event, Event::Paste(_));
+                write!(stdout, "PROBE-EVENT {event:?}\r\n").unwrap();
+            }
+            stdout.flush().unwrap();
+            // The parent sends one paste and nothing else, so there is nothing left to
+            // wait for; failures still burn the full window and report what did arrive.
+            if saw_paste {
+                break;
+            }
+        }
+
+        write!(stdout, "PROBE-DONE\r\n").unwrap();
+        stdout.flush().unwrap();
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+
+    /// Drive a paste through a genuine console instead of trusting a hand-built burst.
+    ///
+    /// The child runs under a pseudoconsole, so the bytes written here take the same
+    /// route a real paste takes: the console host turns them into input records and
+    /// crossterm reports those as ordinary keys. That is the step this module exists to
+    /// undo, and the only way to confirm it is to watch it happen.
+    #[test]
+    #[cfg_attr(not(windows), ignore = "reconstruction only runs on Windows")]
+    fn paste_bursts_survive_a_real_windows_console() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{Read, Write};
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+
+        let mut command = CommandBuilder::new(std::env::current_exe().unwrap());
+        command.arg("--exact");
+        command.arg("paste::tests::console_paste_probe_child");
+        command.arg("--ignored");
+        command.arg("--nocapture");
+        command.env("CST_PASTE_PROBE", "1");
+
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+
+        let mut writer = pair.master.take_writer().unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 || tx.send(buffer[..count].to_vec()).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let mut transcript = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut pasted = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(chunk) => {
+                    // ConPTY asks for the cursor position on startup and blocks until
+                    // it is answered; the real pane does this via vt100 callbacks.
+                    if chunk.windows(4).any(|window| window == b"\x1b[6n") {
+                        writer.write_all(b"\x1b[1;1R").unwrap();
+                        writer.flush().unwrap();
+                    }
+                    transcript.push_str(&String::from_utf8_lossy(&chunk));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if !pasted && transcript.contains("PROBE-READY") {
+                pasted = true;
+                // Byte-for-byte what a terminal sends when bracketed paste is on.
+                let mut payload = b"\x1b[200~".to_vec();
+                payload.extend_from_slice(PASTED_TEXT.replace('\n', "\r").as_bytes());
+                payload.extend_from_slice(b"\x1b[201~");
+                writer.write_all(&payload).unwrap();
+                writer.flush().unwrap();
+            }
+            if transcript.contains("PROBE-DONE") {
+                break;
+            }
+        }
+
+        let status = child.try_wait().ok().flatten().map(|s| s.exit_code());
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            pasted,
+            "probe never signalled readiness (child status {status:?}, \
+             {} bytes read), transcript:\n{transcript}",
+            transcript.len()
+        );
+
+        let reported: Vec<&str> = transcript
+            .lines()
+            .filter_map(|line| line.split_once("PROBE-EVENT ").map(|(_, rest)| rest.trim()))
+            .collect();
+        assert!(
+            !reported.is_empty(),
+            "the console delivered nothing, transcript:\n{transcript}"
+        );
+
+        let pastes: Vec<&&str> = reported
+            .iter()
+            .filter(|line| line.starts_with("Paste("))
+            .collect();
+        assert_eq!(
+            pastes.len(),
+            1,
+            "expected one reconstructed paste, got {reported:#?}"
+        );
+
+        // Every line has to arrive as text. A stray Enter here is the original bug:
+        // the child would have submitted the message part-way through the paste.
+        for line in PASTED_TEXT.split('\n').filter(|line| !line.is_empty()) {
+            assert!(
+                pastes[0].contains(line),
+                "{line:?} missing from {:?}",
+                pastes[0]
+            );
+        }
+        assert!(
+            !reported.iter().any(|line| line.starts_with("Key(")),
+            "pasted keys leaked out of the burst: {reported:#?}"
+        );
+    }
 }
