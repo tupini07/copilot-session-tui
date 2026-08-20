@@ -7,6 +7,7 @@ mod host_terminal;
 mod input;
 mod mux;
 mod mux_input;
+mod paste;
 mod scratchpad;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -351,14 +352,18 @@ fn existing_or_current_dir(cwd: &str) -> String {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     // In mux mode a dedicated thread feeds terminal events into the same channel as PTY
-    // output, so the loop can wait on both at once instead of polling.
+    // output, so the loop can wait on both at once instead of polling. Reading through
+    // `paste` rebuilds the paste events Windows delivers as bare keystrokes; because the
+    // thread does nothing but read, a queued burst can only have come from a paste.
     let terminal_events = app.mux.as_ref().map(|mux| {
         let sender = mux.events.clone();
         std::thread::spawn(move || loop {
-            match crossterm::event::read() {
-                Ok(event) => {
-                    if sender.send(mux::MuxEvent::Term(event)).is_err() {
-                        return;
+            match paste::read_events() {
+                Ok(events) => {
+                    for event in events {
+                        if sender.send(mux::MuxEvent::Term(event)).is_err() {
+                            return;
+                        }
                     }
                 }
                 Err(_) => return,

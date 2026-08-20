@@ -479,6 +479,23 @@ mod tests {
     }
 
     #[test]
+    fn a_child_that_enables_bracketed_paste_is_detected() {
+        // Copilot CLI turns the mode on at startup; the paste path relies on seeing it
+        // so pasted newlines travel as text instead of Enter keystrokes.
+        let (tx, rx) = mpsc::channel();
+        let (program, args) = shell_command("echo done");
+        let mut pane = Pane::spawn(test_spec(1, program, args), 24, 80, tx).unwrap();
+
+        assert!(!pane.bracketed_paste());
+        pane.feed_synthetic(b"\x1b[?2004h");
+        assert!(pane.bracketed_paste());
+        pane.feed_synthetic(b"\x1b[?2004l");
+        assert!(!pane.bracketed_paste());
+
+        wait_for_exit(&rx, &mut pane);
+    }
+
+    #[test]
     fn keys_sent_to_an_exited_pane_are_ignored() {
         let (tx, rx) = mpsc::channel();
         let (program, args) = shell_command("echo done");

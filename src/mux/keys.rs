@@ -155,12 +155,17 @@ fn function_key_number(n: u8) -> Option<u8> {
 }
 
 /// Wrap pasted text in bracketed-paste markers when the child has enabled the mode.
+///
+/// Without the markers the child cannot tell pasted text from typing, so newlines are
+/// rewritten to `\r` — byte-for-byte what forwarding each Enter key used to produce.
+/// A child that asked for bracketed paste gets the text verbatim, keeping `\n` line
+/// breaks intact the way a Unix paste already delivers them.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     if text.is_empty() {
         return vec![0x16];
     }
     if !bracketed {
-        return text.as_bytes().to_vec();
+        return text.replace("\r\n", "\r").replace('\n', "\r").into_bytes();
     }
     let mut bytes = b"\x1b[200~".to_vec();
     bytes.extend_from_slice(text.as_bytes());
@@ -353,6 +358,22 @@ mod tests {
         assert_eq!(encode_paste("", false), vec![0x16]);
         assert_eq!(encode_paste("hi", false), b"hi");
         assert_eq!(encode_paste("hi", true), b"\x1b[200~hi\x1b[201~");
+    }
+
+    #[test]
+    fn paste_newlines_reach_a_bracketed_child_untouched() {
+        assert_eq!(
+            encode_paste("one\ntwo\n\nthree", true),
+            b"\x1b[200~one\ntwo\n\nthree\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn paste_newlines_become_carriage_returns_without_bracketing() {
+        // A shell has no way to tell paste from typing, so it must see the same bytes
+        // that forwarding each Enter keystroke produced.
+        assert_eq!(encode_paste("one\ntwo", false), b"one\rtwo");
+        assert_eq!(encode_paste("one\r\ntwo", false), b"one\rtwo");
     }
 
     #[test]

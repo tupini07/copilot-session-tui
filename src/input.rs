@@ -42,6 +42,23 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    // Replay a paste as typing, but only into a prompt that is actually collecting
+    // text — in Normal mode every character is a command, so pasting must not run one.
+    // These prompts are all single-line, so line breaks are dropped rather than sent.
+    if let Event::Paste(text) = event {
+        if matches!(
+            app.mode,
+            Mode::Search | Mode::Rename | Mode::FilterProject | Mode::BranchName
+        ) {
+            for character in text.chars().filter(|character| !character.is_control()) {
+                let key =
+                    crossterm::event::KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+                handle_terminal_event(app, Event::Key(key))?;
+            }
+        }
+        return Ok(());
+    }
+
     let Event::Key(key) = event else {
         return Ok(());
     };
@@ -1043,6 +1060,30 @@ pub fn maybe_load_details(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasting_into_the_search_prompt_types_the_text() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Search;
+
+        handle_terminal_event(&mut app, Event::Paste("my-project\nrest".to_string())).unwrap();
+
+        // Single-line prompt: the line break is dropped rather than typed or submitted.
+        assert_eq!(app.search_query, "my-projectrest");
+        assert_eq!(app.mode, Mode::Search);
+    }
+
+    #[test]
+    fn pasting_in_normal_mode_never_runs_the_characters_as_commands() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        assert_eq!(app.mode, Mode::Normal);
+
+        // 'd' opens the delete confirmation and '/' opens search when typed.
+        handle_terminal_event(&mut app, Event::Paste("d/rn".to_string())).unwrap();
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.search_query.is_empty());
+    }
 
     #[test]
     fn terminal_shortcut_is_inert_on_session_list() {
