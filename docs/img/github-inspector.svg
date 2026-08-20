@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1148" height="500" viewBox="0 0 1148 500" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace" font-size="15">
+<rect width="1148" height="500" rx="8" fill="#11111b"/>
+<rect x="25.0" y="34.0" width="342.0" height="18.0" fill="#94e2d5" shape-rendering="crispEdges"/>
+<rect x="25.0" y="70.0" width="207.0" height="18.0" fill="#1e1e28" shape-rendering="crispEdges"/>
+<rect x="232.0" y="70.0" width="63.0" height="18.0" fill="#cba6f7" shape-rendering="crispEdges"/>
+<rect x="295.0" y="70.0" width="828.0" height="18.0" fill="#1e1e28" shape-rendering="crispEdges"/>
+<rect x="394.0" y="88.0" width="189.0" height="18.0" fill="#94e2d5" shape-rendering="crispEdges"/>
+<rect x="25.0" y="124.0" width="351.0" height="18.0" fill="#94e2d5" shape-rendering="crispEdges"/>
+<rect x="25.0" y="448.0" width="1098.0" height="18.0" fill="#1e1e28" shape-rendering="crispEdges"/>
+<text x="16.0" y="29.5" fill="#cba6f7" textLength="1116.0" lengthAdjust="spacing" xml:space="preserve">┌ GitHub Inspector ────────────────────────────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="16.0" y="47.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="47.5" fill="#45475a" textLength="342.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> tupini07/copilot-session-tui  PR #42 </text>
+<text x="376.0" y="47.5" fill="#a6e3a1" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">OPEN</text>
+<text x="1123.0" y="47.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="65.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="65.5" fill="#cdd6f4" textLength="459.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> Show PR changed files as a tree beside a live diff</text>
+<text x="1123.0" y="65.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="83.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="34.0" y="83.5" fill="#bac2de" textLength="90.0" lengthAdjust="spacing" xml:space="preserve"> Overview </text>
+<text x="133.0" y="83.5" fill="#bac2de" textLength="90.0" lengthAdjust="spacing" xml:space="preserve"> Comments </text>
+<text x="232.0" y="83.5" fill="#45475a" textLength="63.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> Files </text>
+<text x="1123.0" y="83.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="101.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="101.5" fill="#89b4fa" textLength="54.0" lengthAdjust="spacing" xml:space="preserve"> ▾ src</text>
+<text x="79.0" y="101.5" fill="#585b70" textLength="288.0" lengthAdjust="spacing" xml:space="preserve">                   5 · +703 -133</text>
+<text x="376.0" y="101.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="101.5" fill="#45475a" textLength="189.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> src/ui/file_tree.rs </text>
+<text x="1114.0" y="101.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="119.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="119.5" fill="#89b4fa" textLength="63.0" lengthAdjust="spacing" xml:space="preserve">   ▾ ui</text>
+<text x="88.0" y="119.5" fill="#585b70" textLength="279.0" lengthAdjust="spacing" xml:space="preserve">                   3 · +525 -96</text>
+<text x="376.0" y="119.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="119.5" fill="#f9e2af" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">File: </text>
+<text x="448.0" y="119.5" fill="#cdd6f4" textLength="666.0" lengthAdjust="spacing" xml:space="preserve">added · +306 -0 · 306 changed lines                                       </text>
+<text x="1114.0" y="119.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="137.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="137.5" fill="#45475a" textLength="351.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">     A file_tree.rs             +306 -0</text>
+<text x="376.0" y="137.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1114.0" y="137.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="155.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="155.5" fill="#f9e2af" textLength="63.0" lengthAdjust="spacing" xml:space="preserve">     M </text>
+<text x="88.0" y="155.5" fill="#cdd6f4" textLength="171.0" lengthAdjust="spacing" xml:space="preserve">github_inspector.rs</text>
+<text x="259.0" y="155.5" fill="#585b70" textLength="117.0" lengthAdjust="spacing" xml:space="preserve">     +218 -96</text>
+<text x="376.0" y="155.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="155.5" fill="#94e2d5" textLength="144.0" lengthAdjust="spacing" xml:space="preserve">@@ -0,0 +1,42 @@</text>
+<text x="1114.0" y="155.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="173.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="173.5" fill="#f9e2af" textLength="63.0" lengthAdjust="spacing" xml:space="preserve">     M </text>
+<text x="88.0" y="173.5" fill="#cdd6f4" textLength="54.0" lengthAdjust="spacing" xml:space="preserve">mod.rs</text>
+<text x="142.0" y="173.5" fill="#585b70" textLength="234.0" lengthAdjust="spacing" xml:space="preserve">                     +1 -0</text>
+<text x="376.0" y="173.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="173.5" fill="#a6e3a1" textLength="396.0" lengthAdjust="spacing" xml:space="preserve">+use std::collections::{BTreeMap, BTreeSet};</text>
+<text x="1114.0" y="173.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="191.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="191.5" fill="#f9e2af" textLength="45.0" lengthAdjust="spacing" xml:space="preserve">   M </text>
+<text x="70.0" y="191.5" fill="#cdd6f4" textLength="54.0" lengthAdjust="spacing" xml:space="preserve">app.rs</text>
+<text x="124.0" y="191.5" fill="#585b70" textLength="252.0" lengthAdjust="spacing" xml:space="preserve">                      +14 -6</text>
+<text x="376.0" y="191.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="191.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">+</text>
+<text x="1114.0" y="191.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="209.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="209.5" fill="#f9e2af" textLength="45.0" lengthAdjust="spacing" xml:space="preserve">   M </text>
+<text x="70.0" y="209.5" fill="#cdd6f4" textLength="108.0" lengthAdjust="spacing" xml:space="preserve">mux_input.rs</text>
+<text x="178.0" y="209.5" fill="#585b70" textLength="198.0" lengthAdjust="spacing" xml:space="preserve">              +164 -31</text>
+<text x="376.0" y="209.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="209.5" fill="#a6e3a1" textLength="621.0" lengthAdjust="spacing" xml:space="preserve">+/// One row of the changed-file tree, already flattened for display.</text>
+<text x="1114.0" y="209.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="227.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="227.5" fill="#f9e2af" textLength="27.0" lengthAdjust="spacing" xml:space="preserve"> M </text>
+<text x="52.0" y="227.5" fill="#cdd6f4" textLength="81.0" lengthAdjust="spacing" xml:space="preserve">README.md</text>
+<text x="133.0" y="227.5" fill="#585b70" textLength="243.0" lengthAdjust="spacing" xml:space="preserve">                      +9 -2</text>
+<text x="376.0" y="227.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="227.5" fill="#a6e3a1" textLength="189.0" lengthAdjust="spacing" xml:space="preserve">+pub struct TreeRow {</text>
+<text x="1114.0" y="227.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="245.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="245.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="245.5" fill="#a6e3a1" textLength="198.0" lengthAdjust="spacing" xml:space="preserve">+    pub depth: usize,</text>
+<text x="1114.0" y="245.5" fill="#cba6f7" textLength="18.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">█│</text>
+<text x="16.0" y="263.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="263.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="263.5" fill="#a6e3a1" textLength="207.0" lengthAdjust="spacing" xml:space="preserve">+    pub label: String,</text>
+<text x="1114.0" y="263.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="263.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="281.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="281.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="281.5" fill="#a6e3a1" textLength="261.0" lengthAdjust="spacing" xml:space="preserve">+    pub file: Option&lt;usize&gt;,</text>
+<text x="1114.0" y="281.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="281.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="299.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="299.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="299.5" fill="#a6e3a1" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">+}</text>
+<text x="1114.0" y="299.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="299.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="317.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="317.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="317.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">+</text>
+<text x="1114.0" y="317.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="317.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="335.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="335.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="335.5" fill="#a6e3a1" textLength="477.0" lengthAdjust="spacing" xml:space="preserve">+/// Rows of the changed-file tree, in display order.</text>
+<text x="1114.0" y="335.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="335.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="353.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="353.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="353.5" fill="#a6e3a1" textLength="171.0" lengthAdjust="spacing" xml:space="preserve">+pub fn build_rows(</text>
+<text x="1114.0" y="353.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="353.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="371.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="371.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="371.5" fill="#a6e3a1" textLength="243.0" lengthAdjust="spacing" xml:space="preserve">+    files: &amp;[ChangedFile],</text>
+<text x="1114.0" y="371.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="371.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="389.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="389.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="389.5" fill="#a6e3a1" textLength="306.0" lengthAdjust="spacing" xml:space="preserve">+    collapsed: &amp;BTreeSet&lt;String&gt;,</text>
+<text x="1114.0" y="389.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="389.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="407.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="407.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="407.5" fill="#a6e3a1" textLength="180.0" lengthAdjust="spacing" xml:space="preserve">+) -&gt; Vec&lt;TreeRow&gt; {</text>
+<text x="1114.0" y="407.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="407.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="425.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="425.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="425.5" fill="#a6e3a1" textLength="315.0" lengthAdjust="spacing" xml:space="preserve">+    let mut root = Dir::default();</text>
+<text x="1114.0" y="425.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="425.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="443.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="376.0" y="443.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="394.0" y="443.5" fill="#a6e3a1" textLength="468.0" lengthAdjust="spacing" xml:space="preserve">+    for (index, file) in files.iter().enumerate() {</text>
+<text x="1114.0" y="443.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="443.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="461.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="34.0" y="461.5" fill="#94e2d5" textLength="117.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Tab/Shift+Tab</text>
+<text x="151.0" y="461.5" fill="#cdd6f4" textLength="63.0" lengthAdjust="spacing" xml:space="preserve"> tabs  </text>
+<text x="214.0" y="461.5" fill="#94e2d5" textLength="18.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">↑↓</text>
+<text x="232.0" y="461.5" fill="#cdd6f4" textLength="81.0" lengthAdjust="spacing" xml:space="preserve"> select  </text>
+<text x="313.0" y="461.5" fill="#94e2d5" textLength="18.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">←→</text>
+<text x="331.0" y="461.5" fill="#cdd6f4" textLength="63.0" lengthAdjust="spacing" xml:space="preserve"> fold  </text>
+<text x="394.0" y="461.5" fill="#94e2d5" textLength="45.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Enter</text>
+<text x="439.0" y="461.5" fill="#cdd6f4" textLength="63.0" lengthAdjust="spacing" xml:space="preserve"> diff  </text>
+<text x="502.0" y="461.5" fill="#94e2d5" textLength="27.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Esc</text>
+<text x="529.0" y="461.5" fill="#cdd6f4" textLength="594.0" lengthAdjust="spacing" xml:space="preserve"> close                                                            </text>
+<text x="1123.0" y="461.5" fill="#cba6f7" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="479.5" fill="#cba6f7" textLength="1116.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+</svg>

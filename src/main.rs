@@ -8,6 +8,8 @@ mod input;
 mod mux;
 mod mux_input;
 mod scratchpad;
+#[cfg(feature = "screenshots")]
+mod screenshots;
 mod session;
 mod terminal_pane;
 mod text;
@@ -81,6 +83,14 @@ enum Commands {
     /// Report how this terminal delivers key presses (used to pick a mux prefix key)
     #[command(hide = true)]
     DebugKeys,
+    /// Regenerate the README screenshots from invented sessions
+    #[cfg(feature = "screenshots")]
+    #[command(hide = true)]
+    Screenshots {
+        /// Directory to write the SVG files into
+        #[arg(default_value = "docs/img")]
+        out_dir: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -94,6 +104,10 @@ fn main() -> Result<()> {
         }
         Some(Commands::DebugKeys) => {
             return debug_keys::run();
+        }
+        #[cfg(feature = "screenshots")]
+        Some(Commands::Screenshots { out_dir }) => {
+            return screenshots::run(out_dir);
         }
         None => {}
     }

@@ -5,6 +5,11 @@ edition = "2021"
 rust-version = "1.86"
 description = "A TUI for managing GitHub Copilot CLI sessions"
 
+# Off by default: the generator exists only to regenerate the README images from the
+# real widgets, and shipped builds have no use for it.
+[features]
+screenshots = []
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"

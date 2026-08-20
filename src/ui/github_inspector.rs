@@ -16,6 +16,107 @@ pub fn is_prompt(app: &App) -> bool {
         .is_some_and(|inspector| matches!(inspector.screen, GithubInspectorScreen::NumberPrompt))
 }
 
+/// Load an invented pull request into the inspector, so the documentation
+/// screenshots can show the Files tab without contacting GitHub.
+#[cfg(feature = "screenshots")]
+pub fn install_demo_pull_request(app: &mut App) {
+    use crate::github::{Author, ChangedFile, ItemCommon, Label, PullRequest, RepositoryRef};
+
+    let file =
+        |path: &str, status: &str, additions: u64, deletions: u64, patch: &str| ChangedFile {
+            path: path.to_string(),
+            status: status.to_string(),
+            additions,
+            deletions,
+            changes: additions + deletions,
+            patch: Some(patch.to_string()),
+        };
+
+    let item = GithubItem::PullRequest(PullRequest {
+        common: ItemCommon {
+            repository: RepositoryRef {
+                host: "github.com".to_string(),
+                owner: "tupini07".to_string(),
+                name: "copilot-session-tui".to_string(),
+            },
+            number: 42,
+            title: "Show PR changed files as a tree beside a live diff".to_string(),
+            state: "open".to_string(),
+            author: Author {
+                login: "tupini07".to_string(),
+            },
+            labels: vec![Label {
+                name: "enhancement".to_string(),
+                color: Some("a2eeef".to_string()),
+            }],
+            created_at: "2026-08-19T18:04:00Z".to_string(),
+            updated_at: "2026-08-19T21:37:00Z".to_string(),
+            url: "https://github.com/tupini07/copilot-session-tui/pull/42".to_string(),
+            body: "The flat list wasted most of the screen and hid the diff behind Enter."
+                .to_string(),
+        },
+        draft: false,
+        merged: false,
+        mergeable_state: Some("clean".to_string()),
+        base_ref: "main".to_string(),
+        head_ref: "pr-files-tree".to_string(),
+        additions: 704,
+        deletions: 233,
+        changed_files: 6,
+        discussion: Vec::new(),
+        files: vec![
+            file(
+                "src/ui/file_tree.rs",
+                "added",
+                306,
+                0,
+                "@@ -0,0 +1,42 @@\n+use std::collections::{BTreeMap, BTreeSet};\n+\n+/// One row of the changed-file tree, already flattened for display.\n+pub struct TreeRow {\n+    pub depth: usize,\n+    pub label: String,\n+    pub file: Option<usize>,\n+}\n+\n+/// Rows of the changed-file tree, in display order.\n+pub fn build_rows(\n+    files: &[ChangedFile],\n+    collapsed: &BTreeSet<String>,\n+) -> Vec<TreeRow> {\n+    let mut root = Dir::default();\n+    for (index, file) in files.iter().enumerate() {\n+        root.insert(&file.path, index, file);\n+    }\n+    // A directory with a single child adds a level of indent without adding\n+    // any information, so the two are folded into one row.\n+    root.collapse_single_child_chains();\n+    flatten(&root, collapsed)\n+}",
+            ),
+            file(
+                "src/ui/github_inspector.rs",
+                "modified",
+                218,
+                96,
+                "@@ -196,12 +196,28 @@ fn draw_ready(f: &mut Frame, app: &mut App) {\n-    let lines = file_lines(inspector, item, width);\n-    render_list(f, lines, area);\n+    // A divider doubles as a focus cue, so it is obvious which pane takes keys.\n+    let (tree_area, diff_area) = if split {\n+        let tree_width = (area.width / 3).clamp(TREE_MIN_WIDTH, TREE_MAX_WIDTH);\n+        let chunks = Layout::default()\n+            .direction(Direction::Horizontal)\n+            .constraints([Constraint::Length(tree_width), Constraint::Min(1)])\n+            .split(area);\n+        (chunks[0], chunks[1])\n+    } else if focus == FilesPane::Diff {\n+        (Rect::default(), area)\n+    } else {\n+        (area, Rect::default())\n+    };",
+            ),
+            file(
+                "src/ui/mod.rs",
+                "modified",
+                1,
+                0,
+                "@@ -1,3 +1,4 @@\n+pub mod file_tree;\n pub mod github_inspector;\n pub mod pane;",
+            ),
+            file(
+                "src/mux_input.rs",
+                "modified",
+                164,
+                31,
+                "@@ -300,6 +300,14 @@ fn handle_ready_github_key(app: &mut App, key: KeyEvent) {\n+        KeyCode::Left if files_tab => collapse_or_ascend_github_tree(app),\n+        KeyCode::Right if files_tab => expand_or_enter_github_tree(app),",
+            ),
+            file(
+                "src/app.rs",
+                "modified",
+                14,
+                6,
+                "@@ -240,6 +240,20 @@ impl GithubInspector {\n+    /// Put the tree cursor on the first file so the diff pane has something to\n+    /// show as soon as a pull request opens.\n+    pub fn select_first_tree_file(&mut self) {",
+            ),
+            file(
+                "README.md",
+                "modified",
+                9,
+                2,
+                "@@ -221,8 +221,16 @@ GitHub inspection is available while attached to a mux session.\n+The **Files** tab splits into a directory tree of the changed files and the\n+selected file's diff, which follows the cursor without pressing Enter.",
+            ),
+        ],
+    });
+
+    let mut inspector = GithubInspector::number_prompt();
+    inspector.screen = GithubInspectorScreen::Ready(item);
+    inspector.tab = GithubTab::Files;
+    inspector.select_first_tree_file();
+    app.github_inspector = Some(inspector);
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let Some(inspector) = app.github_inspector.as_ref() else {
         return;

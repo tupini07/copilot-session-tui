@@ -44,6 +44,14 @@ impl Scratchpad {
         Self::open_in(&scratchpad_root(), session_id)
     }
 
+    /// Build a scratchpad backed by a throwaway root, for generating documentation
+    /// screenshots without touching the notes the user has saved.
+    #[cfg(feature = "screenshots")]
+    pub fn synthetic(root: &Path, session_id: &str, content: &str) -> Result<Self> {
+        write_atomic(&scratchpad_path_in(root, session_id), content)?;
+        Self::open_in(root, session_id)
+    }
+
     fn open_in(root: &Path, session_id: &str) -> Result<Self> {
         let path = scratchpad_path_in(root, session_id);
         let content = match fs::read_to_string(&path) {

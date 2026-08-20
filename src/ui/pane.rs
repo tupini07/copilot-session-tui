@@ -293,7 +293,7 @@ mod tests {
             .expect("mux")
             .focused_pane_mut()
             .expect("pane")
-            .feed_for_test(b"hello from copilot");
+            .feed_synthetic(b"hello from copilot");
 
         let text = render(&mut app);
 

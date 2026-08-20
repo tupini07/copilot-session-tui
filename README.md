@@ -2,6 +2,27 @@
 
 A terminal user interface for managing GitHub Copilot CLI sessions. Browse, search, filter, rename, and resume sessions — all from a lightweight TUI that works over SSH.
 
+![The session list, with a filterable list of sessions on the left and details for the selected one on the right](docs/img/session-list.svg)
+
+<table>
+<tr>
+<td width="50%">
+
+![An attached Copilot session running as a pane next to the session scratchpad](docs/img/workspace.svg)
+
+**Multiplexer** — attach a session as a pane and keep a scratchpad, a shell, and the picker one keystroke away.
+
+</td>
+<td width="50%">
+
+![The GitHub inspector showing a pull request's changed files as a tree beside the selected file's diff](docs/img/github-inspector.svg)
+
+**GitHub inspector** — read an issue or pull request, including the diff, without leaving the session.
+
+</td>
+</tr>
+</table>
+
 ## Features
 
 - **Full session list** — see ALL your Copilot sessions with virtual scrolling
@@ -345,6 +366,19 @@ Deleting a registered session explicitly removes its worktree first. Dirty workt
 require a second `Shift+Y` force confirmation. CST then attempts `git branch -d`; an
 unmerged branch is preserved and reported, and CST never escalates automatically to
 `git branch -D`. Active sessions cannot be deleted.
+
+## Screenshots
+
+The images in this README are generated, not captured, so they never contain real
+session data. An off-by-default `screenshots` feature renders invented sessions
+through the same drawing code the app uses and writes the result as SVG:
+
+```bash
+cargo run --features screenshots -- screenshots docs/img
+```
+
+The generator points `COPILOT_HOME` at a throwaway directory before it builds
+anything, so a run cannot read or write your actual sessions.
 
 ## License
 

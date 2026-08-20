@@ -156,9 +156,10 @@ impl Pane {
             .unwrap_or(true)
     }
 
-    /// Feed bytes straight into the parser, standing in for child output in tests.
-    #[cfg(test)]
-    pub fn feed_for_test(&mut self, bytes: &[u8]) {
+    /// Feed bytes straight into the parser, standing in for child output in tests
+    /// and in the generated documentation screenshots.
+    #[cfg(any(test, feature = "screenshots"))]
+    pub fn feed_synthetic(&mut self, bytes: &[u8]) {
         if let Ok(mut parser) = self.parser.lock() {
             parser.process(bytes);
         }
