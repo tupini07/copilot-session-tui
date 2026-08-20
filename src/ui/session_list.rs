@@ -89,7 +89,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 vec![line]
             } else {
                 let project = session.project_name();
-                let truncated_project = text::truncate_to_width(project, 15);
+                // The project line has no time column, so it can use everything the
+                // indent leaves rather than a fixed budget that clips common names.
+                let max_project_width = (inner.width as usize).saturating_sub(5);
+                let truncated_project = text::truncate_to_width(project, max_project_width);
                 let project_line = Line::from(vec![
                     Span::raw("    "),
                     Span::styled(
