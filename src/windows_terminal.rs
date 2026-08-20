@@ -6,8 +6,6 @@ use crate::session::Session;
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(any(windows, test))]
-use std::collections::HashSet;
-#[cfg(any(windows, test))]
 use std::ffi::OsString;
 use std::path::Path;
 #[cfg(any(windows, test))]
@@ -156,13 +154,14 @@ fn launch_favorites_windows(
 #[cfg(any(windows, test))]
 fn build_launch_plan(sessions: &[Session], config: &UserConfig) -> FavoriteLaunchPlan {
     let mut plan = FavoriteLaunchPlan::default();
-    let mut resolved = HashSet::new();
 
-    for session in sessions {
-        if !config.favorites.contains(&session.id) {
+    // Driven by the favorite order rather than the loader's, so tabs open in the
+    // arrangement the user set instead of by whichever session was used last.
+    for id in &config.favorites {
+        let Some(session) = sessions.iter().find(|session| &session.id == id) else {
+            plan.stale.push(id.clone());
             continue;
-        }
-        resolved.insert(session.id.as_str());
+        };
         let active_on_disk = !session.dir_path.as_os_str().is_empty()
             && loader::session_is_active(&session.dir_path);
         if session.is_active || active_on_disk {
@@ -177,13 +176,6 @@ fn build_launch_plan(sessions: &[Session], config: &UserConfig) -> FavoriteLaunc
         }
     }
 
-    plan.stale.extend(
-        config
-            .favorites
-            .iter()
-            .filter(|id| !resolved.contains(id.as_str()))
-            .cloned(),
-    );
     plan
 }
 
@@ -260,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_plan_preserves_loader_order_and_partitions_skipped_favorites() {
+    fn launch_plan_follows_the_favorite_order_and_partitions_skipped_favorites() {
         let cwd = tempfile::tempdir().unwrap();
         let sessions = vec![
             session("newest", "Newest", 3, false, cwd.path()),
@@ -269,8 +261,10 @@ mod tests {
             session("ordinary", "Not favorite", 0, false, cwd.path()),
         ];
         let mut config = UserConfig::default();
-        for id in ["newest", "active", "oldest", "missing"] {
-            config.favorites.insert(id.to_string());
+        // Arranged back-to-front relative to how the loader returns them, so tabs
+        // opening in the arranged order is the only way this can pass.
+        for id in ["oldest", "active", "newest", "missing"] {
+            config.favorites.push(id.to_string());
         }
 
         let plan = build_launch_plan(&sessions, &config);
@@ -280,7 +274,7 @@ mod tests {
                 .iter()
                 .map(|tab| tab.session_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["newest", "oldest"]
+            vec!["oldest", "newest"]
         );
         assert_eq!(plan.active, vec!["Already open"]);
         assert_eq!(plan.stale, vec!["missing"]);
@@ -296,7 +290,7 @@ mod tests {
             Path::new(r"Z:\missing\directory"),
         )];
         let mut config = UserConfig::default();
-        config.favorites.insert("favorite".to_string());
+        config.favorites.push("favorite".to_string());
 
         let plan = build_launch_plan(&sessions, &config);
 

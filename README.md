@@ -127,6 +127,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `Home` / `End` | Jump to first/last |
 | `Enter` | Resume selected session |
 | `Space` | Toggle selected session favorite |
+| `g` | Grab the selected favorite, then `↑`/`↓` to move it |
 | `T` | Open inactive favorites in Windows Terminal tabs |
 | `e` | Open selected session scratchpad |
 | `n` | New session in the filtered project (or the current directory's project) |
@@ -143,6 +144,20 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `?` | Show help |
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
+
+### Favorites
+
+Starred sessions are grouped into a **Favorites** section at the top of the list, in an
+order you control. Press `Space` to star a session — new favorites are appended to the
+end, so starring one never rearranges what you already set. Press `g` to grab the
+selected favorite, `↑`/`↓` to move it, and `Enter` or `Esc` to drop it. Each move is
+saved immediately.
+
+That order is also the order `T` opens Windows Terminal tabs in, so favorite tabs come
+up in the same arrangement on every machine and after every restart. Favorites keep
+their arrangement regardless of the active sort; the sort applies to everything below
+them. Grouping is a property of the unfiltered list, so searching or filtering by
+project temporarily shows a single flat, sorted list instead.
 
 ### Scratchpad editing
 

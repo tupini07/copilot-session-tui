@@ -17,8 +17,17 @@ pub struct UserConfig {
     #[serde(default)]
     pub yolo: bool,
 
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub favorites: BTreeSet<String>,
+    /// Starred sessions, in the order the user arranged them.
+    ///
+    /// Deliberately a list rather than a set: the order is the feature, and it drives
+    /// both the list grouping and the order favorite tabs open in. On disk this is a
+    /// JSON array exactly as the previous set was, so older configs load unchanged.
+    #[serde(
+        default,
+        deserialize_with = "deduplicated",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub favorites: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -51,11 +60,26 @@ fn default_mux_prefix() -> String {
     DEFAULT_MUX_PREFIX.to_string()
 }
 
+/// Drop repeated favorites while preserving first-seen order.
+///
+/// The file is hand-editable and a duplicate would otherwise show the same session
+/// twice in the list and open it twice as a tab.
+fn deduplicated<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut seen = BTreeSet::new();
+    Ok(Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
             yolo: false,
-            favorites: BTreeSet::new(),
+            favorites: Vec::new(),
             model: None,
             reasoning_effort: None,
             mux: false,
@@ -369,13 +393,31 @@ mod tests {
     #[test]
     fn favorites_round_trip_in_global_config() {
         let mut config = UserConfig::default();
-        config.favorites.insert("session-b".to_string());
-        config.favorites.insert("session-a".to_string());
+        config.favorites.push("session-b".to_string());
+        config.favorites.push("session-a".to_string());
 
         let json = serde_json::to_string(&config).unwrap();
         let loaded: UserConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(loaded.favorites, config.favorites);
+        // Order is the point, so round-tripping must not sort them.
+        assert_eq!(loaded.favorites, vec!["session-b", "session-a"]);
+    }
+
+    #[test]
+    fn favorites_written_by_older_versions_still_load() {
+        // Older releases stored a set, which serialised to the same JSON array.
+        let loaded: UserConfig =
+            serde_json::from_str(r#"{"favorites":["session-a","session-b"]}"#).unwrap();
+
+        assert_eq!(loaded.favorites, vec!["session-a", "session-b"]);
+    }
+
+    #[test]
+    fn hand_edited_duplicate_favorites_are_dropped() {
+        let loaded: UserConfig =
+            serde_json::from_str(r#"{"favorites":["a","b","a","b","c"]}"#).unwrap();
+
+        assert_eq!(loaded.favorites, vec!["a", "b", "c"]);
     }
 
     #[test]

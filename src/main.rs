@@ -508,10 +508,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
 
 fn update_layout_metrics(app: &mut App, height: u16) {
     // visible_rows must match the session_list take() count:
-    // inner height = total height - 6 (title + borders + status)
-    // each item = 2 lines normally, 1 line when project filter is active
+    // inner height = total height - 6 (title + borders + status), minus the group
+    // headers, which the list asks the app for so the two cannot disagree.
     let lines_per_item = if app.project_filter.is_some() { 1 } else { 2 };
-    app.visible_rows = (height as usize).saturating_sub(6) / lines_per_item;
+    app.visible_rows = (height as usize)
+        .saturating_sub(6)
+        .saturating_sub(app.list_header_lines())
+        / lines_per_item;
 
     // Project popup visible rows: popup is ~25-80% height, minus borders (2), search (1), separator (1)
     let popup_percent = 80u16

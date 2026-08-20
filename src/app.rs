@@ -286,6 +286,11 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     pub selected: usize,
     pub scroll_offset: usize,
+    /// Session id currently being dragged through the favorite order, if any.
+    ///
+    /// Held by id rather than row index so re-sorting after each move cannot lose
+    /// track of what the user grabbed.
+    pub grabbed_favorite: Option<String>,
     pub mode: Mode,
     pub search_query: String,
     pub rename_input: String,
@@ -358,6 +363,8 @@ pub struct App {
     github_request_cancel: Option<Arc<AtomicBool>>,
     next_github_request_id: u64,
     workspace_state_enabled: bool,
+    /// Disabled in tests so reordering favorites never rewrites the real user config.
+    config_persistence_enabled: bool,
     workspace_state_root: PathBuf,
 }
 
@@ -380,6 +387,7 @@ impl App {
             filtered_indices,
             selected: 0,
             scroll_offset: 0,
+            grabbed_favorite: None,
             mode: Mode::Normal,
             search_query: String::new(),
             rename_input: String::new(),
@@ -439,6 +447,7 @@ impl App {
             github_request_cancel: None,
             next_github_request_id: 1,
             workspace_state_enabled: true,
+            config_persistence_enabled: true,
             workspace_state_root: workspace_state::workspace_root(),
         };
         app.apply_filter();
@@ -793,6 +802,19 @@ impl App {
         self.workspace_state_enabled = false;
     }
 
+    /// Write the user config, unless a test has opted out of touching real files.
+    fn save_config(&self) -> anyhow::Result<()> {
+        if !self.config_persistence_enabled {
+            return Ok(());
+        }
+        config::save(&self.persistable_config())
+    }
+
+    #[cfg(test)]
+    pub fn disable_config_persistence(&mut self) {
+        self.config_persistence_enabled = false;
+    }
+
     #[cfg(test)]
     fn set_workspace_state_root(&mut self, root: PathBuf) {
         self.workspace_state_root = root;
@@ -852,8 +874,14 @@ impl App {
             .collect();
 
         if self.project_filter.is_none() && self.search_query.is_empty() {
-            self.filtered_indices
-                .sort_by_key(|&index| !self.config.favorites.contains(&self.sessions[index].id));
+            // Favorites lead in the order the user arranged; everything else keeps the
+            // selected sort, which the stable sort preserves.
+            let mut ordered = std::mem::take(&mut self.filtered_indices);
+            ordered.sort_by_key(|&index| {
+                self.favorite_rank(&self.sessions[index].id)
+                    .unwrap_or(usize::MAX)
+            });
+            self.filtered_indices = ordered;
         }
 
         // Reset selection if out of bounds
@@ -864,54 +892,167 @@ impl App {
     }
 
     pub fn is_favorite(&self, session_id: &str) -> bool {
-        self.config.favorites.contains(session_id)
+        self.favorite_rank(session_id).is_some()
+    }
+
+    /// Position of a session within the user's favorite order, if it is one.
+    pub fn favorite_rank(&self, session_id: &str) -> Option<usize> {
+        self.config.favorites.iter().position(|id| id == session_id)
+    }
+
+    /// True when the list is showing the arranged favorites group.
+    ///
+    /// Grouping only applies to the unfiltered view, so a search or project filter
+    /// leaves the chosen sort untouched.
+    pub fn favorites_section_active(&self) -> bool {
+        self.project_filter.is_none()
+            && self.search_query.is_empty()
+            && self
+                .filtered_indices
+                .iter()
+                .any(|&index| self.is_favorite(&self.sessions[index].id))
+    }
+
+    /// Lines the list spends on group headers.
+    ///
+    /// Both the renderer and the scroll maths need this, and they must agree or the
+    /// selection drifts out of view, so it is computed in exactly one place.
+    pub fn list_header_lines(&self) -> usize {
+        if !self.favorites_section_active() {
+            return 0;
+        }
+        // `apply_filter` sorts favorites to the front, so counting the leading run is
+        // exact and costs the size of the group rather than the whole list — this
+        // runs on every frame.
+        let favorites = self
+            .filtered_indices
+            .iter()
+            .take_while(|&&index| self.is_favorite(&self.sessions[index].id))
+            .count();
+        // The trailing header only exists when ordinary sessions follow.
+        1 + usize::from(favorites < self.filtered_indices.len())
     }
 
     pub fn toggle_selected_favorite(&mut self) -> anyhow::Result<Option<bool>> {
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return Ok(None);
         };
-        let was_favorite = self.config.favorites.contains(&session_id);
+        let previous = self.config.favorites.clone();
+        let was_favorite = self.is_favorite(&session_id);
 
         if was_favorite {
-            self.config.favorites.remove(&session_id);
+            self.config.favorites.retain(|id| id != &session_id);
         } else {
-            self.config.favorites.insert(session_id.clone());
+            // New favorites land at the end so starring one never silently
+            // rearranges the order the user already set.
+            self.config.favorites.push(session_id.clone());
         }
 
-        if let Err(error) = config::save(&self.persistable_config()) {
-            if was_favorite {
-                self.config.favorites.insert(session_id);
-            } else {
-                self.config.favorites.remove(&session_id);
-            }
+        if let Err(error) = self.save_config() {
+            self.config.favorites = previous;
             return Err(error);
         }
 
         self.apply_filter();
-        if let Some(display_index) = self
-            .filtered_indices
-            .iter()
-            .position(|&index| self.sessions[index].id == session_id)
-        {
-            self.selected = display_index;
-            if self.selected >= self.visible_rows {
-                self.scroll_offset = self.selected - self.visible_rows + 1;
-            }
-        }
+        self.focus_session(&session_id);
 
         Ok(Some(!was_favorite))
     }
 
     pub fn forget_favorite(&mut self, session_id: &str) -> anyhow::Result<bool> {
-        if !self.config.favorites.remove(session_id) {
+        let Some(rank) = self.favorite_rank(session_id) else {
             return Ok(false);
-        }
-        if let Err(error) = config::save(&self.persistable_config()) {
-            self.config.favorites.insert(session_id.to_string());
+        };
+        let removed = self.config.favorites.remove(rank);
+        if let Err(error) = self.save_config() {
+            self.config.favorites.insert(rank, removed);
             return Err(error);
         }
         Ok(true)
+    }
+
+    /// Start or stop dragging the selected favorite through the order.
+    ///
+    /// Returns the message to show, or `None` when nothing was grabbed.
+    pub fn toggle_favorite_grab(&mut self) -> Option<String> {
+        if self.grabbed_favorite.take().is_some() {
+            return Some("Order saved".to_string());
+        }
+        let session_id = self.selected_session()?.id.clone();
+        if !self.is_favorite(&session_id) {
+            return Some(
+                "Only favorites can be reordered — press Space to add this one".to_string(),
+            );
+        }
+        if !self.favorites_section_active() {
+            return Some("Clear the filter and search to reorder favorites".to_string());
+        }
+        self.grabbed_favorite = Some(session_id);
+        Some("Moving favorite — ↑/↓ to move, Enter or Esc to drop".to_string())
+    }
+
+    pub fn release_favorite_grab(&mut self) -> bool {
+        self.grabbed_favorite.take().is_some()
+    }
+
+    /// Move the grabbed favorite one place up (`-1`) or down (`1`).
+    ///
+    /// Persists immediately, so the arrangement survives however the session ends —
+    /// which is the whole point of arranging it.
+    pub fn move_grabbed_favorite(&mut self, offset: isize) -> Option<String> {
+        let session_id = self.grabbed_favorite.clone()?;
+        let from = self.favorite_rank(&session_id)?;
+        // Favorites whose session no longer exists stay in the config but never
+        // appear in the list, so movement is measured in visible steps. Otherwise a
+        // keypress could swap the row past an invisible neighbour and look stuck.
+        let visible: Vec<usize> = self
+            .config
+            .favorites
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| self.sessions.iter().any(|session| &session.id == *id))
+            .map(|(rank, _)| rank)
+            .collect();
+        let Some(to) = visible
+            .iter()
+            .position(|&rank| rank == from)
+            .and_then(|position| position.checked_add_signed(offset))
+            .and_then(|position| visible.get(position).copied())
+        else {
+            // Already at the end of the run; staying put is friendlier than wrapping.
+            return None;
+        };
+
+        let previous = self.config.favorites.clone();
+        let moved = self.config.favorites.remove(from);
+        self.config.favorites.insert(to, moved);
+
+        if let Err(error) = self.save_config() {
+            self.config.favorites = previous;
+            self.grabbed_favorite = None;
+            return Some(format!("Failed to save order: {error}"));
+        }
+
+        self.apply_filter();
+        self.focus_session(&session_id);
+        None
+    }
+
+    /// Put the cursor on a session and scroll it into view.
+    fn focus_session(&mut self, session_id: &str) {
+        let Some(display_index) = self
+            .filtered_indices
+            .iter()
+            .position(|&index| self.sessions[index].id == session_id)
+        else {
+            return;
+        };
+        self.selected = display_index;
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.visible_rows > 0 && self.selected >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = self.selected + 1 - self.visible_rows;
+        }
     }
 
     pub fn cycle_sort(&mut self) {
@@ -1402,7 +1543,7 @@ mod tests {
             session("oldest", "project-b", "2026-08-12T12:00:00Z"),
         ];
         let mut config = UserConfig::default();
-        config.favorites.insert("favorite".to_string());
+        config.favorites.push("favorite".to_string());
         let mut app = App::new(sessions, config);
 
         assert_eq!(visible_ids(&app), vec!["favorite", "newest", "oldest"]);
@@ -1417,21 +1558,196 @@ mod tests {
     }
 
     #[test]
-    fn favorites_preserve_the_selected_sort_within_each_group() {
+    fn favorites_keep_their_arranged_order_regardless_of_sort() {
         let sessions = vec![
             session("zebra", "project", "2026-08-14T12:00:00Z"),
             session("beta", "project", "2026-08-13T12:00:00Z"),
             session("alpha", "project", "2026-08-12T12:00:00Z"),
         ];
         let mut config = UserConfig::default();
-        config.favorites.insert("beta".to_string());
-        config.favorites.insert("alpha".to_string());
+        // Deliberately not alphabetical: the arrangement is the user's, and a sort
+        // change must not quietly rewrite it.
+        config.favorites.push("beta".to_string());
+        config.favorites.push("alpha".to_string());
         let mut app = App::new(sessions, config);
+
+        assert_eq!(visible_ids(&app), vec!["beta", "alpha", "zebra"]);
 
         app.cycle_sort();
         app.cycle_sort();
+        assert_eq!(visible_ids(&app), vec!["beta", "alpha", "zebra"]);
+    }
+
+    /// Three favorites arranged `beta, alpha, zebra`, with the cursor on `alpha`.
+    fn reorderable_app() -> App {
+        let sessions = vec![
+            session("zebra", "project", "2026-08-14T12:00:00Z"),
+            session("beta", "project", "2026-08-13T12:00:00Z"),
+            session("alpha", "project", "2026-08-12T12:00:00Z"),
+        ];
+        let mut config = UserConfig::default();
+        for id in ["beta", "alpha", "zebra"] {
+            config.favorites.push(id.to_string());
+        }
+        let mut app = App::new(sessions, config);
+        app.disable_config_persistence();
+        app.selected = 1;
+        app
+    }
+
+    #[test]
+    fn grabbing_a_favorite_and_moving_it_rewrites_the_order() {
+        let mut app = reorderable_app();
+
+        app.toggle_favorite_grab();
+        assert_eq!(app.grabbed_favorite.as_deref(), Some("alpha"));
+
+        app.move_grabbed_favorite(-1);
+
+        assert_eq!(app.config.favorites, vec!["alpha", "beta", "zebra"]);
         assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
-        assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
+    }
+
+    #[test]
+    fn the_cursor_follows_the_item_being_moved() {
+        let mut app = reorderable_app();
+        app.toggle_favorite_grab();
+
+        app.move_grabbed_favorite(-1);
+
+        // Losing the cursor mid-move would make a second press move a different row.
+        assert_eq!(app.selected, 0);
+        assert_eq!(
+            app.selected_session().map(|session| session.id.as_str()),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn moving_stops_at_the_ends_instead_of_wrapping() {
+        let mut app = reorderable_app();
+        app.selected = 0;
+        app.toggle_favorite_grab();
+
+        app.move_grabbed_favorite(-1);
+        assert_eq!(app.config.favorites, vec!["beta", "alpha", "zebra"]);
+
+        app.selected = 2;
+        app.release_favorite_grab();
+        app.toggle_favorite_grab();
+        app.move_grabbed_favorite(1);
+        assert_eq!(app.config.favorites, vec!["beta", "alpha", "zebra"]);
+    }
+
+    #[test]
+    fn a_favorite_cannot_be_moved_below_the_ordinary_sessions() {
+        let sessions = vec![
+            session("plain", "project", "2026-08-14T12:00:00Z"),
+            session("beta", "project", "2026-08-13T12:00:00Z"),
+            session("alpha", "project", "2026-08-12T12:00:00Z"),
+        ];
+        let config = UserConfig {
+            favorites: vec!["beta".to_string(), "alpha".to_string()],
+            ..Default::default()
+        };
+        let mut app = App::new(sessions, config);
+        app.disable_config_persistence();
+        // The last favorite, sitting directly above the ordinary sessions.
+        app.selected = 1;
+        app.toggle_favorite_grab();
+
+        app.move_grabbed_favorite(1);
+
+        // Moving down must not push it out of the group or drag `plain` in.
+        assert_eq!(app.config.favorites, vec!["beta", "alpha"]);
+        assert_eq!(visible_ids(&app), vec!["beta", "alpha", "plain"]);
+    }
+
+    #[test]
+    fn moving_steps_over_favorites_whose_sessions_are_gone() {
+        let sessions = vec![
+            session("beta", "project", "2026-08-13T12:00:00Z"),
+            session("alpha", "project", "2026-08-12T12:00:00Z"),
+        ];
+        // `ghost` is a favorite whose session directory no longer exists, so it is
+        // kept in the config but never listed.
+        let config = UserConfig {
+            favorites: vec!["beta".to_string(), "ghost".to_string(), "alpha".to_string()],
+            ..Default::default()
+        };
+        let mut app = App::new(sessions, config);
+        app.disable_config_persistence();
+        app.selected = 1;
+        app.toggle_favorite_grab();
+
+        app.move_grabbed_favorite(-1);
+
+        // One press moves one *visible* row; swapping with `ghost` would look stuck.
+        assert_eq!(visible_ids(&app), vec!["alpha", "beta"]);
+        assert_eq!(app.config.favorites, vec!["alpha", "beta", "ghost"]);
+    }
+
+    #[test]
+    fn only_favorites_can_be_grabbed() {
+        let sessions = vec![
+            session("plain", "project", "2026-08-14T12:00:00Z"),
+            session("starred", "project", "2026-08-13T12:00:00Z"),
+        ];
+        let mut config = UserConfig::default();
+        config.favorites.push("starred".to_string());
+        let mut app = App::new(sessions, config);
+        app.disable_config_persistence();
+        // Row 1 is the unstarred session, since the favorite leads the list.
+        app.selected = 1;
+
+        let message = app.toggle_favorite_grab();
+
+        assert!(app.grabbed_favorite.is_none());
+        assert!(message.is_some_and(|text| text.contains("Only favorites")));
+    }
+
+    #[test]
+    fn reordering_is_refused_while_the_list_is_filtered() {
+        let mut app = reorderable_app();
+        app.search_query = "session".to_string();
+        app.apply_filter();
+
+        let message = app.toggle_favorite_grab();
+
+        // The group is not shown while filtering, so moving within it would be
+        // rearranging something the user cannot see.
+        assert!(app.grabbed_favorite.is_none());
+        assert!(message.is_some_and(|text| text.contains("Clear the filter")));
+    }
+
+    #[test]
+    fn newly_starred_sessions_are_appended_rather_than_sorted_in() {
+        let mut app = reorderable_app();
+        app.config.favorites = vec!["beta".to_string()];
+        app.apply_filter();
+        app.selected = visible_ids(&app)
+            .iter()
+            .position(|&id| id == "alpha")
+            .expect("alpha is listed");
+
+        app.toggle_selected_favorite().expect("save is disabled");
+
+        assert_eq!(app.config.favorites, vec!["beta", "alpha"]);
+    }
+
+    #[test]
+    fn headers_are_only_budgeted_when_a_favorites_group_is_shown() {
+        let mut app = reorderable_app();
+        // Every session is a favorite here, so there is no trailing group to label.
+        assert_eq!(app.list_header_lines(), 1);
+
+        app.config.favorites = vec!["beta".to_string()];
+        app.apply_filter();
+        assert_eq!(app.list_header_lines(), 2);
+
+        app.config.favorites.clear();
+        app.apply_filter();
+        assert_eq!(app.list_header_lines(), 0);
     }
 
     #[test]

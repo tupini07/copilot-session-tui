@@ -30,17 +30,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let has_project_filter = app.project_filter.is_some();
     let lines_per_item = if has_project_filter { 1 } else { 2 };
-    let visible_items = inner.height as usize / lines_per_item;
+    let grouped = app.favorites_section_active();
+    let budget = (inner.height as usize).saturating_sub(app.list_header_lines());
+    let visible_items = budget / lines_per_item;
 
-    let items: Vec<ListItem> = app
+    let mut items: Vec<ListItem> = Vec::new();
+    for (display_idx, &real_idx) in app
         .filtered_indices
         .iter()
         .enumerate()
         .skip(app.scroll_offset)
         .take(visible_items)
-        .map(|(display_idx, &real_idx)| {
+    {
+        {
             let session = &app.sessions[real_idx];
             let is_selected = display_idx == app.selected;
+            let is_favorite = app.is_favorite(&session.id);
+            let is_grabbed = app.grabbed_favorite.as_deref() == Some(session.id.as_str());
 
             // Panes we own read differently from a foreign `inuse` lock: ours can be
             // re-attached, theirs cannot.
@@ -51,7 +57,17 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Span::raw("  ")
             };
-            let favorite_indicator = if app.is_favorite(&session.id) {
+            // While an item is grabbed it replaces the star, so the row being moved
+            // is obvious even as it travels past other favorites.
+            let favorite_indicator = if is_grabbed {
+                Span::styled(
+                    "⇕ ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if is_favorite {
                 Span::styled("★ ", Style::default().fg(Color::Yellow))
             } else {
                 Span::raw("  ")
@@ -103,16 +119,42 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 vec![line, project_line]
             };
 
-            if is_selected {
-                ListItem::new(lines).style(Style::default().bg(Color::DarkGray))
-            } else {
-                ListItem::new(lines)
+            // Headers ride on the first row of each group rather than occupying list
+            // entries of their own, so every entry still maps to exactly one session
+            // and the selection index needs no translation.
+            if grouped {
+                if display_idx == 0 && is_favorite {
+                    items.push(header("★ Favorites", Color::Yellow));
+                } else if !is_favorite
+                    && app
+                        .filtered_indices
+                        .get(display_idx.wrapping_sub(1))
+                        .is_some_and(|&previous| app.is_favorite(&app.sessions[previous].id))
+                {
+                    items.push(header("Sessions", Color::DarkGray));
+                }
             }
-        })
-        .collect();
+
+            if is_selected {
+                items.push(ListItem::new(lines).style(Style::default().bg(Color::DarkGray)));
+            } else {
+                items.push(ListItem::new(lines));
+            }
+        }
+    }
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+/// A one-line group label separating the arranged favorites from everything else.
+fn header(label: &str, color: Color) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!("  {label}"),
+        Style::default()
+            .fg(color)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )))
 }
 
 #[cfg(test)]
@@ -224,5 +266,93 @@ pub mod tests {
             column_of(&emoji, "unknown"),
             "the emoji shifted the time column"
         );
+    }
+
+    /// A list of `count` sessions with predictable ids and names.
+    fn numbered_sessions(count: usize) -> Vec<Session> {
+        (0..count)
+            .map(|index| {
+                let mut session = session_named(&format!("Session {index}"));
+                session.id = format!("id-{index}");
+                session
+            })
+            .collect()
+    }
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, app))
+            .expect("draw succeeds");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn config_with_favorites(ids: &[&str]) -> UserConfig {
+        UserConfig {
+            favorites: ids.iter().map(|id| id.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn both_group_headers_are_drawn_when_favorites_lead_the_list() {
+        let mut app = App::new(
+            numbered_sessions(4),
+            config_with_favorites(&["id-2", "id-0"]),
+        );
+
+        let text = render_app(&mut app, 60, 20);
+
+        assert!(text.contains("★ Favorites"), "got:\n{text}");
+        // Once for the surrounding block title, once for the group label.
+        assert_eq!(text.matches("Sessions").count(), 2, "got:\n{text}");
+    }
+
+    #[test]
+    fn the_trailing_header_is_omitted_when_every_session_is_a_favorite() {
+        let mut app = App::new(
+            numbered_sessions(2),
+            config_with_favorites(&["id-0", "id-1"]),
+        );
+
+        let text = render_app(&mut app, 60, 20);
+
+        assert!(text.contains("★ Favorites"), "got:\n{text}");
+        // Only the surrounding block title, never a group label with nothing under it.
+        assert_eq!(text.matches("Sessions").count(), 1, "got:\n{text}");
+    }
+
+    #[test]
+    fn no_headers_are_drawn_without_favorites() {
+        let mut app = App::new(numbered_sessions(3), UserConfig::default());
+
+        let text = render_app(&mut app, 60, 20);
+
+        assert!(!text.contains("Favorites"), "got:\n{text}");
+    }
+
+    #[test]
+    fn the_grabbed_row_is_marked_in_place_of_its_star() {
+        let mut app = App::new(
+            numbered_sessions(3),
+            config_with_favorites(&["id-0", "id-1"]),
+        );
+
+        let before = render_app(&mut app, 60, 20);
+        assert_eq!(before.matches('★').count(), 3, "got:\n{before}");
+
+        app.grabbed_favorite = Some("id-1".to_string());
+        let after = render_app(&mut app, 60, 20);
+
+        // The marker replaces that row's star rather than adding a column.
+        assert!(after.contains('⇕'), "got:\n{after}");
+        assert_eq!(after.matches('★').count(), 2, "got:\n{after}");
     }
 }

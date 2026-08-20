@@ -74,8 +74,8 @@ fn capture(app: &mut App, width: u16, height: u16) -> Result<String> {
 fn session_list() -> Result<String> {
     let sessions = demo_sessions();
     let mut config = UserConfig::default();
-    config.favorites.insert(sessions[0].id.clone());
-    config.favorites.insert(sessions[1].id.clone());
+    config.favorites.push(sessions[0].id.clone());
+    config.favorites.push(sessions[1].id.clone());
 
     let mut app = App::new(sessions, config);
     app.selected = 0;

@@ -490,6 +490,7 @@ pub fn draw_help(f: &mut Frame, app: &App) {
         help_line("n", "New session in current project"),
         help_line("N", "New isolated worktree session"),
         help_line("Space", "Toggle selected session favorite"),
+        help_line("g", "Grab a favorite, then ↑/↓ to reorder"),
         help_line("T", "Open favorites in Windows Terminal tabs"),
         help_line("e", "Open selected session scratchpad"),
         help_line("r", "Rename selected session"),

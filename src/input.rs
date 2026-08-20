@@ -192,6 +192,34 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
 }
 
 fn handle_normal(app: &mut App, key: KeyCode) {
+    // A grabbed favorite takes over the arrow keys, so this runs first.
+    if app.grabbed_favorite.is_some() {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(message) = app.move_grabbed_favorite(-1) {
+                    app.status_message = Some(message);
+                }
+                return;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(message) = app.move_grabbed_favorite(1) {
+                    app.status_message = Some(message);
+                }
+                return;
+            }
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char(' ') => {
+                app.release_favorite_grab();
+                app.status_message = Some("Order saved".to_string());
+                return;
+            }
+            // Anything else drops the item first, so no command runs while the
+            // list is in a half-rearranged state.
+            _ => {
+                app.release_favorite_grab();
+            }
+        }
+    }
+
     match key {
         KeyCode::Char('q') | KeyCode::Esc => {
             request_quit(app);
@@ -222,6 +250,11 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('e') => open_scratchpad(app),
+        KeyCode::Char('g') => {
+            if let Some(message) = app.toggle_favorite_grab() {
+                app.status_message = Some(message);
+            }
+        }
         KeyCode::Char('T') => open_favorite_tabs(app),
         KeyCode::Char(' ') => match app.toggle_selected_favorite() {
             Ok(Some(true)) => app.status_message = Some("Added to favorites".to_string()),
@@ -1162,5 +1195,74 @@ mod tests {
         let project = app.cwd_project.clone().unwrap();
         assert_eq!(app.project_filter.as_ref(), Some(&project));
         assert!(app.unique_projects.contains(&project));
+    }
+
+    fn favorites_app() -> App {
+        let sessions: Vec<crate::session::Session> = (0..3)
+            .map(|index| crate::session::Session {
+                id: format!("id-{index}"),
+                cwd: "C:/Workspace/zazen".to_string(),
+                project_root: "C:/Workspace/zazen".to_string(),
+                summary: Some(format!("Session {index}")),
+                created_at: None,
+                updated_at: None,
+                is_active: false,
+                dir_path: std::path::PathBuf::from("."),
+                edited_files: Vec::new(),
+                last_user_message: None,
+                turn_count: 0,
+                tool_call_count: 0,
+                details_parsed_len: 0,
+            })
+            .collect();
+        let config = config::UserConfig {
+            favorites: vec!["id-0".to_string(), "id-1".to_string()],
+            ..Default::default()
+        };
+        let mut app = App::new(sessions, config);
+        app.disable_config_persistence();
+        app
+    }
+
+    #[test]
+    fn grabbing_then_pressing_down_reorders_instead_of_moving_the_cursor() {
+        let mut app = favorites_app();
+        app.selected = 0;
+
+        handle_normal(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.grabbed_favorite.as_deref(), Some("id-0"));
+
+        handle_normal(&mut app, KeyCode::Down);
+
+        assert_eq!(app.config.favorites, vec!["id-1", "id-0"]);
+        // The cursor travels with the row, so a second press keeps moving it.
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.grabbed_favorite.as_deref(), Some("id-0"));
+    }
+
+    #[test]
+    fn enter_drops_the_grabbed_favorite_without_resuming_a_session() {
+        let mut app = favorites_app();
+        app.selected = 0;
+        handle_normal(&mut app, KeyCode::Char('g'));
+
+        handle_normal(&mut app, KeyCode::Enter);
+
+        assert!(app.grabbed_favorite.is_none());
+        assert!(app.should_resume.is_none(), "Enter must not attach here");
+    }
+
+    #[test]
+    fn an_unrelated_key_drops_the_grab_before_acting() {
+        let mut app = favorites_app();
+        app.selected = 0;
+        handle_normal(&mut app, KeyCode::Char('g'));
+
+        handle_normal(&mut app, KeyCode::Char('/'));
+
+        // The item is dropped first, so the command never runs mid-rearrangement.
+        assert!(app.grabbed_favorite.is_none());
+        assert_eq!(app.mode, Mode::Search);
+        assert_eq!(app.config.favorites, vec!["id-0", "id-1"]);
     }
 }
