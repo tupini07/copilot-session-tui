@@ -35,6 +35,8 @@ pub fn draw_in(f: &mut Frame, scratchpad: &mut Scratchpad, area: Rect, focused: 
                 .border_style(Style::default().fg(border_color)),
         )
         .hide_status_line();
+    // An unfocused pane that still paints a cursor reads as if it has input focus.
+    let theme = if focused { theme } else { theme.hide_cursor() };
     let editor = EditorView::new(&mut scratchpad.state)
         .theme(theme)
         .line_numbers(LineNumbers::None)
