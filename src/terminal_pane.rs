@@ -921,7 +921,11 @@ mod tests {
             })
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // A real shell has to start and run a user profile before it will act on
+        // input; that alone was measured at over a second, and these tests run in
+        // parallel with others that spawn their own PTYs. The loop exits as soon as
+        // the shell reacts, so a generous ceiling only costs time when genuinely broken.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline && manager.active().unwrap().is_running() {
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -963,7 +967,9 @@ mod tests {
             })
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // See the note on the other shell deadline in this module: profile loading
+        // makes a few seconds far too tight once these run alongside other PTY tests.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline && !pane.contents().contains("CST_PTY_OK") {
             std::thread::sleep(Duration::from_millis(20));
         }

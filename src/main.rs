@@ -40,6 +40,7 @@ use session::manager;
 #[derive(Parser)]
 #[command(name = "copilot-session-tui")]
 #[command(about = "A TUI for managing GitHub Copilot CLI sessions")]
+#[command(version)]
 struct Cli {
     /// Path to the Copilot config directory (default: ~/.copilot)
     #[arg(long)]
@@ -653,6 +654,16 @@ mod tests {
         assert!(
             Cli::try_parse_from(["cst", "--session", "session-1", "--open-favorites"]).is_err()
         );
+    }
+
+    #[test]
+    fn version_flag_reports_the_crate_version() {
+        // Asking a binary what it is should not require byte-scanning it.
+        let Err(error) = Cli::try_parse_from(["cst", "--version"]) else {
+            panic!("--version should short-circuit parsing");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
