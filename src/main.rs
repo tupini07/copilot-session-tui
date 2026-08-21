@@ -450,6 +450,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         input::maybe_load_details(app);
         app.poll_update();
         app.poll_github();
+        // Covers every route into the Files tab — keys, mouse, or opening
+        // straight onto it — rather than each one separately.
+        if app.github_files_tab_active() {
+            app.ensure_github_patches();
+        }
+        if matches!(app.view, app::View::Attached(_)) {
+            app.refresh_github_references();
+        }
 
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             if let Err(error) = scratchpad.autosave_if_due() {

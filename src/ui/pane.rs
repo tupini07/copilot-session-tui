@@ -70,6 +70,7 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         let widget = PseudoTerminal::new(screen);
         f.render_widget(widget, terminal_area);
     });
+    decorate_references(f, app, terminal_area);
 
     // Copilot needs a few seconds before it draws anything; without this the pane just
     // looks frozen.
@@ -88,6 +89,88 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+}
+
+/// Colour and underline `#1234` in the rendered pane according to what it is.
+///
+/// This works on the already-drawn cells rather than the child's output, so it
+/// stays correct however the terminal widget chose to lay the text out, and a
+/// reference that is not yet resolved simply stays plain.
+fn decorate_references(f: &mut Frame, app: &App, area: Rect) {
+    restyle_references(f.buffer_mut(), area, &|number| {
+        app.github_reference_status(number)
+    });
+}
+
+fn restyle_references(
+    buffer: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    lookup: &dyn Fn(u64) -> Option<crate::github::ReferenceStatus>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        let mut x = area.left();
+        while x < area.right() {
+            if buffer[(x, y)].symbol() != "#" {
+                x += 1;
+                continue;
+            }
+            let mut end = x + 1;
+            let mut digits = String::new();
+            while end < area.right() {
+                let symbol = buffer[(end, y)].symbol();
+                match symbol.chars().next() {
+                    Some(character) if character.is_ascii_digit() => digits.push(character),
+                    _ => break,
+                }
+                end += 1;
+            }
+            if digits.is_empty() {
+                x += 1;
+                continue;
+            }
+            // Mirror the scanner: a hash glued to a word is part of that word,
+            // not a reference.
+            let glued = x > area.left()
+                && buffer[(x - 1, y)]
+                    .symbol()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphanumeric());
+            if glued {
+                x = end;
+                continue;
+            }
+            if let Some(status) = digits.parse::<u64>().ok().and_then(lookup) {
+                let style = reference_style(status);
+                for cell in x..end {
+                    buffer[(cell, y)].set_style(style);
+                }
+            }
+            x = end;
+        }
+    }
+}
+
+/// Colour carries the state and the underline says "this is a link".
+fn reference_style(status: crate::github::ReferenceStatus) -> Style {
+    use crate::github::{ReferenceKind, ReferenceState};
+    let color = match status.state {
+        ReferenceState::Open => Color::Green,
+        ReferenceState::Closed => match status.kind {
+            // A closed issue and a closed pull request mean different things,
+            // and GitHub itself colours them differently.
+            ReferenceKind::Issue => Color::Magenta,
+            ReferenceKind::PullRequest => Color::Red,
+        },
+        ReferenceState::Merged => Color::Magenta,
+        ReferenceState::Draft => Color::Gray,
+    };
+    Style::default()
+        .fg(color)
+        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
 }
 
 pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -202,10 +285,53 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 mod tests {
     use super::*;
     use crate::config::UserConfig;
+    use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
     use crate::mux::{Pane, PaneSpec};
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::sync::mpsc;
+
+    #[test]
+    fn known_references_are_styled_and_others_left_alone() {
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buffer = Buffer::empty(area);
+        for (index, character) in "Fixed #11 in #12, room 314, v#9".chars().enumerate() {
+            buffer[(index as u16, 0)].set_symbol(&character.to_string());
+        }
+
+        restyle_references(&mut buffer, area, &|number| match number {
+            11 => Some(ReferenceStatus {
+                kind: ReferenceKind::Issue,
+                state: ReferenceState::Open,
+            }),
+            12 => Some(ReferenceStatus {
+                kind: ReferenceKind::PullRequest,
+                state: ReferenceState::Merged,
+            }),
+            // Resolvable on its own, but here it only appears glued to `v#`.
+            9 => Some(ReferenceStatus {
+                kind: ReferenceKind::Issue,
+                state: ReferenceState::Open,
+            }),
+            _ => None,
+        });
+
+        // The whole `#11` token is styled, not just the digits.
+        for x in 6..9 {
+            assert_eq!(buffer[(x, 0)].style().fg, Some(Color::Green), "cell {x}");
+        }
+        for x in 13..16 {
+            assert_eq!(buffer[(x, 0)].style().fg, Some(Color::Magenta), "cell {x}");
+        }
+        assert!(buffer[(6, 0)]
+            .style()
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        // A number nobody could resolve, and a hash glued to a word, stay untouched.
+        assert_eq!(buffer[(23, 0)].style().fg, Some(Color::Reset));
+        assert_eq!(buffer[(30, 0)].style().fg, Some(Color::Reset));
+    }
 
     /// Render the whole UI into an off-screen buffer and return it as plain text.
     fn render(app: &mut App) -> String {

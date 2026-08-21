@@ -1314,6 +1314,7 @@ mod tests {
             changed_files: 2,
             discussion: Vec::new(),
             files: vec![changed("src/ui/pane.rs"), changed("src/lib.rs")],
+            patches_loaded: true,
         });
 
         let mut app = App::new(Vec::new(), UserConfig::default());

@@ -193,6 +193,13 @@ impl Pane {
             .flatten()
     }
 
+    /// Every `#1234` currently on the pane's screen.
+    ///
+    /// Used to look up what those numbers point at, so they can be decorated.
+    pub fn github_references(&self) -> Vec<u64> {
+        self.with_screen(github_references).unwrap_or_default()
+    }
+
     /// Cursor position and visibility, for mirroring into the outer terminal.
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.with_screen(|screen| {
@@ -332,16 +339,58 @@ impl Pane {
     }
 }
 
-fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<u64> {
-    let (_, cols) = screen.size();
-    let characters: Vec<char> = (0..cols)
+/// Text of one screen row, as characters, for reference scanning.
+fn row_characters(screen: &vt100::Screen, row: u16, cols: u16) -> Vec<char> {
+    (0..cols)
         .map(|col| {
             screen
                 .cell(row, col)
                 .and_then(|cell| cell.contents().chars().next())
                 .unwrap_or(' ')
         })
-        .collect();
+        .collect()
+}
+
+/// Every distinct `#1234` on screen, in no particular order.
+fn github_references(screen: &vt100::Screen) -> Vec<u64> {
+    let (rows, cols) = screen.size();
+    let mut found = std::collections::BTreeSet::new();
+    for row in 0..rows {
+        let characters = row_characters(screen, row, cols);
+        for (index, character) in characters.iter().enumerate() {
+            if *character != '#' {
+                continue;
+            }
+            let start = index + 1;
+            let mut end = start;
+            while characters.get(end).is_some_and(char::is_ascii_digit) {
+                end += 1;
+            }
+            if end == start {
+                continue;
+            }
+            // A digit immediately before the hash means this is part of a
+            // longer token such as a colour code, not a reference.
+            if index > 0 && characters[index - 1].is_ascii_alphanumeric() {
+                continue;
+            }
+            if let Ok(number) = characters[start..end]
+                .iter()
+                .collect::<String>()
+                .parse::<u64>()
+            {
+                if number > 0 {
+                    found.insert(number);
+                }
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<u64> {
+    let (_, cols) = screen.size();
+    let characters = row_characters(screen, row, cols);
     let clicked = *characters.get(column as usize)?;
     if clicked != '#' && !clicked.is_ascii_digit() {
         return None;
@@ -419,6 +468,27 @@ mod tests {
 
         assert_eq!(github_reference_at(parser.screen(), 0, 6), None);
         assert_eq!(github_reference_at(parser.screen(), 0, 16), None);
+    }
+
+    #[test]
+    fn screen_scan_finds_every_reference_once() {
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(b"Opened #2029, see #77 and #2029 again.\r\nColour #ff00aa is not one.");
+
+        let mut found = github_references(parser.screen());
+        found.sort_unstable();
+
+        // `#ff00aa` yields no digits before the letters, so it never becomes a
+        // reference; the duplicate is asked about only once.
+        assert_eq!(found, vec![77, 2029]);
+    }
+
+    #[test]
+    fn screen_scan_ignores_hashes_glued_to_a_word() {
+        let mut parser = vt100::Parser::new(2, 40, 0);
+        parser.process(b"abc#12 x#9");
+
+        assert!(github_references(parser.screen()).is_empty());
     }
 
     fn shell_command(script: &str) -> (String, Vec<String>) {

@@ -13,10 +13,11 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Which surface the user is looking at: the session list, or a live session pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,9 +279,46 @@ impl GithubInspector {
 
 pub struct GithubLoadResult {
     request_id: u64,
-    result: std::result::Result<GithubItem, GithubError>,
+    result: std::result::Result<crate::github::FetchedItem, GithubError>,
+    /// A background refresh of something already on screen.
+    ///
+    /// These must never replace the view with a spinner or an error: the user
+    /// is reading a perfectly good copy.
+    revalidation: bool,
 }
 
+pub struct GithubPatchResult {
+    request_id: u64,
+    result: std::result::Result<Vec<(String, Option<String>)>, GithubError>,
+}
+
+/// An item kept around so reopening it is instant.
+struct CachedGithubItem {
+    repository: crate::github::RepositoryRef,
+    number: u64,
+    item: GithubItem,
+}
+
+/// How many recently viewed items stay in memory.
+///
+/// Items are small next to the cost of refetching them, and the working set is
+/// however many pull requests one conversation refers to.
+const GITHUB_CACHE_LIMIT: usize = 12;
+
+/// How often the focused pane is scanned for `#1234` references.
+const REFERENCE_SCAN_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Slowest the scan backs off to after repeated lookup failures.
+const REFERENCE_SCAN_BACKOFF_LIMIT: Duration = Duration::from_secs(60);
+
+/// What each `#1234` seen in a repository turned out to be.
+type ReferenceLookup = std::collections::HashMap<
+    (crate::github::RepositoryRef, u64),
+    Option<crate::github::ReferenceStatus>,
+>;
+
+/// One batch of answers coming back from a lookup.
+type ResolvedReferences = Vec<(u64, Option<crate::github::ReferenceStatus>)>;
 pub struct App {
     pub sessions: Vec<Session>,
     pub filtered_indices: Vec<usize>,
@@ -361,6 +399,24 @@ pub struct App {
     pub github_inspector: Option<GithubInspector>,
     github_request_receiver: Option<mpsc::Receiver<GithubLoadResult>>,
     github_request_cancel: Option<Arc<AtomicBool>>,
+    github_patch_receiver: Option<mpsc::Receiver<GithubPatchResult>>,
+    github_patch_cancel: Option<Arc<AtomicBool>>,
+    github_repo_receiver: Option<mpsc::Receiver<(PathBuf, Option<crate::github::RepositoryRef>)>>,
+    github_reference_receiver: Option<mpsc::Receiver<ResolvedReferences>>,
+    /// What each seen `#1234` points at; `None` means "not a reference".
+    ///
+    /// Negative answers are kept deliberately: a terminal is full of numbers
+    /// that merely look like references, and re-asking about them every second
+    /// would be worse than useless.
+    github_references: ReferenceLookup,
+    github_reference_repo: Option<crate::github::RepositoryRef>,
+    github_reference_scan: Option<Instant>,
+    /// Grows when lookups fail, so a broken network is not hammered.
+    github_reference_interval: Duration,
+    /// Repositories already resolved, keyed by working directory.
+    github_repositories: std::collections::HashMap<PathBuf, Option<crate::github::RepositoryRef>>,
+    /// Most recently viewed items, newest last.
+    github_cache: Vec<CachedGithubItem>,
     next_github_request_id: u64,
     workspace_state_enabled: bool,
     /// Disabled in tests so reordering favorites never rewrites the real user config.
@@ -445,6 +501,16 @@ impl App {
             github_inspector: None,
             github_request_receiver: None,
             github_request_cancel: None,
+            github_patch_receiver: None,
+            github_patch_cancel: None,
+            github_repositories: std::collections::HashMap::new(),
+            github_repo_receiver: None,
+            github_reference_receiver: None,
+            github_references: ReferenceLookup::new(),
+            github_reference_repo: None,
+            github_reference_scan: None,
+            github_reference_interval: REFERENCE_SCAN_INTERVAL,
+            github_cache: Vec::new(),
             next_github_request_id: 1,
             workspace_state_enabled: true,
             config_persistence_enabled: true,
@@ -524,6 +590,146 @@ impl App {
         }
         self.cancel_github_request();
         self.github_inspector = Some(GithubInspector::number_prompt());
+        // Resolving the repository is a network round trip that does not depend
+        // on the number, so it can happen while the user is still typing it.
+        self.prefetch_github_repository();
+    }
+
+    fn prefetch_github_repository(&mut self) {
+        let Some(cwd) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.cwd.clone())
+        else {
+            return;
+        };
+        if self.github_repositories.contains_key(&cwd) || self.github_repo_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            // A failure is recorded too: without it, a session outside any
+            // GitHub repository would keep spawning `gh` forever.
+            let resolved = crate::github::resolve_repository_for(&cwd, cancelled).ok();
+            let _ = sender.send((cwd, resolved));
+        });
+        self.github_repo_receiver = Some(receiver);
+    }
+
+    fn poll_github_repository(&mut self) {
+        let Some(receiver) = self.github_repo_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok((cwd, repository)) => {
+                self.github_repo_receiver = None;
+                self.github_repositories.insert(cwd, repository);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.github_repo_receiver = None,
+        }
+    }
+
+    /// Status of a `#1234` seen in the focused pane, once it is known.
+    pub fn github_reference_status(&self, number: u64) -> Option<crate::github::ReferenceStatus> {
+        let repository = self.github_reference_repo.as_ref()?;
+        self.github_references
+            .get(&(repository.clone(), number))
+            .copied()
+            .flatten()
+    }
+
+    /// Look up any references on screen that have not been looked up yet.
+    ///
+    /// One query covers every new number, so a busy screen still costs a single
+    /// round trip.
+    pub fn refresh_github_references(&mut self) {
+        if self.github_reference_receiver.is_some() {
+            return;
+        }
+        // Scanning the whole screen every frame would be wasteful for something
+        // that changes on human timescales.
+        let now = Instant::now();
+        if self
+            .github_reference_scan
+            .is_some_and(|last| now.duration_since(last) < self.github_reference_interval)
+        {
+            return;
+        }
+        self.github_reference_scan = Some(now);
+        let Some(cwd) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.cwd.clone())
+        else {
+            return;
+        };
+        let Some(repository) = self.github_repositories.get(&cwd).cloned().flatten() else {
+            // Resolving the repository is what makes decoration possible at all,
+            // and it is needed for the inspector anyway.
+            self.prefetch_github_repository();
+            return;
+        };
+        self.github_reference_repo = Some(repository.clone());
+
+        let Some(pane) = self.mux.as_ref().and_then(|mux| mux.focused_pane()) else {
+            return;
+        };
+        let unknown: Vec<u64> = pane
+            .github_references()
+            .into_iter()
+            .filter(|number| {
+                !self
+                    .github_references
+                    .contains_key(&(repository.clone(), *number))
+            })
+            .take(crate::github::REFERENCE_BATCH)
+            .collect();
+        if unknown.is_empty() {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_repository = repository.clone();
+        std::thread::spawn(move || {
+            if let Ok(statuses) =
+                crate::github::resolve_references(cwd, worker_repository, unknown, cancelled)
+            {
+                let _ = sender.send(statuses);
+            }
+        });
+        self.github_reference_receiver = Some(receiver);
+    }
+
+    fn poll_github_references(&mut self) {
+        let Some(receiver) = self.github_reference_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(statuses) => {
+                self.github_reference_receiver = None;
+                self.github_reference_interval = REFERENCE_SCAN_INTERVAL;
+                let Some(repository) = self.github_reference_repo.clone() else {
+                    return;
+                };
+                for (number, status) in statuses {
+                    self.github_references
+                        .insert((repository.clone(), number), status);
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_reference_receiver = None;
+                // The numbers stay unknown, so without a backoff a persistent
+                // failure would mean a `gh` process every scan.
+                self.github_reference_interval =
+                    (self.github_reference_interval * 2).min(REFERENCE_SCAN_BACKOFF_LIMIT);
+            }
+        }
     }
 
     pub fn inspect_github_item(&mut self, number: u64) {
@@ -542,6 +748,7 @@ impl App {
 
     pub fn close_github_inspector(&mut self) {
         self.cancel_github_request();
+        self.cancel_github_patches();
         self.github_inspector = None;
     }
 
@@ -589,10 +796,67 @@ impl App {
         else {
             return;
         };
+        // An explicit retry should not hand back the copy the user is trying to
+        // get away from.
+        self.forget_cached_github_item(&cwd, number);
         self.start_github_request(cwd, number);
     }
 
+    fn forget_cached_github_item(&mut self, cwd: &Path, number: u64) {
+        let Some(repository) = self.github_repositories.get(cwd).cloned().flatten() else {
+            return;
+        };
+        self.github_cache
+            .retain(|entry| entry.number != number || entry.repository != repository);
+    }
+
+    fn cached_github_item(&self, cwd: &Path, number: u64) -> Option<&GithubItem> {
+        let repository = self.github_repositories.get(cwd)?.as_ref()?;
+        self.github_cache
+            .iter()
+            .find(|entry| entry.number == number && &entry.repository == repository)
+            .map(|entry| &entry.item)
+    }
+
+    fn store_github_item(&mut self, repository: crate::github::RepositoryRef, item: GithubItem) {
+        let number = item.common().number;
+        self.github_cache
+            .retain(|entry| entry.number != number || entry.repository != repository);
+        self.github_cache.push(CachedGithubItem {
+            repository,
+            number,
+            item,
+        });
+        if self.github_cache.len() > GITHUB_CACHE_LIMIT {
+            self.github_cache.remove(0);
+        }
+    }
+
     fn start_github_request(&mut self, cwd: PathBuf, number: u64) {
+        // A cached copy goes on screen straight away, and is checked for
+        // staleness in the background rather than making the user wait.
+        if let Some(item) = self.cached_github_item(&cwd, number).cloned() {
+            self.show_github_item(cwd, number, item);
+            return;
+        }
+        self.spawn_github_request(cwd, number, false);
+    }
+
+    /// Put an already-known item on screen and quietly check it is current.
+    fn show_github_item(&mut self, cwd: PathBuf, number: u64, item: GithubItem) {
+        let inspector = self
+            .github_inspector
+            .get_or_insert_with(GithubInspector::number_prompt);
+        inspector.prompt_error = None;
+        inspector.request_cwd = Some(cwd.clone());
+        inspector.number = Some(number);
+        inspector.screen = GithubInspectorScreen::Ready(item);
+        inspector.reset_navigation();
+        inspector.select_first_tree_file();
+        self.spawn_github_request(cwd, number, true);
+    }
+
+    fn spawn_github_request(&mut self, cwd: PathBuf, number: u64, revalidation: bool) {
         self.cancel_github_request();
         let request_id = self.next_github_request_id;
         self.next_github_request_id = self.next_github_request_id.wrapping_add(1).max(1);
@@ -600,20 +864,28 @@ impl App {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker_cwd = cwd.clone();
+        let known_repository = self.github_repositories.get(&cwd).cloned().flatten();
         std::thread::spawn(move || {
-            let result = crate::github::fetch_item(worker_cwd, number, worker_cancelled);
-            let _ = sender.send(GithubLoadResult { request_id, result });
+            let result =
+                crate::github::fetch_item(worker_cwd, number, known_repository, worker_cancelled);
+            let _ = sender.send(GithubLoadResult {
+                request_id,
+                result,
+                revalidation,
+            });
         });
 
         let inspector = self
             .github_inspector
             .get_or_insert_with(GithubInspector::number_prompt);
-        inspector.screen = GithubInspectorScreen::Loading;
-        inspector.prompt_error = None;
         inspector.request_id = request_id;
-        inspector.request_cwd = Some(cwd);
-        inspector.number = Some(number);
-        inspector.reset_navigation();
+        if !revalidation {
+            inspector.screen = GithubInspectorScreen::Loading;
+            inspector.prompt_error = None;
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(number);
+            inspector.reset_navigation();
+        }
         self.github_request_receiver = Some(receiver);
         self.github_request_cancel = Some(cancelled);
     }
@@ -626,6 +898,13 @@ impl App {
     }
 
     pub fn poll_github(&mut self) {
+        self.poll_github_repository();
+        self.poll_github_references();
+        self.poll_github_item();
+        self.poll_github_patches();
+    }
+
+    fn poll_github_item(&mut self) {
         let Some(receiver) = self.github_request_receiver.as_ref() else {
             return;
         };
@@ -633,20 +912,7 @@ impl App {
             Ok(result) => {
                 self.github_request_receiver = None;
                 self.github_request_cancel = None;
-                let Some(inspector) = self.github_inspector.as_mut() else {
-                    return;
-                };
-                if inspector.request_id != result.request_id
-                    || !matches!(inspector.screen, GithubInspectorScreen::Loading)
-                {
-                    return;
-                }
-                inspector.screen = match result.result {
-                    Ok(item) => GithubInspectorScreen::Ready(item),
-                    Err(error) => GithubInspectorScreen::Error(error.to_string()),
-                };
-                inspector.select_first_tree_file();
-                inspector.reset_navigation();
+                self.apply_github_result(result);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.github_request_receiver = None;
@@ -661,6 +927,162 @@ impl App {
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
+    }
+
+    fn apply_github_result(&mut self, result: GithubLoadResult) {
+        let stale = self
+            .github_inspector
+            .as_ref()
+            .is_none_or(|inspector| inspector.request_id != result.request_id);
+        if stale {
+            return;
+        }
+
+        let fetched = match result.result {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                // A failed background check leaves the copy on screen alone; the
+                // user did not ask for it and cannot act on it.
+                if !result.revalidation {
+                    if let Some(inspector) = self.github_inspector.as_mut() {
+                        inspector.screen = GithubInspectorScreen::Error(error.to_string());
+                    }
+                }
+                return;
+            }
+        };
+
+        if let Some(cwd) = self
+            .github_inspector
+            .as_ref()
+            .and_then(|inspector| inspector.request_cwd.clone())
+        {
+            self.github_repositories
+                .insert(cwd, Some(fetched.repository.clone()));
+        }
+
+        if result.revalidation {
+            let unchanged = self
+                .github_inspector
+                .as_ref()
+                .and_then(|inspector| inspector.ready_item())
+                .is_some_and(|shown| shown.common().updated_at == fetched.item.common().updated_at);
+            self.store_github_item(fetched.repository, fetched.item.clone());
+            // Redrawing an identical item would throw away the user's scroll
+            // position and any diffs already fetched.
+            if unchanged {
+                return;
+            }
+        } else {
+            self.store_github_item(fetched.repository, fetched.item.clone());
+        }
+
+        let Some(inspector) = self.github_inspector.as_mut() else {
+            return;
+        };
+        inspector.screen = GithubInspectorScreen::Ready(fetched.item);
+        inspector.select_first_tree_file();
+        inspector.reset_navigation();
+    }
+
+    /// True while the inspector is showing a pull request's Files tab.
+    pub fn github_files_tab_active(&self) -> bool {
+        self.github_inspector.as_ref().is_some_and(|inspector| {
+            inspector.tab == GithubTab::Files
+                && inspector
+                    .ready_item()
+                    .is_some_and(|item| item.is_pull_request())
+        })
+    }
+
+    /// True while the diffs for the pull request on screen are still arriving.
+    #[cfg(test)]
+    pub fn github_patches_loading(&self) -> bool {
+        self.github_patch_receiver.is_some()
+    }
+
+    /// Fetch diffs for the pull request on screen, unless that is already done.    ///
+    /// The single-call loader lists changed files without their patches, so the
+    /// Files tab asks for them the first time it is opened.
+    pub fn ensure_github_patches(&mut self) {
+        let Some(inspector) = self.github_inspector.as_ref() else {
+            return;
+        };
+        let (Some(cwd), Some(number)) = (inspector.request_cwd.clone(), inspector.number) else {
+            return;
+        };
+        let needed = inspector.ready_item().is_some_and(|item| match item {
+            GithubItem::PullRequest(pull) => !pull.patches_loaded && !pull.files.is_empty(),
+            GithubItem::Issue(_) => false,
+        });
+        if !needed || self.github_patch_receiver.is_some() {
+            return;
+        }
+        let Some(repository) = self.github_repositories.get(&cwd).cloned().flatten() else {
+            return;
+        };
+
+        let request_id = inspector.request_id;
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            let result = crate::github::fetch_patches(cwd, repository, number, worker_cancelled);
+            let _ = sender.send(GithubPatchResult { request_id, result });
+        });
+        self.github_patch_receiver = Some(receiver);
+        self.github_patch_cancel = Some(cancelled);
+    }
+
+    fn poll_github_patches(&mut self) {
+        let Some(receiver) = self.github_patch_receiver.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_patch_receiver = None;
+                self.github_patch_cancel = None;
+                return;
+            }
+        };
+        self.github_patch_receiver = None;
+        self.github_patch_cancel = None;
+
+        let Ok(patches) = result.result else {
+            // Leaving `patches_loaded` false lets opening the tab try again.
+            return;
+        };
+        let Some(inspector) = self.github_inspector.as_mut() else {
+            return;
+        };
+        if inspector.request_id != result.request_id {
+            return;
+        }
+        let GithubInspectorScreen::Ready(GithubItem::PullRequest(pull)) = &mut inspector.screen
+        else {
+            return;
+        };
+        let patches: std::collections::HashMap<String, Option<String>> =
+            patches.into_iter().collect();
+        for file in &mut pull.files {
+            if let Some(patch) = patches.get(&file.path) {
+                file.patch = patch.clone();
+            }
+        }
+        pull.patches_loaded = true;
+
+        let repository = pull.common.repository.clone();
+        let item = GithubItem::PullRequest(pull.clone());
+        self.store_github_item(repository, item);
+    }
+
+    fn cancel_github_patches(&mut self) {
+        if let Some(cancelled) = self.github_patch_cancel.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.github_patch_receiver = None;
     }
 
     pub fn attached_scratchpad_visible(&self) -> bool {
@@ -1748,6 +2170,298 @@ mod tests {
         app.config.favorites.clear();
         app.apply_filter();
         assert_eq!(app.list_header_lines(), 0);
+    }
+
+    /// A pull request with one changed file and no patch yet, as the fast path
+    /// produces it.
+    fn cached_pull(number: u64, updated_at: &str) -> GithubItem {
+        use crate::github::{Author, ChangedFile, ItemCommon, PullRequest, RepositoryRef};
+        GithubItem::PullRequest(PullRequest {
+            common: ItemCommon {
+                repository: RepositoryRef {
+                    host: "github.com".to_string(),
+                    owner: "octo".to_string(),
+                    name: "widgets".to_string(),
+                },
+                number,
+                title: format!("Change {number}"),
+                state: "open".to_string(),
+                author: Author {
+                    login: "monalisa".to_string(),
+                },
+                labels: Vec::new(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: updated_at.to_string(),
+                url: String::new(),
+                body: String::new(),
+            },
+            draft: false,
+            merged: false,
+            mergeable_state: None,
+            base_ref: "main".to_string(),
+            head_ref: "feature".to_string(),
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            discussion: Vec::new(),
+            files: vec![ChangedFile {
+                path: "src/lib.rs".to_string(),
+                status: "modified".to_string(),
+                additions: 1,
+                deletions: 0,
+                changes: 1,
+                patch: None,
+            }],
+            patches_loaded: false,
+        })
+    }
+
+    #[test]
+    fn reference_styling_is_scoped_to_the_repository_that_was_asked() {
+        use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let open_issue = ReferenceStatus {
+            kind: ReferenceKind::Issue,
+            state: ReferenceState::Open,
+        };
+        app.github_reference_repo = Some(repository());
+        app.github_references
+            .insert((repository(), 11), Some(open_issue));
+        // A number that turned out not to be a reference is remembered as such,
+        // so it is never asked about again.
+        app.github_references.insert((repository(), 314), None);
+
+        assert_eq!(app.github_reference_status(11), Some(open_issue));
+        assert_eq!(app.github_reference_status(314), None);
+        assert_eq!(app.github_reference_status(99), None);
+        assert!(app.github_references.contains_key(&(repository(), 314)));
+
+        // The same number in a different repository is a different thing.
+        let other = crate::github::RepositoryRef {
+            host: "github.com".to_string(),
+            owner: "octo".to_string(),
+            name: "gadgets".to_string(),
+        };
+        app.github_reference_repo = Some(other);
+        assert_eq!(app.github_reference_status(11), None);
+    }
+
+    fn repository() -> crate::github::RepositoryRef {
+        crate::github::RepositoryRef {
+            host: "github.com".to_string(),
+            owner: "octo".to_string(),
+            name: "widgets".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_second_look_at_the_same_item_skips_the_spinner() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.store_github_item(repository(), cached_pull(7, "2026-01-02T00:00:00Z"));
+
+        app.start_github_request(cwd, 7);
+
+        // The whole point: no Loading screen on the way back to something the
+        // user just looked at.
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert!(matches!(inspector.screen, GithubInspectorScreen::Ready(_)));
+        assert_eq!(inspector.ready_item().unwrap().common().number, 7);
+    }
+
+    #[test]
+    fn an_unchanged_revalidation_leaves_the_open_item_alone() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        let item = cached_pull(7, "2026-01-02T00:00:00Z");
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(7);
+            inspector.screen = GithubInspectorScreen::Ready(item.clone());
+            inspector.scroll_offsets[0] = 25;
+        }
+
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Ok(crate::github::FetchedItem {
+                repository: repository(),
+                item,
+            }),
+            revalidation: true,
+        });
+
+        // Replacing an identical item would throw away where the user had
+        // scrolled to.
+        assert_eq!(app.github_inspector.as_ref().unwrap().scroll_offsets[0], 25);
+    }
+
+    #[test]
+    fn a_revalidation_that_moved_on_replaces_what_is_shown() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(7);
+            inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        }
+
+        let mut newer = cached_pull(7, "2026-03-03T00:00:00Z");
+        if let GithubItem::PullRequest(pull) = &mut newer {
+            pull.common.title = "Reworked".to_string();
+        }
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Ok(crate::github::FetchedItem {
+                repository: repository(),
+                item: newer,
+            }),
+            revalidation: true,
+        });
+
+        let shown = app.github_inspector.as_ref().unwrap();
+        assert_eq!(shown.ready_item().unwrap().common().title, "Reworked");
+    }
+
+    #[test]
+    fn a_failed_background_check_keeps_the_copy_on_screen() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        }
+
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Err(crate::github::GithubError {
+                kind: crate::github::GithubErrorKind::Cli,
+                message: "network is down".to_string(),
+            }),
+            revalidation: true,
+        });
+
+        // The user did not ask for the refresh and cannot act on its failure.
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert!(
+            inspector.ready_item().is_some(),
+            "item was replaced by an error"
+        );
+    }
+
+    #[test]
+    fn a_failed_first_load_is_reported() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        app.github_inspector.as_mut().unwrap().request_id = 42;
+
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Err(crate::github::GithubError {
+                kind: crate::github::GithubErrorKind::NotFound,
+                message: "no such item".to_string(),
+            }),
+            revalidation: false,
+        });
+
+        let screen = &app.github_inspector.as_ref().unwrap().screen;
+        assert!(
+            matches!(screen, GithubInspectorScreen::Error(message) if message.contains("no such item"))
+        );
+    }
+
+    #[test]
+    fn the_cache_keeps_only_the_most_recent_items() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        for number in 1..=(GITHUB_CACHE_LIMIT as u64 + 3) {
+            app.store_github_item(repository(), cached_pull(number, "2026-01-01T00:00:00Z"));
+        }
+
+        assert_eq!(app.github_cache.len(), GITHUB_CACHE_LIMIT);
+        // The oldest are dropped, not the newest.
+        assert!(app.github_cache.iter().all(|entry| entry.number > 3));
+    }
+
+    #[test]
+    fn reopening_an_item_refreshes_its_place_in_the_cache() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.store_github_item(repository(), cached_pull(1, "2026-01-01T00:00:00Z"));
+        app.store_github_item(repository(), cached_pull(2, "2026-01-01T00:00:00Z"));
+        app.store_github_item(repository(), cached_pull(1, "2026-02-01T00:00:00Z"));
+
+        // Storing twice must update in place rather than keep two copies.
+        assert_eq!(app.github_cache.len(), 2);
+        assert_eq!(app.github_cache.last().unwrap().number, 1);
+    }
+
+    #[test]
+    fn retrying_bypasses_the_cached_copy() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.store_github_item(repository(), cached_pull(7, "2026-01-02T00:00:00Z"));
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_cwd = Some(cwd.clone());
+            inspector.number = Some(7);
+        }
+
+        app.retry_github_request();
+
+        // Handing back the copy the user is trying to get away from would make
+        // the retry key do nothing.
+        assert!(app.cached_github_item(&cwd, 7).is_none());
+    }
+
+    #[test]
+    fn diffs_are_only_requested_for_a_pull_request_that_lacks_them() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(7);
+            inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        }
+
+        app.ensure_github_patches();
+        assert!(
+            app.github_patches_loading(),
+            "diffs should have been requested"
+        );
+
+        // Already loaded: opening the tab again must not refetch.
+        app.cancel_github_patches();
+        if let Some(GithubItem::PullRequest(pull)) =
+            app.github_inspector
+                .as_mut()
+                .and_then(|inspector| match &mut inspector.screen {
+                    GithubInspectorScreen::Ready(item) => Some(item),
+                    _ => None,
+                })
+        {
+            pull.patches_loaded = true;
+        }
+        app.ensure_github_patches();
+        assert!(!app.github_patches_loading());
     }
 
     #[test]

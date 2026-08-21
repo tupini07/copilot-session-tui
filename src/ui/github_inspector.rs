@@ -108,6 +108,7 @@ pub fn install_demo_pull_request(app: &mut App) {
                 "@@ -221,8 +221,16 @@ GitHub inspection is available while attached to a mux session.\n+The **Files** tab splits into a directory tree of the changed files and the\n+selected file's diff, which follows the cursor without pressing Enter.",
             ),
         ],
+        patches_loaded: true,
     });
 
     let mut inspector = GithubInspector::number_prompt();
@@ -805,10 +806,18 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem, width: usize) -> V
         Line::from(""),
     ];
     let Some(patch) = &file.patch else {
-        lines.push(Line::from(Span::styled(
-            "Diff unavailable: GitHub omitted the patch (the file may be binary or too large).",
-            Style::default().fg(Color::Yellow),
-        )));
+        let pending = matches!(item, GithubItem::PullRequest(pull) if !pull.patches_loaded);
+        lines.push(Line::from(if pending {
+            Span::styled(
+                "Loading diff…",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+            )
+        } else {
+            Span::styled(
+                "Diff unavailable: GitHub omitted the patch (the file may be binary or too large).",
+                Style::default().fg(Color::Yellow),
+            )
+        }));
         return lines;
     };
     lines.extend(patch.lines().map(|line| {
@@ -1022,6 +1031,7 @@ mod tests {
                 changes: 3,
                 patch: patch.map(str::to_string),
             }],
+            patches_loaded: true,
         })
     }
 

@@ -266,6 +266,12 @@ Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the 
 wheel to scroll, and Esc to return. GitHub references such as `#2029` shown in the
 attached chat can also be opened directly with a left click.
 
+Those references are colour-coded once CST has looked them up: green for open, red for
+a closed pull request, magenta for a merged pull request or a closed issue, and grey for
+a draft. Numbers that are not issues or pull requests are left alone. Lookups happen in
+the background, in a single batched query per screenful, and are remembered for the rest
+of the run.
+
 The **Files** tab splits into a directory tree of the changed files and the selected
 file's diff, which follows the cursor without pressing Enter. Directories show their
 aggregated file count and `+/-` totals, files their status (`A`/`M`/`D`/`R`) and own
