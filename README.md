@@ -313,7 +313,10 @@ kind — yellow for an issue, cyan for a pull request — and the number carries
 green for open, red for a closed pull request, magenta for a merged pull request or a
 closed issue, and grey for a draft. Numbers that are not issues or pull requests are left
 alone. Lookups happen in the background, in a single batched query per screenful, and are
-remembered for the rest of the run.
+remembered for the rest of the run. Opening an item in the inspector immediately
+backfills its freshly fetched state into the chat decoration. CST also revalidates every
+visible reference — open, closed, merged, or draft — every five minutes, rotating through
+bounded batches when a screen contains more than GitHub accepts in one query.
 
 The **Files** tab splits into a directory tree of the changed files and the selected
 file's diff, which follows the cursor without pressing Enter. Directories show their

@@ -286,6 +286,7 @@ pub struct GithubLoadResult {
     /// These must never replace the view with a spinner or an error: the user
     /// is reading a perfectly good copy.
     revalidation: bool,
+    reference_generation: Option<u64>,
 }
 
 pub struct GithubPatchResult {
@@ -308,6 +309,7 @@ const GITHUB_CACHE_LIMIT: usize = 12;
 
 /// How often the focused pane is scanned for `#1234` references.
 const REFERENCE_SCAN_INTERVAL: Duration = Duration::from_millis(750);
+const REFERENCE_REVALIDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Slowest the scan backs off to after repeated lookup failures.
 const REFERENCE_SCAN_BACKOFF_LIMIT: Duration = Duration::from_secs(60);
@@ -319,7 +321,13 @@ type ReferenceLookup = std::collections::HashMap<
 >;
 
 /// One batch of answers coming back from a lookup.
-type ResolvedReferences = Vec<(u64, Option<crate::github::ReferenceStatus>)>;
+struct ResolvedReferences {
+    repository: crate::github::RepositoryRef,
+    statuses: Vec<(u64, Option<crate::github::ReferenceStatus>)>,
+    periodic: bool,
+    periodic_batch_len: usize,
+    generations: HashMap<u64, u64>,
+}
 pub struct App {
     pub sessions: Vec<Session>,
     pub filtered_indices: Vec<usize>,
@@ -414,10 +422,14 @@ pub struct App {
     /// that merely look like references, and re-asking about them every second
     /// would be worse than useless.
     github_references: ReferenceLookup,
+    github_reference_generations: HashMap<(crate::github::RepositoryRef, u64), u64>,
+    next_github_reference_generation: u64,
     github_reference_repo: Option<crate::github::RepositoryRef>,
     github_reference_scan: Option<Instant>,
     /// Grows when lookups fail, so a broken network is not hammered.
     github_reference_interval: Duration,
+    github_reference_refreshed_at: HashMap<(crate::github::RepositoryRef, u64), Instant>,
+    github_reference_periodic_remaining: HashMap<crate::github::RepositoryRef, Vec<u64>>,
     /// Repositories already resolved, keyed by working directory.
     github_repositories: std::collections::HashMap<PathBuf, Option<crate::github::RepositoryRef>>,
     /// Most recently viewed items, newest last.
@@ -515,9 +527,13 @@ impl App {
             github_repo_receiver: None,
             github_reference_receiver: None,
             github_references: ReferenceLookup::new(),
+            github_reference_generations: HashMap::new(),
+            next_github_reference_generation: 1,
             github_reference_repo: None,
             github_reference_scan: None,
             github_reference_interval: REFERENCE_SCAN_INTERVAL,
+            github_reference_refreshed_at: HashMap::new(),
+            github_reference_periodic_remaining: HashMap::new(),
             github_cache: Vec::new(),
             next_github_request_id: 1,
             workspace_state_enabled: true,
@@ -773,6 +789,23 @@ impl App {
     /// One query covers every new number, so a busy screen still costs a single
     /// round trip.
     pub fn refresh_github_references(&mut self) {
+        let Some(cwd) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.cwd.clone())
+        else {
+            self.github_reference_repo = None;
+            return;
+        };
+        let Some(repository) = self.github_repositories.get(&cwd).cloned().flatten() else {
+            self.github_reference_repo = None;
+            // Resolving the repository is what makes decoration possible at all,
+            // and it is needed for the inspector anyway.
+            self.prefetch_github_repository();
+            return;
+        };
+        self.github_reference_repo = Some(repository.clone());
         if self.github_reference_receiver.is_some() {
             return;
         }
@@ -786,47 +819,64 @@ impl App {
             return;
         }
         self.github_reference_scan = Some(now);
-        let Some(cwd) = self
-            .mux
-            .as_ref()
-            .and_then(|mux| mux.focused_pane())
-            .map(|pane| pane.cwd.clone())
-        else {
-            return;
-        };
-        let Some(repository) = self.github_repositories.get(&cwd).cloned().flatten() else {
-            // Resolving the repository is what makes decoration possible at all,
-            // and it is needed for the inspector anyway.
-            self.prefetch_github_repository();
-            return;
-        };
-        self.github_reference_repo = Some(repository.clone());
 
         let Some(pane) = self.mux.as_ref().and_then(|mux| mux.focused_pane()) else {
             return;
         };
-        let unknown: Vec<u64> = pane
-            .github_references()
-            .into_iter()
-            .filter(|number| {
-                !self
-                    .github_references
-                    .contains_key(&(repository.clone(), *number))
-            })
-            .take(crate::github::REFERENCE_BATCH)
-            .collect();
-        if unknown.is_empty() {
+        let visible = pane.github_references();
+        if visible.is_empty() {
             return;
         }
+        let stale: Vec<u64> = visible
+            .iter()
+            .copied()
+            .filter(|number| {
+                self.github_reference_refreshed_at
+                    .get(&(repository.clone(), *number))
+                    .is_none_or(|last| now.duration_since(*last) >= REFERENCE_REVALIDATE_INTERVAL)
+            })
+            .collect();
+        let numbers: Vec<u64> = self
+            .github_reference_periodic_remaining
+            .entry(repository.clone())
+            .or_insert(stale)
+            .iter()
+            .copied()
+            .take(crate::github::REFERENCE_BATCH)
+            .collect();
+        if numbers.is_empty() {
+            self.github_reference_periodic_remaining.remove(&repository);
+            return;
+        }
+        let periodic = true;
+        let periodic_batch_len = numbers.len();
+        let generations: HashMap<u64, u64> = numbers
+            .iter()
+            .map(|number| {
+                (
+                    *number,
+                    self.issue_github_reference_generation(repository.clone(), *number),
+                )
+            })
+            .collect();
 
         let (sender, receiver) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_repository = repository.clone();
         std::thread::spawn(move || {
-            if let Ok(statuses) =
-                crate::github::resolve_references(cwd, worker_repository, unknown, cancelled)
-            {
-                let _ = sender.send(statuses);
+            if let Ok(statuses) = crate::github::resolve_references(
+                cwd,
+                worker_repository.clone(),
+                numbers,
+                cancelled,
+            ) {
+                let _ = sender.send(ResolvedReferences {
+                    repository: worker_repository,
+                    statuses,
+                    periodic,
+                    periodic_batch_len,
+                    generations,
+                });
             }
         });
         self.github_reference_receiver = Some(receiver);
@@ -837,15 +887,36 @@ impl App {
             return;
         };
         match receiver.try_recv() {
-            Ok(statuses) => {
+            Ok(resolved) => {
                 self.github_reference_receiver = None;
                 self.github_reference_interval = REFERENCE_SCAN_INTERVAL;
-                let Some(repository) = self.github_reference_repo.clone() else {
-                    return;
-                };
-                for (number, status) in statuses {
-                    self.github_references
-                        .insert((repository.clone(), number), status);
+                if resolved.periodic {
+                    let completed = self
+                        .github_reference_periodic_remaining
+                        .get_mut(&resolved.repository)
+                        .is_none_or(|remaining| {
+                            let consumed = resolved.periodic_batch_len.min(remaining.len());
+                            remaining.drain(..consumed);
+                            remaining.is_empty()
+                        });
+                    if completed {
+                        self.github_reference_periodic_remaining
+                            .remove(&resolved.repository);
+                    }
+                }
+                for (number, status) in resolved.statuses {
+                    let key = (resolved.repository.clone(), number);
+                    let captured = resolved.generations.get(&number).copied().unwrap_or(0);
+                    let current = self
+                        .github_reference_generations
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(0);
+                    if current == captured {
+                        self.github_references.insert(key, status);
+                        self.github_reference_refreshed_at
+                            .insert((resolved.repository.clone(), number), Instant::now());
+                    }
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {}
@@ -959,6 +1030,37 @@ impl App {
         }
     }
 
+    fn store_fetched_github_item(
+        &mut self,
+        repository: crate::github::RepositoryRef,
+        item: GithubItem,
+        request_generation: Option<u64>,
+    ) {
+        let number = item.common().number;
+        let key = (repository.clone(), number);
+        let generation = request_generation
+            .unwrap_or_else(|| self.issue_github_reference_generation(repository.clone(), number));
+        if self.github_reference_generations.get(&key) == Some(&generation) {
+            self.github_references
+                .insert(key, Some(item.reference_status()));
+            self.github_reference_refreshed_at
+                .insert((repository.clone(), number), Instant::now());
+        }
+        self.store_github_item(repository, item);
+    }
+
+    fn issue_github_reference_generation(
+        &mut self,
+        repository: crate::github::RepositoryRef,
+        number: u64,
+    ) -> u64 {
+        let generation = self.next_github_reference_generation;
+        self.next_github_reference_generation = generation.wrapping_add(1).max(1);
+        self.github_reference_generations
+            .insert((repository, number), generation);
+        generation
+    }
+
     fn start_github_request(&mut self, cwd: PathBuf, number: u64) {
         // A cached copy goes on screen straight away, and is checked for
         // staleness in the background rather than making the user wait.
@@ -992,6 +1094,9 @@ impl App {
         let worker_cancelled = Arc::clone(&cancelled);
         let worker_cwd = cwd.clone();
         let known_repository = self.github_repositories.get(&cwd).cloned().flatten();
+        let reference_generation = known_repository
+            .as_ref()
+            .map(|repository| self.issue_github_reference_generation(repository.clone(), number));
         std::thread::spawn(move || {
             let result =
                 crate::github::fetch_item(worker_cwd, number, known_repository, worker_cancelled);
@@ -999,6 +1104,7 @@ impl App {
                 request_id,
                 result,
                 revalidation,
+                reference_generation,
             });
         });
 
@@ -1094,14 +1200,22 @@ impl App {
                 .as_ref()
                 .and_then(|inspector| inspector.ready_item())
                 .is_some_and(|shown| shown.common().updated_at == fetched.item.common().updated_at);
-            self.store_github_item(fetched.repository, fetched.item.clone());
+            self.store_fetched_github_item(
+                fetched.repository,
+                fetched.item.clone(),
+                result.reference_generation,
+            );
             // Redrawing an identical item would throw away the user's scroll
             // position and any diffs already fetched.
             if unchanged {
                 return;
             }
         } else {
-            self.store_github_item(fetched.repository, fetched.item.clone());
+            self.store_fetched_github_item(
+                fetched.repository,
+                fetched.item.clone(),
+                result.reference_generation,
+            );
         }
 
         let Some(inspector) = self.github_inspector.as_mut() else {
@@ -2830,6 +2944,216 @@ mod tests {
         assert_eq!(app.github_reference_status(11), None);
     }
 
+    #[test]
+    fn pane_switch_updates_reference_repository_even_while_a_request_is_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = app_with(true);
+        let current = repository();
+        app.github_repositories
+            .insert(directory.path().to_path_buf(), Some(current.clone()));
+        app.github_reference_repo = Some(crate::github::RepositoryRef {
+            host: "github.com".to_string(),
+            owner: "old".to_string(),
+            name: "repository".to_string(),
+        });
+        let (_sender, receiver) = mpsc::channel();
+        app.github_reference_receiver = Some(receiver);
+
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 3 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 2".to_string()],
+            )
+        };
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "Current".to_string(),
+                cwd: directory.path().to_path_buf(),
+                session_id: "current-session".to_string(),
+                program,
+                args,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = View::Attached(1);
+
+        app.refresh_github_references();
+
+        assert_eq!(app.github_reference_repo.as_ref(), Some(&current));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn inspecting_an_item_backfills_its_fresh_state_into_chat_decoration() {
+        use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.github_reference_repo = Some(repository());
+        app.github_references.insert(
+            (repository(), 2175),
+            Some(ReferenceStatus {
+                kind: ReferenceKind::PullRequest,
+                state: ReferenceState::Open,
+            }),
+        );
+        let mut item = cached_pull(2175, "2026-08-21T20:50:27Z");
+        if let GithubItem::PullRequest(pull) = &mut item {
+            pull.common.state = "closed".to_string();
+            pull.merged = true;
+        }
+
+        app.store_fetched_github_item(repository(), item, None);
+
+        assert_eq!(
+            app.github_reference_status(2175),
+            Some(ReferenceStatus {
+                kind: ReferenceKind::PullRequest,
+                state: ReferenceState::Merged,
+            }),
+            "closing the inspector must leave the chat with the fetched state"
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        app.github_reference_receiver = Some(receiver);
+        sender
+            .send(ResolvedReferences {
+                repository: repository(),
+                statuses: vec![(
+                    2175,
+                    Some(ReferenceStatus {
+                        kind: ReferenceKind::PullRequest,
+                        state: ReferenceState::Open,
+                    }),
+                )],
+                periodic: false,
+                periodic_batch_len: 0,
+                generations: HashMap::from([(2175, 0)]),
+            })
+            .unwrap();
+        app.poll_github_references();
+        assert_eq!(
+            app.github_reference_status(2175).unwrap().state,
+            ReferenceState::Merged,
+            "a batch started before the inspector fetch must not overwrite it"
+        );
+
+        app.store_github_item(repository(), cached_pull(2175, "2026-08-21T20:49:00Z"));
+        assert_eq!(
+            app.github_reference_status(2175).unwrap().state,
+            ReferenceState::Merged,
+            "patch/cache enrichment is not authoritative for reference state"
+        );
+    }
+
+    #[test]
+    fn periodic_reference_batches_update_their_repository_and_finish_the_cycle() {
+        use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let repository = repository();
+        app.github_reference_periodic_remaining
+            .insert(repository.clone(), (1..=41).collect());
+        let closed = ReferenceStatus {
+            kind: ReferenceKind::Issue,
+            state: ReferenceState::Closed,
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        app.github_reference_receiver = Some(receiver);
+        sender
+            .send(ResolvedReferences {
+                repository: repository.clone(),
+                statuses: (1..=40).map(|number| (number, Some(closed))).collect(),
+                periodic: true,
+                periodic_batch_len: 40,
+                generations: (1..=40).map(|number| (number, 0)).collect(),
+            })
+            .unwrap();
+        app.poll_github_references();
+
+        assert_eq!(
+            app.github_reference_periodic_remaining[&repository],
+            vec![41]
+        );
+        assert!(app
+            .github_reference_refreshed_at
+            .contains_key(&(repository.clone(), 1)));
+        assert!(!app
+            .github_reference_refreshed_at
+            .contains_key(&(repository.clone(), 41)));
+        assert_eq!(
+            app.github_references[&(repository.clone(), 1)],
+            Some(closed)
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        app.github_reference_receiver = Some(receiver);
+        sender
+            .send(ResolvedReferences {
+                repository: repository.clone(),
+                statuses: vec![(41, Some(closed))],
+                periodic: true,
+                periodic_batch_len: 1,
+                generations: HashMap::from([(41, 0)]),
+            })
+            .unwrap();
+        app.poll_github_references();
+
+        assert!(!app
+            .github_reference_periodic_remaining
+            .contains_key(&repository));
+        assert!(app
+            .github_reference_refreshed_at
+            .contains_key(&(repository.clone(), 41)));
+        assert_eq!(app.github_references[&(repository, 41)], Some(closed));
+    }
+
+    #[test]
+    fn newer_periodic_request_beats_an_older_slow_inspector_request() {
+        use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let repository = repository();
+        app.github_reference_repo = Some(repository.clone());
+        let inspector_generation = app.issue_github_reference_generation(repository.clone(), 7);
+        let periodic_generation = app.issue_github_reference_generation(repository.clone(), 7);
+        let closed = ReferenceStatus {
+            kind: ReferenceKind::PullRequest,
+            state: ReferenceState::Closed,
+        };
+        let (sender, receiver) = mpsc::channel();
+        app.github_reference_receiver = Some(receiver);
+        sender
+            .send(ResolvedReferences {
+                repository: repository.clone(),
+                statuses: vec![(7, Some(closed))],
+                periodic: false,
+                periodic_batch_len: 0,
+                generations: HashMap::from([(7, periodic_generation)]),
+            })
+            .unwrap();
+        app.poll_github_references();
+
+        app.store_fetched_github_item(
+            repository,
+            cached_pull(7, "2026-08-21T20:00:00Z"),
+            Some(inspector_generation),
+        );
+
+        assert_eq!(app.github_reference_status(7), Some(closed));
+    }
+
     fn repository() -> crate::github::RepositoryRef {
         crate::github::RepositoryRef {
             host: "github.com".to_string(),
@@ -2879,6 +3203,7 @@ mod tests {
                 item,
             }),
             revalidation: true,
+            reference_generation: None,
         });
 
         // Replacing an identical item would throw away where the user had
@@ -2912,6 +3237,7 @@ mod tests {
                 item: newer,
             }),
             revalidation: true,
+            reference_generation: None,
         });
 
         let shown = app.github_inspector.as_ref().unwrap();
@@ -2935,6 +3261,7 @@ mod tests {
                 message: "network is down".to_string(),
             }),
             revalidation: true,
+            reference_generation: None,
         });
 
         // The user did not ask for the refresh and cannot act on its failure.
@@ -2958,6 +3285,7 @@ mod tests {
                 message: "no such item".to_string(),
             }),
             revalidation: false,
+            reference_generation: None,
         });
 
         let screen = &app.github_inspector.as_ref().unwrap().screen;

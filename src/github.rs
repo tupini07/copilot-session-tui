@@ -135,6 +135,31 @@ impl GithubItem {
     pub fn is_pull_request(&self) -> bool {
         matches!(self, Self::PullRequest(_))
     }
+
+    pub fn reference_status(&self) -> ReferenceStatus {
+        match self {
+            Self::Issue(issue) => ReferenceStatus {
+                kind: ReferenceKind::Issue,
+                state: if issue.common.state.eq_ignore_ascii_case("closed") {
+                    ReferenceState::Closed
+                } else {
+                    ReferenceState::Open
+                },
+            },
+            Self::PullRequest(pull) => ReferenceStatus {
+                kind: ReferenceKind::PullRequest,
+                state: if pull.merged || pull.common.state.eq_ignore_ascii_case("merged") {
+                    ReferenceState::Merged
+                } else if pull.common.state.eq_ignore_ascii_case("closed") {
+                    ReferenceState::Closed
+                } else if pull.draft {
+                    ReferenceState::Draft
+                } else {
+                    ReferenceState::Open
+                },
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,7 +886,7 @@ fn resolve_references_with(
     let mut nodes = response
         .data
         .and_then(|data| data.repository)
-        .unwrap_or_default();
+        .ok_or_else(|| GithubError::invalid("references", "missing repository data"))?;
 
     Ok(numbers
         .into_iter()
@@ -1480,6 +1505,17 @@ mod tests {
             .expect("query argument");
         assert!(query.contains(&format!("r{REFERENCE_BATCH}:issueOrPullRequest")));
         assert!(!query.contains(&format!("r{}:issueOrPullRequest", REFERENCE_BATCH + 1)));
+    }
+
+    #[test]
+    fn missing_repository_data_is_an_error_not_a_batch_of_negative_answers() {
+        let runner = FakeRunner::ok(&[r#"{"data":null,"errors":[{"message":"temporary"}]}"#]);
+
+        let error = resolve_references_with(&runner, Path::new("/repo"), &repository(), &[1, 2])
+            .unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::InvalidResponse);
+        assert!(error.message.contains("missing repository data"));
     }
 
     #[test]
