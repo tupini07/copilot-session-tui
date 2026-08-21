@@ -1113,7 +1113,7 @@ impl App {
                 mux.panes
                     .iter()
                     .filter_map(|pane| {
-                        let session_id = pane.session_id.as_ref()?;
+                        let session_id = &pane.session_id;
                         (self.terminal_open.contains(&pane.id) && stopped.contains(session_id))
                             .then(|| (pane.id, session_id.clone()))
                     })
@@ -1601,7 +1601,7 @@ impl App {
         self.spawn_pane(
             title,
             PathBuf::from(cwd),
-            Some(session_id.to_string()),
+            session_id.to_string(),
             program,
             args,
         )
@@ -1609,15 +1609,15 @@ impl App {
 
     /// Start a brand new Copilot session as a pane.
     pub fn attach_new_session(&mut self, cwd: &str, title: String) -> Result<()> {
-        let (program, args) = manager::new_session_command(&self.config)?;
-        self.spawn_pane(title, PathBuf::from(cwd), None, program, args)
+        let (program, args, session_id) = manager::new_session_command(&self.config)?;
+        self.spawn_pane(title, PathBuf::from(cwd), session_id, program, args)
     }
 
     fn spawn_pane(
         &mut self,
         title: String,
         cwd: PathBuf,
-        session_id: Option<String>,
+        session_id: String,
         program: String,
         args: Vec<String>,
     ) -> Result<()> {
@@ -1648,9 +1648,7 @@ impl App {
         )?;
         mux.push(pane);
         self.view = View::Attached(id);
-        if let Some(session_id) = workspace_session_id.as_deref() {
-            self.restore_workspace_panels(id, session_id);
-        }
+        self.restore_workspace_panels(id, &workspace_session_id);
         Ok(())
     }
 
@@ -1874,7 +1872,7 @@ mod tests {
                 id: 42,
                 title: "Session".to_string(),
                 cwd: directory.path().to_path_buf(),
-                session_id: Some(session_id.to_string()),
+                session_id: session_id.to_string(),
                 program,
                 args,
             },

@@ -122,7 +122,7 @@ fn workspace(sandbox: &Path) -> Result<String> {
             id: 1,
             title: "Add a tree view to the PR inspector".to_string(),
             cwd: sandbox.to_path_buf(),
-            session_id: Some(session_id.to_string()),
+            session_id: session_id.to_string(),
             program,
             args,
         },

@@ -414,7 +414,7 @@ mod tests {
                 id: 1,
                 title: "booting".to_string(),
                 cwd: std::env::temp_dir(),
-                session_id: None,
+                session_id: "booting-session".to_string(),
                 program,
                 args,
             },

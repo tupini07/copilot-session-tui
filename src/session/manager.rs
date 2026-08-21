@@ -40,9 +40,26 @@ pub fn resume_command(session_id: &str, config: &UserConfig) -> Result<(String, 
     Ok((copilot, args))
 }
 
-/// Program plus arguments for starting a fresh session inside a pane.
-pub fn new_session_command(config: &UserConfig) -> Result<(String, Vec<String>)> {
-    Ok((find_copilot()?, config_args(config)))
+/// Program plus arguments for starting a fresh session inside a pane, and the id that
+/// session will have.
+///
+/// The id is ours to choose: `--session-id` names a new session rather than resuming one.
+/// Deciding it up front is what lets a pane bind its scratchpad and terminal to the real
+/// session from the moment it spawns, instead of waiting for Copilot to invent an id and
+/// having nothing stable to key on in the meantime.
+pub fn new_session_command(config: &UserConfig) -> Result<(String, Vec<String>, String)> {
+    let copilot = find_copilot()?;
+    let (args, session_id) = new_session_args(config);
+    Ok((copilot, args, session_id))
+}
+
+/// The argument half of [`new_session_command`], split out so it can be tested without
+/// a Copilot binary on PATH.
+fn new_session_args(config: &UserConfig) -> (Vec<String>, String) {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut args = vec![format!("--session-id={session_id}")];
+    args.extend(config_args(config));
+    (args, session_id)
 }
 
 /// Rename a session using the current `name` field while preserving legacy metadata.
@@ -239,6 +256,89 @@ fn locate_copilot() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_session_is_told_the_id_it_will_have() {
+        let config = UserConfig::default();
+
+        let (args, session_id) = new_session_args(&config);
+
+        assert!(
+            uuid::Uuid::parse_str(&session_id).is_ok(),
+            "Copilot expects a UUID, got {session_id}"
+        );
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some(format!("--session-id={session_id}").as_str()),
+            "the pane and the child must agree on the id"
+        );
+    }
+
+    #[test]
+    fn every_new_session_gets_its_own_id() {
+        let config = UserConfig::default();
+
+        let (_, first) = new_session_args(&config);
+        let (_, second) = new_session_args(&config);
+
+        // Two new sessions sharing an id would share a scratchpad.
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn naming_a_new_session_does_not_drop_the_configured_arguments() {
+        let config = UserConfig {
+            yolo: true,
+            model: Some("claude-opus-5".to_string()),
+            ..UserConfig::default()
+        };
+
+        let (args, _) = new_session_args(&config);
+
+        assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "--model=claude-opus-5"),
+            "got {args:?}"
+        );
+    }
+
+    /// Proves against the real Copilot binary that the id CST picks is the id the
+    /// session actually gets. Ignored by default: it needs Copilot installed and
+    /// authenticated, and it spends a few AI credits.
+    ///
+    /// ```text
+    /// cargo test -- --ignored a_new_session_really_is_created_under_the_id_we_chose
+    /// ```
+    #[test]
+    #[ignore = "requires a real, authenticated Copilot CLI and spends AI credits"]
+    fn a_new_session_really_is_created_under_the_id_we_chose() {
+        let (program, args, session_id) = new_session_command(&UserConfig::default())
+            .expect("Copilot CLI must be installed for this probe");
+
+        let workdir = tempfile::tempdir().unwrap();
+        let status = Command::new(&program)
+            .args(&args)
+            .args(["-p", "reply with exactly: ok"])
+            .current_dir(workdir.path())
+            .status()
+            .expect("failed to launch copilot");
+        assert!(status.success(), "copilot rejected {args:?}");
+
+        let session_dir = dirs::home_dir()
+            .expect("home directory")
+            .join(".copilot")
+            .join("session-state")
+            .join(&session_id);
+        let found = session_dir.is_dir();
+        if found {
+            let _ = fs::remove_dir_all(&session_dir);
+        }
+        assert!(
+            found,
+            "expected the session at {}, so per-session state keyed on {session_id} would find it",
+            session_dir.display()
+        );
+    }
 
     #[test]
     fn rename_updates_current_name_field() {

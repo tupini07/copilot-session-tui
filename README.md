@@ -47,6 +47,9 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 
 - [Rust](https://rustup.rs/) 1.86+
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) (Windows) or GCC (Linux/macOS)
+- [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
+  `--session-id` arrived. CST names each new session itself so that a session's
+  scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
 
 ### Build from source
 

@@ -55,8 +55,10 @@ pub enum PaneStatus {
 /// One Copilot session hosted inside CST: a PTY plus the terminal state it drives.
 pub struct Pane {
     pub id: PaneId,
-    /// Copilot session id, once known. New sessions only learn theirs after Copilot starts.
-    pub session_id: Option<String>,
+    /// Copilot session id. Known before the child starts: resumes are given one and new
+    /// sessions are told theirs via `--session-id`, so a pane can always key per-session
+    /// state (scratchpad, terminal, panel layout) on something stable and unique.
+    pub session_id: String,
     pub title: String,
     pub cwd: PathBuf,
     pub status: PaneStatus,
@@ -73,7 +75,7 @@ pub struct PaneSpec {
     pub id: PaneId,
     pub title: String,
     pub cwd: PathBuf,
-    pub session_id: Option<String>,
+    pub session_id: String,
     pub program: String,
     pub args: Vec<String>,
 }
@@ -510,7 +512,7 @@ mod tests {
             id,
             title: "test".to_string(),
             cwd: std::env::temp_dir(),
-            session_id: None,
+            session_id: format!("test-session-{id}"),
             program,
             args,
         }

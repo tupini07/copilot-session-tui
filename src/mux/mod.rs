@@ -260,7 +260,7 @@ impl MuxState {
     pub fn pane_for_session(&self, session_id: &str) -> Option<PaneId> {
         self.panes
             .iter()
-            .find(|pane| pane.session_id.as_deref() == Some(session_id))
+            .find(|pane| pane.session_id == session_id)
             .map(|pane| pane.id)
     }
 

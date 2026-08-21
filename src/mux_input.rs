@@ -810,13 +810,9 @@ fn close_scratchpad(app: &mut App) -> bool {
 
 fn focused_workspace_context(app: &App) -> Option<(u64, String, String, String)> {
     let pane = app.mux.as_ref()?.focused_pane()?;
-    let session_id = pane
-        .session_id
-        .clone()
-        .unwrap_or_else(|| format!("mux-pane-{}", pane.id));
     Some((
         pane.id,
-        session_id,
+        pane.session_id.clone(),
         pane.title.clone(),
         pane.cwd.to_string_lossy().to_string(),
     ))
@@ -1083,7 +1079,7 @@ mod tests {
                 id,
                 title: format!("Test session {id}"),
                 cwd: std::env::temp_dir(),
-                session_id: Some(session_id.to_string()),
+                session_id: session_id.to_string(),
                 program,
                 args,
             },
@@ -1547,6 +1543,22 @@ mod tests {
         assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
         assert_eq!(app.mode, crate::app::Mode::Normal, "no panes, no switcher");
         assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn per_session_state_is_keyed_on_the_session_not_the_pane_number() {
+        // Pane numbering restarts at 1 every run, so deriving a scratchpad or
+        // terminal key from it made two unrelated new sessions share one file.
+        let first_run = attached_mux_app("session-alpha");
+        let (first_pane, alpha, _, _) = focused_workspace_context(&first_run).unwrap();
+
+        let second_run = attached_mux_app("session-beta");
+        let (second_pane, beta, _, _) = focused_workspace_context(&second_run).unwrap();
+
+        assert_eq!(first_pane, second_pane, "the same pane number, as in life");
+        assert_eq!(alpha, "session-alpha");
+        assert_eq!(beta, "session-beta");
+        assert_ne!(alpha, beta, "but state must not be shared between them");
     }
 
     #[test]
