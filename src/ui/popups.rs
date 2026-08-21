@@ -471,7 +471,7 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(list, chunks[2]);
 }
 
-pub fn draw_help(f: &mut Frame, app: &App) {
+pub fn draw_help(f: &mut Frame, app: &mut App) {
     let area = centered_rect(55, 70, f.area());
     f.render_widget(Clear, area);
 
@@ -557,20 +557,68 @@ pub fn draw_help(f: &mut Frame, app: &App) {
         ));
         text.push(help_line("", "These work from this list too"));
         text.push(Line::from(""));
+        text.push(Line::from(Span::styled(
+            "  GitHub references in the chat",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+        text.extend(reference_legend());
+        text.push(Line::from(""));
     }
 
     text.push(Line::from(Span::styled(
-        "  Press any key to close",
+        "  ↑/↓ PageUp/PageDown scroll · Esc/q/Enter/? close",
         Style::default().fg(Color::DarkGray),
     )));
 
+    // The list has outgrown the popup, so without scrolling the tail of it --
+    // including the multiplexer bindings -- simply cannot be read.
+    let viewport = area.height.saturating_sub(2) as usize;
+    let max_scroll = text.len().saturating_sub(viewport);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+
+    let title = if max_scroll > 0 {
+        format!(" Help ({}/{}) ", app.help_scroll + 1, max_scroll + 1)
+    } else {
+        " Help ".to_string()
+    };
     let block = Block::default()
-        .title(" Help ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let paragraph = Paragraph::new(text).block(block);
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .scroll((u16::try_from(app.help_scroll).unwrap_or(u16::MAX), 0));
     f.render_widget(paragraph, area);
+}
+
+/// Shows what the colours on a `#1234` in the chat mean.
+///
+/// The kind lives in the hash and the state in the number, which is not
+/// guessable, so the help screen spells it out.
+fn reference_legend() -> Vec<Line<'static>> {
+    let sample = |hash: Color, number: Color, label: &str| -> Vec<Span<'static>> {
+        let link = Modifier::UNDERLINED | Modifier::BOLD;
+        vec![
+            Span::styled("#", Style::default().fg(hash).add_modifier(link)),
+            Span::styled("12", Style::default().fg(number).add_modifier(link)),
+            Span::styled(format!(" {label}"), Style::default().fg(Color::White)),
+        ]
+    };
+
+    let mut kinds = vec![Span::raw("  ")];
+    kinds.extend(sample(Color::Yellow, Color::Green, "issue     "));
+    kinds.extend(sample(Color::Cyan, Color::Green, "pull request"));
+
+    let mut states = vec![Span::raw("  ")];
+    states.extend(sample(Color::Cyan, Color::Green, "open  "));
+    states.extend(sample(Color::Cyan, Color::Red, "closed  "));
+    states.extend(sample(Color::Cyan, Color::Magenta, "merged  "));
+    states.extend(sample(Color::Cyan, Color::Gray, "draft"));
+
+    vec![Line::from(kinds), Line::from(states)]
 }
 
 fn help_line(key: &str, desc: &str) -> Line<'static> {
@@ -950,4 +998,82 @@ fn project_settings_row<'a>(
         Span::styled(format!("[{state:<9}] "), Style::default().fg(state_color)),
         Span::styled(value.to_string(), Style::default().fg(value_color)),
     ])
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::UserConfig;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn rendered_with(
+        config: UserConfig,
+        width: u16,
+        height: u16,
+        scroll: usize,
+    ) -> (String, usize) {
+        let mut app = App::new(Vec::new(), config);
+        app.mode = crate::app::Mode::Help;
+        app.help_scroll = scroll;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw_help(f, &mut app)).expect("draw");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        (text, app.help_scroll)
+    }
+
+    fn rendered(width: u16, height: u16, scroll: usize) -> (String, usize) {
+        rendered_with(UserConfig::default(), width, height, scroll)
+    }
+
+    const FOOTER: &str = "Esc/q/Enter/? close";
+
+    #[test]
+    fn a_help_screen_taller_than_its_popup_can_be_scrolled_to_the_end() {
+        let (top, _) = rendered(120, 40, 0);
+        assert!(top.contains("Keyboard Shortcuts"), "got:\n{top}");
+        assert!(
+            !top.contains(FOOTER),
+            "the help fits after all, so scrolling is pointless:\n{top}"
+        );
+
+        let (bottom, clamped) = rendered(120, 40, usize::MAX);
+        assert!(bottom.contains(FOOTER), "got:\n{bottom}");
+        assert!(
+            clamped < usize::MAX,
+            "End should be clamped to the last page, got {clamped}"
+        );
+    }
+
+    #[test]
+    fn a_help_screen_that_fits_is_not_scrolled() {
+        let (text, clamped) = rendered(200, 100, usize::MAX);
+
+        assert!(text.contains("Keyboard Shortcuts"), "got:\n{text}");
+        assert!(text.contains(FOOTER), "got:\n{text}");
+        assert_eq!(clamped, 0);
+    }
+
+    #[test]
+    fn the_reference_legend_is_reachable_under_the_multiplexer_section() {
+        let config = UserConfig {
+            mux: true,
+            ..UserConfig::default()
+        };
+        let (text, _) = rendered_with(config, 200, 100, 0);
+
+        assert!(
+            text.contains("GitHub references in the chat"),
+            "got:\n{text}"
+        );
+        assert!(text.contains("pull request"), "got:\n{text}");
+    }
 }

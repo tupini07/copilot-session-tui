@@ -298,7 +298,10 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('N') => begin_worktree_session(app),
-        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('?') => {
+            app.help_scroll = 0;
+            app.mode = Mode::Help;
+        }
         KeyCode::Char(',') => {
             app.settings_selected = 0;
             app.settings_editing = None;
@@ -693,6 +696,37 @@ fn handle_filter_project(app: &mut App, key: KeyCode) {
 }
 
 fn handle_help(app: &mut App, key: KeyCode) {
+    // Scrolling has to come first, or the keys that move through a help screen
+    // taller than the popup would close it instead.
+    match key {
+        KeyCode::Up => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+            return;
+        }
+        KeyCode::Down => {
+            // The draw clamps this against the real content height.
+            app.help_scroll = app.help_scroll.saturating_add(1);
+            return;
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(10);
+            return;
+        }
+        KeyCode::PageDown => {
+            app.help_scroll = app.help_scroll.saturating_add(10);
+            return;
+        }
+        KeyCode::Home => {
+            app.help_scroll = 0;
+            return;
+        }
+        KeyCode::End => {
+            // Clamped by the draw, which is the only place that knows the height.
+            app.help_scroll = usize::MAX;
+            return;
+        }
+        _ => {}
+    }
     if matches!(
         key,
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter
@@ -1116,6 +1150,43 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn arrow_keys_scroll_the_help_instead_of_closing_it() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        handle_normal(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.mode, Mode::Help);
+        assert_eq!(app.help_scroll, 0);
+
+        handle_help(&mut app, KeyCode::Down);
+        handle_help(&mut app, KeyCode::Down);
+        assert_eq!(app.mode, Mode::Help);
+        assert_eq!(app.help_scroll, 2);
+
+        handle_help(&mut app, KeyCode::Up);
+        assert_eq!(app.help_scroll, 1);
+
+        handle_help(&mut app, KeyCode::Home);
+        assert_eq!(app.help_scroll, 0);
+        assert_eq!(app.mode, Mode::Help);
+
+        handle_help(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn reopening_the_help_starts_at_the_top() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Help;
+        handle_help(&mut app, KeyCode::PageDown);
+        assert_eq!(app.help_scroll, 10);
+        handle_help(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.mode, Mode::Normal);
+
+        handle_normal(&mut app, KeyCode::Char('?'));
+
+        assert_eq!(app.help_scroll, 0);
     }
 
     #[test]

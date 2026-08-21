@@ -144,9 +144,9 @@ fn restyle_references(
                 continue;
             }
             if let Some(status) = digits.parse::<u64>().ok().and_then(lookup) {
-                let style = reference_style(status);
-                for cell in x..end {
-                    buffer[(cell, y)].set_style(style);
+                buffer[(x, y)].set_style(reference_marker_style(status));
+                for cell in (x + 1)..end {
+                    buffer[(cell, y)].set_style(reference_style(status));
                 }
             }
             x = end;
@@ -154,7 +154,25 @@ fn restyle_references(
     }
 }
 
-/// Colour carries the state and the underline says "this is a link".
+/// Colour of the leading `#`, which carries the kind.
+///
+/// State alone cannot say this: GitHub shows an open issue and an open pull
+/// request in the same green, so without a second channel the two are
+/// indistinguishable. Tinting the hash leaves the layout untouched, which
+/// swapping in an icon glyph would not — a wide character would shift the rest
+/// of the child's line.
+fn reference_marker_style(status: crate::github::ReferenceStatus) -> Style {
+    use crate::github::ReferenceKind;
+    let color = match status.kind {
+        ReferenceKind::Issue => Color::Yellow,
+        ReferenceKind::PullRequest => Color::Cyan,
+    };
+    Style::default()
+        .fg(color)
+        .add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+}
+
+/// Colour of the number, which carries the state; the underline says "this is a link".
 fn reference_style(status: crate::github::ReferenceStatus) -> Style {
     use crate::github::{ReferenceKind, ReferenceState};
     let color = match status.state {
@@ -317,13 +335,17 @@ mod tests {
             _ => None,
         });
 
-        // The whole `#11` token is styled, not just the digits.
-        for x in 6..9 {
+        // The number carries the state...
+        for x in 7..9 {
             assert_eq!(buffer[(x, 0)].style().fg, Some(Color::Green), "cell {x}");
         }
-        for x in 13..16 {
+        for x in 14..16 {
             assert_eq!(buffer[(x, 0)].style().fg, Some(Color::Magenta), "cell {x}");
         }
+        // ...and the hash carries the kind, which the state alone cannot: both of
+        // these would be green if they were open.
+        assert_eq!(buffer[(6, 0)].style().fg, Some(Color::Yellow), "issue hash");
+        assert_eq!(buffer[(13, 0)].style().fg, Some(Color::Cyan), "pull hash");
         assert!(buffer[(6, 0)]
             .style()
             .add_modifier
@@ -331,6 +353,31 @@ mod tests {
         // A number nobody could resolve, and a hash glued to a word, stay untouched.
         assert_eq!(buffer[(23, 0)].style().fg, Some(Color::Reset));
         assert_eq!(buffer[(30, 0)].style().fg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn an_open_issue_and_an_open_pull_request_are_distinguishable() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buffer = Buffer::empty(area);
+        for (index, character) in "#11 #12".chars().enumerate() {
+            buffer[(index as u16, 0)].set_symbol(&character.to_string());
+        }
+
+        restyle_references(&mut buffer, area, &|number| {
+            Some(ReferenceStatus {
+                kind: if number == 11 {
+                    ReferenceKind::Issue
+                } else {
+                    ReferenceKind::PullRequest
+                },
+                state: ReferenceState::Open,
+            })
+        });
+
+        // Both are open, so both numbers are green; only the hash tells them apart.
+        assert_eq!(buffer[(1, 0)].style().fg, Some(Color::Green));
+        assert_eq!(buffer[(5, 0)].style().fg, Some(Color::Green));
+        assert_ne!(buffer[(0, 0)].style().fg, buffer[(4, 0)].style().fg);
     }
 
     /// Render the whole UI into an off-screen buffer and return it as plain text.

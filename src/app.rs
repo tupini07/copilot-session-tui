@@ -348,6 +348,8 @@ pub struct App {
     /// Selection waiting out a settle delay before its (large) event log is read.
     pub detail_pending: Option<(String, std::time::Instant)>,
     pub should_quit: bool,
+    /// First visible line of the help popup, which is taller than it can draw.
+    pub help_scroll: usize,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
     pub should_new_session: Option<NewSessionRequest>,
     pub status_message: Option<String>,
@@ -459,6 +461,7 @@ impl App {
             detail_loaded_for: None,
             detail_pending: None,
             should_quit: false,
+            help_scroll: 0,
             should_resume: None,
             should_new_session: None,
             status_message: None,
