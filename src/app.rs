@@ -12,7 +12,7 @@ use anyhow::Result;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -356,6 +356,7 @@ pub struct App {
     pub visible_rows: usize,
     pub update_info: Option<UpdateInfo>,
     pub update_receiver: Option<mpsc::Receiver<UpdateCheckResult>>,
+    session_load_receiver: Option<mpsc::Receiver<crate::session::loader::SessionLoadResult>>,
     pub update_check_requested: bool,
     pub should_update: bool,
     pub config: UserConfig,
@@ -468,6 +469,7 @@ impl App {
             visible_rows: 20,
             update_info: None,
             update_receiver: None,
+            session_load_receiver: None,
             update_check_requested: false,
             should_update: false,
             config,
@@ -1289,6 +1291,7 @@ impl App {
         if sessions.is_empty() {
             return;
         }
+
         let selected_id = self.selected_session().map(|session| session.id.clone());
         for session in sessions {
             if let Some(index) = self
@@ -1302,11 +1305,97 @@ impl App {
                 self.sessions.push(session);
             }
         }
-        self.unique_projects = extract_unique_projects(&self.sessions);
+        self.rebuild_unique_projects();
         self.sort_sessions();
         if let Some(session_id) = selected_id {
             self.focus_session(&session_id);
         }
+    }
+
+    pub fn begin_session_load(
+        &mut self,
+        receiver: mpsc::Receiver<crate::session::loader::SessionLoadResult>,
+    ) {
+        self.session_load_receiver = Some(receiver);
+    }
+
+    pub fn sessions_loading(&self) -> bool {
+        self.session_load_receiver.is_some()
+    }
+
+    pub fn poll_session_load(&mut self) {
+        let Some(receiver) = self.session_load_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(sessions)) => {
+                self.apply_loaded_catalog(sessions);
+                self.session_load_receiver = None;
+            }
+            Ok(Err(error)) => {
+                self.status_message = Some(format!("Cannot load sessions: {error}"));
+                self.session_load_receiver = None;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status_message =
+                    Some("Cannot load sessions: background worker stopped".to_string());
+                self.session_load_receiver = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn apply_loaded_catalog(&mut self, sessions: Vec<Session>) {
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        let mut previous: HashMap<String, Session> = std::mem::take(&mut self.sessions)
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect();
+        let mut catalog = Vec::with_capacity(sessions.len() + previous.len());
+        for session in sessions {
+            if let Some(current) = previous.remove(&session.id) {
+                // Favorites and newly created panes can be refreshed while the worker is
+                // scanning. Their in-memory metadata is newer than its snapshot.
+                catalog.push(current);
+            } else if session.dir_path.join("workspace.yaml").is_file() {
+                // A session deleted after the worker read it must not come back as a ghost.
+                catalog.push(session);
+            }
+        }
+        // A session can be created while the worker is scanning. Keep anything merged
+        // after its snapshot rather than making it briefly disappear at completion.
+        catalog.extend(previous.into_values());
+        self.sessions = catalog;
+        self.rebuild_unique_projects();
+        self.sort_sessions();
+        if let Some(session_id) = selected_id {
+            self.focus_session(&session_id);
+        }
+    }
+
+    fn rebuild_unique_projects(&mut self) {
+        let selected_project = self.unique_projects.get(self.project_selected).cloned();
+        self.unique_projects = extract_unique_projects(&self.sessions);
+        if let Some(project) = self.cwd_project.as_ref() {
+            if !self
+                .unique_projects
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(project))
+            {
+                self.unique_projects.insert(0, project.clone());
+            }
+        }
+        self.project_selected = selected_project
+            .as_ref()
+            .and_then(|selected| {
+                self.unique_projects
+                    .iter()
+                    .position(|project| project.eq_ignore_ascii_case(selected))
+            })
+            .unwrap_or_else(|| {
+                self.project_selected
+                    .min(self.unique_projects.len().saturating_sub(1))
+            });
     }
 
     /// Persisted Copilot names are more useful in the pane switcher than OSC window
@@ -2118,6 +2207,87 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         assert_eq!(app.sessions[0].id, "fresh-session");
         assert_eq!(app.sessions[0].display_name(), "Fresh name");
+    }
+
+    #[test]
+    fn background_catalog_completion_keeps_selection_details_and_concurrent_sessions() {
+        let mut favorite = session("favorite", "project-a", "2026-08-21T10:00:00Z");
+        favorite.summary = Some("Current favorite name".to_string());
+        favorite.turn_count = 9;
+        favorite.details_parsed_len = 456;
+        let concurrent = session("created-during-scan", "project-c", "2026-08-21T12:30:00Z");
+        let mut app = App::new(vec![favorite, concurrent], UserConfig::default());
+        app.focus_session("favorite");
+
+        let loaded_favorite = Session {
+            summary: Some("Stale worker name".to_string()),
+            ..session("favorite", "project-a", "2026-08-21T12:00:00Z")
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let historical_dir = temp.path().join("historical");
+        std::fs::create_dir(&historical_dir).unwrap();
+        std::fs::write(historical_dir.join("workspace.yaml"), "id: historical\n").unwrap();
+        let historical = Session {
+            dir_path: historical_dir,
+            ..session("historical", "project-b", "2026-08-20T12:00:00Z")
+        };
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_load(receiver);
+        assert!(app.sessions_loading());
+        sender.send(Ok(vec![loaded_favorite, historical])).unwrap();
+
+        app.poll_session_load();
+
+        assert!(!app.sessions_loading());
+        assert_eq!(app.selected_session().unwrap().id, "favorite");
+        let favorite = app
+            .sessions
+            .iter()
+            .find(|session| session.id == "favorite")
+            .unwrap();
+        assert_eq!(favorite.display_name(), "Current favorite name");
+        assert_eq!(favorite.turn_count, 9);
+        assert_eq!(favorite.details_parsed_len, 456);
+        assert!(app
+            .sessions
+            .iter()
+            .any(|session| session.id == "historical"));
+        assert!(
+            app.sessions
+                .iter()
+                .any(|session| session.id == "created-during-scan"),
+            "a session created after the worker's directory snapshot must survive"
+        );
+    }
+
+    #[test]
+    fn background_catalog_does_not_resurrect_deleted_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let deleted = Session {
+            dir_path: temp.path().join("already-deleted"),
+            ..session("deleted", "project", "2026-08-21T12:00:00Z")
+        };
+        let mut app = App::new(Vec::new(), UserConfig::default());
+
+        app.apply_loaded_catalog(vec![deleted]);
+
+        assert!(app.sessions.is_empty());
+    }
+
+    #[test]
+    fn background_catalog_keeps_a_launch_project_with_no_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+        let launch_project = app.cwd_project.clone().unwrap();
+
+        app.apply_loaded_catalog(Vec::new());
+
+        assert!(app
+            .unique_projects
+            .iter()
+            .any(|project| project.eq_ignore_ascii_case(&launch_project)));
     }
 
     #[test]

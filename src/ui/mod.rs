@@ -125,7 +125,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .fg(ratatui::style::Color::Black)
                 .bg(ratatui::style::Color::Magenta),
         ),
-        ratatui::text::Span::raw(format!("  {} sessions", app.filtered_indices.len())),
+        ratatui::text::Span::raw(if app.sessions_loading() {
+            format!("  {} sessions · loading…", app.filtered_indices.len())
+        } else {
+            format!("  {} sessions", app.filtered_indices.len())
+        }),
     ]));
 
     f.render_widget(title, main_layout[0]);
@@ -231,6 +235,9 @@ pub fn attached_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UserConfig;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     #[test]
     fn attached_workspace_places_scratchpad_right_and_terminal_below() {
@@ -253,5 +260,24 @@ mod tests {
         assert_eq!(layout.chat, Rect::new(0, 0, 100, 29));
         assert!(layout.scratchpad.is_none());
         assert!(layout.terminal.is_none());
+    }
+
+    #[test]
+    fn first_frame_says_the_rest_of_the_catalog_is_loading() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.begin_session_load(receiver);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("0 sessions · loading…"), "got:\n{text}");
     }
 }

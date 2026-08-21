@@ -168,6 +168,12 @@ their arrangement regardless of the active sort; the sort applies to everything 
 them. Grouping is a property of the unfiltered list, so searching or filtering by
 project temporarily shows a single flat, sorted list instead.
 
+Favorites are also CST's fast startup set. Their lightweight metadata is loaded before
+the first frame; the remaining session catalog is discovered on a background thread and
+merged into the list without changing the selected session. The title bar says
+`loading…` until that scan finishes. Searching and project filtering cover the sessions
+loaded so far, then automatically include the rest when they arrive.
+
 ### Scratchpad editing
 
 Scratchpads are plain-text files stored in CST's local app-data directory and

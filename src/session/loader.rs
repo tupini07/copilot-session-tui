@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use super::{Session, WorkspaceYaml};
 use crate::events::parser;
@@ -24,25 +26,11 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
     }
 
     let mut sessions = Vec::new();
-    let entries = fs::read_dir(&session_dir)
-        .with_context(|| format!("Failed to read {}", session_dir.display()))?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        match load_single_session(&path) {
-            Ok(session) => {
-                if session_is_visible(&session) {
-                    sessions.push(session);
-                }
-            }
-            Err(_) => continue,
-        }
-    }
+    let mut visited = HashSet::new();
+    load_session_directory_pass(&session_dir, &mut visited, &mut sessions)?;
+    // read_dir is not a snapshot. A session created while the first pass is in flight
+    // may be omitted by the iterator, so reconcile directory names once before publish.
+    load_session_directory_pass(&session_dir, &mut visited, &mut sessions)?;
 
     // Sort by updated_at descending (most recent first)
     sessions.sort_by(|a, b| {
@@ -52,6 +40,69 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
     });
 
     Ok(sessions)
+}
+
+fn load_session_directory_pass(
+    session_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+    sessions: &mut Vec<Session>,
+) -> Result<()> {
+    let entries = fs::read_dir(session_dir)
+        .with_context(|| format!("Failed to read {}", session_dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || visited.contains(&path) {
+            continue;
+        }
+        if let Ok(session) = load_single_session(&path) {
+            if session_is_visible(&session) {
+                visited.insert(path);
+                sessions.push(session);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load only configured sessions, preserving the caller's order.
+///
+/// This is the synchronous startup path: a handful of favorites can be painted while
+/// the complete catalog is still being discovered on a worker thread.
+pub fn load_sessions_by_ids(copilot_home: &Path, session_ids: &[String]) -> Result<Vec<Session>> {
+    let session_dir = copilot_home.join("session-state");
+    if !session_dir.exists() {
+        anyhow::bail!("Session directory not found: {}", session_dir.display());
+    }
+
+    let mut seen = HashSet::new();
+    let mut sessions = Vec::new();
+    for session_id in session_ids {
+        if seen.insert(session_id) {
+            // A stale or partially written favorite must not prevent all the healthy
+            // favorites from forming the fast startup set.
+            if let Ok(Some(session)) = load_session(copilot_home, session_id) {
+                sessions.push(session);
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+pub type SessionLoadResult = std::result::Result<Vec<Session>, String>;
+
+/// Discover the complete catalog without delaying the first frame.
+pub fn load_sessions_async(copilot_home: PathBuf) -> mpsc::Receiver<SessionLoadResult> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = if copilot_home.join("session-state").exists() {
+            load_sessions(&copilot_home).map_err(|error| error.to_string())
+        } else {
+            // First-run users still need the picker so they can create a session.
+            Ok(Vec::new())
+        };
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 /// Load one known session without walking the entire Copilot history.
@@ -348,6 +399,116 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(load_session(home.path(), "../outside").is_err());
+    }
+
+    #[test]
+    fn favorite_only_load_preserves_configured_order_and_deduplicates() {
+        let home = tempfile::tempdir().unwrap();
+        for (id, name) in [("first", "First"), ("second", "Second")] {
+            let dir = home.path().join("session-state").join(id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("workspace.yaml"),
+                format!(
+                    "id: {id}\ncwd: {}\nname: {name}\n\
+                     created_at: 2026-08-06T12:00:00Z\n\
+                     updated_at: 2026-08-06T12:00:00Z\n",
+                    dir.display()
+                ),
+            )
+            .unwrap();
+        }
+        let malformed = home.path().join("session-state").join("malformed");
+        fs::create_dir_all(&malformed).unwrap();
+        fs::write(malformed.join("workspace.yaml"), "not: [valid").unwrap();
+
+        let ids = vec![
+            "second".to_string(),
+            "malformed".to_string(),
+            "../outside".to_string(),
+            "first".to_string(),
+            "second".to_string(),
+        ];
+        let sessions = load_sessions_by_ids(home.path(), &ids).unwrap();
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+    }
+
+    #[test]
+    fn second_directory_pass_finds_a_session_created_during_the_scan() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("session-state");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first");
+        fs::create_dir_all(&first).unwrap();
+        fs::write(
+            first.join("workspace.yaml"),
+            format!("id: first\ncwd: {}\nname: First\n", first.display()),
+        )
+        .unwrap();
+        let second = root.join("second");
+        fs::create_dir_all(&second).unwrap();
+        let becoming_visible = root.join("becoming-visible");
+        fs::create_dir_all(&becoming_visible).unwrap();
+        fs::write(
+            becoming_visible.join("workspace.yaml"),
+            format!(
+                "id: becoming-visible\ncwd: {}\n",
+                becoming_visible.display()
+            ),
+        )
+        .unwrap();
+
+        let mut visited = HashSet::new();
+        let mut sessions = Vec::new();
+        load_session_directory_pass(&root, &mut visited, &mut sessions).unwrap();
+
+        // Copilot created the directory during the first pass but had not finished its
+        // workspace file. A failed first parse must remain eligible for reconciliation.
+        fs::write(
+            second.join("workspace.yaml"),
+            format!("id: second\ncwd: {}\nname: Second\n", second.display()),
+        )
+        .unwrap();
+        fs::write(
+            becoming_visible.join("workspace.yaml"),
+            format!(
+                "id: becoming-visible\ncwd: {}\nname: Now visible\n",
+                becoming_visible.display()
+            ),
+        )
+        .unwrap();
+        load_session_directory_pass(&root, &mut visited, &mut sessions).unwrap();
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["first", "second", "becoming-visible"])
+        );
+    }
+
+    #[test]
+    fn complete_catalog_can_load_on_a_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("session-state").join("test-session");
+        fs::create_dir_all(&dir).unwrap();
+        write_workspace(&dir, "name: Background\n");
+
+        let result = load_sessions_async(home.path().to_path_buf())
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker should answer")
+            .expect("load should succeed");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].display_name(), "Background");
     }
 
     #[test]

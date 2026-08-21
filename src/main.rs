@@ -125,21 +125,6 @@ fn main() -> Result<()> {
         std::env::set_var("COPILOT_HOME", &copilot_home);
     }
 
-    // Normal picker startup tolerates an absent session directory so users can still
-    // create their first session. Targeted commands need the load error to be explicit.
-    let sessions = match loader::load_sessions(&copilot_home) {
-        Ok(sessions) => sessions,
-        Err(error) if cli.session.is_some() || cli.open_favorites => {
-            return Err(error).context("Failed to load Copilot sessions");
-        }
-        Err(_) => Vec::new(),
-    };
-    let startup_session = cli
-        .session
-        .as_deref()
-        .map(|id| resolve_startup_session(&sessions, id))
-        .transpose()?;
-
     let mut user_config = config::load();
     // CLI flags win for this invocation only; they are never written back to disk.
     let mux_on_disk = user_config.mux;
@@ -148,6 +133,33 @@ fn main() -> Result<()> {
     } else if cli.no_mux {
         user_config.mux = false;
     }
+
+    // Direct resume is an exact id and favorites are already ids, so neither path needs
+    // to enumerate the complete catalog. Normal startup paints favorites, then discovers
+    // the rest in the background.
+    let mut session_load_receiver = None;
+    let sessions = if let Some(session_id) = cli.session.as_deref() {
+        vec![loader::load_session(&copilot_home, session_id)
+            .context("Failed to load Copilot session")?
+            .with_context(|| format!("Session '{session_id}' was not found"))?]
+    } else {
+        let favorites = match loader::load_sessions_by_ids(&copilot_home, &user_config.favorites) {
+            Ok(sessions) => sessions,
+            Err(error) if cli.open_favorites => {
+                return Err(error).context("Failed to load favorite Copilot sessions");
+            }
+            Err(_) => Vec::new(),
+        };
+        if !cli.open_favorites {
+            session_load_receiver = Some(loader::load_sessions_async(copilot_home.clone()));
+        }
+        favorites
+    };
+    let startup_session = cli
+        .session
+        .as_deref()
+        .map(|id| resolve_startup_session(&sessions, id))
+        .transpose()?;
 
     if cli.open_favorites {
         let mux_override = if cli.mux {
@@ -181,6 +193,9 @@ fn main() -> Result<()> {
     let mut app = App::new(sessions, user_config);
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;
+    if let Some(receiver) = session_load_receiver {
+        app.begin_session_load(receiver);
+    }
 
     // Start background update check
     app.update_receiver = Some(updater::check_for_updates_async());
@@ -469,6 +484,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
 
         input::maybe_load_details(app);
+        app.poll_session_load();
         app.poll_update();
         app.poll_github();
         // Covers every route into the Files tab — keys, mouse, or opening
