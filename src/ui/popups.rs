@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::app::{App, DeleteTarget, SettingsEditField};
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -532,6 +532,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
             &format!("{prefix} t"),
             "Toggle/focus the session terminal",
         ));
+        text.push(help_line(&format!("{prefix} s"), "Open prompt snippets"));
         text.push(help_line(
             &format!("{prefix} C-h e"),
             "Open scratchpad shortcut help",

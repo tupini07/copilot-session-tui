@@ -12,6 +12,12 @@ pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 /// unlike chords that depend on the keyboard-enhancement protocol.
 pub const DEFAULT_MUX_PREFIX: &str = "C-b";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSnippet {
+    pub name: String,
+    pub prompt: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserConfig {
     #[serde(default)]
@@ -28,6 +34,9 @@ pub struct UserConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub favorites: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<PromptSnippet>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -80,6 +89,7 @@ impl Default for UserConfig {
         Self {
             yolo: false,
             favorites: Vec::new(),
+            snippets: Vec::new(),
             model: None,
             reasoning_effort: None,
             mux: false,
@@ -109,6 +119,9 @@ pub struct EffectiveWorktreeConfig {
 pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<ProjectWorktreeConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snippets: Vec<PromptSnippet>,
 
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -207,6 +220,14 @@ impl ProjectSettings {
         }
     }
 
+    pub fn snippets(&self) -> &[PromptSnippet] {
+        &self.config.snippets
+    }
+
+    pub fn set_snippets(&mut self, snippets: Vec<PromptSnippet>) {
+        self.config.snippets = snippets;
+    }
+
     fn worktree_mut(&mut self) -> &mut ProjectWorktreeConfig {
         self.config
             .worktree
@@ -227,7 +248,7 @@ impl ProjectSettings {
 
 impl ProjectConfig {
     fn is_empty(&self) -> bool {
-        self.worktree.is_none() && self.extra.is_empty()
+        self.worktree.is_none() && self.snippets.is_empty() && self.extra.is_empty()
     }
 }
 
@@ -287,10 +308,17 @@ pub fn effective_worktree(
 }
 
 pub fn load() -> UserConfig {
+    load_checked().unwrap_or_default()
+}
+
+pub fn load_checked() -> Result<UserConfig> {
     let path = config_path();
     match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => UserConfig::default(),
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("Invalid global settings in {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to read global settings: {}", path.display())),
     }
 }
 
@@ -482,6 +510,36 @@ mod tests {
         assert_eq!(saved["future_setting"], true);
         assert_eq!(saved["worktree"]["future_field"], 7);
         assert_eq!(saved["worktree"]["branch_prefix"], "feature/");
+    }
+
+    #[test]
+    fn global_and_project_snippets_round_trip_without_losing_unknown_fields() {
+        let global = UserConfig {
+            snippets: vec![PromptSnippet {
+                name: "Review".to_string(),
+                prompt: "Review this carefully.".to_string(),
+            }],
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_string(&global).unwrap();
+        let loaded: UserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.snippets, global.snippets);
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(".cst.json"), r#"{"future_setting":true}"#).unwrap();
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+        settings.set_snippets(vec![PromptSnippet {
+            name: "Project plan".to_string(),
+            prompt: "Use this repository's plan.".to_string(),
+        }]);
+        settings.save().unwrap();
+
+        let reloaded = ProjectSettings::load(temp.path(), &global).unwrap();
+        assert_eq!(reloaded.snippets()[0].name, "Project plan");
+        let saved: Value =
+            serde_json::from_str(&fs::read_to_string(temp.path().join(".cst.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["future_setting"], true);
     }
 
     #[test]

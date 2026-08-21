@@ -5,6 +5,7 @@ pub mod popups;
 pub mod scratchpad;
 pub mod session_detail;
 pub mod session_list;
+pub mod snippets;
 pub mod status_bar;
 pub mod tabs;
 pub mod terminal_pane;
@@ -68,6 +69,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         pane::draw_status(f, app, layout.status);
         if github_inspector::is_prompt(app) {
             github_inspector::draw(f, app);
+        }
+        if app.snippet_modal.is_some() {
+            snippets::draw(f, app);
         }
         if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
             scratchpad::draw_help(f, size);

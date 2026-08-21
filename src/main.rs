@@ -12,6 +12,7 @@ mod scratchpad;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod session;
+mod snippets;
 mod terminal_pane;
 mod text;
 mod ui;

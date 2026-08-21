@@ -4,6 +4,7 @@ use crate::mux::{
     resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
     HelpCommand, MuxEvent, PrefixCommand, PrefixState,
 };
+use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -29,6 +30,11 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
 
     if app.github_inspector.is_some() {
         handle_github_inspector_event(app, event);
+        return;
+    }
+
+    if app.snippet_modal.is_some() {
+        handle_snippet_event(app, event);
         return;
     }
 
@@ -106,6 +112,331 @@ fn handle_chat_event(app: &mut App, event: Event) {
     }
 }
 
+fn handle_snippet_event(app: &mut App, event: Event) {
+    let screen = match app.snippet_modal.as_ref() {
+        Some(modal) => modal.screen,
+        None => return,
+    };
+    match (screen, event) {
+        (SnippetScreen::List, Event::Key(key)) if key.kind == KeyEventKind::Press => {
+            handle_snippet_list_key(app, key.code);
+        }
+        (SnippetScreen::Editor, Event::Key(key)) if key.kind == KeyEventKind::Press => {
+            handle_snippet_editor_key(app, key);
+        }
+        (SnippetScreen::Editor, Event::Paste(text)) => {
+            let Some(modal) = app.snippet_modal.as_mut() else {
+                return;
+            };
+            match modal.editor_field {
+                SnippetEditorField::Name => {
+                    modal.insert_editor_text(&text.replace(['\r', '\n'], " "));
+                }
+                SnippetEditorField::Prompt => modal.insert_editor_text(&text),
+                SnippetEditorField::Scope => {}
+            }
+        }
+        (SnippetScreen::ConfirmDelete, Event::Key(key)) if key.kind == KeyEventKind::Press => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => delete_selected_snippet(app),
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    if let Some(modal) = app.snippet_modal.as_mut() {
+                        modal.cancel_subscreen();
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_snippet_list_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Up => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.select_previous();
+            }
+        }
+        KeyCode::Down => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.select_next();
+            }
+        }
+        KeyCode::Char('a') => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.begin_add();
+            }
+        }
+        KeyCode::Char('e') => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.begin_edit();
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.begin_delete();
+            }
+        }
+        KeyCode::Enter => use_selected_snippet(app),
+        KeyCode::Char('q') | KeyCode::Esc => app.snippet_modal = None,
+        _ => {}
+    }
+}
+
+fn handle_snippet_editor_key(app: &mut App, key: KeyEvent) {
+    let control = key
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL);
+    if control && matches!(key.code, KeyCode::Char('s')) {
+        save_snippet_editor(app);
+        return;
+    }
+    if control && matches!(key.code, KeyCode::Char('g')) {
+        toggle_snippet_scope(app);
+        return;
+    }
+
+    let Some(modal) = app.snippet_modal.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => modal.cancel_subscreen(),
+        KeyCode::Tab => modal.editor_field = modal.editor_field.next(true),
+        KeyCode::BackTab => modal.editor_field = modal.editor_field.next(false),
+        KeyCode::Backspace => modal.backspace_editor(),
+        KeyCode::Delete => modal.delete_editor(),
+        KeyCode::Left => modal.move_editor_cursor(-1),
+        KeyCode::Right => modal.move_editor_cursor(1),
+        KeyCode::Up => modal.move_prompt_cursor_vertical(false),
+        KeyCode::Down => modal.move_prompt_cursor_vertical(true),
+        KeyCode::Home => modal.move_editor_line_boundary(false),
+        KeyCode::End => modal.move_editor_line_boundary(true),
+        KeyCode::Enter => match modal.editor_field {
+            SnippetEditorField::Name => modal.editor_field = SnippetEditorField::Prompt,
+            SnippetEditorField::Prompt => modal.insert_editor_text("\n"),
+            SnippetEditorField::Scope => toggle_snippet_scope(app),
+        },
+        KeyCode::Char(' ') if modal.editor_field == SnippetEditorField::Scope => {
+            toggle_snippet_scope(app);
+        }
+        KeyCode::Char(character)
+            if !key.modifiers.intersects(
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            ) =>
+        {
+            match modal.editor_field {
+                SnippetEditorField::Name | SnippetEditorField::Prompt => {
+                    modal.insert_editor_text(&character.to_string());
+                }
+                SnippetEditorField::Scope => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn toggle_snippet_scope(app: &mut App) {
+    let Some(modal) = app.snippet_modal.as_mut() else {
+        return;
+    };
+    modal.error = None;
+    modal.editor_scope = match modal.editor_scope {
+        SnippetScope::Global if modal.project_root.is_some() => SnippetScope::Project,
+        SnippetScope::Global => {
+            modal.error = Some("No Git project detected for this session".to_string());
+            SnippetScope::Global
+        }
+        SnippetScope::Project => SnippetScope::Global,
+    };
+}
+
+fn save_snippet_editor(app: &mut App) {
+    let Some(modal) = app.snippet_modal.as_ref() else {
+        return;
+    };
+    let name = modal.editor_name.trim().to_string();
+    let prompt = modal
+        .editor_prompt
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    if name.is_empty() || prompt.trim().is_empty() {
+        if let Some(modal) = app.snippet_modal.as_mut() {
+            modal.error = Some("Name and prompt are both required".to_string());
+        }
+        return;
+    }
+    if name.chars().any(char::is_control)
+        || prompt
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        if let Some(modal) = app.snippet_modal.as_mut() {
+            modal.error = Some("Snippets cannot contain terminal control characters".to_string());
+        }
+        return;
+    }
+    if modal.editor_scope == SnippetScope::Project && modal.project_root.is_none() {
+        if let Some(modal) = app.snippet_modal.as_mut() {
+            modal.error = Some("No Git project detected for project scope".to_string());
+        }
+        return;
+    }
+
+    let editing = modal.editing;
+    let target_scope = modal.editor_scope;
+    let project_root = modal.project_root.clone();
+    let original_global = modal.original_global.clone();
+    let original_project = modal.original_project.clone();
+    let mut global = modal.global.clone();
+    let mut project = modal.project.clone();
+    let snippet = crate::config::PromptSnippet { name, prompt };
+    let selected = match editing {
+        Some((old_scope, index)) if old_scope == target_scope => match target_scope {
+            SnippetScope::Global => {
+                global[index] = snippet;
+                index
+            }
+            SnippetScope::Project => {
+                project[index] = snippet;
+                global.len() + index
+            }
+        },
+        Some((old_scope, index)) => {
+            match old_scope {
+                SnippetScope::Global => {
+                    global.remove(index);
+                }
+                SnippetScope::Project => {
+                    project.remove(index);
+                }
+            }
+            match target_scope {
+                SnippetScope::Global => {
+                    global.push(snippet);
+                    global.len() - 1
+                }
+                SnippetScope::Project => {
+                    project.push(snippet);
+                    global.len() + project.len() - 1
+                }
+            }
+        }
+        None => match target_scope {
+            SnippetScope::Global => {
+                global.push(snippet);
+                global.len() - 1
+            }
+            SnippetScope::Project => {
+                project.push(snippet);
+                global.len() + project.len() - 1
+            }
+        },
+    };
+
+    let (global_dirty, project_dirty) = match editing {
+        Some((old_scope, _)) if old_scope != target_scope => (true, true),
+        _ => match target_scope {
+            SnippetScope::Global => (true, false),
+            SnippetScope::Project => (false, true),
+        },
+    };
+    let update = crate::snippets::SnippetUpdate {
+        global: global.clone(),
+        project: project.clone(),
+        original_global,
+        original_project,
+        project_root,
+        global_dirty,
+        project_dirty,
+    };
+    match app.persist_snippets(&update) {
+        Ok(()) => {
+            let modal = app.snippet_modal.as_mut().expect("modal remains open");
+            modal.global = global;
+            modal.project = project;
+            modal.original_global = modal.global.clone();
+            modal.original_project = modal.project.clone();
+            modal.selected = selected;
+            modal.cancel_subscreen();
+        }
+        Err(error) => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.error = Some(format!("Cannot save snippet: {error}"));
+            }
+        }
+    }
+}
+
+fn delete_selected_snippet(app: &mut App) {
+    let Some(modal) = app.snippet_modal.as_ref() else {
+        return;
+    };
+    let Some((scope, index, _)) = modal.selected_entry() else {
+        return;
+    };
+    let project_root = modal.project_root.clone();
+    let original_global = modal.original_global.clone();
+    let original_project = modal.original_project.clone();
+    let mut global = modal.global.clone();
+    let mut project = modal.project.clone();
+    match scope {
+        SnippetScope::Global => {
+            global.remove(index);
+        }
+        SnippetScope::Project => {
+            project.remove(index);
+        }
+    }
+    let update = crate::snippets::SnippetUpdate {
+        global: global.clone(),
+        project: project.clone(),
+        original_global,
+        original_project,
+        project_root,
+        global_dirty: scope == SnippetScope::Global,
+        project_dirty: scope == SnippetScope::Project,
+    };
+    match app.persist_snippets(&update) {
+        Ok(()) => {
+            let modal = app.snippet_modal.as_mut().expect("modal remains open");
+            modal.global = global;
+            modal.project = project;
+            modal.original_global = modal.global.clone();
+            modal.original_project = modal.project.clone();
+            modal.selected = modal.selected.min(modal.len().saturating_sub(1));
+            modal.cancel_subscreen();
+        }
+        Err(error) => {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.screen = SnippetScreen::List;
+                modal.error = Some(format!("Cannot delete snippet: {error}"));
+            }
+        }
+    }
+}
+
+fn use_selected_snippet(app: &mut App) {
+    let prompt = app
+        .snippet_modal
+        .as_ref()
+        .and_then(|modal| modal.selected_entry())
+        .map(|(_, _, snippet)| snippet.prompt.clone());
+    let Some(prompt) = prompt else {
+        return;
+    };
+    if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
+        if let Err(error) = pane.send_prompt_snippet(&prompt) {
+            if let Some(modal) = app.snippet_modal.as_mut() {
+                modal.error = Some(format!("Cannot paste snippet: {error}"));
+            }
+            return;
+        }
+    }
+    app.snippet_modal = None;
+    focus_chat(app);
+}
+
 fn handle_attached_key(app: &mut App, key: KeyEvent) {
     let Some((prefix_state, prefix)) = app.mux.as_ref().map(|mux| (mux.prefix_state, mux.prefix))
     else {
@@ -169,6 +500,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             Some(PrefixCommand::Chat) => focus_chat(app),
             Some(PrefixCommand::Scratchpad) => toggle_attached_scratchpad(app),
             Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
+            Some(PrefixCommand::Snippets) => app.open_snippets(),
             Some(PrefixCommand::Help) => {
                 if let Some(mux) = app.mux.as_mut() {
                     mux.prefix_state = PrefixState::Help;
@@ -926,6 +1258,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             attach_focused(app);
             toggle_attached_terminal(app);
         }
+        Some(PrefixCommand::Snippets) => {
+            attach_focused(app);
+            app.open_snippets();
+        }
         Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Github) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Quit) => unreachable!("handled before pane availability"),
@@ -1051,6 +1387,7 @@ mod tests {
         };
         let mut app = App::new(Vec::new(), config);
         app.disable_workspace_state_persistence();
+        app.disable_config_persistence();
         app
     }
 
@@ -1062,6 +1399,10 @@ mod tests {
     }
 
     fn push_test_pane(app: &mut App, id: u64, session_id: &str) {
+        push_test_pane_at(app, id, session_id, std::env::temp_dir());
+    }
+
+    fn push_test_pane_at(app: &mut App, id: u64, session_id: &str, cwd: std::path::PathBuf) {
         let events = app.mux.as_ref().unwrap().events.clone();
         let (program, args) = if cfg!(windows) {
             (
@@ -1078,7 +1419,7 @@ mod tests {
             PaneSpec {
                 id,
                 title: format!("Test session {id}"),
-                cwd: std::env::temp_dir(),
+                cwd,
                 session_id: session_id.to_string(),
                 program,
                 args,
@@ -1559,6 +1900,252 @@ mod tests {
         assert_eq!(alpha, "session-alpha");
         assert_eq!(beta, "session-beta");
         assert_ne!(alpha, beta, "but state must not be shared between them");
+    }
+
+    fn snippet_key(app: &mut App, code: KeyCode) {
+        handle_snippet_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn prefix_s_opens_snippets_and_new_snippets_default_to_global() {
+        let mut app = attached_mux_app("snippet-session");
+        app.disable_config_persistence();
+
+        send_prefix_command(&mut app, 's');
+        assert!(app.snippet_modal.is_some());
+
+        snippet_key(&mut app, KeyCode::Char('a'));
+        {
+            let modal = app.snippet_modal.as_mut().unwrap();
+            assert_eq!(modal.editor_scope, SnippetScope::Global);
+            modal.editor_name = "Review".to_string();
+            modal.editor_prompt = "Review this carefully.".to_string();
+        }
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(app.config.snippets.len(), 1);
+        assert_eq!(app.config.snippets[0].name, "Review");
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().screen,
+            SnippetScreen::List
+        );
+    }
+
+    #[test]
+    fn opening_snippets_loads_the_focused_sessions_project_collection() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let project_snippet = crate::config::PromptSnippet {
+            name: "Local".to_string(),
+            prompt: "Only in this repository".to_string(),
+        };
+        let mut settings =
+            crate::config::ProjectSettings::load(project.path(), &UserConfig::default()).unwrap();
+        settings.set_snippets(vec![project_snippet.clone()]);
+        settings.save().unwrap();
+
+        let mut app = mux_app();
+        push_test_pane_at(
+            &mut app,
+            1,
+            "project-snippet-session",
+            project.path().to_path_buf(),
+        );
+        app.view = View::Attached(1);
+
+        send_prefix_command(&mut app, 's');
+
+        let modal = app.snippet_modal.as_ref().unwrap();
+        assert_eq!(modal.project, vec![project_snippet]);
+        assert_eq!(
+            modal.project_root.as_deref(),
+            Some(project.path()),
+            "scope follows the focused pane, not CST's launch directory"
+        );
+    }
+
+    #[test]
+    fn using_a_snippet_closes_the_modal_and_focuses_chat_without_submitting() {
+        let mut app = attached_mux_app("snippet-use-session");
+        app.config.snippets = vec![crate::config::PromptSnippet {
+            name: "Plan".to_string(),
+            prompt: "Make a plan first; do not execute it yet.".to_string(),
+        }];
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        app.open_snippets();
+
+        snippet_key(&mut app, KeyCode::Enter);
+
+        assert!(app.snippet_modal.is_none());
+        assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        // Pane::send_prompt_snippet owns paste-safety checks; the next test covers
+        // multiline text before Copilot has enabled bracketed paste.
+    }
+
+    #[test]
+    fn multiline_snippet_waits_for_bracketed_paste_instead_of_pressing_enter() {
+        let mut app = attached_mux_app("snippet-safe-paste-session");
+        app.config.snippets = vec![crate::config::PromptSnippet {
+            name: "Multiline".to_string(),
+            prompt: "line one\nline two".to_string(),
+        }];
+        app.open_snippets();
+
+        snippet_key(&mut app, KeyCode::Enter);
+
+        let modal = app
+            .snippet_modal
+            .as_ref()
+            .expect("unsafe paste keeps the modal open");
+        assert!(modal
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("not ready for multiline paste"));
+    }
+
+    #[test]
+    fn deleting_a_snippet_requires_confirmation() {
+        let mut app = attached_mux_app("snippet-delete-session");
+        app.disable_config_persistence();
+        app.config.snippets = vec![crate::config::PromptSnippet {
+            name: "Disposable".to_string(),
+            prompt: "Delete me".to_string(),
+        }];
+        app.open_snippets();
+
+        snippet_key(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().screen,
+            SnippetScreen::ConfirmDelete
+        );
+        snippet_key(&mut app, KeyCode::Esc);
+        assert_eq!(app.config.snippets.len(), 1, "cancel keeps the snippet");
+
+        snippet_key(&mut app, KeyCode::Char('d'));
+        snippet_key(&mut app, KeyCode::Char('y'));
+        assert!(app.config.snippets.is_empty());
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().screen,
+            SnippetScreen::List
+        );
+    }
+
+    #[test]
+    fn editor_supports_multiline_prompt_input_and_project_scope_guard() {
+        let mut app = attached_mux_app("snippet-editor-session");
+        app.disable_config_persistence();
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        {
+            let modal = app.snippet_modal.as_mut().unwrap();
+            modal.editor_field = SnippetEditorField::Prompt;
+        }
+
+        snippet_key(&mut app, KeyCode::Char('o'));
+        snippet_key(&mut app, KeyCode::Char('n'));
+        snippet_key(&mut app, KeyCode::Char('e'));
+        snippet_key(&mut app, KeyCode::Enter);
+        handle_snippet_event(&mut app, Event::Paste("two\nthree".to_string()));
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_prompt,
+            "one\ntwo\nthree"
+        );
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        );
+        let modal = app.snippet_modal.as_ref().unwrap();
+        assert_eq!(modal.editor_scope, SnippetScope::Global);
+        assert!(modal.error.as_deref().unwrap().contains("No Git project"));
+    }
+
+    #[test]
+    fn editor_rejects_terminal_controls_before_persisting() {
+        let mut app = attached_mux_app("snippet-control-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        {
+            let modal = app.snippet_modal.as_mut().unwrap();
+            modal.editor_name = "Unsafe".to_string();
+            modal.editor_prompt = "text\u{1b}[201~".to_string();
+        }
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        );
+
+        assert!(app.config.snippets.is_empty());
+        assert!(app
+            .snippet_modal
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("control characters"));
+    }
+
+    #[test]
+    fn editing_can_move_a_global_snippet_into_project_scope() {
+        let mut app = attached_mux_app("snippet-move-session");
+        app.disable_config_persistence();
+        app.config.snippets = vec![crate::config::PromptSnippet {
+            name: "Move me".to_string(),
+            prompt: "Project-specific prompt".to_string(),
+        }];
+        app.open_snippets();
+        app.snippet_modal.as_mut().unwrap().project_root =
+            Some(std::env::temp_dir().join("snippet-project"));
+
+        snippet_key(&mut app, KeyCode::Char('e'));
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        );
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        );
+
+        assert!(app.config.snippets.is_empty());
+        let modal = app.snippet_modal.as_ref().unwrap();
+        assert_eq!(modal.project.len(), 1);
+        assert_eq!(modal.project[0].name, "Move me");
+        assert_eq!(modal.screen, SnippetScreen::List);
+    }
+
+    #[test]
+    fn editing_in_place_does_not_reorder_the_list() {
+        let mut app = attached_mux_app("snippet-order-session");
+        app.disable_config_persistence();
+        app.config.snippets = vec![
+            crate::config::PromptSnippet {
+                name: "First".to_string(),
+                prompt: "one".to_string(),
+            },
+            crate::config::PromptSnippet {
+                name: "Second".to_string(),
+                prompt: "two".to_string(),
+            },
+        ];
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('e'));
+        app.snippet_modal.as_mut().unwrap().editor_prompt = "updated".to_string();
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(app.config.snippets[0].name, "First");
+        assert_eq!(app.config.snippets[0].prompt, "updated");
+        assert_eq!(app.config.snippets[1].name, "Second");
     }
 
     #[test]

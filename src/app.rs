@@ -5,10 +5,11 @@ use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
+use crate::snippets::{SnippetModal, SnippetUpdate};
 use crate::terminal_pane::TerminalManager;
 use crate::updater::{UpdateCheckResult, UpdateInfo};
 use crate::workspace_state;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
@@ -397,6 +398,7 @@ pub struct App {
     pub terminal_open: HashSet<crate::mux::PaneId>,
     pub workspace_focus: WorkspaceFocus,
     pub workspace_help: Option<WorkspaceHelp>,
+    pub snippet_modal: Option<SnippetModal>,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
     pub github_inspector: Option<GithubInspector>,
@@ -501,6 +503,7 @@ impl App {
             terminal_open: HashSet::new(),
             workspace_focus: WorkspaceFocus::Chat,
             workspace_help: None,
+            snippet_modal: None,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
             github_inspector: None,
@@ -558,6 +561,120 @@ impl App {
 
     pub fn mux_enabled(&self) -> bool {
         self.mux.is_some()
+    }
+
+    pub fn open_snippets(&mut self) {
+        let (global, global_error) = if self.config_persistence_enabled {
+            match config::load_checked() {
+                Ok(persisted) => {
+                    let snippets = persisted.snippets.clone();
+                    self.adopt_persisted_config(persisted);
+                    (snippets, None)
+                }
+                Err(error) => (
+                    self.config.snippets.clone(),
+                    Some(format!("Cannot refresh global snippets: {error}")),
+                ),
+            }
+        } else {
+            (self.config.snippets.clone(), None)
+        };
+        let project_root = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .and_then(|pane| {
+                crate::session::loader::detect_project_root(&pane.cwd.to_string_lossy())
+            })
+            .map(PathBuf::from);
+        let (project, project_error, project_root) = match project_root {
+            Some(root) => match ProjectSettings::load(&root, &self.config) {
+                Ok(settings) => (settings.snippets().to_vec(), None, Some(root)),
+                Err(error) => (
+                    Vec::new(),
+                    Some(format!("Cannot load project snippets: {error}")),
+                    None,
+                ),
+            },
+            None => (Vec::new(), None, None),
+        };
+        let mut modal = SnippetModal::new(global, project, project_root);
+        modal.error = global_error.or(project_error);
+        self.snippet_modal = Some(modal);
+    }
+
+    pub fn persist_snippets(&mut self, update: &SnippetUpdate) -> Result<()> {
+        if update.project_root.is_none() && !update.project.is_empty() {
+            anyhow::bail!("Project-scoped snippets require a Git project");
+        }
+        let global_to_save = if update.global_dirty && self.config_persistence_enabled {
+            Some(reconcile_global_snippets(
+                config::load_checked()?,
+                &update.original_global,
+                &update.global,
+            )?)
+        } else {
+            None
+        };
+        let mut project_settings = if update.project_dirty {
+            update
+                .project_root
+                .as_deref()
+                .map(|root| ProjectSettings::load(root, &self.config))
+                .transpose()?
+        } else {
+            None
+        };
+        let previous_project = project_settings
+            .as_ref()
+            .map(|settings| settings.snippets().to_vec())
+            .unwrap_or_default();
+
+        if !self.config_persistence_enabled {
+            self.config.snippets = update.global.clone();
+            return Ok(());
+        }
+
+        if update.project_dirty && previous_project != update.original_project {
+            anyhow::bail!("Project snippets changed on disk; close and reopen the snippet manager");
+        }
+        if update.project_dirty {
+            let settings = project_settings
+                .as_mut()
+                .context("Project settings disappeared while saving snippets")?;
+            settings.set_snippets(update.project.clone());
+            settings.save()?;
+        }
+
+        if let Some(persisted) = global_to_save {
+            if let Err(error) = config::save(&persisted) {
+                if update.project_dirty {
+                    let settings = project_settings
+                        .as_mut()
+                        .context("Project settings disappeared while rolling back snippets")?;
+                    settings.set_snippets(previous_project);
+                    if let Err(rollback) = settings.save() {
+                        return Err(error).context(format!(
+                            "Failed to save global snippets; project rollback also failed: {rollback}"
+                        ));
+                    }
+                }
+                return Err(error).context("Failed to save global snippets");
+            }
+            self.adopt_persisted_config(persisted);
+        } else {
+            self.config.snippets = update.global.clone();
+        }
+        Ok(())
+    }
+
+    fn adopt_persisted_config(&mut self, mut persisted: UserConfig) {
+        // Mux is fixed for the lifetime of this App, including a CLI-only override.
+        // Remember the refreshed disk value for future saves but keep the live mode.
+        let runtime_mux = self.config.mux;
+        self.mux_on_disk = persisted.mux;
+        persisted.mux = runtime_mux;
+        self.config = persisted;
     }
 
     /// Status message that also warns when the prefix key had to be defaulted.
@@ -1945,6 +2062,18 @@ fn carry_session_details(session: &mut Session, old: Session) {
     session.details_parsed_len = old.details_parsed_len;
 }
 
+fn reconcile_global_snippets(
+    mut persisted: UserConfig,
+    original: &[crate::config::PromptSnippet],
+    updated: &[crate::config::PromptSnippet],
+) -> Result<UserConfig> {
+    if persisted.snippets != original {
+        anyhow::bail!("Global snippets changed on disk; close and reopen the snippet manager");
+    }
+    persisted.snippets = updated.to_vec();
+    Ok(persisted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1973,6 +2102,127 @@ mod tests {
         let mut app = app_with(false);
         app.mux_on_disk = true;
         assert!(app.persistable_config().mux);
+    }
+
+    #[test]
+    fn project_snippet_save_uses_the_project_config_without_touching_global_config() {
+        let project = tempfile::tempdir().unwrap();
+        let mut app = app_with(false);
+        let snippet = crate::config::PromptSnippet {
+            name: "Repository review".to_string(),
+            prompt: "Review this repository.".to_string(),
+        };
+
+        app.persist_snippets(&SnippetUpdate {
+            global: Vec::new(),
+            project: vec![snippet.clone()],
+            original_global: Vec::new(),
+            original_project: Vec::new(),
+            project_root: Some(project.path().to_path_buf()),
+            global_dirty: false,
+            project_dirty: true,
+        })
+        .unwrap();
+
+        assert!(app.config.snippets.is_empty());
+        let settings = ProjectSettings::load(project.path(), &app.config).unwrap();
+        assert_eq!(settings.snippets(), &[snippet]);
+    }
+
+    #[test]
+    fn project_snippet_save_refuses_to_overwrite_an_external_change() {
+        let project = tempfile::tempdir().unwrap();
+        let original = crate::config::PromptSnippet {
+            name: "Original".to_string(),
+            prompt: "original".to_string(),
+        };
+        let external = crate::config::PromptSnippet {
+            name: "External".to_string(),
+            prompt: "changed elsewhere".to_string(),
+        };
+        let mut settings = ProjectSettings::load(project.path(), &UserConfig::default()).unwrap();
+        settings.set_snippets(vec![external.clone()]);
+        settings.save().unwrap();
+        let mut app = app_with(false);
+
+        let error = app
+            .persist_snippets(&SnippetUpdate {
+                global: Vec::new(),
+                project: vec![crate::config::PromptSnippet {
+                    name: "Mine".to_string(),
+                    prompt: "my edit".to_string(),
+                }],
+                original_global: Vec::new(),
+                original_project: vec![original],
+                project_root: Some(project.path().to_path_buf()),
+                global_dirty: false,
+                project_dirty: true,
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed on disk"));
+        let reloaded = ProjectSettings::load(project.path(), &app.config).unwrap();
+        assert_eq!(reloaded.snippets(), &[external]);
+    }
+
+    #[test]
+    fn global_snippet_reconcile_preserves_fresh_settings_and_detects_conflicts() {
+        let original = crate::config::PromptSnippet {
+            name: "Original".to_string(),
+            prompt: "old".to_string(),
+        };
+        let updated = crate::config::PromptSnippet {
+            name: "Original".to_string(),
+            prompt: "new".to_string(),
+        };
+        let persisted = UserConfig {
+            yolo: true,
+            model: Some("fresh-external-model".to_string()),
+            snippets: vec![original.clone()],
+            ..UserConfig::default()
+        };
+
+        let merged =
+            reconcile_global_snippets(persisted, std::slice::from_ref(&original), &[updated])
+                .unwrap();
+        assert!(merged.yolo);
+        assert_eq!(merged.model.as_deref(), Some("fresh-external-model"));
+
+        let error = reconcile_global_snippets(
+            UserConfig {
+                snippets: vec![crate::config::PromptSnippet {
+                    name: "External".to_string(),
+                    prompt: "changed".to_string(),
+                }],
+                ..UserConfig::default()
+            },
+            &[original],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed on disk"));
+    }
+
+    #[test]
+    fn adopting_fresh_global_config_keeps_runtime_mux_override() {
+        let mut app = app_with(true);
+        app.mux_on_disk = false;
+        app.adopt_persisted_config(UserConfig {
+            mux: false,
+            model: Some("fresh-model".to_string()),
+            snippets: vec![crate::config::PromptSnippet {
+                name: "Fresh".to_string(),
+                prompt: "fresh prompt".to_string(),
+            }],
+            ..UserConfig::default()
+        });
+
+        assert!(app.config.mux, "the live CLI override remains active");
+        assert!(!app.mux_on_disk, "future saves retain the disk value");
+        assert_eq!(app.config.model.as_deref(), Some("fresh-model"));
+        assert_eq!(app.config.snippets[0].name, "Fresh");
     }
 
     #[test]

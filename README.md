@@ -262,6 +262,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `c` | Focus the main session chat |
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
+| `prefix` `s` | Open prompt snippets |
 | `prefix` `Ctrl+H` `e` | Open scratchpad shortcut help |
 | `prefix` `Ctrl+G` `i` | Inspect a GitHub issue or pull request |
 | `prefix` `n` / `p` | Next / previous session |
@@ -269,6 +270,25 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `x` | End the focused session for good |
 | `prefix` `q` | End the focused session and quit CST together |
 | `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
+
+### Prompt snippets
+
+`prefix` `s` opens reusable prompts without leaving the attached session. Select one and
+press Enter to focus the chat and paste its text at the cursor; CST does **not** send the
+message. Multiline snippets use the same bracketed-paste path as terminal paste, so line
+breaks remain text instead of becoming accidental submissions. If Copilot is still
+starting and has not enabled bracketed paste yet, CST keeps the modal open and asks you
+to wait rather than risk turning a line break into Enter.
+
+The snippet list supports `a` add, `e` edit, and `d` delete (with confirmation). In the
+editor, Tab / Shift+Tab moves between name, prompt, and scope; arrows, Home/End,
+Backspace, and Delete edit at the cursor; Enter adds a line break in the prompt; Ctrl+G
+or Space on the scope field toggles scope; Ctrl+S saves.
+
+New snippets default to **global**, stored in CST's global `config.json` and available in
+every session. **Project** snippets live in that repository's `.cst.json` and appear only
+while a session in that Git project is focused. Moving an existing snippet between scopes
+updates both stores while preserving unrelated and future `.cst.json` fields.
 
 `prefix` `q` is the one-step exit: it ends the attached session and quits CST without a
 detour through the session list. Because quitting also kills every other pane, it asks

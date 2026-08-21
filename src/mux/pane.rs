@@ -248,6 +248,30 @@ impl Pane {
         self.pty.write(&bytes)
     }
 
+    /// Paste a snippet without allowing a line break to become an Enter keypress.
+    pub fn send_prompt_snippet(&mut self, text: &str) -> Result<()> {
+        if !self.is_running() {
+            anyhow::bail!("the focused session is no longer running");
+        }
+        if text.is_empty() {
+            anyhow::bail!("the snippet prompt is empty");
+        }
+        if text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\r' | '\n' | '\t'))
+        {
+            anyhow::bail!("snippet prompts cannot contain terminal control characters");
+        }
+        let bracketed = self.bracketed_paste();
+        if (text.contains('\r') || text.contains('\n')) && !bracketed {
+            anyhow::bail!(
+                "Copilot is not ready for multiline paste yet; wait for startup to finish"
+            );
+        }
+        let bytes = keys::encode_paste(text, bracketed);
+        self.pty.write(&bytes)
+    }
+
     pub fn handle_mouse(&mut self, event: MouseEvent) -> Result<()> {
         if !self.is_running() {
             return Ok(());
@@ -561,6 +585,7 @@ mod tests {
         assert!(!pane.bracketed_paste());
         pane.feed_synthetic(b"\x1b[?2004h");
         assert!(pane.bracketed_paste());
+        pane.send_prompt_snippet("line one\nline two").unwrap();
         pane.feed_synthetic(b"\x1b[?2004l");
         assert!(!pane.bracketed_paste());
 
@@ -579,6 +604,37 @@ mod tests {
         pane.send_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
         pane.send_paste("text").unwrap();
+        assert!(pane.send_prompt_snippet("text").is_err());
+    }
+
+    #[test]
+    fn multiline_snippet_is_rejected_until_bracketed_paste_is_enabled() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 3 127.0.0.1 > nul"
+        } else {
+            "sleep 2"
+        });
+        let mut pane = Pane::spawn(test_spec(3, program, args), 24, 80, tx).unwrap();
+
+        assert!(pane
+            .send_prompt_snippet("")
+            .unwrap_err()
+            .to_string()
+            .contains("empty"));
+        assert!(pane
+            .send_prompt_snippet("safe\x1b[201~unsafe")
+            .unwrap_err()
+            .to_string()
+            .contains("control characters"));
+        pane.send_prompt_snippet("single line").unwrap();
+        let error = pane
+            .send_prompt_snippet("line one\nline two")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not ready for multiline paste"));
+
+        let _ = pane.kill();
     }
 
     #[test]
