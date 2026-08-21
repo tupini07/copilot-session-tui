@@ -276,7 +276,7 @@ GitHub inspection is available while attached to a mux session. Enter an issue o
 request number and CST resolves the repository from that session's working directory.
 Issues have **Overview** and **Comments** tabs; pull requests add **Files**. Use Tab /
 Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the mouse
-wheel to scroll, and Esc to return. GitHub references such as `#2029` shown in the
+wheel to scroll, and `q` to leave. GitHub references such as `#2029` shown in the
 attached chat can also be opened directly with a left click.
 
 Those references are colour-coded once CST has looked them up. The `#` carries the
@@ -293,7 +293,8 @@ totals, and single-child directory chains are folded into one row. In the tree, 
 moves, Left folds an open directory or steps out to its parent, Right unfolds it or
 enters it, and Enter folds a directory or moves focus to the diff. With the diff focused,
 Up/Down/PageUp/PageDown scroll, Left/Right scroll long lines horizontally, and Esc
-returns to the tree. Clicking either pane focuses it, clicking a row selects it, and the
+returns to the tree — `q` still leaves the inspector outright from anywhere. Clicking
+either pane focuses it, clicking a row selects it, and the
 wheel scrolls whichever pane the pointer is over. Terminals too narrow to split show only
 the focused pane. A file whose patch GitHub omits — binary or too large — says so instead.
 

@@ -196,7 +196,7 @@ fn draw_loading(f: &mut Frame, inspector: &GithubInspector) {
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
-            Line::from(vec![key("Esc"), Span::raw(" close")]),
+            Line::from(vec![key("q"), Span::raw(" close")]),
         ],
     );
 }
@@ -219,7 +219,7 @@ fn draw_error(f: &mut Frame, inspector: &GithubInspector, message: &str) {
         Line::from(vec![
             key("r"),
             Span::raw(" retry   "),
-            key("Esc"),
+            key("q"),
             Span::raw(" close"),
         ]),
     ]);
@@ -849,7 +849,9 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect) {
                 key("←→"),
                 Span::raw(" horizontal  "),
                 key("Esc"),
-                Span::raw(" files"),
+                Span::raw(" files  "),
+                key("q"),
+                Span::raw(" close"),
             ]);
         } else {
             spans.extend([
@@ -859,7 +861,7 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect) {
                 Span::raw(" fold  "),
                 key("Enter"),
                 Span::raw(" diff  "),
-                key("Esc"),
+                key("q"),
                 Span::raw(" close"),
             ]);
         }
@@ -869,7 +871,7 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect) {
             Span::raw(" navigate  "),
             key("wheel"),
             Span::raw(" scroll  "),
-            key("Esc"),
+            key("q"),
             Span::raw(" close"),
         ]);
     }

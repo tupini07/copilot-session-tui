@@ -270,12 +270,12 @@ fn handle_github_inspector_key(app: &mut App, key: KeyEvent) {
             _ => {}
         },
         crate::app::GithubInspectorScreen::Loading => {
-            if key.code == KeyCode::Esc {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
                 app.close_github_inspector();
             }
         }
         crate::app::GithubInspectorScreen::Error(_) => match key.code {
-            KeyCode::Esc => app.close_github_inspector(),
+            KeyCode::Esc | KeyCode::Char('q') => app.close_github_inspector(),
             KeyCode::Char('r') => app.retry_github_request(),
             _ => {}
         },
@@ -310,6 +310,9 @@ fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
                 inspector.cycle_tab(false);
             }
         }
+        // `q` leaves the inspector outright, wherever you are in it; Esc only
+        // steps back out of the diff.
+        KeyCode::Char('q') => app.close_github_inspector(),
         KeyCode::Esc => {
             let in_diff = app
                 .github_inspector
@@ -1397,6 +1400,42 @@ mod tests {
         );
 
         press(&mut app, KeyCode::Esc);
+        assert!(app.github_inspector.is_none());
+    }
+
+    #[test]
+    fn q_leaves_the_inspector_from_anywhere_in_it() {
+        let mut app = pull_request_app();
+
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.github_inspector.is_none(), "q closes from a tab");
+
+        // From inside a diff, where Esc only steps back to the tree.
+        let mut app = pull_request_app();
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().files_pane,
+            crate::app::FilesPane::Diff
+        );
+
+        press(&mut app, KeyCode::Char('q'));
+        assert!(
+            app.github_inspector.is_none(),
+            "q closes outright rather than returning to the tree"
+        );
+    }
+
+    #[test]
+    fn q_closes_the_loading_and_error_screens() {
+        let mut app = pull_request_app();
+        app.github_inspector.as_mut().unwrap().screen = crate::app::GithubInspectorScreen::Loading;
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.github_inspector.is_none());
+
+        let mut app = pull_request_app();
+        app.github_inspector.as_mut().unwrap().screen =
+            crate::app::GithubInspectorScreen::Error("nope".to_string());
+        press(&mut app, KeyCode::Char('q'));
         assert!(app.github_inspector.is_none());
     }
 
