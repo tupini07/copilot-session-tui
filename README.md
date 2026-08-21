@@ -65,6 +65,12 @@ When an update is available, the status bar shows the current and latest version
 Press `u` to check GitHub immediately, download and install the matching release
 asset when available, then restart the TUI.
 
+CST relaunches itself once the update is installed, so you never have to quit and
+retype the command. This matters most when CST is your terminal's startup command:
+quitting a terminal's root process closes the window, leaving nowhere to restart from.
+On Unix the new build replaces the running process; on Windows the old process stays on
+briefly as a parent, because something has to hold the console open.
+
 ### Usage
 
 ```bash
@@ -258,6 +264,13 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 `prefix` `q` is the one-step exit: it ends the attached session and quits CST without a
 detour through the session list. Because quitting also kills every other pane, it asks
 for confirmation when a session other than the one on screen is still running.
+
+It quits CST the same way `q` does in the session list — the process exits normally
+after restoring the terminal. If your terminal *window* closes too, that is because CST
+is the window's root process, and terminals close when their root process exits. Launch
+CST through the [shell wrapper](#shell-integration-auto-cd-into-project-directory) (or
+from an existing prompt) to be returned to that prompt instead. Updates relaunch CST for
+you either way.
 
 GitHub inspection is available while attached to a mux session. Enter an issue or pull
 request number and CST resolves the repository from that session's working directory.

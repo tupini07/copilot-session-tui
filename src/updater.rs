@@ -134,7 +134,8 @@ pub fn force_check_for_updates_async() -> mpsc::Receiver<UpdateCheckResult> {
 }
 
 /// Perform the actual self-update. Call this AFTER terminal is restored.
-pub fn perform_update() -> Result<()> {
+/// Download and install the newest release, returning its version.
+pub fn perform_update() -> Result<String> {
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
@@ -146,13 +147,63 @@ pub fn perform_update() -> Result<()> {
         .update()?;
 
     println!("Updated to version {}!", status.version());
-    println!("Please restart the application.");
-    Ok(())
+    Ok(status.version().to_string())
+}
+
+/// Start the freshly installed binary in place of this one.
+///
+/// Restarting by hand is awkward when CST is the terminal's root process: quitting
+/// takes the window with it, so there is nothing left to type the command into.
+/// Handing the terminal straight to the new build avoids that entirely.
+///
+/// `executable` must be captured *before* updating. The installer replaces the running
+/// binary by renaming it out of the way, and Windows reports the moved file's new path,
+/// so asking afterwards can point back at the old build.
+///
+/// On Unix the process image is replaced, so this only returns on failure. Windows has
+/// no equivalent, so the old process stays on as a thin parent and forwards the exit
+/// status; something has to remain attached to the console or the window would close.
+pub fn relaunch(executable: &std::path::Path) -> Result<std::process::ExitStatus> {
+    // The same arguments, so a restart lands wherever the original launch did.
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut command = std::process::Command::new(executable);
+    command.args(&arguments);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(anyhow::Error::new(command.exec())
+            .context("Could not start the updated copilot-session-tui"))
+    }
+
+    #[cfg(not(unix))]
+    {
+        command
+            .status()
+            .context("Could not start the updated copilot-session-tui")
+    }
+}
+
+/// Mirrors the `#[cfg(unix)]` arm of [`relaunch`] so it is type-checked on Windows too.
+#[cfg(test)]
+fn relaunch_unix_shape(error: std::io::Error) -> Result<std::process::ExitStatus> {
+    Err(anyhow::Error::new(error).context("Could not start the updated copilot-session-tui"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_relaunch_explains_itself() {
+        // `CommandExt::exec` hands back a bare io::Error, and this is the shape the
+        // Unix arm wraps it in. Compiling it here keeps that arm honest on Windows.
+        let error = relaunch_unix_shape(std::io::Error::other("no such file"))
+            .expect_err("relaunch cannot succeed here");
+
+        assert!(format!("{error:#}").contains("Could not start the updated copilot-session-tui"));
+        assert!(format!("{error:#}").contains("no such file"));
+    }
 
     #[test]
     fn compares_minor_versions_semantically() {

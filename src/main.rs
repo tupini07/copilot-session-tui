@@ -246,8 +246,29 @@ fn main() -> Result<()> {
     // Perform update if requested (after terminal is restored)
     if app.should_update {
         eprintln!("Updating copilot-session-tui...");
-        if let Err(e) = updater::perform_update() {
-            eprintln!("Update failed: {}", e);
+        // Asked before the installer moves the running binary aside, so the restart
+        // cannot pick up the displaced old build.
+        let executable = std::env::current_exe();
+        match updater::perform_update() {
+            Ok(version) => match executable {
+                Ok(executable) => {
+                    eprintln!("Restarting into {version}...");
+                    // Quitting to restart by hand costs the whole window when CST is
+                    // the terminal's root process, which is exactly when it matters.
+                    match updater::relaunch(&executable) {
+                        Ok(status) => std::process::exit(status.code().unwrap_or(0)),
+                        Err(error) => {
+                            eprintln!("{error:#}");
+                            eprintln!("Please restart the application.");
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Could not find the running executable: {error}");
+                    eprintln!("Please restart the application.");
+                }
+            },
+            Err(error) => eprintln!("Update failed: {error}"),
         }
         return Ok(());
     }
