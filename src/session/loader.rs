@@ -36,18 +36,9 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
 
         match load_single_session(&path) {
             Ok(session) => {
-                // Skip empty sessions (no title and no events)
-                if session.summary.is_none() {
-                    let events_path = path.join("events.jsonl");
-                    let has_events = events_path.exists()
-                        && fs::metadata(&events_path)
-                            .map(|m| m.len() > 100) // trivial events file = just session.start
-                            .unwrap_or(false);
-                    if !has_events {
-                        continue;
-                    }
+                if session_is_visible(&session) {
+                    sessions.push(session);
                 }
-                sessions.push(session);
             }
             Err(_) => continue,
         }
@@ -61,6 +52,36 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
     });
 
     Ok(sessions)
+}
+
+/// Load one known session without walking the entire Copilot history.
+///
+/// New mux panes already know their UUID, so this is the fast path for incorporating a
+/// session created after CST started.
+pub fn load_session(copilot_home: &Path, session_id: &str) -> Result<Option<Session>> {
+    let mut components = Path::new(session_id).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        anyhow::bail!("Invalid Copilot session id: {session_id}");
+    }
+    let path = copilot_home.join("session-state").join(session_id);
+    if !path.join("workspace.yaml").is_file() {
+        return Ok(None);
+    }
+    let session = load_single_session(&path)?;
+    Ok(session_is_visible(&session).then_some(session))
+}
+
+fn session_is_visible(session: &Session) -> bool {
+    if session.summary.is_some() {
+        return true;
+    }
+    let events_path = session.dir_path.join("events.jsonl");
+    events_path.exists()
+        && fs::metadata(events_path)
+            .map(|metadata| metadata.len() > 100) // trivial file = just session.start
+            .unwrap_or(false)
 }
 
 fn load_single_session(dir: &Path) -> Result<Session> {
@@ -308,6 +329,25 @@ mod tests {
         let session = load_single_session(temp.path()).unwrap();
 
         assert_eq!(session.display_name(), "Legacy TUI rename");
+    }
+
+    #[test]
+    fn loads_one_new_session_without_scanning_its_siblings() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("session-state").join("test-session");
+        fs::create_dir_all(&target).unwrap();
+        write_workspace(&target, "name: Just created\n");
+
+        let session = load_session(home.path(), "test-session")
+            .unwrap()
+            .expect("session should be visible");
+
+        assert_eq!(session.id, "test-session");
+        assert_eq!(session.display_name(), "Just created");
+        assert!(load_session(home.path(), "not-created-yet")
+            .unwrap()
+            .is_none());
+        assert!(load_session(home.path(), "../outside").is_err());
     }
 
     #[test]

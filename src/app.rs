@@ -539,6 +539,11 @@ impl App {
             self.status_message = Some("No running sessions".to_string());
             return;
         }
+        // New Copilot sessions do not exist on disk until the child has started. Refresh
+        // only the live pane ids here: walking the user's entire Copilot history would
+        // make opening this tiny switcher noticeably slow.
+        self.refresh_live_pane_sessions();
+        let mux = self.mux.as_ref().expect("multiplexer checked above");
         self.pane_selected = mux
             .focused
             .and_then(|id| mux.panes.iter().position(|pane| pane.id == id))
@@ -1255,6 +1260,66 @@ impl App {
         self.filtered_indices.get(self.selected).copied()
     }
 
+    fn refresh_live_pane_sessions(&mut self) {
+        let session_ids: Vec<String> = self
+            .mux
+            .as_ref()
+            .map(|mux| {
+                mux.panes
+                    .iter()
+                    .map(|pane| pane.session_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut refreshed = Vec::new();
+        for session_id in session_ids {
+            match crate::session::loader::load_session(&self.copilot_home, &session_id) {
+                Ok(Some(session)) => refreshed.push(session),
+                Ok(None) => {}
+                Err(error) => {
+                    self.status_message =
+                        Some(format!("Cannot refresh session {session_id}: {error}"));
+                }
+            }
+        }
+        self.merge_session_metadata(refreshed);
+    }
+
+    fn merge_session_metadata(&mut self, sessions: Vec<Session>) {
+        if sessions.is_empty() {
+            return;
+        }
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        for session in sessions {
+            if let Some(index) = self
+                .sessions
+                .iter()
+                .position(|existing| existing.id == session.id)
+            {
+                let old = std::mem::replace(&mut self.sessions[index], session);
+                carry_session_details(&mut self.sessions[index], old);
+            } else {
+                self.sessions.push(session);
+            }
+        }
+        self.unique_projects = extract_unique_projects(&self.sessions);
+        self.sort_sessions();
+        if let Some(session_id) = selected_id {
+            self.focus_session(&session_id);
+        }
+    }
+
+    /// Persisted Copilot names are more useful in the pane switcher than OSC window
+    /// titles, which can lag behind `/rename` and generated-name updates.
+    pub fn pane_session_title<'a>(&'a self, session_id: &str, fallback: &'a str) -> &'a str {
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(Session::display_name)
+            .filter(|title| *title != "(unnamed)")
+            .unwrap_or(fallback)
+    }
+
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
@@ -1667,6 +1732,7 @@ impl App {
         if let Some(mux) = self.mux.as_mut() {
             mux.prefix_state = PrefixState::Idle;
         }
+        self.refresh_live_pane_sessions();
     }
 
     /// `prefix q` — end the focused session and CST in one step.
@@ -1765,6 +1831,7 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
         if s.project_root.is_empty() {
             continue;
         }
+
         if let Some(updated) = s.updated_at {
             let entry = latest.entry(s.project_root.clone()).or_insert(updated);
             if updated > *entry {
@@ -1779,6 +1846,14 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
     let mut projects: Vec<String> = latest.keys().cloned().collect();
     projects.sort_by(|a, b| latest[b].cmp(&latest[a])); // most recent first
     projects
+}
+
+fn carry_session_details(session: &mut Session, old: Session) {
+    session.edited_files = old.edited_files;
+    session.last_user_message = old.last_user_message;
+    session.turn_count = old.turn_count;
+    session.tool_call_count = old.tool_call_count;
+    session.details_parsed_len = old.details_parsed_len;
 }
 
 #[cfg(test)]
@@ -1956,6 +2031,93 @@ mod tests {
             .iter()
             .map(|&index| app.sessions[index].id.as_str())
             .collect()
+    }
+
+    #[test]
+    fn refreshing_sessions_adds_new_metadata_without_losing_cached_details_or_selection() {
+        let mut existing = session("existing", "project-a", "2026-08-21T10:00:00Z");
+        existing.edited_files = vec!["src/main.rs".to_string()];
+        existing.last_user_message = Some("keep me".to_string());
+        existing.turn_count = 7;
+        existing.tool_call_count = 11;
+        existing.details_parsed_len = 1234;
+        let mut app = App::new(vec![existing], UserConfig::default());
+
+        let renamed = Session {
+            summary: Some("Current persisted name".to_string()),
+            ..session("existing", "project-a", "2026-08-21T11:00:00Z")
+        };
+        let new = Session {
+            summary: Some("Brand new session".to_string()),
+            ..session("new", "project-b", "2026-08-21T12:00:00Z")
+        };
+        app.merge_session_metadata(vec![renamed, new]);
+
+        assert_eq!(app.selected_session().unwrap().id, "existing");
+        let existing = app
+            .sessions
+            .iter()
+            .find(|session| session.id == "existing")
+            .unwrap();
+        assert_eq!(existing.display_name(), "Current persisted name");
+        assert_eq!(existing.edited_files, ["src/main.rs"]);
+        assert_eq!(existing.last_user_message.as_deref(), Some("keep me"));
+        assert_eq!(existing.turn_count, 7);
+        assert_eq!(existing.tool_call_count, 11);
+        assert_eq!(existing.details_parsed_len, 1234);
+        assert!(app.sessions.iter().any(|session| session.id == "new"));
+        assert!(app
+            .unique_projects
+            .iter()
+            .any(|project| project == "project-b"));
+    }
+
+    #[test]
+    fn pane_switcher_prefers_the_refreshed_session_name_to_an_old_window_title() {
+        let persisted = Session {
+            summary: Some("EmbViz".to_string()),
+            ..session("new-session", "project", "2026-08-21T12:00:00Z")
+        };
+        let app = App::new(vec![persisted], UserConfig::default());
+
+        assert_eq!(
+            app.pane_session_title(
+                "new-session",
+                "Create Embedding Space Visualizations - GitHub Copilot"
+            ),
+            "EmbViz"
+        );
+        assert_eq!(
+            app.pane_session_title("not-on-disk-yet", "Starting Copilot"),
+            "Starting Copilot"
+        );
+    }
+
+    #[test]
+    fn a_session_created_after_startup_is_discovered_from_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let session_dir = home.path().join("session-state").join("fresh-session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("workspace.yaml"),
+            format!(
+                "id: fresh-session\ncwd: {}\nname: Fresh name\n\
+                 created_at: 2026-08-21T12:00:00Z\nupdated_at: 2026-08-21T12:00:01Z\n",
+                home.path().display()
+            ),
+        )
+        .unwrap();
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.copilot_home = home.path().to_path_buf();
+        let fresh = crate::session::loader::load_session(&app.copilot_home, "fresh-session")
+            .unwrap()
+            .expect("new session metadata");
+        app.merge_session_metadata(vec![fresh]);
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].id, "fresh-session");
+        assert_eq!(app.sessions[0].display_name(), "Fresh name");
     }
 
     #[test]

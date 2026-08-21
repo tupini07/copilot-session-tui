@@ -165,6 +165,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(index, pane)| {
+            let title = app.pane_session_title(&pane.session_id, &pane.title);
             let selected = index == app.pane_selected;
             let base = if selected {
                 Style::default()
@@ -184,7 +185,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {} ", index + 1), base.fg(Color::Cyan)),
                 Span::styled(marker, marker_style),
-                Span::styled(format!(" {}", pane.title), base),
+                Span::styled(format!(" {title}"), base),
                 // Panes routinely span several projects, so the title alone is ambiguous.
                 Span::styled(
                     format!("  {}", project_label(&pane.cwd)),
