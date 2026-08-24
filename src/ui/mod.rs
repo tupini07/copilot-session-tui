@@ -1,4 +1,5 @@
 pub mod file_tree;
+pub mod diff;
 pub mod github_inspector;
 pub mod pane;
 pub mod popups;

@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -161,6 +162,7 @@ pub struct GithubInspector {
     pub diff_horizontal: usize,
     pub max_diff_scroll: usize,
     pub max_diff_horizontal: usize,
+    pub diff_render_cache: Option<DiffRenderCache>,
     pub request_id: u64,
     pub request_cwd: Option<PathBuf>,
     pub number: Option<u64>,
@@ -187,6 +189,7 @@ impl GithubInspector {
             diff_horizontal: 0,
             max_diff_scroll: 0,
             max_diff_horizontal: 0,
+            diff_render_cache: None,
             request_id: 0,
             request_cwd: None,
             number: None,
@@ -275,6 +278,7 @@ impl GithubInspector {
         self.diff_horizontal = 0;
         self.max_diff_scroll = 0;
         self.max_diff_horizontal = 0;
+        self.diff_render_cache = None;
     }
 }
 
@@ -292,6 +296,14 @@ pub struct GithubLoadResult {
 pub struct GithubPatchResult {
     request_id: u64,
     result: std::result::Result<Vec<(String, Option<String>)>, GithubError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRenderCache {
+    pub file_index: usize,
+    pub line_count: usize,
+    pub max_width: usize,
+    pub lines: Vec<Line<'static>>,
 }
 
 /// An item kept around so reopening it is instant.
@@ -1313,6 +1325,7 @@ impl App {
             }
         }
         pull.patches_loaded = true;
+        inspector.diff_render_cache = None;
 
         let repository = pull.common.repository.clone();
         let item = GithubItem::PullRequest(pull.clone());
@@ -3373,6 +3386,43 @@ mod tests {
         }
         app.ensure_github_patches();
         assert!(!app.github_patches_loading());
+    }
+
+    #[test]
+    fn arriving_patches_invalidate_the_rendered_diff_cache() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+            inspector.diff_render_cache = Some(DiffRenderCache {
+                file_index: 0,
+                line_count: 1,
+                max_width: 10,
+                lines: vec![Line::from("old render")],
+            });
+        }
+        let (sender, receiver) = mpsc::channel();
+        app.github_patch_receiver = Some(receiver);
+        sender
+            .send(GithubPatchResult {
+                request_id: 42,
+                result: Ok(vec![(
+                    "src/lib.rs".to_string(),
+                    Some("@@ -1 +1 @@\n-old\n+new".to_string()),
+                )]),
+            })
+            .unwrap();
+
+        app.poll_github_patches();
+
+        assert!(app
+            .github_inspector
+            .as_ref()
+            .unwrap()
+            .diff_render_cache
+            .is_none());
     }
 
     #[test]

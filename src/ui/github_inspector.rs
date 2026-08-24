@@ -1,4 +1,6 @@
-use crate::app::{App, FilesPane, GithubInspector, GithubInspectorScreen, GithubTab};
+use crate::app::{
+    App, DiffRenderCache, FilesPane, GithubInspector, GithubInspectorScreen, GithubTab,
+};
 use crate::github::{DiscussionKind, GithubItem};
 use crate::text;
 use crate::ui::file_tree;
@@ -352,15 +354,15 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
         focus,
     );
     let diff_width = diff_area.width.saturating_sub(1) as usize;
-    let diff_content = diff_lines_for_selection(inspector, item, &rows, diff_width);
+    let PreparedDiff {
+        local_lines,
+        updated_cache,
+        line_count: diff_line_count,
+        max_width: diff_max_width,
+    } = prepare_diff(inspector, item, &rows);
     let diff_height = diff_area.height as usize;
-    let max_diff_scroll = diff_content.len().saturating_sub(diff_height);
-    let max_diff_horizontal = diff_content
-        .iter()
-        .map(line_width)
-        .max()
-        .unwrap_or_default()
-        .saturating_sub(diff_width);
+    let max_diff_scroll = diff_line_count.saturating_sub(diff_height);
+    let max_diff_horizontal = diff_max_width.saturating_sub(diff_width);
 
     if let Some(inspector) = app.github_inspector.as_mut() {
         inspector.tree_area = tree_body;
@@ -368,6 +370,9 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
         inspector.visible_tree_rows = tree_body.height as usize;
         inspector.max_diff_scroll = max_diff_scroll;
         inspector.max_diff_horizontal = max_diff_horizontal;
+        if let Some(cache) = updated_cache {
+            inspector.diff_render_cache = Some(cache);
+        }
         inspector.diff_scroll = inspector.diff_scroll.min(max_diff_scroll);
         inspector.diff_horizontal = inspector.diff_horizontal.min(max_diff_horizontal);
         inspector.tree_selected = inspector.tree_selected.min(rows.len().saturating_sub(1));
@@ -397,13 +402,21 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
             width: diff_area.width.saturating_sub(1),
             ..diff_area
         };
-        f.render_widget(
-            Paragraph::new(diff_content).scroll((
-                inspector.diff_scroll.min(u16::MAX as usize) as u16,
-                inspector.diff_horizontal.min(u16::MAX as usize) as u16,
-            )),
-            diff_body,
+        let full_diff = local_lines.as_deref().unwrap_or_else(|| {
+            inspector
+                .diff_render_cache
+                .as_ref()
+                .map(|cache| cache.lines.as_slice())
+                .unwrap_or(&[])
+        });
+        let visible_diff = super::diff::viewport_lines(
+            full_diff,
+            inspector.diff_scroll,
+            diff_height,
+            inspector.diff_horizontal,
+            diff_body.width as usize,
         );
+        f.render_widget(Paragraph::new(visible_diff), diff_body);
         draw_scrollbar(
             f,
             diff_area,
@@ -533,12 +546,18 @@ fn tree_row_line(
 }
 
 /// Diff for the selected row: a file's patch, or a summary for a directory.
-fn diff_lines_for_selection(
+struct PreparedDiff {
+    local_lines: Option<Vec<Line<'static>>>,
+    updated_cache: Option<DiffRenderCache>,
+    line_count: usize,
+    max_width: usize,
+}
+
+fn prepare_diff(
     inspector: &GithubInspector,
     item: &GithubItem,
     rows: &[file_tree::TreeRow],
-    width: usize,
-) -> Vec<Line<'static>> {
+) -> PreparedDiff {
     match rows.get(inspector.tree_selected).map(|row| &row.kind) {
         Some(file_tree::RowKind::Directory {
             path,
@@ -546,7 +565,7 @@ fn diff_lines_for_selection(
             additions,
             deletions,
             ..
-        }) => vec![
+        }) => prepared_local(vec![
             Line::from(Span::styled(
                 format!(" {path}/ "),
                 Style::default()
@@ -563,8 +582,51 @@ fn diff_lines_for_selection(
                 "Select a file to see its diff.",
                 Style::default().fg(Color::DarkGray),
             )),
-        ],
-        _ => diff_lines(inspector, item, width),
+        ]),
+        _ => {
+            if item.files().get(inspector.selected_file).is_none() {
+                return prepared_local(vec![Line::from(Span::styled(
+                    "Select a file to see its diff.",
+                    Style::default().fg(Color::DarkGray),
+                ))]);
+            }
+            if let Some(cache) = inspector
+                .diff_render_cache
+                .as_ref()
+                .filter(|cache| cache.file_index == inspector.selected_file)
+            {
+                return PreparedDiff {
+                    local_lines: None,
+                    updated_cache: None,
+                    line_count: cache.line_count,
+                    max_width: cache.max_width,
+                };
+            }
+            let lines = diff_lines(inspector, item);
+            let line_count = lines.len();
+            let max_width = lines.iter().map(line_width).max().unwrap_or_default();
+            let cache = DiffRenderCache {
+                file_index: inspector.selected_file,
+                line_count,
+                max_width,
+                lines,
+            };
+            PreparedDiff {
+                local_lines: None,
+                updated_cache: Some(cache),
+                line_count,
+                max_width,
+            }
+        }
+    }
+}
+
+fn prepared_local(lines: Vec<Line<'static>>) -> PreparedDiff {
+    PreparedDiff {
+        line_count: lines.len(),
+        max_width: lines.iter().map(line_width).max().unwrap_or_default(),
+        local_lines: Some(lines),
+        updated_cache: None,
     }
 }
 
@@ -781,7 +843,7 @@ fn comment_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn diff_lines(inspector: &GithubInspector, item: &GithubItem, width: usize) -> Vec<Line<'static>> {
+fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'static>> {
     let Some(file) = item.files().get(inspector.selected_file) else {
         return vec![Line::from(Span::styled(
             "Select a file to see its diff.",
@@ -790,7 +852,7 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem, width: usize) -> V
     };
     let mut lines = vec![
         Line::from(Span::styled(
-            format!(" {} ", text::truncate_to_width(&file.path, width.max(1))),
+            format!(" {} ", file.path),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -820,22 +882,7 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem, width: usize) -> V
         }));
         return lines;
     };
-    lines.extend(patch.lines().map(|line| {
-        let style = if line.starts_with("@@") {
-            Style::default().fg(Color::Cyan)
-        } else if line.starts_with("+++") || line.starts_with("---") {
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD)
-        } else if line.starts_with('+') {
-            Style::default().fg(Color::Green)
-        } else if line.starts_with('-') {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        Line::from(Span::styled(line.to_string(), style))
-    }));
+    lines.extend(super::diff::render_patch(&file.path, patch));
     lines
 }
 
@@ -1212,7 +1259,36 @@ mod tests {
         // Tree on the left, and the selected file's diff without pressing Enter.
         assert!(text.contains("lib.rs"), "got:\n{text}");
         assert!(text.contains("@@ -1,2 +1,3 @@"), "got:\n{text}");
-        assert!(text.contains("+new"), "got:\n{text}");
+        assert!(text.contains("+│ new"), "got:\n{text}");
+        assert!(text.contains("1    -│ old"), "got:\n{text}");
+    }
+
+    #[test]
+    fn highlighted_diff_cache_survives_repaints_and_resizes() {
+        let mut app = app_with(pull(Some("@@ -1 +1 @@\n-let old = 1;\n+let new = 2;")));
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Files;
+
+        render(&mut app, 100, 28);
+        let first = app
+            .github_inspector
+            .as_ref()
+            .unwrap()
+            .diff_render_cache
+            .clone()
+            .expect("first draw populates the cache");
+        render(&mut app, 100, 28);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().diff_render_cache,
+            Some(first.clone()),
+            "an unchanged repaint reuses the rendered lines"
+        );
+
+        render(&mut app, 120, 28);
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().diff_render_cache,
+            Some(first),
+            "horizontal viewport cropping does not require re-highlighting"
+        );
     }
 
     #[test]

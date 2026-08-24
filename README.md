@@ -322,14 +322,17 @@ bounded batches when a screen contains more than GitHub accepts in one query.
 The **Files** tab splits into a directory tree of the changed files and the selected
 file's diff, which follows the cursor without pressing Enter. Directories show their
 aggregated file count and `+/-` totals, files their status (`A`/`M`/`D`/`R`) and own
-totals, and single-child directory chains are folded into one row. In the tree, Up/Down
-moves, Left folds an open directory or steps out to its parent, Right unfolds it or
-enters it, and Enter folds a directory or moves focus to the diff. With the diff focused,
-Up/Down/PageUp/PageDown scroll, Left/Right scroll long lines horizontally, and Esc
-returns to the tree — `q` still leaves the inspector outright from anywhere. Clicking
-either pane focuses it, clicking a row selects it, and the
-wheel scrolls whichever pane the pointer is over. Terminals too narrow to split show only
-the focused pane. A file whose patch GitHub omits — binary or too large — says so instead.
+totals, and single-child directory chains are folded into one row. Diffs use old/new
+line-number gutters, full-row green/red backgrounds for additions/deletions, distinct
+hunk bands, and syntax highlighting selected from the file extension instead of showing
+the raw patch text. In the tree, Up/Down moves, Left folds an open directory or steps out
+to its parent, Right unfolds it or enters it, and Enter folds a directory or moves focus
+to the diff. With the diff focused, Up/Down/PageUp/PageDown scroll, Left/Right scroll
+long lines horizontally, and Esc returns to the tree — `q` still leaves the inspector
+outright from anywhere. Clicking either pane focuses it, clicking a row selects it, and
+the wheel scrolls whichever pane the pointer is over. Terminals too narrow to split show
+only the focused pane. A file whose patch GitHub omits — binary or too large — says so
+instead.
 
 The inspector requires the [`gh` CLI](https://cli.github.com/) to be installed and
 authenticated. It uses the host from the repository remote, including GitHub Enterprise

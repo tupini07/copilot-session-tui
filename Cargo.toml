@@ -35,7 +35,7 @@ fs4 = "1"
 uuid = { version = "1", features = ["v4"] }
 # Vendored to keep visual wrapping, cursor placement, and mouse hit-testing on the
 # same word-boundary algorithm. Upstream 0.11.6 supports character wrapping only.
-edtui = { path = "vendor/edtui", version = "0.11.6", default-features = false, features = ["mouse-support"] }
+edtui = { path = "vendor/edtui", version = "0.11.6", default-features = false, features = ["mouse-support", "syntax-highlighting"] }
 arboard = { version = "3.6.1", default-features = false }
 portable-pty = "0.9"
 vt100 = "0.16"
