@@ -321,6 +321,70 @@ pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
     );
 }
 
+pub fn draw_takeover_confirm(f: &mut Frame, app: &App) {
+    let Some(target) = app.pending_takeover.as_ref() else {
+        return;
+    };
+    let area = centered_rect(62, 50, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Take Over Active Session? ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let owners = if target.pids.len() == 1 {
+        format!("Copilot PID {}", target.pids[0])
+    } else {
+        format!("{} Copilot processes", target.pids.len())
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    &target.title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  This session is active in another process ({owners})."),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "  Taking over ends that exact Copilot process, then resumes the",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "  session in this CST instance. In-flight work will be interrupted.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "y/Enter",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" take over    "),
+                Span::styled(
+                    "n/Esc",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" cancel"),
+            ]),
+        ])
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
 pub fn draw_rename(f: &mut Frame, app: &App) {
     let area = centered_rect(50, 20, f.area());
     f.render_widget(Clear, area);
@@ -1077,5 +1141,37 @@ mod help_tests {
             "got:\n{text}"
         );
         assert!(text.contains("pull request"), "got:\n{text}");
+    }
+
+    #[test]
+    fn takeover_popup_names_the_session_and_interruption_risk() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.pending_takeover = Some(crate::app::TakeoverTarget {
+            id: "session-id".to_string(),
+            cwd: "C:/repo".to_string(),
+            title: "Important work".to_string(),
+            dir_path: std::path::PathBuf::from("session-id"),
+            pids: vec![1234],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal
+            .draw(|frame| draw_takeover_confirm(frame, &app))
+            .unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Take Over Active Session"), "got:\n{text}");
+        assert!(text.contains("Important work"), "got:\n{text}");
+        assert!(text.contains("Copilot PID"), "got:\n{text}");
+        assert!(text.contains("1234"), "got:\n{text}");
+        assert!(text.contains("In-flight work will be"), "got:\n{text}");
+        assert!(text.contains("interrupted."), "got:\n{text}");
+        assert!(text.contains("y/Enter take over"), "got:\n{text}");
     }
 }

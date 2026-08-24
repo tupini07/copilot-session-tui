@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// A child process running under a pseudo-terminal.
 ///
@@ -128,6 +129,71 @@ impl PtySession {
     }
 
     pub fn kill(&self) -> Result<()> {
+        if let Ok(mut child) = self.child.lock() {
+            if child.try_wait().ok().flatten().is_none() {
+                child
+                    .kill()
+                    .context("Failed to terminate the session process")?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn terminate_and_wait(&self, timeout: Duration) -> Result<Option<u32>> {
+        let pid = self.child.lock().ok().and_then(|child| child.process_id());
+        if let Some(code) = self.try_wait() {
+            return Ok(Some(code));
+        }
+        if let Err(error) = self.terminate_process() {
+            if let Some(code) = self.try_wait() {
+                return Ok(Some(code));
+            }
+            return Err(error);
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(mut child) = self.child.lock() {
+                if let Some(status) = child
+                    .try_wait()
+                    .context("Failed to check the session process after termination")?
+                {
+                    return Ok(Some(status.exit_code()));
+                }
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "Session process {} did not exit within {} ms",
+                    pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+                    timeout.as_millis()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(windows)]
+    fn terminate_process(&self) -> Result<()> {
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+
+        let child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Session process handle is unavailable"))?;
+        let handle = child
+            .as_raw_handle()
+            .context("Session process has no Windows handle")?;
+        // SAFETY: `handle` is owned by the live portable-pty child and remains valid
+        // while the child mutex guard above is held.
+        let terminated = unsafe { TerminateProcess(handle.cast(), 1) };
+        if terminated == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Failed to terminate the session process");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn terminate_process(&self) -> Result<()> {
         if let Ok(mut child) = self.child.lock() {
             if child.try_wait().ok().flatten().is_none() {
                 child

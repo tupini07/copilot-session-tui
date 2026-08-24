@@ -527,8 +527,29 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             input::handle_input(app)?;
         }
 
-        if app.should_quit
-            || app.should_resume.is_some()
+        if app.should_quit {
+            if app.exit_dir.is_none() {
+                app.exit_dir = app
+                    .mux
+                    .as_ref()
+                    .and_then(|mux| mux.focused_cwd())
+                    .map(|path| path.to_string_lossy().to_string());
+            }
+            let shutdown = app
+                .mux
+                .as_mut()
+                .map(|mux| mux.shutdown())
+                .transpose();
+            if let Err(error) = shutdown {
+                app.should_quit = false;
+                app.detach();
+                app.status_message = Some(format!("Cannot quit yet: {error}"));
+                continue;
+            }
+            break;
+        }
+
+        if app.should_resume.is_some()
             || app.should_update
             || app.should_new_session.is_some()
         {
@@ -543,10 +564,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     // Without a daemon, panes are children of this process and must be reaped. Capture the
     // exit directory first — shutdown drops the panes that hold it.
     if let Some(mux) = app.mux.as_mut() {
-        app.exit_dir = mux
-            .focused_cwd()
-            .map(|path| path.to_string_lossy().to_string());
-        let _ = mux.shutdown();
+        if app.exit_dir.is_none() {
+            app.exit_dir = mux
+                .focused_cwd()
+                .map(|path| path.to_string_lossy().to_string());
+        }
+        if !mux.panes.is_empty() {
+            mux.shutdown()?;
+        }
     }
 
     Ok(())

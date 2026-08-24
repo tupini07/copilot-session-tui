@@ -443,6 +443,7 @@ dependencies = [
  "fs4",
  "fuzzy-matcher",
  "ignore",
+ "libc",
  "portable-pty",
  "ratatui",
  "self_update",

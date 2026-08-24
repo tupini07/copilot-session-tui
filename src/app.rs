@@ -54,6 +54,7 @@ pub enum Mode {
     Rename,
     ConfirmDelete,
     ConfirmForceDelete,
+    ConfirmTakeover,
     FilterProject,
     Help,
     Settings,
@@ -96,6 +97,15 @@ pub struct PendingWorktree {
 pub enum DeleteTarget {
     SessionOnly,
     Managed { entry: ManagedWorktree, dirty: bool },
+}
+
+#[derive(Debug, Clone)]
+pub struct TakeoverTarget {
+    pub id: String,
+    pub cwd: String,
+    pub title: String,
+    pub dir_path: PathBuf,
+    pub pids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +402,7 @@ pub struct App {
     pub branch_input: String,
     pub branch_config: Option<EffectiveWorktreeConfig>,
     pub pending_delete: Option<DeleteTarget>,
+    pub pending_takeover: Option<TakeoverTarget>,
     /// Present only when multiplexing is enabled; owns every live pane.
     pub mux: Option<MuxState>,
     pub view: View,
@@ -510,6 +521,7 @@ impl App {
             branch_input: String::new(),
             branch_config: None,
             pending_delete: None,
+            pending_takeover: None,
             mux,
             view: View::List,
             pane_size: (24, 80),

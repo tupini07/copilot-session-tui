@@ -352,8 +352,14 @@ impl MuxState {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        for pane in &self.panes {
-            let _ = pane.kill();
+        let mut failures = Vec::new();
+        for pane in &mut self.panes {
+            if let Err(error) = pane.shutdown() {
+                failures.push(format!("'{}': {error}", pane.title));
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("Could not end all sessions: {}", failures.join("; "));
         }
         self.panes.clear();
         self.focused = None;

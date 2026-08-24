@@ -355,6 +355,14 @@ impl Pane {
         self.pty.kill()
     }
 
+    pub fn shutdown(&mut self) -> Result<()> {
+        let code = self
+            .pty
+            .terminate_and_wait(std::time::Duration::from_secs(3))?;
+        self.mark_exited(code);
+        Ok(())
+    }
+
     /// Pick up an exit that happened without the reader thread noticing yet.
     pub fn poll_exit(&mut self) {
         if self.is_running() {
@@ -654,6 +662,23 @@ mod tests {
 
         pane.kill().unwrap();
         wait_for_exit(&rx, &mut pane);
+    }
+
+    #[test]
+    fn shutdown_waits_until_the_child_is_really_gone() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(30, program, args), 24, 80, tx).unwrap();
+        assert!(pane.is_running());
+
+        pane.shutdown().unwrap();
+
+        assert!(!pane.is_running());
+        assert!(matches!(pane.status, PaneStatus::Exited(_)));
     }
 
     /// The full loop that makes the multiplexer usable: keystrokes are encoded, written to

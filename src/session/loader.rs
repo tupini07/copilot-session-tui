@@ -286,62 +286,11 @@ fn find_project_root(cwd: &str) -> Option<String> {
 
 /// Detect if a session is currently active by checking lock files
 fn detect_active(dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("inuse.") && name_str.ends_with(".lock") {
-            // Extract PID from filename
-            let pid_str = name_str
-                .strip_prefix("inuse.")
-                .and_then(|s| s.strip_suffix(".lock"));
-            if let Some(pid_str) = pid_str {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    if is_process_running(pid) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    !super::process::active_session_pids(dir).is_empty()
 }
 
 pub fn session_is_active(dir: &Path) -> bool {
     detect_active(dir)
-}
-
-/// Whether a process is still alive.
-///
-/// `OpenProcess` succeeds for a live process and fails with `ERROR_INVALID_PARAMETER`
-/// once the PID is gone. A PID belonging to a process we may not query (access denied)
-/// still exists, so that case counts as running.
-#[cfg(windows)]
-fn is_process_running(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
-    };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    // SAFETY: `OpenProcess` takes no pointers; the handle it returns is closed below and
-    // never escapes this function.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return GetLastError() != ERROR_INVALID_PARAMETER;
-        }
-        CloseHandle(handle);
-        true
-    }
-}
-
-#[cfg(not(windows))]
-fn is_process_running(pid: u32) -> bool {
-    use std::path::Path as StdPath;
-    StdPath::new(&format!("/proc/{}", pid)).exists()
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 pub mod loader;
 pub mod manager;
+pub mod process;
 pub mod worktree;
 
 use chrono::{DateTime, Utc};

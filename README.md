@@ -154,6 +154,12 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
 
+If Enter targets a session that is active in another process, CST shows a **Take Over**
+confirmation instead of refusing. Confirming terminates only the Copilot PID recorded by
+that session's lock (after validating that the PID still belongs to Copilot), waits for it
+to exit, and resumes the conversation in the current CST. Takeover interrupts any
+in-flight work in the previous process.
+
 ### Favorites
 
 Starred sessions are grouped into a **Favorites** section at the top of the list, in an
@@ -294,6 +300,9 @@ updates both stores while preserving unrelated and future `.cst.json` fields.
 `prefix` `q` is the one-step exit: it ends the attached session and quits CST without a
 detour through the session list. Because quitting also kills every other pane, it asks
 for confirmation when a session other than the one on screen is still running.
+Before CST exits it now waits for each pane's Copilot process to terminate; if any process
+does not close, CST stays open and reports the failure rather than leaving a live session
+lock behind.
 
 It quits CST the same way `q` does in the session list — the process exits normally
 after restoring the terminal. If your terminal *window* closes too, that is because CST

@@ -175,6 +175,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::ConfirmDelete => popups::draw_delete_confirm(f, app),
         Mode::ConfirmForceDelete => popups::draw_force_delete_confirm(f, app),
+        Mode::ConfirmTakeover => popups::draw_takeover_confirm(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
         Mode::Help => popups::draw_help(f, app),
         Mode::Rename => popups::draw_rename(f, app),

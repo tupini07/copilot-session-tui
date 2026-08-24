@@ -1,5 +1,6 @@
 use crate::app::{
-    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, View,
+    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, TakeoverTarget,
+    View,
 };
 use crate::config;
 use crate::session::loader;
@@ -89,6 +90,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::Rename => handle_rename(app, key.code),
         Mode::ConfirmDelete => handle_confirm_delete(app, key.code),
         Mode::ConfirmForceDelete => handle_confirm_force_delete(app, key.code),
+        Mode::ConfirmTakeover => handle_confirm_takeover(app, key.code),
         Mode::FilterProject => handle_filter_project(app, key.code),
         Mode::Help => handle_help(app, key.code),
         Mode::Settings => handle_settings(app, key.code),
@@ -342,29 +344,83 @@ fn resume_selected(app: &mut App) {
     let Some(session) = app.selected_session() else {
         return;
     };
-    let (id, cwd, title) = (
+    let (id, cwd, title, dir_path) = (
         session.id.clone(),
         session.cwd.clone(),
         session.display_name().to_string(),
+        session.dir_path.clone(),
     );
 
     if app.mux_enabled() {
         // A pane we own is not "busy elsewhere" — re-focus it instead of refusing.
-        if app.pane_for_session(&id).is_none() && session.is_active {
-            app.status_message = Some("Cannot resume: session is already active".to_string());
+        if app.pane_for_session(&id).is_some() {
+            resume_target(app, id, cwd, title);
             return;
         }
+    }
+
+    let pids = crate::session::process::active_session_pids(&dir_path);
+    if !pids.is_empty() {
+        app.pending_takeover = Some(TakeoverTarget {
+            id,
+            cwd,
+            title,
+            dir_path,
+            pids,
+        });
+        app.mode = Mode::ConfirmTakeover;
+        return;
+    }
+    mark_session_inactive(app, &id);
+    resume_target(app, id, cwd, title);
+}
+
+fn resume_target(app: &mut App, id: String, cwd: String, title: String) {
+    if app.mux_enabled() {
         match app.attach_session(&id, &cwd, title) {
             Ok(()) => crate::mux_input::sync_workspace_panels(app),
             Err(error) => app.status_message = Some(format!("Cannot attach session: {error}")),
         }
-        return;
-    }
-
-    if session.is_active {
-        app.status_message = Some("Cannot resume: session is already active".to_string());
     } else {
         app.should_resume = Some((id, cwd));
+    }
+}
+
+fn mark_session_inactive(app: &mut App, id: &str) {
+    if let Some(session) = app.sessions.iter_mut().find(|session| session.id == id) {
+        session.is_active = false;
+    }
+}
+
+fn handle_confirm_takeover(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            let Some(target) = app.pending_takeover.take() else {
+                app.mode = Mode::Normal;
+                return;
+            };
+            app.mode = Mode::Normal;
+            match crate::session::process::terminate_session(&target.dir_path, &target.pids) {
+                Ok(_) if !loader::session_is_active(&target.dir_path) => {
+                    mark_session_inactive(app, &target.id);
+                    resume_target(app, target.id, target.cwd, target.title);
+                }
+                Ok(_) => {
+                    app.status_message = Some(
+                        "Takeover failed: the previous Copilot process is still active".into(),
+                    );
+                }
+                Err(error) => {
+                    app.status_message = Some(format!("Takeover failed: {error}"));
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.pending_takeover = None;
+            app.mode = Mode::Normal;
+            app.status_message = Some("Takeover cancelled".to_string());
+        }
+        _ => {}
     }
 }
 
@@ -1266,6 +1322,46 @@ mod tests {
         let project = app.cwd_project.clone().unwrap();
         assert_eq!(app.project_filter.as_ref(), Some(&project));
         assert!(app.unique_projects.contains(&project));
+    }
+
+    #[test]
+    fn active_session_opens_takeover_confirmation_instead_of_refusing() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        std::fs::write(
+            temp.path().join(format!("inuse.{pid}.lock")),
+            pid.to_string(),
+        )
+        .unwrap();
+        let session = crate::session::Session {
+            id: "active-session".to_string(),
+            cwd: temp.path().to_string_lossy().to_string(),
+            project_root: temp.path().to_string_lossy().to_string(),
+            summary: Some("Active elsewhere".to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: true,
+            dir_path: temp.path().to_path_buf(),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        };
+        let mut app = App::new(vec![session], config::UserConfig::default());
+
+        resume_selected(&mut app);
+
+        assert_eq!(app.mode, Mode::ConfirmTakeover);
+        let takeover = app.pending_takeover.as_ref().unwrap();
+        assert_eq!(takeover.id, "active-session");
+        assert_eq!(takeover.pids, vec![pid]);
+        assert!(app.should_resume.is_none());
+
+        handle_confirm_takeover(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pending_takeover.is_none());
+        assert!(app.should_resume.is_none());
     }
 
     fn favorites_app() -> App {
