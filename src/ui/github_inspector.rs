@@ -898,7 +898,11 @@ fn draw_scrollbar(
         .track_style(Style::default().fg(Color::DarkGray))
         .thumb_symbol("█")
         .thumb_style(Style::default().fg(Color::Magenta));
-    let mut state = ScrollbarState::new(line_count)
+    // With an explicit viewport length Ratatui expects the number of possible
+    // positions, not the total line count. Passing `line_count` makes the thumb stop
+    // early even after the text has reached its real maximum offset.
+    let positions = line_count.saturating_sub(viewport_height).saturating_add(1);
+    let mut state = ScrollbarState::new(positions)
         .position(offset)
         .viewport_content_length(viewport_height);
     f.render_stateful_widget(scrollbar, area, &mut state);
@@ -985,6 +989,51 @@ mod tests {
             url: format!("https://github.com/octo/widgets/issues/{number}"),
             body: "A description with enough words to wrap cleanly.".to_string(),
         }
+    }
+
+    fn rendered_scrollbar(line_count: usize, viewport: usize, offset: usize) -> Vec<String> {
+        let backend = TestBackend::new(2, viewport as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_scrollbar(
+                    frame,
+                    Rect::new(0, 0, 2, viewport as u16),
+                    line_count,
+                    viewport,
+                    offset,
+                );
+            })
+            .unwrap();
+        (0..viewport as u16)
+            .map(|row| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((1, row))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_the_end_at_the_real_maximum_offset() {
+        let at_top = rendered_scrollbar(20, 10, 0);
+        let at_bottom = rendered_scrollbar(20, 10, 10);
+
+        assert_eq!(at_top.first().map(String::as_str), Some("█"));
+        assert_eq!(at_top.last().map(String::as_str), Some("│"));
+        assert_eq!(at_bottom.first().map(String::as_str), Some("│"));
+        assert_eq!(at_bottom.last().map(String::as_str), Some("█"));
+    }
+
+    #[test]
+    fn content_that_fits_has_no_scrollbar() {
+        assert!(rendered_scrollbar(10, 10, 0)
+            .iter()
+            .all(|symbol| symbol == " "));
     }
 
     fn issue() -> GithubItem {
