@@ -177,7 +177,7 @@ fn draw_prompt(f: &mut Frame, inspector: &GithubInspector) {
 
 fn draw_loading(f: &mut Frame, inspector: &GithubInspector) {
     let number = inspector.number.unwrap_or_default();
-    let frame = spinner_frame();
+    let frame = super::spinner_frame();
     draw_message_screen(
         f,
         " GitHub Inspector ",
@@ -950,15 +950,6 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         width,
         height,
     }
-}
-
-fn spinner_frame() -> &'static str {
-    const FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-    let tick = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() / 120)
-        .unwrap_or_default();
-    FRAMES[tick as usize % FRAMES.len()]
 }
 
 #[cfg(test)]

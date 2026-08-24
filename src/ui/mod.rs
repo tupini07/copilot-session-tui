@@ -15,6 +15,20 @@ use ratatui::Frame;
 
 use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus, WorkspaceHelp};
 
+const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+pub(crate) fn spinner_frame() -> &'static str {
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() / 120)
+        .unwrap_or_default();
+    spinner_frame_at(tick)
+}
+
+fn spinner_frame_at(tick: u128) -> &'static str {
+    SPINNER_FRAMES[tick as usize % SPINNER_FRAMES.len()]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachedLayout {
     pub chat: Rect,
@@ -129,11 +143,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .fg(ratatui::style::Color::Black)
                 .bg(ratatui::style::Color::Magenta),
         ),
-        ratatui::text::Span::raw(if app.sessions_loading() {
-            format!("  {} sessions · loading…", app.filtered_indices.len())
-        } else {
-            format!("  {} sessions", app.filtered_indices.len())
-        }),
+        ratatui::text::Span::raw(format!("  {} sessions", app.filtered_indices.len())),
+        ratatui::text::Span::styled(
+            if app.sessions_loading() {
+                format!(" · {} loading remaining sessions…", spinner_frame())
+            } else {
+                String::new()
+            },
+            ratatui::style::Style::default()
+                .fg(ratatui::style::Color::Cyan)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
     ]));
 
     f.render_widget(title, main_layout[0]);
@@ -282,6 +302,19 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("0 sessions · loading…"), "got:\n{text}");
+        assert!(text.contains("0 sessions"), "got:\n{text}");
+        assert!(text.contains("loading remaining sessions…"), "got:\n{text}");
+        assert!(
+            SPINNER_FRAMES.iter().any(|frame| text.contains(frame)),
+            "got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn spinner_advances_through_all_frames() {
+        for (tick, frame) in SPINNER_FRAMES.iter().enumerate() {
+            assert_eq!(spinner_frame_at(tick as u128), *frame);
+        }
+        assert_eq!(spinner_frame_at(SPINNER_FRAMES.len() as u128), SPINNER_FRAMES[0]);
     }
 }

@@ -170,9 +170,10 @@ project temporarily shows a single flat, sorted list instead.
 
 Favorites are also CST's fast startup set. Their lightweight metadata is loaded before
 the first frame; the remaining session catalog is discovered on a background thread and
-merged into the list without changing the selected session. The title bar says
-`loading…` until that scan finishes. Searching and project filtering cover the sessions
-loaded so far, then automatically include the rest when they arrive.
+merged into the list without changing the selected session. An animated
+`⠋ loading remaining sessions…` indicator stays in the title bar until that scan
+finishes. Searching and project filtering cover the sessions loaded so far, then
+automatically include the rest when they arrive.
 
 ### Scratchpad editing
 

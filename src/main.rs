@@ -586,7 +586,8 @@ fn pump_mux(app: &mut App) -> Result<()> {
         .panes
         .iter()
         .any(|pane| pane.is_running() && pane.is_blank())
-        || app.github_loading();
+        || app.github_loading()
+        || app.sessions_loading();
     let timeout = if animating { 100 } else { 250 };
 
     let first = match mux
