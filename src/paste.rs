@@ -27,6 +27,14 @@ use std::time::Duration;
 /// protect a genuine Enter that was typed while the reader was briefly descheduled.
 const MIN_PASTE_CHARS: usize = 8;
 
+/// Give the console pipe time to deliver the records after the first character.
+///
+/// A zero-time poll here let the first character escape as typing, then folded the
+/// remainder into a paste on the next read (`A` followed by Copilot's paste card).
+/// Five milliseconds is well below human key-repeat/typing intervals but comfortably
+/// above the small scheduling gap Windows Terminal can put after the first record.
+const BURST_START_GRACE: Duration = Duration::from_millis(5);
+
 /// How long to keep waiting for more of a burst once one is clearly under way.
 ///
 /// A large paste crosses the console pipe in several chunks with sub-millisecond gaps.
@@ -43,19 +51,26 @@ pub fn read_events() -> io::Result<Vec<Event>> {
     if !cfg!(windows) || paste_char(&first).is_none() {
         return Ok(vec![first]);
     }
+    collect_run(first, event::poll, event::read)
+}
 
+fn collect_run<P, R>(first: Event, mut poll: P, mut read: R) -> io::Result<Vec<Event>>
+where
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+{
     let mut run = vec![first];
     let mut trailing = None;
     loop {
         let grace = if text_len(&run) >= 2 {
             BURST_GRACE
         } else {
-            Duration::ZERO
+            BURST_START_GRACE
         };
-        if !event::poll(grace)? {
+        if !poll(grace)? {
             break;
         }
-        let next = event::read()?;
+        let next = read()?;
         if paste_char(&next).is_some() || is_key_release(&next) {
             run.push(next);
         } else {
@@ -145,6 +160,37 @@ mod tests {
     fn folds_a_long_burst_into_one_paste() {
         let folded = fold(typed("hello world"));
         assert_eq!(folded, vec![Event::Paste("hello world".to_string())]);
+    }
+
+    #[test]
+    fn delayed_remainder_does_not_leave_the_first_character_outside_the_paste() {
+        use std::cell::{Cell, RefCell};
+        use std::collections::VecDeque;
+
+        let queue = RefCell::new(VecDeque::from(typed("fter the first character")));
+        let polls = Cell::new(0);
+        let events = collect_run(
+            press(KeyCode::Char('A')),
+            |timeout| {
+                // Models Windows Terminal delivering the first record immediately and
+                // the remaining console records a few milliseconds later.
+                let call = polls.get();
+                polls.set(call + 1);
+                Ok(!queue.borrow().is_empty() && (call > 0 || timeout >= Duration::from_millis(3)))
+            },
+            || {
+                queue
+                    .borrow_mut()
+                    .pop_front()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "empty queue"))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![Event::Paste("After the first character".to_string())]
+        );
     }
 
     #[test]
