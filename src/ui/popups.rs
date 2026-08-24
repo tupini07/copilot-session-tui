@@ -697,7 +697,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         model_editing,
     ));
     lines.push(Line::from(Span::styled(
-        "    Pass --model flag (e.g. gpt-5.2, claude-sonnet-4)",
+        "    Default for new sessions only (e.g. gpt-5.2, claude-sonnet-4)",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -722,7 +722,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         false,
     ));
     lines.push(Line::from(Span::styled(
-        "    Pass --reasoning-effort (low/medium/high/xhigh)",
+        "    Default for new sessions only (low/medium/high/xhigh)",
         Style::default().fg(Color::DarkGray),
     )));
 

@@ -8,21 +8,28 @@ use crate::config::{EffectiveWorktreeConfig, UserConfig};
 
 use super::worktree::{self, ManagedWorktree};
 
-fn apply_config_args(cmd: &mut Command, config: &UserConfig) {
-    for arg in config_args(config) {
+fn apply_args(cmd: &mut Command, args: Vec<String>) {
+    for arg in args {
         cmd.arg(arg);
     }
 }
 
-/// Copilot CLI arguments implied by the user's config.
-///
-/// Shared by the launch-and-exit path (`std::process::Command`) and the multiplexer
-/// path (`portable_pty::CommandBuilder`) so both modes launch identical sessions.
-pub fn config_args(config: &UserConfig) -> Vec<String> {
+/// Launch policy that applies every time Copilot starts.
+fn runtime_args(config: &UserConfig) -> Vec<String> {
     let mut args = Vec::new();
     if config.yolo {
         args.push("--yolo".to_string());
     }
+    args
+}
+
+/// Defaults applied only while creating a new session.
+///
+/// Copilot persists model and effort in the session. Passing them again on resume would
+/// overwrite a model the user selected inside that conversation with CST's current
+/// defaults.
+fn new_session_config_args(config: &UserConfig) -> Vec<String> {
+    let mut args = runtime_args(config);
     if let Some(ref model) = config.model {
         args.push(format!("--model={}", model));
     }
@@ -35,9 +42,13 @@ pub fn config_args(config: &UserConfig) -> Vec<String> {
 /// Program plus arguments for resuming an existing session inside a pane.
 pub fn resume_command(session_id: &str, config: &UserConfig) -> Result<(String, Vec<String>)> {
     let copilot = find_copilot()?;
+    Ok((copilot, resume_args(session_id, config)))
+}
+
+fn resume_args(session_id: &str, config: &UserConfig) -> Vec<String> {
     let mut args = vec![format!("--resume={}", session_id)];
-    args.extend(config_args(config));
-    Ok((copilot, args))
+    args.extend(runtime_args(config));
+    args
 }
 
 /// Program plus arguments for starting a fresh session inside a pane, and the id that
@@ -58,7 +69,7 @@ pub fn new_session_command(config: &UserConfig) -> Result<(String, Vec<String>, 
 fn new_session_args(config: &UserConfig) -> (Vec<String>, String) {
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut args = vec![format!("--session-id={session_id}")];
-    args.extend(config_args(config));
+    args.extend(new_session_config_args(config));
     (args, session_id)
 }
 
@@ -143,7 +154,7 @@ pub fn resume_session(session_id: &str, cwd: &str, config: &UserConfig) -> Resul
 
     let mut cmd = Command::new(copilot);
     cmd.arg(format!("--resume={}", session_id));
-    apply_config_args(&mut cmd, config);
+    apply_args(&mut cmd, runtime_args(config));
 
     // Set the working directory to the session's original cwd
     if !cwd.is_empty() {
@@ -163,7 +174,7 @@ pub fn start_new_session(cwd: &str, config: &UserConfig) -> Result<()> {
     let copilot = find_copilot()?;
 
     let mut cmd = Command::new(copilot);
-    apply_config_args(&mut cmd, config);
+    apply_args(&mut cmd, new_session_config_args(config));
     let cwd_path = Path::new(cwd);
     if cwd_path.exists() {
         cmd.current_dir(cwd_path);
@@ -193,7 +204,7 @@ pub fn start_worktree_session(
     );
 
     let mut cmd = Command::new(copilot);
-    apply_config_args(&mut cmd, config);
+    apply_args(&mut cmd, new_session_config_args(config));
     cmd.current_dir(&created.entry.path);
 
     if let Err(error) = cmd.status() {
@@ -290,6 +301,7 @@ mod tests {
         let config = UserConfig {
             yolo: true,
             model: Some("claude-opus-5".to_string()),
+            reasoning_effort: Some("high".to_string()),
             ..UserConfig::default()
         };
 
@@ -299,6 +311,35 @@ mod tests {
         assert!(
             args.iter().any(|arg| arg == "--model=claude-opus-5"),
             "got {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--reasoning-effort=high"),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn resuming_preserves_the_sessions_model_and_effort() {
+        let config = UserConfig {
+            yolo: true,
+            model: Some("new-default-model".to_string()),
+            reasoning_effort: Some("xhigh".to_string()),
+            ..UserConfig::default()
+        };
+
+        let args = resume_args("existing-session", &config);
+
+        assert_eq!(args[0], "--resume=existing-session");
+        assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--model=")),
+            "a CST default must not replace the session's model: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--reasoning-effort=")),
+            "a CST default must not replace the session's effort: {args:?}"
         );
     }
 

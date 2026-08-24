@@ -377,6 +377,11 @@ Press `,` for global settings. Existing global files containing only `yolo`, `mo
 and `reasoning_effort` remain valid. Terminal and worktree defaults are stored in the
 same config:
 
+`model` and `reasoning_effort` are **new-session defaults**. CST does not pass them when
+resuming an existing session, so a model or effort selected inside that conversation
+survives reopening it. `yolo` remains a launch policy and is applied on both new and
+resumed sessions.
+
 ```json
 {
   "yolo": false,
