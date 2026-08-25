@@ -231,9 +231,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(
-                " c chat  e scratch  t terminal  C-h help  C-g github  d list  w switch  n/p cycle  x end  q quit ",
-            ),
+            Span::raw(root_command_hint(&prefix)),
         ],
         PaneStatus::Running => vec![
             Span::raw(" "),
@@ -299,6 +297,13 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status, area);
 }
 
+fn root_command_hint(prefix: &str) -> String {
+    format!(
+        " c chat e scratch t term s snippets C-h help C-g github d list w switch \
+         n/p cycle 1-9 jump x end q quit {prefix} send Esc cancel "
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +314,33 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::sync::mpsc;
+
+    #[test]
+    fn live_prefix_menu_covers_every_root_command() {
+        let hint = root_command_hint("C-b");
+        for entry in [
+            "c chat",
+            "e scratch",
+            "t term",
+            "s snippets",
+            "C-h help",
+            "C-g github",
+            "d list",
+            "w switch",
+            "n/p cycle",
+            "1-9 jump",
+            "x end",
+            "q quit",
+            "C-b send",
+            "Esc cancel",
+        ] {
+            assert!(hint.contains(entry), "missing {entry:?} from {hint:?}");
+        }
+        assert!(
+            text::display_width(&hint) <= 125,
+            "keep the complete menu usable in a typical 128-column terminal: {hint:?}"
+        );
+    }
 
     #[test]
     fn known_references_are_styled_and_others_left_alone() {

@@ -598,6 +598,10 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         ));
         text.push(help_line(&format!("{prefix} s"), "Open prompt snippets"));
         text.push(help_line(
+            &format!("{prefix} C-g i"),
+            "Inspect a GitHub issue or pull request",
+        ));
+        text.push(help_line(
             &format!("{prefix} C-h e"),
             "Open scratchpad shortcut help",
         ));
@@ -1140,6 +1144,8 @@ mod help_tests {
             text.contains("GitHub references in the chat"),
             "got:\n{text}"
         );
+        assert!(text.contains("C-b C-g i"), "got:\n{text}");
+        assert!(text.contains("Inspect a GitHub issue"), "got:\n{text}");
         assert!(text.contains("pull request"), "got:\n{text}");
     }
 
