@@ -288,7 +288,7 @@ starting and has not enabled bracketed paste yet, CST keeps the modal open and a
 to wait rather than risk turning a line break into Enter.
 
 The snippet list supports `a` add, `e` edit, and `d` delete (with confirmation). In the
-editor, Tab / Shift+Tab moves between name, prompt, and scope; arrows, Home/End,
+editor, Tab / Shift+Tab moves through name, scope, and prompt in visual order; arrows, Home/End,
 Backspace, and Delete edit at the cursor; Enter adds a line break in the prompt; Ctrl+G
 or Space on the scope field toggles scope; Ctrl+S saves.
 

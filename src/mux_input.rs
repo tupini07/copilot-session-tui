@@ -213,7 +213,7 @@ fn handle_snippet_editor_key(app: &mut App, key: KeyEvent) {
         KeyCode::Home => modal.move_editor_line_boundary(false),
         KeyCode::End => modal.move_editor_line_boundary(true),
         KeyCode::Enter => match modal.editor_field {
-            SnippetEditorField::Name => modal.editor_field = SnippetEditorField::Prompt,
+            SnippetEditorField::Name => modal.editor_field = SnippetEditorField::Scope,
             SnippetEditorField::Prompt => modal.insert_editor_text("\n"),
             SnippetEditorField::Scope => toggle_snippet_scope(app),
         },
@@ -1932,6 +1932,40 @@ mod tests {
         assert_eq!(
             app.snippet_modal.as_ref().unwrap().screen,
             SnippetScreen::List
+        );
+    }
+
+    #[test]
+    fn snippet_editor_navigation_follows_name_scope_prompt() {
+        let mut app = attached_mux_app("snippet-navigation-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Name
+        );
+
+        snippet_key(&mut app, KeyCode::Tab);
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Scope
+        );
+        snippet_key(&mut app, KeyCode::Tab);
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Prompt
+        );
+        snippet_key(&mut app, KeyCode::BackTab);
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Scope
+        );
+
+        app.snippet_modal.as_mut().unwrap().editor_field = SnippetEditorField::Name;
+        snippet_key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Scope
         );
     }
 

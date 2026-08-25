@@ -33,9 +33,9 @@ pub enum SnippetEditorField {
 impl SnippetEditorField {
     pub fn next(self, forward: bool) -> Self {
         match (self, forward) {
-            (Self::Name, true) | (Self::Scope, false) => Self::Prompt,
-            (Self::Prompt, true) | (Self::Name, false) => Self::Scope,
-            (Self::Scope, true) | (Self::Prompt, false) => Self::Name,
+            (Self::Name, true) | (Self::Prompt, false) => Self::Scope,
+            (Self::Scope, true) | (Self::Name, false) => Self::Prompt,
+            (Self::Prompt, true) | (Self::Scope, false) => Self::Name,
         }
     }
 }
@@ -330,6 +330,35 @@ mod tests {
         modal.begin_edit();
         assert_eq!(modal.editor_scope, SnippetScope::Project);
         assert_eq!(modal.editor_name, "project");
+    }
+
+    #[test]
+    fn editor_field_order_matches_the_visual_layout() {
+        assert_eq!(
+            SnippetEditorField::Name.next(true),
+            SnippetEditorField::Scope
+        );
+        assert_eq!(
+            SnippetEditorField::Scope.next(true),
+            SnippetEditorField::Prompt
+        );
+        assert_eq!(
+            SnippetEditorField::Prompt.next(true),
+            SnippetEditorField::Name
+        );
+
+        assert_eq!(
+            SnippetEditorField::Name.next(false),
+            SnippetEditorField::Prompt
+        );
+        assert_eq!(
+            SnippetEditorField::Prompt.next(false),
+            SnippetEditorField::Scope
+        );
+        assert_eq!(
+            SnippetEditorField::Scope.next(false),
+            SnippetEditorField::Name
+        );
     }
 
     #[test]
