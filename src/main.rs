@@ -613,7 +613,7 @@ fn pump_mux(app: &mut App) -> Result<()> {
         .any(|pane| pane.is_running() && pane.is_blank())
         || app.github_loading()
         || app.sessions_loading();
-    let timeout = if animating { 100 } else { 250 };
+    let timeout = mux_wait_timeout(app, animating);
 
     let first = match mux
         .receiver
@@ -645,6 +645,19 @@ fn pump_mux(app: &mut App) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
+    if animating || app.attached_terminal_visible() || app.detail_load_pending() {
+        100
+    } else if app.background_work_pending() {
+        250
+    } else {
+        // Input and PTY output wake the channel immediately. This is only the idle
+        // maintenance cadence; redrawing every 250 ms across many CST instances was
+        // consuming a meaningful fraction of a CPU core for no visible change.
+        5_000
+    }
 }
 
 fn apply_terminal_event(app: &mut App, event: crossterm::event::Event) -> Result<()> {
@@ -739,6 +752,20 @@ mod tests {
         };
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn idle_mux_waits_for_events_instead_of_redrawing_four_times_per_second() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        assert_eq!(mux_wait_timeout(&app, false), 5_000);
+        assert_eq!(mux_wait_timeout(&app, true), 100);
+
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.begin_session_load(receiver);
+        assert_eq!(mux_wait_timeout(&app, false), 250);
+
+        app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
+        assert_eq!(mux_wait_timeout(&app, false), 100);
     }
 
     #[test]

@@ -116,7 +116,7 @@ impl Scratchpad {
             self.state.reset_vertical_goal();
         }
         self.status_message = None;
-        let before = self.content();
+        let may_edit = event_may_edit(&event);
         if !self.handle_shortcut(&event) {
             self.prepare_selection_for_input(&event);
             self.handler.on_event(event, &mut self.state);
@@ -125,7 +125,7 @@ impl Scratchpad {
             }
         }
 
-        if self.content() != before {
+        if may_edit {
             self.dirty = true;
             self.last_edit = Some(Instant::now());
         }
@@ -147,6 +147,10 @@ impl Scratchpad {
             }
         }
         Ok(())
+    }
+
+    pub fn autosave_pending(&self) -> bool {
+        self.dirty
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -604,6 +608,36 @@ fn is_vertical_navigation(event: &Event) -> bool {
     )
 }
 
+fn event_may_edit(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return matches!(event, Event::Paste(_));
+    };
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    if is_ctrl(key, 'a') || is_alt(key, 'a') || is_ctrl(key, 'c') {
+        return false;
+    }
+    if matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+    ) && !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        return false;
+    }
+    // Be conservative for every other supported event. edtui has more editing
+    // chords than CST customizes (including AltGr normalization); an unnecessary
+    // autosave is harmless, while a missed mutation can lose scratchpad content.
+    is_supported_key(key.code)
+}
+
 fn is_supported_key(key: KeyCode) -> bool {
     matches!(
         key,
@@ -841,6 +875,51 @@ impl ClipboardTrait for TextClipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_classification_does_not_dirty_navigation_or_copy() {
+        assert!(!event_may_edit(&key(KeyCode::Left, KeyModifiers::NONE)));
+        assert!(!event_may_edit(&key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(event_may_edit(&key(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(event_may_edit(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(event_may_edit(&Event::Paste("many\nlines".to_string())));
+        for character in ['k', 'o', 'j', 'h', 'd', 'u'] {
+            assert!(
+                event_may_edit(&key(KeyCode::Char(character), KeyModifiers::CONTROL)),
+                "edtui Ctrl+{character} may edit"
+            );
+        }
+        assert!(
+            event_may_edit(&key(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            "AltGr characters may be normalized into inserted text"
+        );
+        assert!(!event_may_edit(&key(KeyCode::Right, KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn edtui_editing_chord_marks_dirty_and_is_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = scratchpad_path_in(temp.path(), "dirty-chord");
+        fs::write(&path, "delete this").unwrap();
+        let mut scratchpad = Scratchpad::open_in(temp.path(), "dirty-chord").unwrap();
+
+        scratchpad
+            .handle_event(key(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(scratchpad.is_dirty());
+        scratchpad.save().unwrap();
+
+        assert_ne!(fs::read_to_string(path).unwrap(), "delete this");
+    }
 
     fn test_scratchpad(content: &str) -> (tempfile::TempDir, Scratchpad) {
         let temp = tempfile::tempdir().unwrap();

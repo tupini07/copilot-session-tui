@@ -1579,6 +1579,23 @@ impl App {
         self.session_load_receiver.is_some()
     }
 
+    pub fn background_work_pending(&self) -> bool {
+        self.session_load_receiver.is_some()
+            || self.update_receiver.is_some()
+            || self.github_request_receiver.is_some()
+            || self.github_patch_receiver.is_some()
+            || self.github_repo_receiver.is_some()
+            || self.github_reference_receiver.is_some()
+            || self
+                .scratchpad
+                .as_ref()
+                .is_some_and(Scratchpad::autosave_pending)
+    }
+
+    pub fn detail_load_pending(&self) -> bool {
+        self.detail_pending.is_some()
+    }
+
     pub fn poll_session_load(&mut self) {
         let Some(receiver) = self.session_load_receiver.as_ref() else {
             return;

@@ -351,6 +351,11 @@ Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;
 states are forwarded through the mux so Copilot retains the outer terminal's scrolling,
 paste, copy, and Windows Terminal tab-spinner behavior.
 
+Input and Copilot output wake the mux immediately. Established idle panes do not redraw
+continuously: CST uses a five-second maintenance cadence when nothing is changing, while
+animations, visible terminals, background results, detail settling, and scratchpad
+autosave retain 100–250 ms polling.
+
 The prefix also works from the session list, so detaching never strands a running pane:
 `prefix` `w` opens the switcher, `prefix` `n`/`p` and `prefix` `1`–`9` re-attach directly,
 and `prefix` `x` ends the focused one. The footer shows how many panes are running.
