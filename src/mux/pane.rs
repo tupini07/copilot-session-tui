@@ -1,6 +1,7 @@
 use anyhow::Result;
-use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -65,6 +66,7 @@ pub struct Pane {
     /// When the child was spawned, so the UI can say how long a slow start has taken.
     pub started_at: Instant,
     parser: PaneParser,
+    has_visible_output: Arc<AtomicBool>,
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
@@ -105,12 +107,19 @@ impl Pane {
         )));
 
         let pump_parser = Arc::clone(&parser);
+        let has_visible_output = Arc::new(AtomicBool::new(false));
+        let pump_has_visible_output = Arc::clone(&has_visible_output);
         std::thread::spawn(move || {
             while let Ok(chunk) = chunk_rx.recv() {
                 match chunk {
                     PtyChunk::Output(bytes) => {
                         if let Ok(mut parser) = pump_parser.lock() {
                             parser.process(&bytes);
+                            if !pump_has_visible_output.load(Ordering::Relaxed)
+                                && Self::screen_has_visible_text(parser.screen())
+                            {
+                                pump_has_visible_output.store(true, Ordering::Release);
+                            }
                         }
                         // The UI thread coalesces these; one wakeup per chunk is fine.
                         if events.send(MuxEvent::Output(id)).is_err() {
@@ -133,6 +142,7 @@ impl Pane {
             status: PaneStatus::Running,
             started_at: Instant::now(),
             parser,
+            has_visible_output,
             pty,
             mouse_captured: false,
             viewport: Viewport {
@@ -154,8 +164,7 @@ impl Pane {
     /// sequences long before any text, so "has the screen got anything on it" is a more
     /// honest readiness signal than "have we received bytes".
     pub fn is_blank(&self) -> bool {
-        self.with_screen(|screen| screen.contents().trim().is_empty())
-            .unwrap_or(true)
+        !self.has_visible_output.load(Ordering::Acquire)
     }
 
     /// Feed bytes straight into the parser, standing in for child output in tests
@@ -164,7 +173,23 @@ impl Pane {
     pub fn feed_synthetic(&mut self, bytes: &[u8]) {
         if let Ok(mut parser) = self.parser.lock() {
             parser.process(bytes);
+            if Self::screen_has_visible_text(parser.screen()) {
+                self.has_visible_output.store(true, Ordering::Release);
+            }
         }
+    }
+
+    fn screen_has_visible_text(screen: &vt100::Screen) -> bool {
+        let (rows, cols) = screen.size();
+        (0..rows).any(|row| {
+            (0..cols).any(|col| {
+                screen.cell(row, col).is_some_and(|cell| {
+                    cell.contents()
+                        .chars()
+                        .any(|character| !character.is_whitespace())
+                })
+            })
+        })
     }
 
     pub fn mark_exited(&mut self, code: Option<u32>) {
@@ -234,7 +259,23 @@ impl Pane {
         if !self.is_running() {
             return Ok(());
         }
-        if let Some(bytes) = keys::encode(key, self.application_cursor()) {
+        // DECCKM only changes cursor/navigation key encodings. Reading it for every
+        // ordinary character needlessly contended with the parser thread that is
+        // producing Copilot's echo.
+        let application_cursor = if matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+        ) {
+            self.application_cursor()
+        } else {
+            false
+        };
+        if let Some(bytes) = keys::encode(key, application_cursor) {
             self.pty.write(&bytes)?;
         }
         Ok(())
@@ -598,6 +639,26 @@ mod tests {
         assert!(!pane.bracketed_paste());
 
         wait_for_exit(&rx, &mut pane);
+    }
+
+    #[test]
+    fn startup_readiness_is_cached_without_rebuilding_screen_contents() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(1, program, args), 24, 80, tx).unwrap();
+
+        assert!(pane.is_blank());
+        pane.feed_synthetic(b"\x1b[?2004h\x1b[6n");
+        assert!(pane.is_blank(), "control sequences are not visible output");
+        pane.feed_synthetic(b"Copilot ready");
+        assert!(!pane.is_blank());
+        assert!(!pane.is_blank(), "subsequent checks are atomic reads");
+
+        pane.shutdown().unwrap();
     }
 
     #[test]
