@@ -47,7 +47,10 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
     // text — in Normal mode every character is a command, so pasting must not run one.
     // These prompts are all single-line, so line breaks are dropped rather than sent.
     if let Event::Paste(text) = event {
-        if matches!(
+        if app.mode == Mode::Settings && app.settings_editing.is_some() {
+            app.settings_input
+                .extend(text.chars().filter(|character| !character.is_control()));
+        } else if matches!(
             app.mode,
             Mode::Search | Mode::Rename | Mode::FilterProject | Mode::BranchName
         ) {
@@ -1237,6 +1240,21 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn pasting_a_uuid_into_the_ntfy_topic_editor_keeps_it_editable() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        app.settings_selected = 10;
+        app.settings_editing = Some(SettingsEditField::NtfyTopic);
+        let topic = "f7dd1a49-c978-455a-a170-136c29ed39a4";
+
+        handle_terminal_event(&mut app, Event::Paste(format!("{topic}\r\n"))).unwrap();
+
+        assert_eq!(app.settings_input, topic);
+        assert_eq!(app.settings_editing, Some(SettingsEditField::NtfyTopic));
+        assert_eq!(app.mode, Mode::Settings);
     }
 
     #[test]

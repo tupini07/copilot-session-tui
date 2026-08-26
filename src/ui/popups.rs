@@ -960,7 +960,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     setting_lines.push(lines.len());
     let topic_editing = app.settings_editing == Some(SettingsEditField::NtfyTopic);
     let topic_display = if topic_editing {
-        format!("{}█", "•".repeat(app.settings_input.chars().count()))
+        format!("{}█", app.settings_input)
     } else if app.config.notifications.topic.is_empty() {
         "(not configured)".to_string()
     } else {
@@ -969,7 +969,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     lines.push(settings_row(
         "ntfy Topic",
         &topic_display,
-        if app.config.notifications.topic.is_empty() {
+        if app.config.notifications.topic.is_empty() && app.settings_input.is_empty() {
             Color::DarkGray
         } else {
             Color::Cyan
@@ -1319,7 +1319,7 @@ mod help_tests {
     }
 
     #[test]
-    fn notification_settings_scroll_into_view_and_mask_the_topic() {
+    fn notification_settings_mask_the_saved_topic_but_reveal_it_while_editing() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         app.settings_selected = 12;
         app.config.notifications.enabled = true;
@@ -1356,12 +1356,8 @@ mod help_tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            !editing.contains("super_secret_phone_topic"),
-            "topic leaked in edit mode:\n{editing}"
-        );
-        assert!(
-            editing.contains("••••"),
-            "masked cursor field missing:\n{editing}"
+            editing.contains("super_secret_phone_topic█"),
+            "editable topic and cursor missing:\n{editing}"
         );
     }
 }
