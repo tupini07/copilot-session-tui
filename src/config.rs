@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,6 +58,9 @@ pub struct UserConfig {
 
     #[serde(default)]
     pub terminal: TerminalConfig,
+
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,6 +100,7 @@ impl Default for UserConfig {
             mux_prefix: default_mux_prefix(),
             worktree: WorktreeConfig::default(),
             terminal: TerminalConfig::default(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -285,6 +290,14 @@ pub fn config_path() -> PathBuf {
         .join("config.json")
 }
 
+fn global_snippets_path() -> PathBuf {
+    config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("snippets.json")
+}
+
 pub fn project_config_path(repository_root: &Path) -> PathBuf {
     repository_root.join(".cst.json")
 }
@@ -308,22 +321,137 @@ pub fn effective_worktree(
 }
 
 pub fn load() -> UserConfig {
-    load_checked().unwrap_or_default()
+    let config_path = config_path();
+    let snippets_path = global_snippets_path();
+    let mut config = load_base_config(&config_path).unwrap_or_default();
+    // A damaged sidecar must not make unrelated settings/favorites fall back to
+    // defaults and later overwrite a valid config.json.
+    let _ = overlay_global_snippets(&mut config, &snippets_path);
+    config
 }
 
 pub fn load_checked() -> Result<UserConfig> {
-    let path = config_path();
-    match fs::read_to_string(&path) {
+    load_checked_in(&config_path(), &global_snippets_path())
+}
+
+fn load_checked_in(config_path: &Path, snippets_path: &Path) -> Result<UserConfig> {
+    let mut config = load_base_config(config_path)?;
+    overlay_global_snippets(&mut config, snippets_path)?;
+    Ok(config)
+}
+
+fn load_base_config(config_path: &Path) -> Result<UserConfig> {
+    match fs::read_to_string(config_path) {
         Ok(content) => serde_json::from_str(&content)
-            .with_context(|| format!("Invalid global settings in {}", path.display())),
+            .with_context(|| format!("Invalid global settings in {}", config_path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
         Err(error) => Err(error)
-            .with_context(|| format!("Failed to read global settings: {}", path.display())),
+            .with_context(|| format!("Failed to read global settings: {}", config_path.display())),
     }
+}
+
+fn overlay_global_snippets(config: &mut UserConfig, snippets_path: &Path) -> Result<()> {
+    let lock_path = snippets_path.with_extension("lock");
+    let _lock = SnippetLock::acquire(&lock_path)?;
+    overlay_global_snippets_locked(config, snippets_path)
+}
+
+fn overlay_global_snippets_locked(config: &mut UserConfig, snippets_path: &Path) -> Result<()> {
+    match fs::read_to_string(snippets_path) {
+        Ok(content) => {
+            config.snippets = serde_json::from_str(&content).with_context(|| {
+                format!("Invalid global snippets in {}", snippets_path.display())
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // One-time migration from the original config.json field. The sidecar is
+            // authoritative afterward, so a long-running pre-snippet CST can rewrite
+            // config.json without erasing prompts.
+            if !config.snippets.is_empty() {
+                write_json_atomic(snippets_path, &config.snippets)?;
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to read global snippets: {}",
+                    snippets_path.display()
+                )
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn save(config: &UserConfig) -> Result<()> {
     write_json_atomic(&config_path(), config)
+}
+
+pub fn save_global_snippets_if_unchanged(
+    original: &[PromptSnippet],
+    snippets: &[PromptSnippet],
+) -> Result<UserConfig> {
+    let snippets_path = global_snippets_path();
+    let lock_path = snippets_path.with_extension("lock");
+    save_global_snippets_if_unchanged_in(
+        &config_path(),
+        &snippets_path,
+        &lock_path,
+        original,
+        snippets,
+    )
+}
+
+fn save_global_snippets_if_unchanged_in(
+    config_path: &Path,
+    snippets_path: &Path,
+    lock_path: &Path,
+    original: &[PromptSnippet],
+    snippets: &[PromptSnippet],
+) -> Result<UserConfig> {
+    let _lock = SnippetLock::acquire(lock_path)?;
+    let mut config = load_base_config(config_path)?;
+    overlay_global_snippets_locked(&mut config, snippets_path)?;
+    if config.snippets != original {
+        anyhow::bail!("Global snippets changed on disk; close and reopen the snippet manager");
+    }
+    write_json_atomic(snippets_path, snippets)?;
+    config.snippets = snippets.to_vec();
+    Ok(config)
+}
+
+struct SnippetLock {
+    file: fs::File,
+}
+
+impl SnippetLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("Failed to open snippet lock {}", path.display()))?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file }),
+            Err(TryLockError::WouldBlock) => {
+                anyhow::bail!("Another CST instance is saving global snippets")
+            }
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("Failed to lock {}", path.display()))
+            }
+        }
+    }
+}
+
+impl Drop for SnippetLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 fn load_project_config(repository_root: &Path) -> Result<ProjectConfig> {
@@ -354,7 +482,7 @@ fn save_project_config(repository_root: &Path, config: &ProjectConfig) -> Result
     write_json_atomic(&path, config)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     let parent = path
         .parent()
         .context("Configuration path has no parent directory")?;
@@ -460,6 +588,15 @@ mod tests {
     }
 
     #[test]
+    fn global_config_round_trip_preserves_future_fields() {
+        let json = r#"{"yolo":true,"future_setting":{"enabled":7}}"#;
+        let loaded: UserConfig = serde_json::from_str(json).unwrap();
+        let saved: Value = serde_json::to_value(loaded).unwrap();
+
+        assert_eq!(saved["future_setting"]["enabled"], 7);
+    }
+
+    #[test]
     fn project_overrides_layer_over_global_values() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
@@ -540,6 +677,159 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(temp.path().join(".cst.json")).unwrap())
                 .unwrap();
         assert_eq!(saved["future_setting"], true);
+    }
+
+    #[test]
+    fn legacy_global_snippets_migrate_to_an_authoritative_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let snippets_path = temp.path().join("snippets.json");
+        let snippet = PromptSnippet {
+            name: "Quick check in".to_string(),
+            prompt: "Anything else to work on?".to_string(),
+        };
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&UserConfig {
+                snippets: vec![snippet.clone()],
+                ..UserConfig::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let migrated = load_checked_in(&config_path, &snippets_path).unwrap();
+        assert_eq!(migrated.snippets, vec![snippet.clone()]);
+        assert!(snippets_path.exists());
+
+        // Simulate a long-running old CST rewriting config.json with no snippet field.
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&UserConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let protected = load_checked_in(&config_path, &snippets_path).unwrap();
+        assert_eq!(protected.snippets, vec![snippet]);
+    }
+
+    #[test]
+    fn sidecar_parse_errors_are_actionable_instead_of_silently_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let snippets_path = temp.path().join("snippets.json");
+        fs::write(&config_path, r#"{"yolo":true,"future_setting":7}"#).unwrap();
+        fs::write(&snippets_path, "{invalid").unwrap();
+
+        let error = load_checked_in(&config_path, &snippets_path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Invalid global snippets"));
+        assert!(error.contains("snippets.json"));
+
+        let preserved = load_base_config(&config_path).unwrap();
+        assert!(preserved.yolo);
+        assert_eq!(preserved.extra["future_setting"], 7);
+    }
+
+    #[test]
+    fn sidecar_compare_and_write_rejects_a_stale_second_editor() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let snippets_path = temp.path().join("snippets.json");
+        let lock_path = temp.path().join("snippets.lock");
+        let original = PromptSnippet {
+            name: "Original".to_string(),
+            prompt: "old".to_string(),
+        };
+        let first_update = PromptSnippet {
+            name: "Original".to_string(),
+            prompt: "first".to_string(),
+        };
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&UserConfig {
+                yolo: true,
+                snippets: vec![original.clone()],
+                ..UserConfig::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_json_atomic(&snippets_path, std::slice::from_ref(&original)).unwrap();
+
+        let saved = save_global_snippets_if_unchanged_in(
+            &config_path,
+            &snippets_path,
+            &lock_path,
+            std::slice::from_ref(&original),
+            std::slice::from_ref(&first_update),
+        )
+        .unwrap();
+        assert!(saved.yolo, "fresh unrelated settings are retained");
+        let compatibility: UserConfig =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            compatibility.snippets,
+            vec![original.clone()],
+            "sidecar edits never rewrite unrelated config.json snapshots"
+        );
+
+        let error = save_global_snippets_if_unchanged_in(
+            &config_path,
+            &snippets_path,
+            &lock_path,
+            std::slice::from_ref(&original),
+            &[PromptSnippet {
+                name: "Original".to_string(),
+                prompt: "second".to_string(),
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("changed on disk"));
+        let current: Vec<PromptSnippet> =
+            serde_json::from_str(&fs::read_to_string(snippets_path).unwrap()).unwrap();
+        assert_eq!(current, vec![first_update]);
+    }
+
+    #[test]
+    fn migration_cannot_race_a_locked_snippet_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let snippets_path = temp.path().join("snippets.json");
+        let lock_path = temp.path().join("snippets.lock");
+        let legacy = PromptSnippet {
+            name: "Legacy".to_string(),
+            prompt: "migrate me".to_string(),
+        };
+        fs::write(
+            &config_path,
+            serde_json::to_vec(&UserConfig {
+                snippets: vec![legacy.clone()],
+                ..UserConfig::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let held = SnippetLock::acquire(&lock_path).unwrap();
+
+        let error = load_checked_in(&config_path, &snippets_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("saving global snippets"));
+        assert!(
+            !snippets_path.exists(),
+            "an unlocked migrator must not write while the lock is held"
+        );
+
+        drop(held);
+        assert_eq!(
+            load_checked_in(&config_path, &snippets_path)
+                .unwrap()
+                .snippets,
+            vec![legacy]
+        );
     }
 
     #[test]

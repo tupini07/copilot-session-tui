@@ -655,15 +655,6 @@ impl App {
         if update.project_root.is_none() && !update.project.is_empty() {
             anyhow::bail!("Project-scoped snippets require a Git project");
         }
-        let global_to_save = if update.global_dirty && self.config_persistence_enabled {
-            Some(reconcile_global_snippets(
-                config::load_checked()?,
-                &update.original_global,
-                &update.global,
-            )?)
-        } else {
-            None
-        };
         let mut project_settings = if update.project_dirty {
             update
                 .project_root
@@ -694,22 +685,25 @@ impl App {
             settings.save()?;
         }
 
-        if let Some(persisted) = global_to_save {
-            if let Err(error) = config::save(&persisted) {
-                if update.project_dirty {
-                    let settings = project_settings
-                        .as_mut()
-                        .context("Project settings disappeared while rolling back snippets")?;
-                    settings.set_snippets(previous_project);
-                    if let Err(rollback) = settings.save() {
-                        return Err(error).context(format!(
-                            "Failed to save global snippets; project rollback also failed: {rollback}"
-                        ));
+        if update.global_dirty {
+            match config::save_global_snippets_if_unchanged(&update.original_global, &update.global)
+            {
+                Ok(persisted) => self.adopt_persisted_config(persisted),
+                Err(error) => {
+                    if update.project_dirty {
+                        let settings = project_settings
+                            .as_mut()
+                            .context("Project settings disappeared while rolling back snippets")?;
+                        settings.set_snippets(previous_project);
+                        if let Err(rollback) = settings.save() {
+                            return Err(error).context(format!(
+                                "Failed to save global snippets; project rollback also failed: {rollback}"
+                            ));
+                        }
                     }
+                    return Err(error).context("Failed to save global snippets");
                 }
-                return Err(error).context("Failed to save global snippets");
             }
-            self.adopt_persisted_config(persisted);
         } else {
             self.config.snippets = update.global.clone();
         }
@@ -2336,18 +2330,6 @@ fn carry_session_details(session: &mut Session, old: Session) {
     session.details_parsed_len = old.details_parsed_len;
 }
 
-fn reconcile_global_snippets(
-    mut persisted: UserConfig,
-    original: &[crate::config::PromptSnippet],
-    updated: &[crate::config::PromptSnippet],
-) -> Result<UserConfig> {
-    if persisted.snippets != original {
-        anyhow::bail!("Global snippets changed on disk; close and reopen the snippet manager");
-    }
-    persisted.snippets = updated.to_vec();
-    Ok(persisted)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2438,45 +2420,6 @@ mod tests {
         assert!(error.contains("changed on disk"));
         let reloaded = ProjectSettings::load(project.path(), &app.config).unwrap();
         assert_eq!(reloaded.snippets(), &[external]);
-    }
-
-    #[test]
-    fn global_snippet_reconcile_preserves_fresh_settings_and_detects_conflicts() {
-        let original = crate::config::PromptSnippet {
-            name: "Original".to_string(),
-            prompt: "old".to_string(),
-        };
-        let updated = crate::config::PromptSnippet {
-            name: "Original".to_string(),
-            prompt: "new".to_string(),
-        };
-        let persisted = UserConfig {
-            yolo: true,
-            model: Some("fresh-external-model".to_string()),
-            snippets: vec![original.clone()],
-            ..UserConfig::default()
-        };
-
-        let merged =
-            reconcile_global_snippets(persisted, std::slice::from_ref(&original), &[updated])
-                .unwrap();
-        assert!(merged.yolo);
-        assert_eq!(merged.model.as_deref(), Some("fresh-external-model"));
-
-        let error = reconcile_global_snippets(
-            UserConfig {
-                snippets: vec![crate::config::PromptSnippet {
-                    name: "External".to_string(),
-                    prompt: "changed".to_string(),
-                }],
-                ..UserConfig::default()
-            },
-            &[original],
-            &[],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("changed on disk"));
     }
 
     #[test]

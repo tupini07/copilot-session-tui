@@ -292,10 +292,13 @@ editor, Tab / Shift+Tab moves through name, scope, and prompt in visual order; a
 Backspace, and Delete edit at the cursor; Enter adds a line break in the prompt; Ctrl+G
 or Space on the scope field toggles scope; Ctrl+S saves.
 
-New snippets default to **global**, stored in CST's global `config.json` and available in
-every session. **Project** snippets live in that repository's `.cst.json` and appear only
-while a session in that Git project is focused. Moving an existing snippet between scopes
-updates both stores while preserving unrelated and future `.cst.json` fields.
+New snippets default to **global**, stored in CST's global `snippets.json` sidecar and
+available in every session. Keeping prompts separate from `config.json` means an older
+long-running CST cannot erase them when it saves settings using an older schema. Existing
+`config.json` snippets migrate automatically. **Project** snippets live in that
+repository's `.cst.json` and appear only while a session in that Git project is focused.
+Moving an existing snippet between scopes updates both stores while preserving unrelated
+and future `.cst.json` fields.
 
 `prefix` `q` is the one-step exit: it ends the attached session and quits CST without a
 detour through the session list. Because quitting also kills every other pane, it asks
