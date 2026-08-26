@@ -2454,6 +2454,18 @@ mod tests {
     }
 
     #[test]
+    fn host_progress_sequences_still_request_the_outer_terminal_flush() {
+        let mut app = mux_app();
+        let sequence = b"\x1b]9;4;3;0\x1b\\".to_vec();
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(sequence.clone())
+        ));
+        assert_eq!(app.host_sequences, vec![sequence]);
+    }
+
+    #[test]
     fn title_change_for_an_unfocused_pane_repaints_the_tab_strip() {
         let mut app = attached_mux_app("foreground");
         push_test_pane(&mut app, 2, "background");

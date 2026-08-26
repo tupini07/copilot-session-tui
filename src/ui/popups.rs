@@ -553,6 +553,10 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            format!("  CST v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
         help_line("↑/k ↓/j", "Navigate sessions"),
         help_line("Home/End", "Jump to first/last"),
@@ -1265,6 +1269,10 @@ mod help_tests {
         let (text, clamped) = rendered(200, 100, usize::MAX);
 
         assert!(text.contains("Keyboard Shortcuts"), "got:\n{text}");
+        assert!(
+            text.contains(&format!("CST v{}", env!("CARGO_PKG_VERSION"))),
+            "running version missing:\n{text}"
+        );
         assert!(text.contains(FOOTER), "got:\n{text}");
         assert_eq!(clamped, 0);
     }
