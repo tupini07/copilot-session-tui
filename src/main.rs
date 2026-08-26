@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long, conflicts_with = "session")]
     open_favorites: bool,
 
+    /// Internal helper used to replace the installed executable without stopping panes
+    #[arg(long, value_name = "VERSION", hide = true)]
+    install_update_helper: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -98,6 +102,12 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(version) = cli.install_update_helper.as_deref() {
+        updater::install_update_helper(version)?;
+        return Ok(());
+    }
+    updater::cleanup_old_update_files();
 
     // Handle subcommands
     match &cli.command {
@@ -239,6 +249,9 @@ fn main() -> Result<()> {
 
     // Run app
     let result = run_app(&mut terminal, &mut app);
+    // A helper process performs replacement independently, but waiting here ensures a
+    // normal exit never abandons the user without the final install result.
+    app.wait_for_update_install();
 
     // Restore terminal
     disable_raw_mode()?;
@@ -258,36 +271,6 @@ fn main() -> Result<()> {
 
     // Handle result
     result?;
-
-    // Perform update if requested (after terminal is restored)
-    if app.should_update {
-        eprintln!("Updating copilot-session-tui...");
-        // Asked before the installer moves the running binary aside, so the restart
-        // cannot pick up the displaced old build.
-        let executable = std::env::current_exe();
-        match updater::perform_update() {
-            Ok(version) => match executable {
-                Ok(executable) => {
-                    eprintln!("Restarting into {version}...");
-                    // Quitting to restart by hand costs the whole window when CST is
-                    // the terminal's root process, which is exactly when it matters.
-                    match updater::relaunch(&executable) {
-                        Ok(status) => std::process::exit(status.code().unwrap_or(0)),
-                        Err(error) => {
-                            eprintln!("{error:#}");
-                            eprintln!("Please restart the application.");
-                        }
-                    }
-                }
-                Err(error) => {
-                    eprintln!("Could not find the running executable: {error}");
-                    eprintln!("Please restart the application.");
-                }
-            },
-            Err(error) => eprintln!("Update failed: {error}"),
-        }
-        return Ok(());
-    }
 
     // Track the directory to write to --last-dir-file
     let mut last_dir: Option<String> = None;
@@ -527,6 +510,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             input::handle_input(app)?;
         }
 
+        if exit_waits_for_update(app) {
+            app.status_message =
+                Some("Finishing the update before leaving; running sessions stay open...".into());
+            continue;
+        }
+
         if app.should_quit {
             if app.exit_dir.is_none() {
                 app.exit_dir = app
@@ -549,10 +538,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             break;
         }
 
-        if app.should_resume.is_some()
-            || app.should_update
-            || app.should_new_session.is_some()
-        {
+        if app.should_resume.is_some() || app.should_new_session.is_some() {
             break;
         }
     }
@@ -658,6 +644,11 @@ fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
         // consuming a meaningful fraction of a CPU core for no visible change.
         5_000
     }
+}
+
+fn exit_waits_for_update(app: &App) -> bool {
+    app.update_installing()
+        && (app.should_quit || app.should_resume.is_some() || app.should_new_session.is_some())
 }
 
 fn apply_terminal_event(app: &mut App, event: crossterm::event::Event) -> Result<()> {
@@ -766,6 +757,19 @@ mod tests {
 
         app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
         assert_eq!(mux_wait_timeout(&app, false), 100);
+    }
+
+    #[test]
+    fn natural_exit_waits_for_background_installation() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.update_install_receiver = Some(receiver);
+        app.should_quit = true;
+
+        assert!(exit_waits_for_update(&app));
+
+        app.update_install_receiver = None;
+        assert!(!exit_waits_for_update(&app));
     }
 
     #[test]

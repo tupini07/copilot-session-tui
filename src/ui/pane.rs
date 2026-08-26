@@ -233,6 +233,26 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(root_command_hint(&prefix)),
         ],
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && app.update_notice.is_some() =>
+        {
+            vec![
+                Span::styled(
+                    " Update ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    " {} ",
+                    text::truncate_to_width(
+                        app.update_notice.as_deref().unwrap_or_default(),
+                        area.width.saturating_sub(11) as usize,
+                    )
+                )),
+            ]
+        }
         PaneStatus::Running => vec![
             Span::raw(" "),
             Span::styled(prefix.clone(), Style::default().fg(Color::Cyan)),
@@ -299,8 +319,8 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
 fn root_command_hint(prefix: &str) -> String {
     format!(
-        " c chat e scratch t term s snippets C-h help C-g github d list w switch \
-         n/p cycle 1-9 jump x end q quit {prefix} send Esc cancel "
+        " c chat e scratch t term s snippets u update C-h help C-g gh d list w switch \
+         n/p cycle 1-9 jump x end q quit {prefix} send Esc "
     )
 }
 
@@ -323,8 +343,9 @@ mod tests {
             "e scratch",
             "t term",
             "s snippets",
+            "u update",
             "C-h help",
-            "C-g github",
+            "C-g gh",
             "d list",
             "w switch",
             "n/p cycle",
@@ -332,7 +353,7 @@ mod tests {
             "x end",
             "q quit",
             "C-b send",
-            "Esc cancel",
+            "Esc",
         ] {
             assert!(hint.contains(entry), "missing {entry:?} from {hint:?}");
         }
@@ -507,6 +528,24 @@ mod tests {
             "the spinner must disappear as soon as the child draws, got:\n{text}"
         );
         assert!(text.contains("hello from copilot"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn attached_status_shows_non_disruptive_update_progress() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.update_notice = Some("Installing v0.19.0; running sessions stay open...".to_string());
+
+        let text = render(&mut app);
+
+        assert!(text.contains("Update"), "got:\n{text}");
+        assert!(text.contains("Installing v0.19.0"), "got:\n{text}");
+        assert!(text.contains("running sessions stay open"), "got:\n{text}");
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

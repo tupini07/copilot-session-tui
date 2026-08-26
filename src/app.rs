@@ -7,7 +7,7 @@ use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::snippets::{SnippetModal, SnippetUpdate};
 use crate::terminal_pane::TerminalManager;
-use crate::updater::{UpdateCheckResult, UpdateInfo};
+use crate::updater::{UpdateCheckResult, UpdateInfo, UpdateInstallOutcome, UpdateInstallResult};
 use crate::workspace_state;
 use anyhow::{Context, Result};
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -387,9 +387,13 @@ pub struct App {
     pub visible_rows: usize,
     pub update_info: Option<UpdateInfo>,
     pub update_receiver: Option<mpsc::Receiver<UpdateCheckResult>>,
+    pub update_install_receiver: Option<mpsc::Receiver<UpdateInstallResult>>,
     session_load_receiver: Option<mpsc::Receiver<crate::session::loader::SessionLoadResult>>,
     pub update_check_requested: bool,
-    pub should_update: bool,
+    pub installed_update_version: Option<String>,
+    pub update_notice: Option<String>,
+    #[cfg(test)]
+    pub update_install_requested_for: Option<String>,
     pub config: UserConfig,
     pub copilot_home: PathBuf,
     pub settings_selected: usize,
@@ -506,9 +510,13 @@ impl App {
             visible_rows: 20,
             update_info: None,
             update_receiver: None,
+            update_install_receiver: None,
             session_load_receiver: None,
             update_check_requested: false,
-            should_update: false,
+            installed_update_version: None,
+            update_notice: None,
+            #[cfg(test)]
+            update_install_requested_for: None,
             config,
             copilot_home: crate::session::loader::copilot_home(),
             settings_selected: 0,
@@ -1582,6 +1590,7 @@ impl App {
     pub fn background_work_pending(&self) -> bool {
         self.session_load_receiver.is_some()
             || self.update_receiver.is_some()
+            || self.update_install_receiver.is_some()
             || self.github_request_receiver.is_some()
             || self.github_patch_receiver.is_some()
             || self.github_repo_receiver.is_some()
@@ -2145,6 +2154,7 @@ impl App {
     }
 
     pub fn poll_update(&mut self) {
+        self.poll_update_install();
         if self.update_info.is_some() && !self.update_check_requested {
             return;
         }
@@ -2156,9 +2166,9 @@ impl App {
                 self.update_info = result;
                 if self.update_check_requested {
                     if self.update_info.is_some() {
-                        self.should_update = true;
+                        self.begin_update_install();
                     } else {
-                        self.status_message = Some("No update available".to_string());
+                        self.set_update_notice("No update available");
                     }
                 }
                 self.update_receiver = None;
@@ -2166,20 +2176,120 @@ impl App {
             }
             Ok(Err(error)) => {
                 if self.update_check_requested {
-                    self.status_message = Some(format!("Update check failed: {error}"));
+                    self.set_update_notice(format!("Update check failed: {error}"));
                 }
                 self.update_receiver = None;
                 self.update_check_requested = false;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 if self.update_check_requested {
-                    self.status_message =
-                        Some("Update check failed: background worker stopped".to_string());
+                    self.set_update_notice("Update check failed: background worker stopped");
                 }
                 self.update_receiver = None;
                 self.update_check_requested = false;
             }
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    pub fn request_update(&mut self) {
+        if let Some(version) = self.installed_update_version.as_deref() {
+            self.set_update_notice(format!(
+                "v{version} is installed; this running CST remains on v{} until restarted",
+                env!("CARGO_PKG_VERSION")
+            ));
+        } else if self.update_install_receiver.is_some() {
+            self.set_update_notice("Update installation is already running...");
+        } else if self.update_info.is_some() {
+            self.begin_update_install();
+        } else if !self.update_check_requested {
+            self.update_receiver = Some(crate::updater::force_check_for_updates_async());
+            self.update_check_requested = true;
+            self.set_update_notice("Checking for updates...");
+        } else {
+            self.set_update_notice("Already checking for updates...");
+        }
+    }
+
+    pub fn clear_update_notice(&mut self) {
+        self.update_notice = None;
+    }
+
+    fn set_update_notice(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.status_message = Some(message.clone());
+        self.update_notice = Some(message);
+    }
+
+    pub fn update_installing(&self) -> bool {
+        self.update_install_receiver.is_some()
+    }
+
+    pub fn wait_for_update_install(&mut self) {
+        let result = self.update_install_receiver.as_ref().map(|receiver| {
+            receiver.recv().unwrap_or_else(|_| {
+                Err("background worker stopped before reporting a result".to_string())
+            })
+        });
+        if let Some(result) = result {
+            self.apply_update_install_result(result);
+        }
+    }
+
+    fn begin_update_install(&mut self) {
+        let Some(info) = self.update_info.as_ref() else {
+            return;
+        };
+        let version = info.latest_version.clone();
+        #[cfg(not(test))]
+        {
+            self.update_install_receiver =
+                Some(crate::updater::install_update_async(version.clone()));
+        }
+        #[cfg(test)]
+        {
+            self.update_install_requested_for = Some(version.clone());
+        }
+        self.set_update_notice(format!(
+            "Installing v{version} in the background; running sessions stay open..."
+        ));
+    }
+
+    fn poll_update_install(&mut self) {
+        let Some(receiver) = self.update_install_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => self.apply_update_install_result(result),
+            Err(mpsc::TryRecvError::Disconnected) => self.apply_update_install_result(Err(
+                "background worker stopped before reporting a result".to_string(),
+            )),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn apply_update_install_result(&mut self, result: UpdateInstallResult) {
+        self.update_install_receiver = None;
+        match result {
+            Ok(UpdateInstallOutcome::Installed(version)) => {
+                self.update_info = None;
+                self.installed_update_version = Some(version.clone());
+                self.set_update_notice(format!(
+                    "Installed v{version}; running sessions remain on v{} until CST is restarted",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            Ok(UpdateInstallOutcome::AlreadyInstalled(version)) => {
+                self.update_info = None;
+                self.installed_update_version = Some(version.clone());
+                self.set_update_notice(format!(
+                    "v{version} is already installed; running sessions remain on v{}",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            Err(error) => {
+                self.set_update_notice(format!("Update installation failed: {error}"));
+            }
         }
     }
 }
@@ -3455,7 +3565,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_update_check_starts_an_available_update() {
+    fn requested_update_check_starts_a_non_disruptive_install() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         let (tx, rx) = mpsc::channel();
         app.update_receiver = Some(rx);
@@ -3468,7 +3578,8 @@ mod tests {
 
         app.poll_update();
 
-        assert!(app.should_update);
+        assert_eq!(app.update_install_requested_for.as_deref(), Some("0.10.0"));
+        assert!(!app.should_quit);
         assert!(app.update_info.is_some());
         assert!(!app.update_check_requested);
         assert!(app.update_receiver.is_none());
@@ -3485,8 +3596,33 @@ mod tests {
         app.poll_update();
 
         assert_eq!(app.status_message.as_deref(), Some("No update available"));
-        assert!(!app.should_update);
         assert!(!app.update_check_requested);
         assert!(app.update_receiver.is_none());
+    }
+
+    #[test]
+    fn completed_install_keeps_the_current_process_running() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.update_info = Some(UpdateInfo {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: "99.0.0".to_string(),
+        });
+        let (sender, receiver) = mpsc::channel();
+        app.update_install_receiver = Some(receiver);
+        sender
+            .send(Ok(UpdateInstallOutcome::Installed("99.0.0".to_string())))
+            .unwrap();
+
+        app.poll_update();
+
+        assert_eq!(app.installed_update_version.as_deref(), Some("99.0.0"));
+        assert!(app.update_info.is_none());
+        assert!(!app.should_quit);
+        assert!(app.should_resume.is_none());
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("running sessions remain"));
     }
 }

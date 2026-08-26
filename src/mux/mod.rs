@@ -128,6 +128,7 @@ pub enum PrefixCommand {
     Scratchpad,
     Terminal,
     Snippets,
+    Update,
     Help,
     Github,
     /// `prefix q` — end the focused session and CST together.
@@ -152,6 +153,7 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
         KeyCode::Char('t') => Some(PrefixCommand::Terminal),
         KeyCode::Char('s') => Some(PrefixCommand::Snippets),
+        KeyCode::Char('u') => Some(PrefixCommand::Update),
         KeyCode::Char('q') => Some(PrefixCommand::Quit),
         KeyCode::Char(character)
             if character.eq_ignore_ascii_case(&'h')
@@ -452,6 +454,10 @@ mod tests {
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('s'), none), &chord),
             Some(PrefixCommand::Snippets)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('u'), none), &chord),
+            Some(PrefixCommand::Update)
         );
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('h'), KeyModifiers::CONTROL), &chord),

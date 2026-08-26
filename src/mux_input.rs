@@ -64,6 +64,7 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
             handle_attached_key(app, *key);
             return;
         }
+        app.clear_update_notice();
     }
 
     if let Event::Mouse(mouse) = &event {
@@ -501,6 +502,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             Some(PrefixCommand::Scratchpad) => toggle_attached_scratchpad(app),
             Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
             Some(PrefixCommand::Snippets) => app.open_snippets(),
+            Some(PrefixCommand::Update) => app.request_update(),
             Some(PrefixCommand::Help) => {
                 if let Some(mux) = app.mux.as_mut() {
                     mux.prefix_state = PrefixState::Help;
@@ -1236,6 +1238,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         request_quit(app);
         return true;
     }
+    if matches!(command, Some(PrefixCommand::Update)) {
+        app.request_update();
+        return true;
+    }
     if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
         app.status_message = Some("No sessions are running".to_string());
         return true;
@@ -1262,6 +1268,7 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             attach_focused(app);
             app.open_snippets();
         }
+        Some(PrefixCommand::Update) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Github) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Quit) => unreachable!("handled before pane availability"),
@@ -1933,6 +1940,28 @@ mod tests {
             app.snippet_modal.as_ref().unwrap().screen,
             SnippetScreen::List
         );
+    }
+
+    #[test]
+    fn prefix_u_installs_without_detaching_or_ending_the_pane() {
+        let mut app = attached_mux_app("update-session");
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+
+        send_prefix_command(&mut app, 'u');
+
+        assert_eq!(app.update_install_requested_for.as_deref(), Some("0.19.0"));
+        assert!(matches!(app.view, View::Attached(1)));
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().is_running());
+        assert!(!app.should_quit);
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        );
+        assert!(app.update_notice.is_none());
     }
 
     #[test]

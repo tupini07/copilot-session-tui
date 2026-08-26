@@ -598,6 +598,10 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         ));
         text.push(help_line(&format!("{prefix} s"), "Open prompt snippets"));
         text.push(help_line(
+            &format!("{prefix} u"),
+            "Install update without stopping sessions",
+        ));
+        text.push(help_line(
             &format!("{prefix} C-g i"),
             "Inspect a GitHub issue or pull request",
         ));

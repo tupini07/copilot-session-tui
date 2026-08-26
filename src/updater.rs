@@ -1,5 +1,9 @@
+#![cfg_attr(test, allow(dead_code))]
+
 use anyhow::{Context, Result};
+use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -16,6 +20,13 @@ pub struct UpdateInfo {
 }
 
 pub type UpdateCheckResult = std::result::Result<Option<UpdateInfo>, String>;
+pub type UpdateInstallResult = std::result::Result<UpdateInstallOutcome, String>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UpdateInstallOutcome {
+    Installed(String),
+    AlreadyInstalled(String),
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCache {
@@ -133,77 +144,197 @@ pub fn force_check_for_updates_async() -> mpsc::Receiver<UpdateCheckResult> {
     spawn_update_check(true)
 }
 
-/// Perform the actual self-update. Call this AFTER terminal is restored.
-/// Download and install the newest release, returning its version.
-pub fn perform_update() -> Result<String> {
+/// Install an update without stopping the current CST process or any panes it owns.
+pub fn install_update_async(latest_version: String) -> mpsc::Receiver<UpdateInstallResult> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = run_update_helper(&latest_version).map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+/// Entry point used by the short-lived updater helper process.
+pub fn install_update_helper(latest_version: &str) -> Result<()> {
+    let outcome = install_update(latest_version)?;
+    println!("{}", serde_json::to_string(&outcome)?);
+    Ok(())
+}
+
+fn run_update_helper(latest_version: &str) -> Result<UpdateInstallOutcome> {
+    let executable = invocation_executable()?;
+    let output = std::process::Command::new(&executable)
+        .arg("--install-update-helper")
+        .arg(latest_version)
+        .output()
+        .with_context(|| format!("Failed to start update helper {}", executable.display()))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Update helper failed{}",
+            if error.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", error.trim())
+            }
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("Update helper returned an invalid result")
+}
+
+fn install_update(latest_version: &str) -> Result<UpdateInstallOutcome> {
+    let _lock = UpdateLock::acquire()?;
+    let installed = semver::Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let latest = semver::Version::parse(latest_version)?;
+    if installed >= latest {
+        return Ok(UpdateInstallOutcome::AlreadyInstalled(
+            latest_version.to_string(),
+        ));
+    }
+    let version = perform_update_with_progress(false, latest_version)?;
+    if semver::Version::parse(&version)? < latest {
+        anyhow::bail!("Updater installed v{version}, older than requested v{latest_version}");
+    }
+    Ok(UpdateInstallOutcome::Installed(version))
+}
+
+fn invocation_executable() -> Result<PathBuf> {
+    let argument = std::env::args_os()
+        .next()
+        .context("The CST executable path is unavailable")?;
+    let path = PathBuf::from(argument);
+    if path.is_absolute() {
+        Ok(path)
+    } else if path.components().count() > 1 {
+        Ok(std::env::current_dir()?.join(path))
+    } else {
+        find_on_path(&path)
+            .or_else(|| std::env::current_exe().ok())
+            .context("Could not resolve the CST executable")
+    }
+}
+
+fn find_on_path(name: &std::path::Path) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            let executable = candidate.with_extension("exe");
+            if executable.is_file() {
+                return Some(executable);
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort cleanup for Windows executables relocated by a prior live update.
+///
+/// Removal fails harmlessly while any old CST process still maps the file; a later
+/// startup retries after those sessions have naturally ended.
+pub fn cleanup_old_update_files() {
+    #[cfg(windows)]
+    if let Ok(executable) = invocation_executable() {
+        if let (Some(directory), Some(stem)) = (
+            executable.parent(),
+            executable.file_stem().and_then(|stem| stem.to_str()),
+        ) {
+            cleanup_old_update_files_in(directory, stem);
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn cleanup_old_update_files_in(directory: &std::path::Path, stem: &str) {
+    let prefix = format!(".{stem}.");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(random) = name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".__relocated__.exe"))
+        else {
+            continue;
+        };
+        if random.len() == 32 && random.bytes().all(|byte| byte.is_ascii_lowercase()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UpdateLock {
+    file: std::fs::File,
+}
+
+impl UpdateLock {
+    fn acquire() -> Result<Self> {
+        let path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".copilot")
+            .join("session-tui-update.lock");
+        Self::acquire_in(&path)
+    }
+
+    fn acquire_in(path: &std::path::Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("Failed to open update lock {}", path.display()))?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file }),
+            Err(TryLockError::WouldBlock) => {
+                anyhow::bail!("Another CST instance is already installing the update")
+            }
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("Failed to lock {}", path.display()))
+            }
+        }
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn perform_update_with_progress(show_progress: bool, target_version: &str) -> Result<String> {
+    let target_tag = format!("v{target_version}");
     let status = self_update::backends::github::Update::configure()
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name("copilot-session-tui")
-        .show_download_progress(true)
+        .show_download_progress(show_progress)
+        .show_output(show_progress)
         .no_confirm(true) // user already confirmed via TUI
         .current_version(self_update::cargo_crate_version!())
+        .target_version_tag(&target_tag)
         .build()?
         .update()?;
 
-    println!("Updated to version {}!", status.version());
+    if show_progress {
+        println!("Updated to version {}!", status.version());
+    }
     Ok(status.version().to_string())
-}
-
-/// Start the freshly installed binary in place of this one.
-///
-/// Restarting by hand is awkward when CST is the terminal's root process: quitting
-/// takes the window with it, so there is nothing left to type the command into.
-/// Handing the terminal straight to the new build avoids that entirely.
-///
-/// `executable` must be captured *before* updating. The installer replaces the running
-/// binary by renaming it out of the way, and Windows reports the moved file's new path,
-/// so asking afterwards can point back at the old build.
-///
-/// On Unix the process image is replaced, so this only returns on failure. Windows has
-/// no equivalent, so the old process stays on as a thin parent and forwards the exit
-/// status; something has to remain attached to the console or the window would close.
-pub fn relaunch(executable: &std::path::Path) -> Result<std::process::ExitStatus> {
-    // The same arguments, so a restart lands wherever the original launch did.
-    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut command = std::process::Command::new(executable);
-    command.args(&arguments);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(anyhow::Error::new(command.exec())
-            .context("Could not start the updated copilot-session-tui"))
-    }
-
-    #[cfg(not(unix))]
-    {
-        command
-            .status()
-            .context("Could not start the updated copilot-session-tui")
-    }
-}
-
-/// Mirrors the `#[cfg(unix)]` arm of [`relaunch`] so it is type-checked on Windows too.
-#[cfg(test)]
-fn relaunch_unix_shape(error: std::io::Error) -> Result<std::process::ExitStatus> {
-    Err(anyhow::Error::new(error).context("Could not start the updated copilot-session-tui"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_failed_relaunch_explains_itself() {
-        // `CommandExt::exec` hands back a bare io::Error, and this is the shape the
-        // Unix arm wraps it in. Compiling it here keeps that arm honest on Windows.
-        let error = relaunch_unix_shape(std::io::Error::other("no such file"))
-            .expect_err("relaunch cannot succeed here");
-
-        assert!(format!("{error:#}").contains("Could not start the updated copilot-session-tui"));
-        assert!(format!("{error:#}").contains("no such file"));
-    }
 
     #[test]
     fn compares_minor_versions_semantically() {
@@ -216,5 +347,50 @@ mod tests {
         assert!(compare_versions("0.10.0".to_string(), "0.10.0".to_string())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn install_outcome_has_a_stable_helper_protocol() {
+        let outcome = UpdateInstallOutcome::Installed("0.19.0".to_string());
+        let encoded = serde_json::to_vec(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<UpdateInstallOutcome>(&encoded).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn update_lock_prevents_concurrent_installers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("update.lock");
+        let first = UpdateLock::acquire_in(&path).unwrap();
+
+        let error = UpdateLock::acquire_in(&path).unwrap_err().to_string();
+
+        assert!(error.contains("already installing"), "got {error}");
+        drop(first);
+        UpdateLock::acquire_in(&path).unwrap();
+    }
+
+    #[test]
+    fn startup_cleanup_only_removes_self_replace_relocated_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let relocated = temp.path().join(format!(
+            ".copilot-session-tui.{}.__relocated__.exe",
+            "a".repeat(32)
+        ));
+        let unrelated = temp.path().join(".other.aaaaaaaa.__relocated__.exe");
+        let malformed = temp
+            .path()
+            .join(".copilot-session-tui.short.__relocated__.exe");
+        std::fs::write(&relocated, "old").unwrap();
+        std::fs::write(&unrelated, "keep").unwrap();
+        std::fs::write(&malformed, "keep").unwrap();
+
+        cleanup_old_update_files_in(temp.path(), "copilot-session-tui");
+
+        assert!(!relocated.exists());
+        assert!(unrelated.exists());
+        assert!(malformed.exists());
     }
 }

@@ -103,7 +103,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 key_span("q"),
                 Span::raw(" Quit"),
             ];
-            if let Some(ref info) = app.update_info {
+            if let Some(info) = app
+                .update_info
+                .as_ref()
+                .filter(|_| app.update_install_receiver.is_none())
+            {
                 spans.push(Span::raw("  │  "));
                 spans.push(Span::styled(
                     format!("⬆ v{} → v{} ", info.current_version, info.latest_version),

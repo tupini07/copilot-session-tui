@@ -311,17 +311,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.mode = Mode::Settings;
         }
         KeyCode::Char('.') => begin_project_settings(app),
-        KeyCode::Char('u') => {
-            if app.update_info.is_some() {
-                app.should_update = true;
-            } else if !app.update_check_requested {
-                app.update_receiver = Some(crate::updater::force_check_for_updates_async());
-                app.update_check_requested = true;
-                app.status_message = Some("Checking for updates...".to_string());
-            } else {
-                app.status_message = Some("Already checking for updates...".to_string());
-            }
-        }
+        KeyCode::Char('u') => app.request_update(),
         _ => {}
     }
 }
@@ -1254,6 +1244,21 @@ mod tests {
         assert!(app.terminal.active_session_id().is_none());
         assert!(!app.terminal.is_visible());
         assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn list_update_installs_without_requesting_exit() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+
+        handle_normal(&mut app, KeyCode::Char('u'));
+
+        assert_eq!(app.update_install_requested_for.as_deref(), Some("0.19.0"));
+        assert!(!app.should_quit);
+        assert!(app.status_message.as_deref().unwrap().contains("stay open"));
     }
 
     #[test]

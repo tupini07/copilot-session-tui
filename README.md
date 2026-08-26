@@ -65,14 +65,11 @@ The binary will be at `target/release/copilot-session-tui` (or `.exe` on Windows
 
 The TUI checks GitHub Releases for a newer version at startup, using a 12-hour cache.
 When an update is available, the status bar shows the current and latest versions.
-Press `u` to check GitHub immediately, download and install the matching release
-asset when available, then restart the TUI.
-
-CST relaunches itself once the update is installed, so you never have to quit and
-retype the command. This matters most when CST is your terminal's startup command:
-quitting a terminal's root process closes the window, leaving nowhere to restart from.
-On Unix the new build replaces the running process; on Windows the old process stays on
-briefly as a parent, because something has to hold the console open.
+Press `u` from the session list or `prefix` `u` while attached to check GitHub and
+install the matching release asset **without stopping CST or any running sessions**.
+The current process continues on its in-memory version; the installed version takes
+effect the next time CST naturally starts. A cross-process lock prevents multiple CST
+instances from replacing the executable concurrently.
 
 ### Usage
 
@@ -149,7 +146,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `s` | Cycle sort order |
 | `,` | Edit global settings |
 | `.` | Edit filtered-project `.cst.json` settings |
-| `u` | Install an available update |
+| `u` | Install an available update without stopping sessions |
 | `?` | Show help |
 | `q` / `Esc` | Quit |
 | `Ctrl+C` | Force quit |
@@ -270,6 +267,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `s` | Open prompt snippets |
+| `prefix` `u` | Install an update without stopping running sessions |
 | `prefix` `Ctrl+H` `e` | Open scratchpad shortcut help |
 | `prefix` `Ctrl+G` `i` | Inspect a GitHub issue or pull request |
 | `prefix` `n` / `p` | Next / previous session |
@@ -308,8 +306,8 @@ It quits CST the same way `q` does in the session list — the process exits nor
 after restoring the terminal. If your terminal *window* closes too, that is because CST
 is the window's root process, and terminals close when their root process exits. Launch
 CST through the [shell wrapper](#shell-integration-auto-cd-into-project-directory) (or
-from an existing prompt) to be returned to that prompt instead. Updates relaunch CST for
-you either way.
+from an existing prompt) to be returned to that prompt instead. Installing an update
+does not trigger this exit path or disturb panes.
 
 GitHub inspection is available while attached to a mux session. Enter an issue or pull
 request number and CST resolves the repository from that session's working directory.
