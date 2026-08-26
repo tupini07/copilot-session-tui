@@ -319,15 +319,6 @@ impl MuxState {
         self.panes.iter().filter(|pane| pane.is_running()).count()
     }
 
-    /// Running panes other than the focused one — the sessions a quit would end
-    /// without the user seeing them go.
-    pub fn background_running_count(&self) -> usize {
-        self.panes
-            .iter()
-            .filter(|pane| pane.is_running() && Some(pane.id) != self.focused)
-            .count()
-    }
-
     /// Catch exits whose notification never reached the event loop, so a quit
     /// confirmation never lists sessions that are already gone.
     pub fn reap(&mut self) {

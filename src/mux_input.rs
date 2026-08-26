@@ -1522,8 +1522,24 @@ mod tests {
     }
 
     #[test]
-    fn prefix_q_ends_a_lone_session_and_cst_without_confirming() {
+    fn prefix_q_confirms_before_ending_a_lone_active_session() {
         let mut app = attached_mux_app("quit-lone-session");
+
+        send_prefix_command(&mut app, 'q');
+
+        assert!(!app.should_quit);
+        assert!(app.confirm_quit);
+    }
+
+    #[test]
+    fn prefix_q_dismisses_an_exited_session_without_confirming() {
+        let mut app = attached_mux_app("quit-exited-session");
+        app.mux
+            .as_mut()
+            .unwrap()
+            .focused_pane_mut()
+            .unwrap()
+            .mark_exited(Some(0));
 
         send_prefix_command(&mut app, 'q');
 

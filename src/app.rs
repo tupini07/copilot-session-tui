@@ -2220,19 +2220,18 @@ impl App {
 
     /// `prefix q` — end the focused session and CST in one step.
     ///
-    /// Quitting kills every pane, so this confirms when panes *other* than the one on
-    /// screen would go with it. The focused session is the one the user just asked to
-    /// end, so ending it alone needs no second keystroke.
+    /// A live focused session may still be working, so quitting always confirms when
+    /// any pane would be terminated. Exited panes can be dismissed immediately.
     pub fn request_quit_from_pane(&mut self) {
-        let background = self
+        let running = self
             .mux
             .as_mut()
             .map(|mux| {
                 mux.reap();
-                mux.background_running_count()
+                mux.running_count()
             })
             .unwrap_or(0);
-        if background > 0 {
+        if running > 0 {
             self.confirm_quit = true;
         } else {
             self.should_quit = true;
