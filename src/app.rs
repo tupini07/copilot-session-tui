@@ -1725,9 +1725,17 @@ impl App {
                 }
                 // Search filter
                 if !self.search_query.is_empty() {
-                    let haystack =
-                        format!("{} {} {} {}", s.display_name(), s.project_root, s.cwd, s.id);
-                    return matcher.fuzzy_match(&haystack, &self.search_query).is_some();
+                    // Match fields independently. Concatenating them let a short query
+                    // start in a title/path and finish in the UUID, so nearly every
+                    // favorite in the same project appeared to match.
+                    return [
+                        s.display_name(),
+                        s.project_root.as_str(),
+                        s.cwd.as_str(),
+                        s.id.as_str(),
+                    ]
+                    .into_iter()
+                    .any(|field| matcher.fuzzy_match(field, &self.search_query).is_some());
                 }
                 true
             })
@@ -2826,6 +2834,41 @@ mod tests {
         app.search_query = "Session".to_string();
         app.apply_filter();
         assert_eq!(visible_ids(&app), vec!["newest", "favorite", "oldest"]);
+    }
+
+    #[test]
+    fn search_filters_favorites_without_crossing_metadata_boundaries() {
+        let project = "D:/Workspace/SpeakingBigMapsIntoExistence";
+        let mut intended = session("intended-deadbeef", project, "2026-08-14T12:00:00Z");
+        intended.summary = Some("Standup Cleanup".to_string());
+        let mut unrelated = session("unrelated-deadbeef", project, "2026-08-13T12:00:00Z");
+        // "stand" can be assembled across "Start Benchmark" + UUID when every
+        // field is concatenated, but no individual field actually matches.
+        unrelated.summary = Some("Start Benchmark".to_string());
+        let config = UserConfig {
+            favorites: vec![intended.id.clone(), unrelated.id.clone()],
+            ..UserConfig::default()
+        };
+        let mut app = App::new(vec![intended, unrelated], config);
+
+        app.search_query = "stand".to_string();
+        app.apply_filter();
+
+        assert_eq!(visible_ids(&app), vec!["intended-deadbeef"]);
+        assert!(!app.favorites_section_active(), "search results are flat");
+    }
+
+    #[test]
+    fn search_can_still_match_each_metadata_field() {
+        let project = "D:/Workspace/SpeakingBigMapsIntoExistence";
+        let item = session("abc1234", project, "2026-08-14T12:00:00Z");
+        let mut app = App::new(vec![item], UserConfig::default());
+
+        for query in ["Session", "SpeakingBig", "Workspace", "abc1234"] {
+            app.search_query = query.to_string();
+            app.apply_filter();
+            assert_eq!(visible_ids(&app), vec!["abc1234"], "query {query:?}");
+        }
     }
 
     #[test]
