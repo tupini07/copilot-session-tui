@@ -726,6 +726,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut setting_lines = vec![1usize, 4, 7, 10, 13, 16, 19, 22];
 
     lines.push(Line::from(""));
 
@@ -909,6 +910,123 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     )));
 
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Notifications (ntfy HTTP)",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    let notifications_enabled = app.config.notifications.enabled;
+    lines.push(settings_row(
+        "Notifications",
+        if notifications_enabled { "ON" } else { "OFF" },
+        if notifications_enabled {
+            Color::Green
+        } else {
+            Color::Red
+        },
+        app.settings_selected == 8,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Publish ready/error history directly over HTTP",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    let server_editing = app.settings_editing == Some(SettingsEditField::NtfyServer);
+    let server_display = if server_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        app.config.notifications.server.clone()
+    };
+    lines.push(settings_row(
+        "ntfy Server",
+        &server_display,
+        Color::Cyan,
+        app.settings_selected == 9,
+        server_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Defaults to https://ntfy.sh; self-hosted URLs are supported",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    let topic_editing = app.settings_editing == Some(SettingsEditField::NtfyTopic);
+    let topic_display = if topic_editing {
+        format!("{}█", "•".repeat(app.settings_input.chars().count()))
+    } else if app.config.notifications.topic.is_empty() {
+        "(not configured)".to_string()
+    } else {
+        "•••••••••••• (configured)".to_string()
+    };
+    lines.push(settings_row(
+        "ntfy Topic",
+        &topic_display,
+        if app.config.notifications.topic.is_empty() {
+            Color::DarkGray
+        } else {
+            Color::Cyan
+        },
+        app.settings_selected == 10,
+        topic_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Secret topic; never shown outside edit mode",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        "Ready Events",
+        if app.config.notifications.ready {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if app.config.notifications.ready {
+            Color::Green
+        } else {
+            Color::Red
+        },
+        app.settings_selected == 11,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Questions, approvals, or completed work ready for review",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        "Error Events",
+        if app.config.notifications.error {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if app.config.notifications.error {
+            Color::Green
+        } else {
+            Color::Red
+        },
+        app.settings_selected == 12,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Copilot OSC progress error state",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
@@ -917,7 +1035,17 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         Span::raw(" Save & Close"),
     ]));
 
-    let paragraph = Paragraph::new(lines);
+    let viewport = inner.height as usize;
+    let selected_line = setting_lines
+        .get(app.settings_selected)
+        .copied()
+        .unwrap_or_default();
+    let max_scroll = lines.len().saturating_sub(viewport);
+    let scroll = selected_line
+        .saturating_sub(2)
+        .min(max_scroll)
+        .min(u16::MAX as usize) as u16;
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     f.render_widget(paragraph, inner);
 }
 
@@ -1188,5 +1316,52 @@ mod help_tests {
         assert!(text.contains("In-flight work will be"), "got:\n{text}");
         assert!(text.contains("interrupted."), "got:\n{text}");
         assert!(text.contains("y/Enter take over"), "got:\n{text}");
+    }
+
+    #[test]
+    fn notification_settings_scroll_into_view_and_mask_the_topic() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 12;
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "super_secret_phone_topic".to_string();
+        let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
+
+        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Notifications (ntfy HTTP)"), "got:\n{text}");
+        assert!(text.contains("Error Events"), "got:\n{text}");
+        assert!(text.contains("Save & Close"), "got:\n{text}");
+        assert!(text.contains("(configured)"), "got:\n{text}");
+        assert!(
+            !text.contains("super_secret_phone_topic"),
+            "topic leaked outside edit mode:\n{text}"
+        );
+
+        app.settings_selected = 10;
+        app.settings_editing = Some(SettingsEditField::NtfyTopic);
+        app.settings_input = "super_secret_phone_topic".to_string();
+        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+        let editing: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            !editing.contains("super_secret_phone_topic"),
+            "topic leaked in edit mode:\n{editing}"
+        );
+        assert!(
+            editing.contains("••••"),
+            "masked cursor field missing:\n{editing}"
+        );
     }
 }

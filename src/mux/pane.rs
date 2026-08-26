@@ -6,8 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::callbacks::PaneCallbacks;
-use super::callbacks::PaneSignals;
+use super::callbacks::{PaneCallbacks, PaneSignalEvent, PaneSignals};
 use super::keys;
 use super::pty::{pty_size, PtyChunk, PtySession};
 use super::MuxEvent;
@@ -73,6 +72,19 @@ pub struct Pane {
     viewport: Viewport,
     working: bool,
     needs_attention: bool,
+    ready_sent_in_cycle: bool,
+    error_sent_in_cycle: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneSignalOutcome {
+    pub bell: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneNotification {
+    Ready,
+    Error,
 }
 
 /// Everything needed to start a pane, grouped so callers don't juggle a long argument list.
@@ -159,6 +171,8 @@ impl Pane {
             },
             working: false,
             needs_attention: false,
+            ready_sent_in_cycle: false,
+            error_sent_in_cycle: false,
         })
     }
 
@@ -248,7 +262,13 @@ impl Pane {
     }
 
     /// Apply title/progress/bell signals captured from one exact PTY output chunk.
-    pub fn apply_signals(&mut self, signals: PaneSignals, attended: bool) -> bool {
+    pub fn apply_signals(
+        &mut self,
+        signals: PaneSignals,
+        attended: bool,
+    ) -> (PaneSignalOutcome, Vec<PaneNotification>) {
+        let mut outcome = PaneSignalOutcome::default();
+        let mut notifications = Vec::new();
         if let Some(title) = signals.title {
             let title = title.trim().to_string();
             if !title.is_empty() {
@@ -256,24 +276,51 @@ impl Pane {
             }
         }
 
-        for progress in signals.progress {
-            if progress.is_working() {
-                self.working = true;
-                self.needs_attention = false;
-            } else if self.working {
-                self.working = false;
-                self.needs_attention = !attended;
+        for event in signals.events {
+            match event {
+                PaneSignalEvent::Progress(progress) if progress.is_working() => {
+                    if !self.working {
+                        self.ready_sent_in_cycle = false;
+                        self.error_sent_in_cycle = false;
+                    }
+                    self.working = true;
+                    self.needs_attention = false;
+                    if progress == crate::host_terminal::ProgressState::Error
+                        && !self.error_sent_in_cycle
+                    {
+                        notifications.push(PaneNotification::Error);
+                        self.error_sent_in_cycle = true;
+                    }
+                }
+                PaneSignalEvent::Progress(_) if self.working => {
+                    self.working = false;
+                    self.needs_attention = !attended;
+                    if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+                        notifications.push(PaneNotification::Ready);
+                        self.ready_sent_in_cycle = true;
+                    }
+                }
+                PaneSignalEvent::Progress(_) => {}
+                PaneSignalEvent::Bell => {
+                    outcome.bell = true;
+                    if !attended {
+                        self.needs_attention = true;
+                    }
+                    if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+                        notifications.push(PaneNotification::Ready);
+                        self.ready_sent_in_cycle = true;
+                    }
+                }
             }
         }
-        let bell = signals.bell;
-        if bell && !attended {
-            self.needs_attention = true;
-        }
-        bell
+        (outcome, notifications)
     }
 
     #[cfg(test)]
-    pub fn refresh_from_callbacks(&mut self, attended: bool) -> bool {
+    pub fn refresh_from_callbacks(
+        &mut self,
+        attended: bool,
+    ) -> (PaneSignalOutcome, Vec<PaneNotification>) {
         let signals = self
             .parser
             .lock()
@@ -722,7 +769,8 @@ mod tests {
         );
 
         pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
-        pane.refresh_from_callbacks(false);
+        let (_, notifications) = pane.refresh_from_callbacks(false);
+        assert_eq!(notifications, vec![PaneNotification::Ready]);
         assert!(pane.needs_attention());
         assert!(pane.display_title().starts_with("? "));
 
@@ -745,9 +793,14 @@ mod tests {
         pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
         pane.refresh_from_callbacks(true);
         pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
-        pane.refresh_from_callbacks(true);
+        let (_, notifications) = pane.refresh_from_callbacks(true);
 
         assert!(!pane.needs_attention());
+        assert_eq!(
+            notifications,
+            vec![PaneNotification::Ready],
+            "phone history is independent of focus"
+        );
         pane.shutdown().unwrap();
     }
 
@@ -762,7 +815,10 @@ mod tests {
         let mut pane = Pane::spawn(test_spec(33, program, args), 24, 80, tx).unwrap();
 
         pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\answer\x1b]9;4;0;0\x1b\\");
-        pane.refresh_from_callbacks(false);
+        assert_eq!(
+            pane.refresh_from_callbacks(false).1,
+            vec![PaneNotification::Ready]
+        );
 
         assert!(pane.needs_attention());
         pane.shutdown().unwrap();
@@ -779,13 +835,69 @@ mod tests {
         let mut pane = Pane::spawn(test_spec(34, program, args), 24, 80, tx).unwrap();
 
         pane.feed_synthetic(b"\x07");
-        assert!(pane.refresh_from_callbacks(false));
+        let (outcome, notifications) = pane.refresh_from_callbacks(false);
+        assert!(outcome.bell);
+        assert_eq!(notifications, vec![PaneNotification::Ready]);
         assert!(pane.needs_attention());
 
         pane.acknowledge_attention();
         pane.feed_synthetic(b"\x07");
-        pane.refresh_from_callbacks(true);
+        let (_, notifications) = pane.refresh_from_callbacks(true);
+        assert!(
+            notifications.is_empty(),
+            "bell is deduplicated until new work starts"
+        );
         assert!(!pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn error_notifies_once_and_suppresses_ready_until_the_next_cycle() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(35, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;2;0\x1b\\");
+        let (_, error) = pane.refresh_from_callbacks(true);
+        assert_eq!(error, vec![PaneNotification::Error]);
+        pane.feed_synthetic(b"\x1b]9;4;2;0\x1b\\\x1b]9;4;0;0\x1b\\");
+        let (_, duplicate_and_clear) = pane.refresh_from_callbacks(true);
+        assert!(duplicate_and_clear.is_empty());
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
+        let (_, next_cycle) = pane.refresh_from_callbacks(true);
+        assert_eq!(next_cycle, vec![PaneNotification::Ready]);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn ordered_chunk_preserves_multiple_cycles_and_bell_before_error() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(36, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(
+            b"\x1b]9;4;3;0\x1b\\\x07\x1b]9;4;2;0\x1b\\\x1b]9;4;0;0\x1b\\\
+              \x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\",
+        );
+        let (_, notifications) = pane.refresh_from_callbacks(false);
+
+        assert_eq!(
+            notifications,
+            vec![
+                PaneNotification::Ready,
+                PaneNotification::Error,
+                PaneNotification::Ready,
+            ]
+        );
         pane.shutdown().unwrap();
     }
 

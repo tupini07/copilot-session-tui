@@ -1,9 +1,11 @@
 use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
 use crate::input::{handle_quit_confirm, request_quit};
+use crate::mux::pane::PaneNotification;
 use crate::mux::{
     resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
     HelpCommand, MuxEvent, PrefixCommand, PrefixState,
 };
+use crate::notifications::NotificationKind;
 use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -1352,17 +1354,29 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         MuxEvent::Output(id, signals) => {
             let attended = app.terminal_focused
                 && matches!(app.view, View::Attached(focused) if focused == id);
-            let (bell, attention_changed) = app
+            let (outcome, notifications, attention_changed, title) = app
                 .mux
                 .as_mut()
                 .and_then(|mux| mux.pane_mut(id))
                 .map(|pane| {
                     let before = pane.needs_attention();
-                    let bell = pane.apply_signals(signals, attended);
-                    (bell, before != pane.needs_attention())
+                    let (outcome, notifications) = pane.apply_signals(signals, attended);
+                    (
+                        outcome,
+                        notifications,
+                        before != pane.needs_attention(),
+                        pane.title.clone(),
+                    )
                 })
-                .unwrap_or((false, false));
-            if bell {
+                .unwrap_or_default();
+            for notification in notifications {
+                let kind = match notification {
+                    PaneNotification::Ready => NotificationKind::Ready,
+                    PaneNotification::Error => NotificationKind::Error,
+                };
+                app.enqueue_notification(kind, title.clone());
+            }
+            if outcome.bell {
                 if let Some(title) = app
                     .mux
                     .as_ref()
@@ -1373,7 +1387,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 }
             }
             matches!(app.view, View::Attached(focused) if focused == id)
-                || bell
+                || outcome.bell
                 || attention_changed
         }
         MuxEvent::Exited(id, code) => {
@@ -2421,6 +2435,8 @@ mod tests {
     #[test]
     fn background_completion_requests_attention_and_switching_clears_it() {
         let mut app = attached_mux_app("foreground");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
         push_test_pane(&mut app, 2, "background");
         app.mux.as_mut().unwrap().focused = Some(1);
         app.view = View::Attached(1);
@@ -2433,7 +2449,9 @@ mod tests {
             .unwrap()
             .feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
         let working = crate::mux::callbacks::PaneSignals {
-            progress: vec![crate::host_terminal::ProgressState::Indeterminate],
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Indeterminate,
+            )],
             ..Default::default()
         };
         handle_mux_event(&mut app, MuxEvent::Output(2, working));
@@ -2445,7 +2463,9 @@ mod tests {
             .feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
 
         let complete = crate::mux::callbacks::PaneSignals {
-            progress: vec![crate::host_terminal::ProgressState::Clear],
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Clear,
+            )],
             ..Default::default()
         };
         assert!(
@@ -2453,6 +2473,9 @@ mod tests {
             "attention transition must repaint the internal tab strip"
         );
         assert!(app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention());
+        assert_eq!(app.notification_requests.len(), 1);
+        assert_eq!(app.notification_requests[0].kind, NotificationKind::Ready);
+        assert_eq!(app.notification_requests[0].session_title, "Test session 2");
         assert!(app
             .mux
             .as_ref()
@@ -2473,6 +2496,8 @@ mod tests {
     #[test]
     fn completion_in_the_focused_terminal_needs_attention_only_when_unfocused() {
         let mut app = attached_mux_app("focus-test");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
         app.terminal_focused = false;
         app.mux
             .as_mut()
@@ -2482,19 +2507,70 @@ mod tests {
             .feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
 
         let signals = crate::mux::callbacks::PaneSignals {
-            progress: vec![
-                crate::host_terminal::ProgressState::Indeterminate,
-                crate::host_terminal::ProgressState::Clear,
+            events: vec![
+                crate::mux::callbacks::PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Indeterminate,
+                ),
+                crate::mux::callbacks::PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                ),
             ],
             ..Default::default()
         };
         handle_mux_event(&mut app, MuxEvent::Output(1, signals));
         assert!(app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        assert_eq!(app.notification_requests.len(), 1);
+        assert_eq!(app.notification_requests[0].kind, NotificationKind::Ready);
 
         app.terminal_focused = true;
         app.acknowledge_focused_pane();
         assert!(app.terminal_focused);
         assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn focused_ready_and_error_events_still_publish_for_history() {
+        let mut app = attached_mux_app("notification-history");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        app.terminal_focused = true;
+
+        let ready = crate::mux::callbacks::PaneSignals {
+            events: vec![
+                crate::mux::callbacks::PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Indeterminate,
+                ),
+                crate::mux::callbacks::PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                ),
+            ],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, ready));
+        assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        assert_eq!(app.notification_requests[0].kind, NotificationKind::Ready);
+
+        let error = crate::mux::callbacks::PaneSignals {
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Error,
+            )],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, error));
+        assert_eq!(app.notification_requests[1].kind, NotificationKind::Error);
+        let clear = crate::mux::callbacks::PaneSignals {
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Clear,
+            )],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, clear));
+        assert_eq!(
+            app.notification_requests.len(),
+            2,
+            "error suppresses duplicate ready in the same work cycle"
+        );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

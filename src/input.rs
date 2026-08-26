@@ -781,7 +781,7 @@ fn handle_help(app: &mut App, key: KeyCode) {
     }
 }
 
-const SETTINGS_COUNT: usize = 8;
+const SETTINGS_COUNT: usize = 13;
 
 fn handle_settings(app: &mut App, key: KeyCode) {
     if let Some(field) = app.settings_editing {
@@ -801,15 +801,21 @@ fn handle_settings(app: &mut App, key: KeyCode) {
     }
 
     match key {
-        KeyCode::Esc | KeyCode::Char(',') => match config::save(&app.persistable_config()) {
-            Ok(()) => {
-                app.mode = Mode::Normal;
-                app.status_message = Some("Global settings saved".to_string());
+        KeyCode::Esc | KeyCode::Char(',') => {
+            if let Err(error) = config::validate_notification_config(&app.config.notifications) {
+                app.status_message = Some(error.to_string());
+                return;
             }
-            Err(error) => {
-                app.status_message = Some(format!("Failed to save global settings: {error}"));
+            match config::save(&app.persistable_config()) {
+                Ok(()) => {
+                    app.mode = Mode::Normal;
+                    app.status_message = Some("Global settings saved".to_string());
+                }
+                Err(error) => {
+                    app.status_message = Some(format!("Failed to save global settings: {error}"));
+                }
             }
-        },
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             app.settings_selected = app.settings_selected.saturating_sub(1);
         }
@@ -855,6 +861,25 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::TerminalShell,
                 app.config.terminal.shell.clone().unwrap_or_default(),
             ),
+            8 => {
+                app.config.notifications.enabled = !app.config.notifications.enabled;
+            }
+            9 => begin_global_edit(
+                app,
+                SettingsEditField::NtfyServer,
+                app.config.notifications.server.clone(),
+            ),
+            10 => begin_global_edit(
+                app,
+                SettingsEditField::NtfyTopic,
+                app.config.notifications.topic.clone(),
+            ),
+            11 => {
+                app.config.notifications.ready = !app.config.notifications.ready;
+            }
+            12 => {
+                app.config.notifications.error = !app.config.notifications.error;
+            }
             _ => {}
         },
         _ => {}
@@ -901,6 +926,22 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
         }
         SettingsEditField::TerminalShell => {
             app.config.terminal.shell = (!value.is_empty()).then_some(value);
+        }
+        SettingsEditField::NtfyServer => match config::normalize_ntfy_server(&value) {
+            Ok(server) => app.config.notifications.server = server,
+            Err(error) => {
+                app.status_message = Some(error.to_string());
+                return;
+            }
+        },
+        SettingsEditField::NtfyTopic => {
+            if !value.is_empty() {
+                if let Err(error) = config::validate_ntfy_topic(&value) {
+                    app.status_message = Some(error.to_string());
+                    return;
+                }
+            }
+            app.config.notifications.topic = value;
         }
     }
     app.settings_editing = None;
@@ -1233,6 +1274,31 @@ mod tests {
         handle_normal(&mut app, KeyCode::Char('?'));
 
         assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn notification_settings_toggle_and_require_a_topic_before_save() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        app.settings_selected = 8;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert!(app.config.notifications.enabled);
+        handle_settings(&mut app, KeyCode::Esc);
+
+        assert_eq!(app.mode, Mode::Settings, "invalid settings stay open");
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("topic is required"));
+
+        app.settings_selected = 11;
+        handle_settings(&mut app, KeyCode::Enter);
+        assert!(!app.config.notifications.ready);
+        app.settings_selected = 12;
+        handle_settings(&mut app, KeyCode::Enter);
+        assert!(!app.config.notifications.error);
     }
 
     #[test]

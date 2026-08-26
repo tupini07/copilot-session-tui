@@ -7,6 +7,7 @@ mod host_terminal;
 mod input;
 mod mux;
 mod mux_input;
+mod notifications;
 mod paste;
 mod scratchpad;
 #[cfg(feature = "screenshots")]
@@ -467,6 +468,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         input::maybe_load_details(app);
         app.poll_session_load();
         app.poll_update();
+        app.poll_notifications();
         app.poll_github();
         // Covers every route into the Files tab — keys, mouse, or opening
         // straight onto it — rather than each one separately.
@@ -512,6 +514,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 Some("Finishing the update before leaving; running sessions stay open...".into());
             continue;
         }
+        let exit_requested =
+            app.should_quit || app.should_resume.is_some() || app.should_new_session.is_some();
+        if exit_requested && app.exit_waits_for_notifications() {
+            continue;
+        }
 
         if app.should_quit {
             if app.exit_dir.is_none() {
@@ -528,6 +535,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 .transpose();
             if let Err(error) = shutdown {
                 app.should_quit = false;
+                app.cancel_notification_drain();
                 app.detach();
                 app.status_message = Some(format!("Cannot quit yet: {error}"));
                 continue;

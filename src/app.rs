@@ -1,6 +1,7 @@
 use crate::config::{self, EffectiveWorktreeConfig, ProjectSettings, UserConfig};
 use crate::github::{GithubError, GithubItem};
 use crate::mux::{KeyChord, MuxState, Pane, PaneSpec, PrefixState};
+use crate::notifications::{NotificationKind, NotificationRequest, NotificationWorker};
 use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::worktree::ManagedWorktree;
@@ -115,6 +116,8 @@ pub enum SettingsEditField {
     WorktreeRoot,
     MuxPrefix,
     TerminalShell,
+    NtfyServer,
+    NtfyTopic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +395,11 @@ pub struct App {
     pub update_check_requested: bool,
     pub installed_update_version: Option<String>,
     pub update_notice: Option<String>,
+    notification_worker: Option<NotificationWorker>,
+    notification_pending: usize,
+    notification_drain_started: Option<Instant>,
+    #[cfg(test)]
+    pub notification_requests: Vec<NotificationRequest>,
     #[cfg(test)]
     pub update_install_requested_for: Option<String>,
     pub config: UserConfig,
@@ -516,6 +524,11 @@ impl App {
             update_check_requested: false,
             installed_update_version: None,
             update_notice: None,
+            notification_worker: None,
+            notification_pending: 0,
+            notification_drain_started: None,
+            #[cfg(test)]
+            notification_requests: Vec::new(),
             #[cfg(test)]
             update_install_requested_for: None,
             config,
@@ -1609,6 +1622,7 @@ impl App {
         self.session_load_receiver.is_some()
             || self.update_receiver.is_some()
             || self.update_install_receiver.is_some()
+            || self.notification_pending > 0
             || self.github_request_receiver.is_some()
             || self.github_patch_receiver.is_some()
             || self.github_repo_receiver.is_some()
@@ -1621,6 +1635,78 @@ impl App {
 
     pub fn detail_load_pending(&self) -> bool {
         self.detail_pending.is_some()
+    }
+
+    pub fn enqueue_notification(&mut self, kind: NotificationKind, session_title: String) {
+        if self.notification_drain_started.is_some() {
+            return;
+        }
+        let configured = &self.config.notifications;
+        let event_enabled = match kind {
+            NotificationKind::Ready => configured.ready,
+            NotificationKind::Error => configured.error,
+        };
+        if !configured.enabled || !event_enabled {
+            return;
+        }
+        if let Err(error) = config::validate_notification_config(configured) {
+            self.status_message = Some(format!("Notifications disabled: {error}"));
+            return;
+        }
+        let request = NotificationRequest {
+            config: configured.clone(),
+            session_title,
+            kind,
+        };
+        #[cfg(test)]
+        {
+            self.notification_requests.push(request);
+        }
+        #[cfg(not(test))]
+        {
+            let worker = self
+                .notification_worker
+                .get_or_insert_with(NotificationWorker::start);
+            match worker.enqueue(request) {
+                Ok(()) => self.notification_pending += 1,
+                Err(error) => {
+                    self.status_message = Some(format!("Notification failed: {error}"));
+                }
+            }
+        }
+    }
+
+    pub fn poll_notifications(&mut self) {
+        let Some(worker) = self.notification_worker.as_ref() else {
+            return;
+        };
+        while let Some(result) = worker.try_result() {
+            self.notification_pending = self.notification_pending.saturating_sub(1);
+            if let Err(error) = result.result {
+                self.status_message = Some(format!("Notification failed: {error}"));
+            }
+        }
+    }
+
+    pub fn exit_waits_for_notifications(&mut self) -> bool {
+        const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+        if self.notification_pending == 0 {
+            return false;
+        }
+        let started = *self
+            .notification_drain_started
+            .get_or_insert_with(Instant::now);
+        if started.elapsed() < DRAIN_TIMEOUT {
+            self.status_message =
+                Some("Sending final phone notification before leaving...".to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cancel_notification_drain(&mut self) {
+        self.notification_drain_started = None;
     }
 
     pub fn poll_session_load(&mut self) {
@@ -3634,5 +3720,38 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("running sessions remain"));
+    }
+
+    #[test]
+    fn exit_uses_a_bounded_notification_drain_and_stops_new_enqueues() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.notification_pending = 1;
+
+        assert!(app.exit_waits_for_notifications());
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("final phone notification"));
+
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        app.enqueue_notification(NotificationKind::Ready, "Late event".to_string());
+        assert!(
+            app.notification_requests.is_empty(),
+            "draining rejects events that were not already accepted"
+        );
+
+        app.cancel_notification_drain();
+        app.enqueue_notification(NotificationKind::Ready, "Recovered event".to_string());
+        assert_eq!(
+            app.notification_requests.len(),
+            1,
+            "notifications resume when an exit request is abandoned"
+        );
+
+        assert!(app.exit_waits_for_notifications());
+        app.notification_drain_started = Some(Instant::now() - Duration::from_secs(3));
+        assert!(!app.exit_waits_for_notifications());
     }
 }

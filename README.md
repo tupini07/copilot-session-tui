@@ -361,6 +361,37 @@ opening every tab. The marker persists until that pane is focused or receives in
 Progress state—not text heuristics—drives the notification, so it can also mean “task
 finished and ready for review,” which still requires attention.
 
+### Phone notifications with ntfy
+
+CST can publish the same ready/error lifecycle events directly to an ntfy server over
+HTTP. The ntfy CLI is **not** required. Configure it from Global Settings (`,`):
+
+```json
+{
+  "notifications": {
+    "enabled": true,
+    "server": "https://ntfy.sh",
+    "topic": "long-private-random-topic",
+    "ready": true,
+    "error": true
+  }
+}
+```
+
+`https://ntfy.sh` is the default; self-hosted `http://` or `https://` servers are
+supported. ntfy topics are effectively passwords, so use a long, unguessable topic. CST
+masks it in the settings UI and never includes it in status/error output.
+
+Notifications are published for every configured work cycle regardless of whether the
+terminal tab is focused, giving the ntfy app a useful history. Payloads are intentionally
+title-only: `CST · <session title>` plus either `Ready for attention` or
+`Copilot reported an error`. Project paths, session IDs, prompts, visible chat text, tool
+output, and transcripts are never sent. Delivery is serialized on a background worker
+with bounded timeout/retry behavior, so it cannot block typing or Copilot output.
+
+This integration is outbound only. Replies, Telegram bots, remote approvals, arbitrary
+keypresses, and remote session control are intentionally unsupported.
+
 Input and Copilot output wake the mux immediately. Established idle panes do not redraw
 continuously: CST uses a five-second maintenance cadence when nothing is changing, while
 animations, visible terminals, background results, detail settling, and scratchpad

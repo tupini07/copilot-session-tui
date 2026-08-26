@@ -4,8 +4,13 @@ use std::sync::mpsc::Sender;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PaneSignals {
     pub title: Option<String>,
-    pub bell: bool,
-    pub progress: Vec<crate::host_terminal::ProgressState>,
+    pub events: Vec<PaneSignalEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneSignalEvent {
+    Bell,
+    Progress(crate::host_terminal::ProgressState),
 }
 
 /// Replies the emulator owes the child process.
@@ -18,8 +23,7 @@ pub struct PaneCallbacks {
     replies: Sender<Vec<u8>>,
     events: Sender<MuxEvent>,
     title: Option<String>,
-    bell: bool,
-    progress: Vec<crate::host_terminal::ProgressState>,
+    signals: Vec<PaneSignalEvent>,
 }
 
 impl PaneCallbacks {
@@ -28,8 +32,7 @@ impl PaneCallbacks {
             replies,
             events,
             title: None,
-            bell: false,
-            progress: Vec::new(),
+            signals: Vec::new(),
         }
     }
 
@@ -38,19 +41,10 @@ impl PaneCallbacks {
         self.title.take()
     }
 
-    pub fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell)
-    }
-
-    pub fn take_progress(&mut self) -> Vec<crate::host_terminal::ProgressState> {
-        std::mem::take(&mut self.progress)
-    }
-
     pub fn take_signals(&mut self) -> PaneSignals {
         PaneSignals {
             title: self.take_title(),
-            bell: self.take_bell(),
-            progress: self.take_progress(),
+            events: std::mem::take(&mut self.signals),
         }
     }
 
@@ -71,7 +65,7 @@ impl vt100::Callbacks for PaneCallbacks {
     }
 
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
-        self.bell = true;
+        self.signals.push(PaneSignalEvent::Bell);
     }
 
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
@@ -86,7 +80,7 @@ impl vt100::Callbacks for PaneCallbacks {
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
         if let Some(progress) = crate::host_terminal::progress_state(params) {
-            self.progress.push(progress);
+            self.signals.push(PaneSignalEvent::Progress(progress));
         }
         if let Some(sequence) = crate::host_terminal::progress_sequence(params) {
             let _ = self.events.send(MuxEvent::HostSequence(sequence));
@@ -226,8 +220,10 @@ mod tests {
         };
         assert_eq!(sequence, b"\x1b]9;4;3;0\x1b\\");
         assert_eq!(
-            parser.callbacks_mut().take_progress(),
-            vec![crate::host_terminal::ProgressState::Indeterminate]
+            parser.callbacks_mut().take_signals().events,
+            vec![PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Indeterminate
+            )]
         );
     }
 
@@ -241,14 +237,18 @@ mod tests {
         let complete = parser.callbacks_mut().take_signals();
 
         assert_eq!(
-            working.progress,
-            vec![crate::host_terminal::ProgressState::Indeterminate]
+            working.events,
+            vec![PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Indeterminate
+            )]
         );
         assert_eq!(
-            complete.progress,
-            vec![crate::host_terminal::ProgressState::Clear]
+            complete.events,
+            vec![PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Clear
+            )]
         );
-        assert!(parser.callbacks_mut().take_signals().progress.is_empty());
+        assert!(parser.callbacks_mut().take_signals().events.is_empty());
     }
 
     #[test]

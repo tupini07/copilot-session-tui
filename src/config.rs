@@ -12,11 +12,26 @@ pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 /// Plain control bytes like Ctrl-b travel reliably through every terminal we target,
 /// unlike chords that depend on the keyboard-enhancement protocol.
 pub const DEFAULT_MUX_PREFIX: &str = "C-b";
+pub const DEFAULT_NTFY_SERVER: &str = "https://ntfy.sh";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSnippet {
     pub name: String,
     pub prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ntfy_server")]
+    pub server: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default = "default_true")]
+    pub ready: bool,
+    #[serde(default = "default_true")]
+    pub error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +74,9 @@ pub struct UserConfig {
     #[serde(default)]
     pub terminal: TerminalConfig,
 
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }
@@ -71,6 +89,26 @@ pub struct TerminalConfig {
 
 fn default_mux_prefix() -> String {
     DEFAULT_MUX_PREFIX.to_string()
+}
+
+fn default_ntfy_server() -> String {
+    DEFAULT_NTFY_SERVER.to_string()
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: default_ntfy_server(),
+            topic: String::new(),
+            ready: true,
+            error: true,
+        }
+    }
 }
 
 /// Drop repeated favorites while preserving first-seen order.
@@ -100,6 +138,7 @@ impl Default for UserConfig {
             mux_prefix: default_mux_prefix(),
             worktree: WorktreeConfig::default(),
             terminal: TerminalConfig::default(),
+            notifications: NotificationConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -387,6 +426,76 @@ pub fn save(config: &UserConfig) -> Result<()> {
     write_json_atomic(&config_path(), config)
 }
 
+pub fn validate_ntfy_topic(topic: &str) -> Result<()> {
+    if topic.is_empty() {
+        anyhow::bail!("ntfy topic is required when notifications are enabled");
+    }
+    if topic.len() > 64
+        || !topic
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        anyhow::bail!("ntfy topic must be 1-64 letters, numbers, dashes, or underscores");
+    }
+    Ok(())
+}
+
+pub fn normalize_ntfy_server(server: &str) -> Result<String> {
+    let server = server.trim().trim_end_matches('/');
+    let uri: ureq::http::Uri = server
+        .parse()
+        .map_err(|_| anyhow::anyhow!("ntfy server is not a valid URL"))?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        anyhow::bail!("ntfy server must start with http:// or https://");
+    }
+    if uri.host().is_none_or(str::is_empty)
+        || uri
+            .authority()
+            .is_none_or(|authority| !valid_http_authority(authority.as_str()))
+        || uri.query().is_some()
+        || server.contains('#')
+    {
+        anyhow::bail!("ntfy server must contain a valid host and no query or fragment");
+    }
+    Ok(server.to_string())
+}
+
+fn valid_http_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains([' ', '@']) {
+        return false;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return false;
+        };
+        if end == 0 {
+            return false;
+        }
+        let suffix = &rest[end + 1..];
+        return suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port);
+    }
+    if authority.matches(':').count() > 1 {
+        return false;
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && valid_port(port),
+        None => true,
+    }
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0)
+}
+
+pub fn validate_notification_config(config: &NotificationConfig) -> Result<()> {
+    if !config.enabled {
+        return Ok(());
+    }
+    let _ = normalize_ntfy_server(&config.server)?;
+    validate_ntfy_topic(config.topic.trim())?;
+    Ok(())
+}
+
 pub fn save_global_snippets_if_unchanged(
     original: &[PromptSnippet],
     snippets: &[PromptSnippet],
@@ -594,6 +703,53 @@ mod tests {
         let saved: Value = serde_json::to_value(loaded).unwrap();
 
         assert_eq!(saved["future_setting"]["enabled"], 7);
+    }
+
+    #[test]
+    fn notification_defaults_are_disabled_and_private() {
+        let config: UserConfig = serde_json::from_str("{}").unwrap();
+
+        assert!(!config.notifications.enabled);
+        assert_eq!(config.notifications.server, DEFAULT_NTFY_SERVER);
+        assert!(config.notifications.topic.is_empty());
+        assert!(config.notifications.ready);
+        assert!(config.notifications.error);
+    }
+
+    #[test]
+    fn ntfy_configuration_validates_server_and_topic() {
+        let mut notifications = NotificationConfig {
+            enabled: true,
+            topic: "private_CST-topic_123".to_string(),
+            server: "https://ntfy.example.test/".to_string(),
+            ..NotificationConfig::default()
+        };
+        assert!(validate_notification_config(&notifications).is_ok());
+        assert_eq!(
+            normalize_ntfy_server(&notifications.server).unwrap(),
+            "https://ntfy.example.test"
+        );
+
+        notifications.topic = "not/a/topic".to_string();
+        assert!(validate_notification_config(&notifications).is_err());
+        notifications.topic = "valid".to_string();
+        notifications.server = "file:///tmp/ntfy".to_string();
+        assert!(validate_notification_config(&notifications).is_err());
+        for invalid in ["https://not a host", "https://:443", "https://host:bad"] {
+            notifications.server = invalid.to_string();
+            assert!(
+                validate_notification_config(&notifications).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+
+        notifications.enabled = false;
+        notifications.server.clear();
+        notifications.topic.clear();
+        assert!(
+            validate_notification_config(&notifications).is_ok(),
+            "disabled integration must not block unrelated settings saves"
+        );
     }
 
     #[test]
