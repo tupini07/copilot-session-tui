@@ -166,10 +166,12 @@ selected favorite, `↑`/`↓` to move it, and `Enter` or `Esc` to drop it. Each
 saved immediately.
 
 That order is also the order `T` opens Windows Terminal tabs in, so favorite tabs come
-up in the same arrangement on every machine and after every restart. Favorites keep
-their arrangement regardless of the active sort; the sort applies to everything below
-them. Grouping is a property of the unfiltered list, so searching or filtering by
-project temporarily shows a single flat, sorted list instead.
+up in the same arrangement on every machine and after every restart. CST sends all
+`new-tab` actions in one atomic Windows Terminal command, so changing the focused tab
+while they open cannot reverse the remaining order. Favorites keep their arrangement
+regardless of the active sort; the sort applies to everything below them. Grouping is a
+property of the unfiltered list, so searching or filtering by project temporarily shows
+a single flat, sorted list instead.
 
 Favorites are also CST's fast startup set. Their lightweight metadata is loaded before
 the first frame; the remaining session catalog is discovered on a background thread and

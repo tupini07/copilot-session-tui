@@ -6,7 +6,7 @@ use crate::session::Session;
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(any(windows, test))]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 #[cfg(any(windows, test))]
 use std::path::PathBuf;
@@ -114,40 +114,24 @@ fn launch_favorites_windows(
 
     let current_exe =
         std::env::current_exe().context("Could not resolve the current CST executable")?;
-    let mut failed = Vec::new();
     let requested = tabs.len();
-
-    for tab in tabs {
-        let args = windows_terminal_args(&tab, &current_exe, copilot_home, mux_override);
-        match Command::new("wt.exe").args(&args).status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => failed.push(format!(
-                "'{}' (Windows Terminal exited with {})",
-                tab.title, status
-            )),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                anyhow::bail!(
-                    "Windows Terminal (wt.exe) was not found. Install Windows Terminal or enable its app execution alias."
-                );
-            }
-            Err(error) => failed.push(format!("'{}' ({error})", tab.title)),
-        }
-    }
-
-    let launched = requested - failed.len();
-    if failed.is_empty() {
-        Ok(FavoriteLaunchReport {
+    let args = windows_terminal_batch_args(&tabs, &current_exe, copilot_home, mux_override);
+    match Command::new("wt.exe").args(&args).status() {
+        Ok(status) if status.success() => Ok(FavoriteLaunchReport {
             configured,
-            launched,
+            launched: requested,
             active,
             stale,
-        })
-    } else {
-        anyhow::bail!(
-            "Failed to open {} tab(s): {}",
-            failed.len(),
-            failed.join(", ")
-        )
+        }),
+        Ok(status) => anyhow::bail!("Windows Terminal exited with {status}"),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            anyhow::bail!(
+                "Windows Terminal (wt.exe) was not found. Install Windows Terminal or enable its app execution alias."
+            );
+        }
+        Err(error) => {
+            anyhow::bail!("Failed to open favorite tabs: {error}");
+        }
     }
 }
 
@@ -197,35 +181,86 @@ fn report_skipped(report: &FavoriteLaunchReport) {
 }
 
 #[cfg(any(windows, test))]
-fn windows_terminal_args(
+fn windows_terminal_batch_args(
+    tabs: &[FavoriteTab],
+    current_exe: &Path,
+    copilot_home: &Path,
+    mux_override: Option<bool>,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-w"), OsString::from("0")];
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            args.push(OsString::from(";"));
+        }
+        args.extend(windows_terminal_tab_args(
+            tab,
+            current_exe,
+            copilot_home,
+            mux_override,
+        ));
+    }
+    args
+}
+
+#[cfg(any(windows, test))]
+fn windows_terminal_tab_args(
     tab: &FavoriteTab,
     current_exe: &Path,
     copilot_home: &Path,
     mux_override: Option<bool>,
 ) -> Vec<OsString> {
     let mut args = vec![
-        OsString::from("-w"),
-        OsString::from("0"),
         OsString::from("new-tab"),
         OsString::from("--title"),
-        OsString::from(&tab.title),
+        windows_terminal_literal(OsStr::new(&tab.title)),
         OsString::from("--suppressApplicationTitle"),
     ];
     if let Some(cwd) = &tab.cwd {
         args.push(OsString::from("--startingDirectory"));
-        args.push(cwd.as_os_str().to_owned());
+        args.push(windows_terminal_literal(cwd.as_os_str()));
     }
-    args.push(current_exe.as_os_str().to_owned());
+    args.push(windows_terminal_literal(current_exe.as_os_str()));
     args.push(OsString::from("--copilot-home"));
-    args.push(copilot_home.as_os_str().to_owned());
+    args.push(windows_terminal_literal(copilot_home.as_os_str()));
     args.push(OsString::from("--session"));
-    args.push(OsString::from(&tab.session_id));
+    args.push(windows_terminal_literal(OsStr::new(&tab.session_id)));
     match mux_override {
         Some(true) => args.push(OsString::from("--mux")),
         Some(false) => args.push(OsString::from("--no-mux")),
         None => {}
     }
     args
+}
+
+/// Escape semicolons that Windows Terminal otherwise treats as action separators even
+/// when they arrive inside one argv value. Standalone `;` arguments are deliberately
+/// created by `windows_terminal_batch_args` and never pass through this function.
+#[cfg(any(windows, test))]
+fn windows_terminal_literal(value: &OsStr) -> OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut escaped = Vec::new();
+        for unit in value.encode_wide() {
+            if unit == b';' as u16 {
+                escaped.push(b'\\' as u16);
+            }
+            escaped.push(unit);
+        }
+        OsString::from_wide(&escaped)
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let mut escaped = Vec::new();
+        for byte in value.as_bytes() {
+            if *byte == b';' {
+                escaped.push(b'\\');
+            }
+            escaped.push(*byte);
+        }
+        OsString::from_vec(escaped)
+    }
 }
 
 #[cfg(test)]
@@ -299,17 +334,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_arguments_keep_paths_titles_and_overrides_separate() {
-        let tab = FavoriteTab {
-            session_id: "session;42".to_string(),
-            title: "Map parser; review".to_string(),
-            cwd: Some(PathBuf::from(r"C:\work trees\map parser")),
-        };
+    fn one_terminal_command_preserves_tab_order_and_argument_boundaries() {
+        let tabs = vec![
+            FavoriteTab {
+                session_id: "first".to_string(),
+                title: "First favorite".to_string(),
+                cwd: Some(PathBuf::from(r"C:\work;trees\first")),
+            },
+            FavoriteTab {
+                session_id: "session;42".to_string(),
+                title: "Map parser; review".to_string(),
+                cwd: Some(PathBuf::from(r"C:\work trees\map parser")),
+            },
+            FavoriteTab {
+                session_id: "third".to_string(),
+                title: "Third favorite".to_string(),
+                cwd: None,
+            },
+        ];
 
-        let args = windows_terminal_args(
-            &tab,
-            Path::new(r"C:\Program Files\CST\copilot-session-tui.exe"),
-            Path::new(r"C:\Users\Test User\.copilot"),
+        let args = windows_terminal_batch_args(
+            &tabs,
+            Path::new(r"C:\Program Files\CST;Tools\copilot-session-tui.exe"),
+            Path::new(r"C:\Users\Test;User\.copilot"),
             Some(false),
         );
 
@@ -320,20 +367,64 @@ mod tests {
                 "0",
                 "new-tab",
                 "--title",
-                "Map parser; review",
+                "First favorite",
+                "--suppressApplicationTitle",
+                "--startingDirectory",
+                r"C:\work\;trees\first",
+                r"C:\Program Files\CST\;Tools\copilot-session-tui.exe",
+                "--copilot-home",
+                r"C:\Users\Test\;User\.copilot",
+                "--session",
+                "first",
+                "--no-mux",
+                ";",
+                "new-tab",
+                "--title",
+                r"Map parser\; review",
                 "--suppressApplicationTitle",
                 "--startingDirectory",
                 r"C:\work trees\map parser",
-                r"C:\Program Files\CST\copilot-session-tui.exe",
+                r"C:\Program Files\CST\;Tools\copilot-session-tui.exe",
                 "--copilot-home",
-                r"C:\Users\Test User\.copilot",
+                r"C:\Users\Test\;User\.copilot",
                 "--session",
-                "session;42",
+                r"session\;42",
+                "--no-mux",
+                ";",
+                "new-tab",
+                "--title",
+                "Third favorite",
+                "--suppressApplicationTitle",
+                r"C:\Program Files\CST\;Tools\copilot-session-tui.exe",
+                "--copilot-home",
+                r"C:\Users\Test\;User\.copilot",
+                "--session",
+                "third",
                 "--no-mux",
             ]
             .into_iter()
             .map(OsString::from)
             .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.as_os_str() == ";")
+                .count(),
+            tabs.len() - 1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.as_os_str() == "-w")
+                .count(),
+            1,
+            "the window selector applies once to the atomic action list"
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.as_os_str() == ";")
+                .count(),
+            2,
+            "only the standalone separators remain raw semicolons"
         );
     }
 
