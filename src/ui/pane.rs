@@ -282,7 +282,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let sessions: Vec<(String, bool)> = mux
         .panes
         .iter()
-        .map(|pane| (pane.title.clone(), pane.is_running()))
+        .map(|pane| (pane.display_title(), pane.is_running()))
         .collect();
     let (tab_list, hidden) = tabs::layout(
         &sessions,

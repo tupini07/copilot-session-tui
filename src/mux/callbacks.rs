@@ -1,6 +1,13 @@
 use crate::mux::MuxEvent;
 use std::sync::mpsc::Sender;
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PaneSignals {
+    pub title: Option<String>,
+    pub bell: bool,
+    pub progress: Vec<crate::host_terminal::ProgressState>,
+}
+
 /// Replies the emulator owes the child process.
 ///
 /// `vt100` is a screen model, not a full terminal: it never answers device queries.
@@ -12,6 +19,7 @@ pub struct PaneCallbacks {
     events: Sender<MuxEvent>,
     title: Option<String>,
     bell: bool,
+    progress: Vec<crate::host_terminal::ProgressState>,
 }
 
 impl PaneCallbacks {
@@ -21,6 +29,7 @@ impl PaneCallbacks {
             events,
             title: None,
             bell: false,
+            progress: Vec::new(),
         }
     }
 
@@ -31,6 +40,18 @@ impl PaneCallbacks {
 
     pub fn take_bell(&mut self) -> bool {
         std::mem::take(&mut self.bell)
+    }
+
+    pub fn take_progress(&mut self) -> Vec<crate::host_terminal::ProgressState> {
+        std::mem::take(&mut self.progress)
+    }
+
+    pub fn take_signals(&mut self) -> PaneSignals {
+        PaneSignals {
+            title: self.take_title(),
+            bell: self.take_bell(),
+            progress: self.take_progress(),
+        }
     }
 
     fn reply(&self, bytes: Vec<u8>) {
@@ -64,6 +85,9 @@ impl vt100::Callbacks for PaneCallbacks {
     }
 
     fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        if let Some(progress) = crate::host_terminal::progress_state(params) {
+            self.progress.push(progress);
+        }
         if let Some(sequence) = crate::host_terminal::progress_sequence(params) {
             let _ = self.events.send(MuxEvent::HostSequence(sequence));
         }
@@ -201,6 +225,30 @@ mod tests {
             panic!("expected host sequence");
         };
         assert_eq!(sequence, b"\x1b]9;4;3;0\x1b\\");
+        assert_eq!(
+            parser.callbacks_mut().take_progress(),
+            vec![crate::host_terminal::ProgressState::Indeterminate]
+        );
+    }
+
+    #[test]
+    fn progress_signals_are_drained_per_output_chunk() {
+        let (mut parser, _, _) = parser_with_replies();
+
+        parser.process(b"\x1b]9;4;3;0\x07");
+        let working = parser.callbacks_mut().take_signals();
+        parser.process(b"\x1b]9;4;0;0\x07");
+        let complete = parser.callbacks_mut().take_signals();
+
+        assert_eq!(
+            working.progress,
+            vec![crate::host_terminal::ProgressState::Indeterminate]
+        );
+        assert_eq!(
+            complete.progress,
+            vec![crate::host_terminal::ProgressState::Clear]
+        );
+        assert!(parser.callbacks_mut().take_signals().progress.is_empty());
     }
 
     #[test]

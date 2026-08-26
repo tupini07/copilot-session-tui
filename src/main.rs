@@ -23,7 +23,10 @@ mod workspace_state;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture,
+    },
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -242,7 +245,8 @@ fn main() -> Result<()> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableFocusChange
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -264,6 +268,7 @@ fn main() -> Result<()> {
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste,
+        DisableFocusChange,
         SetTitle("")
     )?;
     terminal.show_cursor()?;
@@ -397,18 +402,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     loop {
         app.collapse_stopped_terminals();
 
-        let desired_title = match app.view {
-            app::View::Attached(_) => app
-                .mux
-                .as_ref()
-                .and_then(|mux| mux.focused_pane())
-                .map(|pane| pane.title.as_str())
-                .unwrap_or("Copilot Session Manager"),
-            app::View::List => "Copilot Session Manager",
-        };
+        let desired_title = desired_terminal_title(app);
         if terminal_title != desired_title {
             terminal_title.clear();
-            terminal_title.push_str(desired_title);
+            terminal_title.push_str(&desired_title);
             execute!(terminal.backend_mut(), SetTitle(&terminal_title))?;
         }
 
@@ -646,12 +643,52 @@ fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
     }
 }
 
+fn desired_terminal_title(app: &App) -> String {
+    match app.view {
+        app::View::Attached(_) => app
+            .focused_pane_title()
+            .unwrap_or_else(|| "Copilot Session Manager".to_string()),
+        app::View::List if app.any_pane_needs_attention() => {
+            "? Copilot Session Manager".to_string()
+        }
+        app::View::List => "Copilot Session Manager".to_string(),
+    }
+}
+
 fn exit_waits_for_update(app: &App) -> bool {
     app.update_installing()
         && (app.should_quit || app.should_resume.is_some() || app.should_new_session.is_some())
 }
 
 fn apply_terminal_event(app: &mut App, event: crossterm::event::Event) -> Result<()> {
+    match &event {
+        crossterm::event::Event::FocusGained => {
+            app.terminal_focused = true;
+            if matches!(app.view, app::View::Attached(_)) {
+                app.acknowledge_focused_pane();
+            }
+            return Ok(());
+        }
+        crossterm::event::Event::FocusLost => {
+            app.terminal_focused = false;
+            return Ok(());
+        }
+        crossterm::event::Event::Key(crossterm::event::KeyEvent {
+            kind: crossterm::event::KeyEventKind::Press,
+            ..
+        })
+        | crossterm::event::Event::Paste(_)
+        | crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(_),
+            ..
+        }) => {
+            app.terminal_focused = true;
+            if matches!(app.view, app::View::Attached(_)) {
+                app.acknowledge_focused_pane();
+            }
+        }
+        _ => {}
+    }
     match app.view {
         app::View::Attached(_) => {
             mux_input::handle_attached_event(app, event);
@@ -701,6 +738,7 @@ fn print_shell_init(shell: &str) {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use crate::mux::{Pane, PaneSpec};
 
     fn session(id: &str, name: &str, active: bool) -> session::Session {
         session::Session {
@@ -757,6 +795,91 @@ mod tests {
 
         app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
         assert_eq!(mux_wait_timeout(&app, false), 100);
+    }
+
+    #[test]
+    fn outer_title_carries_attention_in_attached_and_list_views() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let mut pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "Plan review".to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: "attention-title".to_string(),
+                program,
+                args,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = app::View::Attached(1);
+
+        assert_eq!(desired_terminal_title(&app), "? Plan review");
+        app.terminal_focused = false;
+        apply_terminal_event(&mut app, crossterm::event::Event::FocusGained).unwrap();
+        assert_eq!(desired_terminal_title(&app), "Plan review");
+
+        app.terminal_focused = false;
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .refresh_from_callbacks(false);
+        app.view = app::View::List;
+        assert_eq!(desired_terminal_title(&app), "? Copilot Session Manager");
+        apply_terminal_event(&mut app, crossterm::event::Event::FocusGained).unwrap();
+        assert_eq!(
+            desired_terminal_title(&app),
+            "? Copilot Session Manager",
+            "focusing the list must not acknowledge a pane that was not viewed"
+        );
+
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn newly_created_app_is_unattended_until_focus_or_input_arrives() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        assert!(!app.terminal_focused);
+
+        apply_terminal_event(
+            &mut app,
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        )
+        .unwrap();
+
+        assert!(app.terminal_focused);
     }
 
     #[test]

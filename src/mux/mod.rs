@@ -12,7 +12,7 @@ pub use pane::{Pane, PaneId, PaneSpec, PaneStatus};
 
 /// Events the UI loop must wake up for, from PTYs and from the terminal.
 pub enum MuxEvent {
-    Output(PaneId),
+    Output(PaneId, callbacks::PaneSignals),
     Exited(PaneId, Option<u32>),
     HostSequence(Vec<u8>),
     Term(crossterm::event::Event),

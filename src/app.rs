@@ -432,6 +432,7 @@ pub struct App {
     pub terminal_owner: Option<crate::mux::PaneId>,
     pub terminal_open: HashSet<crate::mux::PaneId>,
     pub workspace_focus: WorkspaceFocus,
+    pub terminal_focused: bool,
     pub workspace_help: Option<WorkspaceHelp>,
     pub snippet_modal: Option<SnippetModal>,
     pub workspace_areas: WorkspaceAreas,
@@ -546,6 +547,10 @@ impl App {
             terminal_owner: None,
             terminal_open: HashSet::new(),
             workspace_focus: WorkspaceFocus::Chat,
+            // DECSET 1004 reports future focus transitions, not initial state. Treat a
+            // newly launched tab as unattended until FocusGained or real input proves
+            // otherwise; favorite tabs often finish startup after becoming background.
+            terminal_focused: false,
             workspace_help: None,
             snippet_modal: None,
             workspace_areas: WorkspaceAreas::default(),
@@ -749,6 +754,25 @@ impl App {
             .as_ref()
             .map(|mux| mux.panes.iter().filter(|pane| pane.is_running()).count())
             .unwrap_or(0)
+    }
+
+    pub fn focused_pane_title(&self) -> Option<String> {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(Pane::display_title)
+    }
+
+    pub fn any_pane_needs_attention(&self) -> bool {
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.panes.iter().any(Pane::needs_attention))
+    }
+
+    pub fn acknowledge_focused_pane(&mut self) {
+        if let Some(pane) = self.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
+            pane.acknowledge_attention();
+        }
     }
 
     pub fn open_github_inspector(&mut self) {

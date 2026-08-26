@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::callbacks::PaneCallbacks;
+use super::callbacks::PaneSignals;
 use super::keys;
 use super::pty::{pty_size, PtyChunk, PtySession};
 use super::MuxEvent;
@@ -70,6 +71,8 @@ pub struct Pane {
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
+    working: bool,
+    needs_attention: bool,
 }
 
 /// Everything needed to start a pane, grouped so callers don't juggle a long argument list.
@@ -113,16 +116,19 @@ impl Pane {
             while let Ok(chunk) = chunk_rx.recv() {
                 match chunk {
                     PtyChunk::Output(bytes) => {
-                        if let Ok(mut parser) = pump_parser.lock() {
+                        let signals = if let Ok(mut parser) = pump_parser.lock() {
                             parser.process(&bytes);
                             if !pump_has_visible_output.load(Ordering::Relaxed)
                                 && Self::screen_has_visible_text(parser.screen())
                             {
                                 pump_has_visible_output.store(true, Ordering::Release);
                             }
-                        }
+                            parser.callbacks_mut().take_signals()
+                        } else {
+                            PaneSignals::default()
+                        };
                         // The UI thread coalesces these; one wakeup per chunk is fine.
-                        if events.send(MuxEvent::Output(id)).is_err() {
+                        if events.send(MuxEvent::Output(id, signals)).is_err() {
                             return;
                         }
                     }
@@ -151,6 +157,8 @@ impl Pane {
                 rows: size.rows,
                 cols: size.cols,
             },
+            working: false,
+            needs_attention: false,
         })
     }
 
@@ -239,20 +247,55 @@ impl Pane {
         .flatten()
     }
 
-    /// Adopt any window title the child set via OSC, and report a pending bell.
-    pub fn refresh_from_callbacks(&mut self) -> bool {
-        let Ok(mut parser) = self.parser.lock() else {
-            return false;
-        };
-        let callbacks = parser.callbacks_mut();
-        if let Some(title) = callbacks.take_title() {
+    /// Apply title/progress/bell signals captured from one exact PTY output chunk.
+    pub fn apply_signals(&mut self, signals: PaneSignals, attended: bool) -> bool {
+        if let Some(title) = signals.title {
             let title = title.trim().to_string();
             if !title.is_empty() {
                 self.title = title;
             }
         }
 
-        callbacks.take_bell()
+        for progress in signals.progress {
+            if progress.is_working() {
+                self.working = true;
+                self.needs_attention = false;
+            } else if self.working {
+                self.working = false;
+                self.needs_attention = !attended;
+            }
+        }
+        let bell = signals.bell;
+        if bell && !attended {
+            self.needs_attention = true;
+        }
+        bell
+    }
+
+    #[cfg(test)]
+    pub fn refresh_from_callbacks(&mut self, attended: bool) -> bool {
+        let signals = self
+            .parser
+            .lock()
+            .map(|mut parser| parser.callbacks_mut().take_signals())
+            .unwrap_or_default();
+        self.apply_signals(signals, attended)
+    }
+
+    pub fn needs_attention(&self) -> bool {
+        self.needs_attention
+    }
+
+    pub fn acknowledge_attention(&mut self) {
+        self.needs_attention = false;
+    }
+
+    pub fn display_title(&self) -> String {
+        if self.needs_attention {
+            format!("? {}", self.title)
+        } else {
+            self.title.clone()
+        }
     }
 
     pub fn send_key(&mut self, key: &KeyEvent) -> Result<()> {
@@ -658,6 +701,91 @@ mod tests {
         assert!(!pane.is_blank());
         assert!(!pane.is_blank(), "subsequent checks are atomic reads");
 
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn background_work_completion_sets_attention_until_acknowledged() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(31, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert!(
+            !pane.needs_attention(),
+            "starting work clears old attention"
+        );
+
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert!(pane.needs_attention());
+        assert!(pane.display_title().starts_with("? "));
+
+        pane.acknowledge_attention();
+        assert!(!pane.needs_attention());
+        assert_eq!(pane.display_title(), pane.title);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn attended_completion_does_not_create_an_attention_marker() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(32, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+
+        assert!(!pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn working_and_clear_in_one_output_chunk_still_requests_attention() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(33, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\answer\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+
+        assert!(pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn background_bell_requests_attention() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(34, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x07");
+        assert!(pane.refresh_from_callbacks(false));
+        assert!(pane.needs_attention());
+
+        pane.acknowledge_attention();
+        pane.feed_synthetic(b"\x07");
+        pane.refresh_from_callbacks(true);
+        assert!(!pane.needs_attention());
         pane.shutdown().unwrap();
     }
 

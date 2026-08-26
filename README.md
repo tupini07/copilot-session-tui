@@ -354,6 +354,13 @@ Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;
 states are forwarded through the mux so Copilot retains the outer terminal's scrolling,
 paste, copy, and Windows Terminal tab-spinner behavior.
 
+When a background Copilot pane transitions from working to waiting/complete (or rings the
+terminal bell), CST prepends `?` to its internal pane tab and the outer Windows Terminal
+tab title. This makes questions, plan approvals, and completed tasks visible without
+opening every tab. The marker persists until that pane is focused or receives input.
+Progress state—not text heuristics—drives the notification, so it can also mean “task
+finished and ready for review,” which still requires attention.
+
 Input and Copilot output wake the mux immediately. Established idle panes do not redraw
 continuously: CST uses a five-second maintenance cadence when nothing is changing, while
 animations, visible terminals, background results, detail settling, and scratchpad

@@ -13,6 +13,22 @@ use ratatui::layout::Rect;
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    let attended = matches!(
+        &event,
+        Event::Key(KeyEvent {
+            kind: KeyEventKind::Press,
+            ..
+        }) | Event::Paste(_)
+            | Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(_),
+                ..
+            })
+    );
+    if attended {
+        app.terminal_focused = true;
+        app.acknowledge_focused_pane();
+    }
+
     if app.confirm_quit {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
@@ -1068,6 +1084,7 @@ fn toggle_attached_terminal(app: &mut App) {
 }
 
 pub fn sync_workspace_panels(app: &mut App) {
+    app.acknowledge_focused_pane();
     let Some((pane_id, session_id, title, cwd)) = focused_workspace_context(app) else {
         let _ = close_scratchpad(app);
         app.terminal.hide();
@@ -1332,14 +1349,19 @@ pub fn sync_view(app: &mut App) {
 /// Apply a PTY event. Returns true when the UI needs a repaint.
 pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
     match event {
-        MuxEvent::Output(id) => {
-            // Titles and bells only surface once the child's escape sequences are parsed.
-            let bell = app
+        MuxEvent::Output(id, signals) => {
+            let attended = app.terminal_focused
+                && matches!(app.view, View::Attached(focused) if focused == id);
+            let (bell, attention_changed) = app
                 .mux
                 .as_mut()
                 .and_then(|mux| mux.pane_mut(id))
-                .map(|pane| pane.refresh_from_callbacks())
-                .unwrap_or(false);
+                .map(|pane| {
+                    let before = pane.needs_attention();
+                    let bell = pane.apply_signals(signals, attended);
+                    (bell, before != pane.needs_attention())
+                })
+                .unwrap_or((false, false));
             if bell {
                 if let Some(title) = app
                     .mux
@@ -1350,7 +1372,9 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     app.status_message = Some(format!("🔔 {title}"));
                 }
             }
-            matches!(app.view, View::Attached(focused) if focused == id) || bell
+            matches!(app.view, View::Attached(focused) if focused == id)
+                || bell
+                || attention_changed
         }
         MuxEvent::Exited(id, code) => {
             if let Some(mux) = app.mux.as_mut() {
@@ -2384,8 +2408,94 @@ mod tests {
         let mut app = mux_app();
         app.view = View::Attached(1);
 
-        assert!(handle_mux_event(&mut app, MuxEvent::Output(1)));
-        assert!(!handle_mux_event(&mut app, MuxEvent::Output(2)));
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::Output(1, Default::default())
+        ));
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::Output(2, Default::default())
+        ));
+    }
+
+    #[test]
+    fn background_completion_requests_attention_and_switching_clears_it() {
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::Attached(1);
+        app.terminal_focused = true;
+
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(2)
+            .unwrap()
+            .feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        let working = crate::mux::callbacks::PaneSignals {
+            progress: vec![crate::host_terminal::ProgressState::Indeterminate],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(2, working));
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(2)
+            .unwrap()
+            .feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+
+        let complete = crate::mux::callbacks::PaneSignals {
+            progress: vec![crate::host_terminal::ProgressState::Clear],
+            ..Default::default()
+        };
+        assert!(
+            handle_mux_event(&mut app, MuxEvent::Output(2, complete)),
+            "attention transition must repaint the internal tab strip"
+        );
+        assert!(app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention());
+        assert!(app
+            .mux
+            .as_ref()
+            .unwrap()
+            .pane(2)
+            .unwrap()
+            .display_title()
+            .starts_with("? "));
+
+        app.mux.as_mut().unwrap().focused = Some(2);
+        app.view = View::Attached(2);
+        sync_workspace_panels(&mut app);
+
+        assert!(!app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn completion_in_the_focused_terminal_needs_attention_only_when_unfocused() {
+        let mut app = attached_mux_app("focus-test");
+        app.terminal_focused = false;
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
+
+        let signals = crate::mux::callbacks::PaneSignals {
+            progress: vec![
+                crate::host_terminal::ProgressState::Indeterminate,
+                crate::host_terminal::ProgressState::Clear,
+            ],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, signals));
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+
+        app.terminal_focused = true;
+        app.acknowledge_focused_pane();
+        assert!(app.terminal_focused);
+        assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]

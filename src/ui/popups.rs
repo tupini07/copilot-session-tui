@@ -166,6 +166,11 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         .enumerate()
         .map(|(index, pane)| {
             let title = app.pane_session_title(&pane.session_id, &pane.title);
+            let title = if pane.needs_attention() {
+                format!("? {title}")
+            } else {
+                title.to_string()
+            };
             let selected = index == app.pane_selected;
             let base = if selected {
                 Style::default()
