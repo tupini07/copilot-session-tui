@@ -59,10 +59,11 @@ where
     P: FnMut(Duration) -> io::Result<bool>,
     R: FnMut() -> io::Result<Event>,
 {
+    let mut text_chars = usize::from(paste_char(&first).is_some());
     let mut run = vec![first];
     let mut trailing = None;
     loop {
-        let grace = if text_len(&run) >= 2 {
+        let grace = if text_chars >= 2 {
             BURST_GRACE
         } else {
             BURST_START_GRACE
@@ -71,7 +72,10 @@ where
             break;
         }
         let next = read()?;
-        if paste_char(&next).is_some() || is_key_release(&next) {
+        if paste_char(&next).is_some() {
+            text_chars += 1;
+            run.push(next);
+        } else if is_key_release(&next) {
             run.push(next);
         } else {
             // Anything else ends the burst but still belongs to the caller.
@@ -190,6 +194,36 @@ mod tests {
         assert_eq!(
             events,
             vec![Event::Paste("After the first character".to_string())]
+        );
+    }
+
+    #[test]
+    fn large_paste_collection_stays_linear() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+        use std::time::Instant;
+
+        let queue = RefCell::new(VecDeque::from(typed(&"x".repeat(25_000))));
+        let started = Instant::now();
+        let events = collect_run(
+            press(KeyCode::Char('A')),
+            |_| Ok(!queue.borrow().is_empty()),
+            || {
+                queue
+                    .borrow_mut()
+                    .pop_front()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "empty queue"))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![Event::Paste(format!("A{}", "x".repeat(25_000)))]
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "collecting a large paste must not rescan the accumulated input per character"
         );
     }
 

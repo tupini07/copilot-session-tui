@@ -1354,21 +1354,24 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         MuxEvent::Output(id, signals) => {
             let attended = app.terminal_focused
                 && matches!(app.view, View::Attached(focused) if focused == id);
-            let (outcome, notifications, attention_changed, title) = app
+            let (outcome, notifications, attention_changed, title_changed, title) = app
                 .mux
                 .as_mut()
                 .and_then(|mux| mux.pane_mut(id))
                 .map(|pane| {
                     let before = pane.needs_attention();
+                    let title_before = pane.title.clone();
                     let (outcome, notifications) = pane.apply_signals(signals, attended);
                     (
                         outcome,
                         notifications,
                         before != pane.needs_attention(),
+                        title_before != pane.title,
                         pane.title.clone(),
                     )
                 })
                 .unwrap_or_default();
+            let notification_changed = !notifications.is_empty();
             for notification in notifications {
                 let kind = match notification {
                     PaneNotification::Ready => NotificationKind::Ready,
@@ -1389,6 +1392,8 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             matches!(app.view, View::Attached(focused) if focused == id)
                 || outcome.bell
                 || attention_changed
+                || title_changed
+                || notification_changed
         }
         MuxEvent::Exited(id, code) => {
             if let Some(mux) = app.mux.as_mut() {
@@ -2430,6 +2435,24 @@ mod tests {
             &mut app,
             MuxEvent::Output(2, Default::default())
         ));
+    }
+
+    #[test]
+    fn title_change_for_an_unfocused_pane_repaints_the_tab_strip() {
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::Attached(1);
+        let signals = crate::mux::callbacks::PaneSignals {
+            title: Some("Renamed background pane".to_string()),
+            events: Vec::new(),
+        };
+
+        assert!(handle_mux_event(&mut app, MuxEvent::Output(2, signals)));
+        assert_eq!(
+            app.mux.as_ref().unwrap().pane(2).unwrap().title,
+            "Renamed background pane"
+        );
     }
 
     #[test]

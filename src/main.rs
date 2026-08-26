@@ -399,6 +399,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     });
     drop(terminal_events);
     let mut terminal_title = String::new();
+    let mut repaint = true;
+    let mut last_paint = std::time::Instant::now();
 
     loop {
         app.collapse_stopped_terminals();
@@ -494,7 +496,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             terminal.backend_mut().flush()?;
         }
 
-        terminal.draw(|f| ui::draw(f, app))?;
+        if mux_paint_due(app, repaint, last_paint) {
+            terminal.draw(|f| ui::draw(f, app))?;
+            last_paint = std::time::Instant::now();
+        }
 
         // Runs after the draw above so the "creating worktree…" notice is already on
         // screen before this blocks on Git.
@@ -504,9 +509,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
 
         if app.mux.is_some() {
-            pump_mux(app)?;
+            repaint = pump_mux(app)?;
         } else {
             input::handle_input(app)?;
+            repaint = true;
         }
 
         if exit_waits_for_update(app) {
@@ -591,19 +597,14 @@ fn update_layout_metrics(app: &mut App, height: u16) {
 ///
 /// Output arriving in many small chunks is drained in one go so a chatty child cannot
 /// force a repaint per chunk.
-fn pump_mux(app: &mut App) -> Result<()> {
+fn pump_mux(app: &mut App) -> Result<bool> {
     let Some(mux) = app.mux.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
 
     // A blank pane is showing the startup spinner, which needs frequent repaints; an
     // established pane can idle until something actually happens.
-    let animating = mux
-        .panes
-        .iter()
-        .any(|pane| pane.is_running() && pane.is_blank())
-        || app.github_loading()
-        || app.sessions_loading();
+    let animating = mux_animating(app);
     let timeout = mux_wait_timeout(app, animating);
 
     let first = match mux
@@ -611,10 +612,12 @@ fn pump_mux(app: &mut App) -> Result<()> {
         .recv_timeout(std::time::Duration::from_millis(timeout))
     {
         Ok(event) => event,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+        // Maintenance, animations, and background work use this timeout as their
+        // redraw clock.
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(true),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             app.should_quit = true;
-            return Ok(());
+            return Ok(true);
         }
     };
 
@@ -626,16 +629,72 @@ fn pump_mux(app: &mut App) -> Result<()> {
         }
     }
 
+    let mut repaint = false;
     for event in pending {
         match event {
-            mux::MuxEvent::Term(event) => apply_terminal_event(app, event)?,
+            mux::MuxEvent::Term(event) => {
+                repaint |= terminal_event_needs_repaint(app, &event);
+                apply_terminal_event(app, event)?;
+            }
             other => {
-                mux_input::handle_mux_event(app, other);
+                repaint |= mux_input::handle_mux_event(app, other);
             }
         }
     }
 
-    Ok(())
+    Ok(repaint)
+}
+
+fn mux_animating(app: &App) -> bool {
+    app.mux.as_ref().is_some_and(|mux| {
+        mux.panes
+            .iter()
+            .any(|pane| pane.is_running() && pane.is_blank())
+    }) || app.github_loading()
+        || app.sessions_loading()
+}
+
+fn mux_paint_due(app: &App, repaint: bool, last_paint: std::time::Instant) -> bool {
+    repaint
+        || (app.mux.is_some()
+            && last_paint.elapsed()
+                >= std::time::Duration::from_millis(mux_wait_timeout(app, mux_animating(app))))
+}
+
+/// Ordinary chat input changes the child, not CST's current frame. Waiting for the
+/// child's output avoids rendering the stale pre-echo screen while holding its parser.
+fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> bool {
+    if !matches!(app.view, app::View::Attached(_))
+        || app.workspace_focus != app::WorkspaceFocus::Chat
+        || app.confirm_quit
+        || app.github_inspector.is_some()
+        || app.snippet_modal.is_some()
+        || app.workspace_help.is_some()
+        || !app.terminal_focused
+    {
+        return true;
+    }
+
+    let Some(mux) = app.mux.as_ref() else {
+        return true;
+    };
+    let pane_is_ready = mux
+        .focused_pane()
+        .is_some_and(|pane| pane.is_running() && !pane.needs_attention());
+    if !pane_is_ready {
+        return true;
+    }
+
+    match event {
+        crossterm::event::Event::Paste(_) => false,
+        crossterm::event::Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+            app.update_notice.is_some()
+                || mux.prefix_state != mux::PrefixState::Idle
+                || mux.prefix.matches(key)
+        }
+        crossterm::event::Event::Key(_) => false,
+        _ => true,
+    }
 }
 
 fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
@@ -803,6 +862,85 @@ mod tests {
 
         app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
         assert_eq!(mux_wait_timeout(&app, false), 100);
+    }
+
+    #[test]
+    fn repaint_deadline_bounds_staleness_when_non_visual_events_keep_arriving() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        assert!(mux_paint_due(
+            &app,
+            false,
+            std::time::Instant::now() - std::time::Duration::from_secs(6)
+        ));
+
+        app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
+        assert!(mux_paint_due(
+            &app,
+            false,
+            std::time::Instant::now() - std::time::Duration::from_millis(150)
+        ));
+        assert!(mux_paint_due(&app, true, std::time::Instant::now()));
+    }
+
+    #[test]
+    fn ordinary_chat_input_waits_for_the_child_before_repainting() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "Latency test".to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: "latency-test".to_string(),
+                program,
+                args,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = app::View::Attached(1);
+        app.terminal_focused = true;
+
+        let character = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!terminal_event_needs_repaint(&app, &character));
+        assert!(!terminal_event_needs_repaint(
+            &app,
+            &crossterm::event::Event::Paste("large prompt".to_string())
+        ));
+
+        let prefix = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('b'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert!(terminal_event_needs_repaint(&app, &prefix));
+
+        app.update_notice = Some("Update ready".to_string());
+        assert!(terminal_event_needs_repaint(&app, &character));
     }
 
     #[test]
