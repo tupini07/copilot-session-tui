@@ -1,5 +1,5 @@
-pub mod file_tree;
 pub mod diff;
+pub mod file_tree;
 pub mod github_inspector;
 pub mod pane;
 pub mod popups;
@@ -12,9 +12,13 @@ pub mod tabs;
 pub mod terminal_pane;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus, WorkspaceHelp};
+use crate::theme::{fill_area, Theme, ThemeName};
 
 const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
@@ -30,6 +34,44 @@ fn spinner_frame_at(tick: u128) -> &'static str {
     SPINNER_FRAMES[tick as usize % SPINNER_FRAMES.len()]
 }
 
+pub(crate) fn foreground_on(theme: Theme, background: Color) -> Color {
+    if theme.name == ThemeName::Classic {
+        theme.text
+    } else {
+        theme.contrast_text(background)
+    }
+}
+
+pub(crate) fn badge_foreground(theme: Theme, background: Color) -> Color {
+    if theme.name == ThemeName::Classic {
+        theme.selection_fg
+    } else {
+        theme.contrast_text(background)
+    }
+}
+
+pub(crate) fn semantic_foreground_on(theme: Theme, semantic: Color, background: Color) -> Color {
+    if theme.is_light {
+        foreground_on(theme, background)
+    } else {
+        semantic
+    }
+}
+
+pub(crate) fn row_selection_style(theme: Theme) -> Style {
+    if theme.name == ThemeName::Classic {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.selection_fg)
+            .bg(theme.selection_bg)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachedLayout {
     pub chat: Rect,
@@ -39,6 +81,10 @@ pub struct AttachedLayout {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let size = f.area();
+    let theme = app.theme();
+    fill_area(f.buffer_mut(), size, theme.background);
+
     if app.github_inspector.is_some() && !github_inspector::is_prompt(app) {
         github_inspector::draw(f, app);
         return;
@@ -46,12 +92,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.mode == Mode::Scratchpad {
         if let Some(scratchpad) = app.scratchpad.as_mut() {
-            scratchpad::draw(f, scratchpad);
+            scratchpad::draw_with_theme(f, scratchpad, theme);
         }
         return;
     }
-
-    let size = f.area();
 
     if matches!(app.view, View::Attached(_)) {
         let layout = attached_layout(
@@ -66,19 +110,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         };
         pane::draw_chat(f, app, layout.chat);
         if let (Some(area), Some(scratchpad)) = (layout.scratchpad, app.scratchpad.as_mut()) {
-            scratchpad::draw_in(
+            scratchpad::draw_in_with_theme(
                 f,
                 scratchpad,
                 area,
                 app.workspace_focus == WorkspaceFocus::Scratchpad,
+                theme,
             );
         }
         if let (Some(area), Some(terminal)) = (layout.terminal, app.terminal.active()) {
-            terminal_pane::draw(
+            terminal_pane::draw_with_theme(
                 f,
                 terminal,
                 app.workspace_focus == WorkspaceFocus::Terminal,
                 area,
+                theme,
             );
         }
         pane::draw_status(f, app, layout.status);
@@ -89,7 +135,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             snippets::draw(f, app);
         }
         if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
-            scratchpad::draw_help(f, size);
+            scratchpad::draw_help_with_theme(f, size, theme);
         }
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
@@ -122,40 +168,41 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let sort_text = format!(" Sort: {} ", app.sort_label());
 
-    let title = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
-        ratatui::text::Span::styled(
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(
             " Copilot Session Manager ",
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Black)
-                .bg(ratatui::style::Color::Cyan)
-                .add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
         ),
-        ratatui::text::Span::raw("  "),
-        ratatui::text::Span::styled(
+        Span::raw("  "),
+        Span::styled(
             filter_text,
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Black)
-                .bg(ratatui::style::Color::Yellow),
+            Style::default()
+                .fg(badge_foreground(theme, theme.warning))
+                .bg(theme.warning),
         ),
-        ratatui::text::Span::raw("  "),
-        ratatui::text::Span::styled(
+        Span::raw("  "),
+        Span::styled(
             sort_text,
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Black)
-                .bg(ratatui::style::Color::Magenta),
+            Style::default()
+                .fg(badge_foreground(theme, theme.accent))
+                .bg(theme.accent),
         ),
-        ratatui::text::Span::raw(format!("  {} sessions", app.filtered_indices.len())),
-        ratatui::text::Span::styled(
+        Span::raw(format!("  {} sessions", app.filtered_indices.len())),
+        Span::styled(
             if app.sessions_loading() {
                 format!(" · {} loading remaining sessions…", spinner_frame())
             } else {
                 String::new()
             },
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Cyan)
-                .add_modifier(ratatui::style::Modifier::BOLD),
+            Style::default()
+                .fg(semantic_foreground_on(theme, theme.info, theme.background))
+                .add_modifier(Modifier::BOLD),
         ),
-    ]));
+    ]))
+    .style(Style::default().fg(theme.text).bg(theme.background));
 
     f.render_widget(title, main_layout[0]);
 
@@ -186,7 +233,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         _ => {}
     }
     if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
-        scratchpad::draw_help(f, size);
+        scratchpad::draw_help_with_theme(f, size, theme);
     }
 
     if app.confirm_quit {
@@ -203,6 +250,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 "Branch '{}' — copying files and checking out…",
                 pending.branch
             ),
+            theme,
         );
     }
 }
@@ -262,7 +310,9 @@ pub fn attached_layout(
 mod tests {
     use super::*;
     use crate::config::UserConfig;
+    use crate::theme::ThemeName;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
     #[test]
@@ -317,6 +367,90 @@ mod tests {
         for (tick, frame) in SPINNER_FRAMES.iter().enumerate() {
             assert_eq!(spinner_frame_at(tick as u128), *frame);
         }
-        assert_eq!(spinner_frame_at(SPINNER_FRAMES.len() as u128), SPINNER_FRAMES[0]);
+        assert_eq!(
+            spinner_frame_at(SPINNER_FRAMES.len() as u128),
+            SPINNER_FRAMES[0]
+        );
+    }
+
+    #[test]
+    fn classic_row_selection_preserves_the_legacy_white_on_dark_gray_style() {
+        let style = row_selection_style(ThemeName::Classic.theme());
+        assert_eq!(style.fg, Some(Color::White));
+        assert_eq!(style.bg, Some(Color::DarkGray));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        let width = needle.chars().count() as u16;
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..=buffer.area.right().saturating_sub(width) {
+                let rendered = (x..x + width)
+                    .map(|column| buffer[(column, y)].symbol())
+                    .collect::<String>();
+                if rendered == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle:?} was not rendered");
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("expected an RGB color, got {color:?}");
+            };
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+        }
+
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn light_themes_paint_blank_cells_and_render_primary_text_with_contrast() {
+        for theme_name in [ThemeName::CatppuccinLatte, ThemeName::SolarizedLight] {
+            let mut app = App::new(
+                Vec::new(),
+                UserConfig {
+                    theme: theme_name,
+                    ..UserConfig::default()
+                },
+            );
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+            let buffer = terminal.backend().buffer();
+            assert!(
+                buffer.content().iter().all(|cell| cell.bg != Color::Reset),
+                "{} left terminal-default background cells",
+                theme_name.label()
+            );
+            let theme = theme_name.theme();
+            let blank = &buffer[(70, 10)];
+            assert_eq!(blank.symbol(), " ");
+            assert_eq!(blank.bg, theme.background);
+
+            let (x, y) = find_text(buffer, "0 sessions");
+            let text = &buffer[(x, y)];
+            assert_eq!(text.fg, theme.text);
+            assert_eq!(text.bg, theme.background);
+            assert!(
+                contrast_ratio(text.fg, text.bg) >= 4.5,
+                "{} rendered primary text at insufficient contrast",
+                theme_name.label()
+            );
+        }
     }
 }

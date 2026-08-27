@@ -3,6 +3,7 @@ use crate::app::{
 };
 use crate::github::{DiscussionKind, GithubItem};
 use crate::text;
+use crate::theme::Theme;
 use crate::ui::file_tree;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -121,35 +122,37 @@ pub fn install_demo_pull_request(app: &mut App) {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let theme = app.theme();
     let Some(inspector) = app.github_inspector.as_ref() else {
         return;
     };
     match &inspector.screen {
-        GithubInspectorScreen::NumberPrompt => draw_prompt(f, inspector),
-        GithubInspectorScreen::Loading => draw_loading(f, inspector),
-        GithubInspectorScreen::Error(message) => draw_error(f, inspector, message),
-        GithubInspectorScreen::Ready(_) => draw_ready(f, app),
+        GithubInspectorScreen::NumberPrompt => draw_prompt(f, inspector, theme),
+        GithubInspectorScreen::Loading => draw_loading(f, inspector, theme),
+        GithubInspectorScreen::Error(message) => draw_error(f, inspector, message, theme),
+        GithubInspectorScreen::Ready(_) => draw_ready(f, app, theme),
     }
 }
 
-fn draw_prompt(f: &mut Frame, inspector: &GithubInspector) {
+fn draw_prompt(f: &mut Frame, inspector: &GithubInspector, theme: Theme) {
     let area = centered_rect(58, 9, f.area());
     f.render_widget(Clear, area);
     let block = Block::default()
         .title(" Inspect GitHub item ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(Style::default().fg(theme.text).bg(theme.surface))
+        .border_style(Style::default().fg(theme.accent));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let error = inspector
         .prompt_error
         .as_deref()
-        .map(|message| Span::styled(message, Style::default().fg(Color::Red)))
+        .map(|message| Span::styled(message, Style::default().fg(theme.error)))
         .unwrap_or_else(|| {
             Span::styled(
                 "Enter an issue or pull request number",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )
         });
     let lines = vec![
@@ -158,58 +161,60 @@ fn draw_prompt(f: &mut Frame, inspector: &GithubInspector) {
             Span::raw("  # "),
             Span::styled(
                 inspector.input.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(Color::Magenta)),
+            Span::styled("█", Style::default().fg(theme.accent)),
         ]),
         Line::from(""),
         Line::from(vec![Span::raw("  "), error]),
         Line::from(""),
         Line::from(vec![
-            key("Enter"),
+            key("Enter", theme),
             Span::raw(" inspect   "),
-            key("Esc"),
+            key("Esc", theme),
             Span::raw(" cancel"),
         ]),
     ];
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(theme.text).bg(theme.surface)),
+        inner,
+    );
 }
 
-fn draw_loading(f: &mut Frame, inspector: &GithubInspector) {
+fn draw_loading(f: &mut Frame, inspector: &GithubInspector, theme: Theme) {
     let number = inspector.number.unwrap_or_default();
     let frame = super::spinner_frame();
     draw_message_screen(
         f,
         " GitHub Inspector ",
-        Color::Magenta,
+        theme.accent,
         vec![
             Line::from(""),
             Line::from(Span::styled(
                 format!("  {frame}  Loading GitHub item #{number}..."),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "  The attached session remains live while gh fetches the item.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )),
             Line::from(""),
-            Line::from(vec![key("q"), Span::raw(" close")]),
+            Line::from(vec![key("q", theme), Span::raw(" close")]),
         ],
+        theme,
     );
 }
 
-fn draw_error(f: &mut Frame, inspector: &GithubInspector, message: &str) {
+fn draw_error(f: &mut Frame, inspector: &GithubInspector, message: &str, theme: Theme) {
     let number = inspector.number.unwrap_or_default();
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             format!("  Could not load GitHub item #{number}"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -219,32 +224,45 @@ fn draw_error(f: &mut Frame, inspector: &GithubInspector, message: &str) {
     lines.extend([
         Line::from(""),
         Line::from(vec![
-            key("r"),
+            key("r", theme),
             Span::raw(" retry   "),
-            key("q"),
+            key("q", theme),
             Span::raw(" close"),
         ]),
     ]);
-    draw_message_screen(f, " GitHub Inspector — Error ", Color::Red, lines);
+    draw_message_screen(f, " GitHub Inspector — Error ", theme.error, lines, theme);
 }
 
-fn draw_message_screen(f: &mut Frame, title: &str, color: Color, lines: Vec<Line<'static>>) {
+fn draw_message_screen(
+    f: &mut Frame,
+    title: &str,
+    color: Color,
+    lines: Vec<Line<'static>>,
+    theme: Theme,
+) {
     let area = f.area();
     f.render_widget(Clear, area);
     let block = Block::default()
         .title(title.to_string())
         .borders(Borders::ALL)
+        .style(Style::default().fg(theme.text).bg(theme.background))
         .border_style(Style::default().fg(color));
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.background))
+            .block(block),
+        area,
+    );
 }
 
-fn draw_ready(f: &mut Frame, app: &mut App) {
+fn draw_ready(f: &mut Frame, app: &mut App, theme: Theme) {
     let area = f.area();
     f.render_widget(Clear, area);
     let outer = Block::default()
         .title(" GitHub Inspector ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(Style::default().fg(theme.text).bg(theme.background))
+        .border_style(Style::default().fg(theme.accent));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
     let sections = Layout::default()
@@ -263,20 +281,20 @@ fn draw_ready(f: &mut Frame, app: &mut App) {
     let Some(item) = inspector.ready_item() else {
         return;
     };
-    draw_header(f, item, sections[0]);
-    draw_tabs(f, inspector, item, sections[1]);
+    draw_header(f, item, sections[0], theme);
+    draw_tabs(f, inspector, item, sections[1], theme);
 
     if inspector.tab == GithubTab::Files && item.is_pull_request() {
-        draw_files_tab(f, app, sections[2]);
+        draw_files_tab(f, app, sections[2], theme);
         let inspector = app.github_inspector.as_ref().expect("inspector is active");
-        draw_footer(f, inspector, sections[3]);
+        draw_footer(f, inspector, sections[3], theme);
         return;
     }
 
     let content = sections[2];
     let viewport_width = content.width.saturating_sub(1) as usize;
     let viewport_height = content.height as usize;
-    let lines = build_active_lines(inspector, item, viewport_width);
+    let lines = build_active_lines(inspector, item, viewport_width, theme);
     let line_count = lines.len();
     let max_scroll = line_count.saturating_sub(viewport_height);
 
@@ -291,12 +309,21 @@ fn draw_ready(f: &mut Frame, app: &mut App) {
         .as_ref()
         .map(|inspector| inspector.active_scroll())
         .unwrap_or_default();
-    let paragraph = Paragraph::new(lines).scroll((actual_offset.min(u16::MAX as usize) as u16, 0));
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text).bg(theme.background))
+        .scroll((actual_offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(paragraph, content);
-    draw_scrollbar(f, content, line_count, viewport_height, actual_offset);
+    draw_scrollbar(
+        f,
+        content,
+        line_count,
+        viewport_height,
+        actual_offset,
+        theme,
+    );
 
     let inspector = app.github_inspector.as_ref().expect("inspector is active");
-    draw_footer(f, inspector, sections[3]);
+    draw_footer(f, inspector, sections[3], theme);
 }
 
 /// Minimum content width before the changed-file tree and the diff can usefully
@@ -306,7 +333,7 @@ const TREE_MIN_WIDTH: u16 = 26;
 const TREE_MAX_WIDTH: u16 = 52;
 
 /// Draw the tree of changed files beside the selected file's diff.
-fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect, theme: Theme) {
     let Some(inspector) = app.github_inspector.as_ref() else {
         return;
     };
@@ -335,9 +362,9 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
         let divider = Block::default()
             .borders(Borders::RIGHT)
             .border_style(Style::default().fg(if focus == FilesPane::Tree {
-                Color::Magenta
+                theme.accent
             } else {
-                Color::DarkGray
+                theme.inactive
             }));
         let inner = divider.inner(tree_area);
         f.render_widget(divider, tree_area);
@@ -352,6 +379,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
         inspector,
         tree_body.width as usize,
         focus,
+        theme,
     );
     let diff_width = diff_area.width.saturating_sub(1) as usize;
     let PreparedDiff {
@@ -359,7 +387,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
         updated_cache,
         line_count: diff_line_count,
         max_width: diff_max_width,
-    } = prepare_diff(inspector, item, &rows);
+    } = prepare_diff(inspector, item, &rows, theme);
     let diff_height = diff_area.height as usize;
     let max_diff_scroll = diff_line_count.saturating_sub(diff_height);
     let max_diff_horizontal = diff_max_width.saturating_sub(diff_width);
@@ -383,6 +411,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
     if tree_body.width > 0 && tree_body.height > 0 {
         f.render_widget(
             Paragraph::new(tree_lines)
+                .style(Style::default().fg(theme.text).bg(theme.background))
                 .scroll((inspector.tree_offset.min(u16::MAX as usize) as u16, 0)),
             tree_body,
         );
@@ -392,6 +421,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
             rows.len(),
             tree_body.height as usize,
             inspector.tree_offset,
+            theme,
         );
     }
     if diff_area.width > 0 && diff_area.height > 0 {
@@ -415,14 +445,20 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect) {
             diff_height,
             inspector.diff_horizontal,
             diff_body.width as usize,
+            theme,
         );
-        f.render_widget(Paragraph::new(visible_diff), diff_body);
+        f.render_widget(
+            Paragraph::new(visible_diff)
+                .style(Style::default().fg(theme.text).bg(theme.diff_context_bg)),
+            diff_body,
+        );
         draw_scrollbar(
             f,
             diff_area,
             max_diff_scroll + diff_height,
             diff_height,
             inspector.diff_scroll,
+            theme,
         );
     }
 }
@@ -448,29 +484,37 @@ fn tree_row_lines(
     inspector: &GithubInspector,
     width: usize,
     focus: FilesPane,
+    theme: Theme,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return vec![Line::from(Span::styled(
             " No changed files",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ))];
     }
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            tree_row_line(row, files, index == inspector.tree_selected, focus, width)
+            tree_row_line(
+                row,
+                files,
+                index == inspector.tree_selected,
+                focus,
+                width,
+                theme,
+            )
         })
         .collect()
 }
 
 /// Single-letter status marker, so the path keeps as much width as possible.
-fn status_marker(status: &str) -> (&'static str, Color) {
+fn status_marker(status: &str, theme: Theme) -> (&'static str, Color) {
     match status {
-        "added" => ("A", Color::Green),
-        "removed" => ("D", Color::Red),
-        "modified" => ("M", Color::Yellow),
-        "renamed" => ("R", Color::Magenta),
-        _ => ("·", Color::DarkGray),
+        "added" => ("A", theme.success),
+        "removed" => ("D", theme.error),
+        "modified" => ("M", theme.warning),
+        "renamed" => ("R", theme.accent),
+        _ => ("·", theme.muted),
     }
 }
 
@@ -480,6 +524,7 @@ fn tree_row_line(
     selected: bool,
     focus: FilesPane,
     width: usize,
+    theme: Theme,
 ) -> Line<'static> {
     let indent = " ".repeat(row.depth * 2 + 1);
     let (marker, marker_color, name_color, stats) = match &row.kind {
@@ -491,19 +536,19 @@ fn tree_row_line(
             ..
         } => (
             if *expanded { "▾" } else { "▸" }.to_string(),
-            Color::Blue,
-            Color::Blue,
+            theme.directory,
+            theme.directory,
             format!("{count} · +{additions} -{deletions}"),
         ),
         file_tree::RowKind::File { index } => {
             let file = files.get(*index);
             let (marker, color) = file
-                .map(|file| status_marker(&file.status))
-                .unwrap_or(("·", Color::DarkGray));
+                .map(|file| status_marker(&file.status, theme))
+                .unwrap_or(("·", theme.muted));
             let stats = file
                 .map(|file| format!("+{} -{}", file.additions, file.deletions))
                 .unwrap_or_default();
-            (marker.to_string(), color, Color::White, stats)
+            (marker.to_string(), color, theme.text, stats)
         }
     };
 
@@ -523,9 +568,11 @@ fn tree_row_line(
     let (base, name_style, stats_style) = if selected {
         // The unfocused pane keeps a dimmer cursor so focus is never ambiguous.
         let highlight = if focus == FilesPane::Tree {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
         } else {
-            Style::default().fg(Color::White).bg(Color::Rgb(60, 60, 80))
+            Style::default().fg(theme.text).bg(theme.chrome_bg)
         }
         .add_modifier(Modifier::BOLD);
         (highlight, highlight, highlight)
@@ -533,7 +580,7 @@ fn tree_row_line(
         (
             Style::default().fg(marker_color),
             Style::default().fg(name_color),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )
     };
 
@@ -557,6 +604,7 @@ fn prepare_diff(
     inspector: &GithubInspector,
     item: &GithubItem,
     rows: &[file_tree::TreeRow],
+    theme: Theme,
 ) -> PreparedDiff {
     match rows.get(inspector.tree_selected).map(|row| &row.kind) {
         Some(file_tree::RowKind::Directory {
@@ -569,25 +617,26 @@ fn prepare_diff(
             Line::from(Span::styled(
                 format!(" {path}/ "),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Blue)
+                    .fg(theme.selection_fg)
+                    .bg(theme.directory)
                     .add_modifier(Modifier::BOLD),
             )),
             summary_line(
                 "Directory",
                 format!("{files} changed files · +{additions} -{deletions}"),
+                theme,
             ),
             Line::from(""),
             Line::from(Span::styled(
                 "Select a file to see its diff.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )),
         ]),
         _ => {
             if item.files().get(inspector.selected_file).is_none() {
                 return prepared_local(vec![Line::from(Span::styled(
                     "Select a file to see its diff.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ))]);
             }
             if let Some(cache) = inspector
@@ -602,7 +651,7 @@ fn prepare_diff(
                     max_width: cache.max_width,
                 };
             }
-            let lines = diff_lines(inspector, item);
+            let lines = diff_lines(inspector, item, theme);
             let line_count = lines.len();
             let max_width = lines.iter().map(line_width).max().unwrap_or_default();
             let cache = DiffRenderCache {
@@ -631,19 +680,19 @@ fn prepared_local(lines: Vec<Line<'static>>) -> PreparedDiff {
 }
 
 /// Like `field`, but flush left: the diff pane already has a one-column gutter.
-fn summary_line(label: &str, value: String) -> Line<'static> {
+fn summary_line(label: &str, value: String, theme: Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!("{label}: "),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(Color::White)),
+        Span::styled(value, Style::default().fg(theme.text)),
     ])
 }
 
-fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect) {
+fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect, theme: Theme) {
     let common = item.common();
     let kind = if item.is_pull_request() {
         "PR"
@@ -651,8 +700,8 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect) {
         "Issue"
     };
     let state_color = match common.state.to_ascii_lowercase().as_str() {
-        "open" => Color::Green,
-        _ => Color::Magenta,
+        "open" => theme.success,
+        _ => theme.accent,
     };
     let line1 = Line::from(vec![
         Span::styled(
@@ -662,8 +711,8 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect) {
                 common.number
             ),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(theme.selection_fg)
+                .bg(theme.info)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -676,14 +725,22 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect) {
     ]);
     let line2 = Line::from(Span::styled(
         format!(" {}", common.title),
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
     ));
-    f.render_widget(Paragraph::new(vec![line1, line2]), area);
+    f.render_widget(
+        Paragraph::new(vec![line1, line2])
+            .style(Style::default().fg(theme.text).bg(theme.background)),
+        area,
+    );
 }
 
-fn draw_tabs(f: &mut Frame, inspector: &GithubInspector, item: &GithubItem, area: Rect) {
+fn draw_tabs(
+    f: &mut Frame,
+    inspector: &GithubInspector,
+    item: &GithubItem,
+    area: Rect,
+    theme: Theme,
+) {
     let tabs = if item.is_pull_request() {
         [
             Some(GithubTab::Overview),
@@ -702,17 +759,18 @@ fn draw_tabs(f: &mut Frame, inspector: &GithubInspector, item: &GithubItem, area
         };
         let style = if inspector.tab == tab {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Magenta)
+                .fg(theme.selection_fg)
+                .bg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.inactive)
         };
         spans.push(Span::styled(name, style));
         spans.push(Span::raw(" "));
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40))),
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().fg(theme.text).bg(theme.chrome_bg)),
         area,
     );
 }
@@ -721,25 +779,26 @@ fn build_active_lines(
     inspector: &GithubInspector,
     item: &GithubItem,
     width: usize,
+    theme: Theme,
 ) -> Vec<Line<'static>> {
     match inspector.tab {
-        GithubTab::Overview => overview_lines(item, width),
-        GithubTab::Comments => comment_lines(item, width),
+        GithubTab::Overview => overview_lines(item, width, theme),
+        GithubTab::Comments => comment_lines(item, width, theme),
         // The Files tab draws its own split panes; an item without files has none.
         GithubTab::Files => vec![Line::from(Span::styled(
             " No changed files",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ))],
     }
 }
 
-fn overview_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
+fn overview_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let common = item.common();
     let mut lines = vec![
-        field("Author", format!("@{}", common.author.login)),
-        field("Created", common.created_at.clone()),
-        field("Updated", common.updated_at.clone()),
-        field("URL", common.url.clone()),
+        field("Author", format!("@{}", common.author.login), theme),
+        field("Created", common.created_at.clone(), theme),
+        field("Updated", common.updated_at.clone(), theme),
+        field("URL", common.url.clone(), theme),
     ];
     if !common.labels.is_empty() {
         lines.push(field(
@@ -750,6 +809,7 @@ fn overview_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
                 .map(|label| label.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
+            theme,
         ));
     }
     if let GithubItem::PullRequest(pull) = item {
@@ -761,10 +821,11 @@ fn overview_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
             pull.common.state.as_str()
         };
         lines.extend([
-            field("PR state", state.to_string()),
+            field("PR state", state.to_string(), theme),
             field(
                 "Branches",
                 format!("{} <- {}", pull.base_ref, pull.head_ref),
+                theme,
             ),
             field(
                 "Changes",
@@ -772,14 +833,15 @@ fn overview_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
                     "+{} -{} across {} files",
                     pull.additions, pull.deletions, pull.changed_files
                 ),
+                theme,
             ),
         ]);
         if let Some(mergeable) = &pull.mergeable_state {
-            lines.push(field("Mergeability", mergeable.clone()));
+            lines.push(field("Mergeability", mergeable.clone(), theme));
         }
     }
     lines.push(Line::from(""));
-    lines.push(section("Description"));
+    lines.push(section("Description", theme));
     lines.push(Line::from(""));
     let body = if common.body.trim().is_empty() {
         "(no description)"
@@ -794,12 +856,12 @@ fn overview_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn comment_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
+fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'static>> {
     let entries = item.discussion();
     if entries.is_empty() {
         return vec![Line::from(Span::styled(
             " No comments or reviews",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ))];
     }
     let mut lines = Vec::new();
@@ -821,9 +883,7 @@ fn comment_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(Span::styled(
             format!(" {context}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         )));
         let body = if entry.body.trim().is_empty() {
             "(no comment body)"
@@ -837,25 +897,25 @@ fn comment_lines(item: &GithubItem, width: usize) -> Vec<Line<'static>> {
         );
         lines.push(Line::from(Span::styled(
             "─".repeat(width.max(1)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.inactive),
         )));
     }
     lines
 }
 
-fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'static>> {
+fn diff_lines(inspector: &GithubInspector, item: &GithubItem, theme: Theme) -> Vec<Line<'static>> {
     let Some(file) = item.files().get(inspector.selected_file) else {
         return vec![Line::from(Span::styled(
             "Select a file to see its diff.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ))];
     };
     let mut lines = vec![
         Line::from(Span::styled(
             format!(" {} ", file.path),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(theme.selection_fg)
+                .bg(theme.info)
                 .add_modifier(Modifier::BOLD),
         )),
         summary_line(
@@ -864,6 +924,7 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'stati
                 "{} · +{} -{} · {} changed lines",
                 file.status, file.additions, file.deletions, file.changes
             ),
+            theme,
         ),
         Line::from(""),
     ];
@@ -872,58 +933,63 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem) -> Vec<Line<'stati
         lines.push(Line::from(if pending {
             Span::styled(
                 "Loading diff…",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                Style::default().fg(theme.info).add_modifier(Modifier::DIM),
             )
         } else {
             Span::styled(
                 "Diff unavailable: GitHub omitted the patch (the file may be binary or too large).",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.warning),
             )
         }));
         return lines;
     };
-    lines.extend(super::diff::render_patch(&file.path, patch));
+    lines.extend(super::diff::render_patch(&file.path, patch, theme));
     lines
 }
 
-fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect) {
-    let mut spans = vec![Span::raw(" "), key("Tab/Shift+Tab"), Span::raw(" tabs  ")];
+fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect, theme: Theme) {
+    let mut spans = vec![
+        Span::raw(" "),
+        key("Tab/Shift+Tab", theme),
+        Span::raw(" tabs  "),
+    ];
     if inspector.tab == GithubTab::Files {
         if inspector.files_pane == FilesPane::Diff {
             spans.extend([
-                key("↑↓/PgUp/PgDn"),
+                key("↑↓/PgUp/PgDn", theme),
                 Span::raw(" scroll  "),
-                key("←→"),
+                key("←→", theme),
                 Span::raw(" horizontal  "),
-                key("Esc"),
+                key("Esc", theme),
                 Span::raw(" files  "),
-                key("q"),
+                key("q", theme),
                 Span::raw(" close"),
             ]);
         } else {
             spans.extend([
-                key("↑↓"),
+                key("↑↓", theme),
                 Span::raw(" select  "),
-                key("←→"),
+                key("←→", theme),
                 Span::raw(" fold  "),
-                key("Enter"),
+                key("Enter", theme),
                 Span::raw(" diff  "),
-                key("q"),
+                key("q", theme),
                 Span::raw(" close"),
             ]);
         }
     } else {
         spans.extend([
-            key("↑↓/PgUp/PgDn"),
+            key("↑↓/PgUp/PgDn", theme),
             Span::raw(" navigate  "),
-            key("wheel"),
+            key("wheel", theme),
             Span::raw(" scroll  "),
-            key("q"),
+            key("q", theme),
             Span::raw(" close"),
         ]);
     }
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40))),
+        Paragraph::new(Line::from(spans))
+            .style(Style::default().fg(theme.text).bg(theme.chrome_bg)),
         area,
     );
 }
@@ -934,6 +1000,7 @@ fn draw_scrollbar(
     line_count: usize,
     viewport_height: usize,
     offset: usize,
+    theme: Theme,
 ) {
     if viewport_height == 0 || line_count <= viewport_height {
         return;
@@ -942,9 +1009,9 @@ fn draw_scrollbar(
         .begin_symbol(None)
         .end_symbol(None)
         .track_symbol(Some("│"))
-        .track_style(Style::default().fg(Color::DarkGray))
+        .track_style(Style::default().fg(theme.inactive))
         .thumb_symbol("█")
-        .thumb_style(Style::default().fg(Color::Magenta));
+        .thumb_style(Style::default().fg(theme.accent));
     // With an explicit viewport length Ratatui expects the number of possible
     // positions, not the total line count. Passing `line_count` makes the thumb stop
     // early even after the text has reached its real maximum offset.
@@ -955,32 +1022,32 @@ fn draw_scrollbar(
     f.render_stateful_widget(scrollbar, area, &mut state);
 }
 
-fn field(label: &str, value: String) -> Line<'static> {
+fn field(label: &str, value: String, theme: Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             format!(" {label}: "),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(Color::White)),
+        Span::styled(value, Style::default().fg(theme.text)),
     ])
 }
 
-fn section(title: &str) -> Line<'static> {
+fn section(title: &str, theme: Theme) -> Line<'static> {
     Line::from(Span::styled(
         format!(" -- {title} --"),
         Style::default()
-            .fg(Color::Magenta)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     ))
 }
 
-fn key(label: &str) -> Span<'static> {
+fn key(label: &str, theme: Theme) -> Span<'static> {
     Span::styled(
         label.to_string(),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.accent_alt)
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -1011,8 +1078,15 @@ mod tests {
     use crate::github::{
         Author, ChangedFile, DiscussionEntry, Issue, ItemCommon, Label, PullRequest, RepositoryRef,
     };
+    use crate::theme::ThemeName;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    const TEST_THEMES: [ThemeName; 3] = [
+        ThemeName::Nord,
+        ThemeName::CatppuccinLatte,
+        ThemeName::SolarizedLight,
+    ];
 
     fn common(number: u64) -> ItemCommon {
         ItemCommon {
@@ -1049,6 +1123,7 @@ mod tests {
                     line_count,
                     viewport,
                     offset,
+                    ThemeName::Classic.theme(),
                 );
             })
             .unwrap();
@@ -1125,12 +1200,90 @@ mod tests {
     }
 
     fn app_with(item: GithubItem) -> App {
-        let mut app = App::new(Vec::new(), UserConfig::default());
+        app_with_theme(item, ThemeName::Classic)
+    }
+
+    fn app_with_theme(item: GithubItem, theme: ThemeName) -> App {
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                theme,
+                ..Default::default()
+            },
+        );
         let mut inspector = GithubInspector::number_prompt();
         inspector.screen = GithubInspectorScreen::Ready(item);
         inspector.select_first_tree_file();
         app.github_inspector = Some(inspector);
         app
+    }
+
+    #[test]
+    fn inspector_selections_follow_dark_and_light_themes() {
+        let item = pull(Some("@@ -1 +1 @@\n-old\n+new"));
+        let rows = file_tree::build_rows(item.files(), &Default::default());
+        let row = rows
+            .iter()
+            .find(|row| matches!(&row.kind, file_tree::RowKind::File { .. }))
+            .expect("tree contains the changed file");
+
+        for name in TEST_THEMES {
+            let theme = name.theme();
+            let active = tree_row_line(row, item.files(), true, FilesPane::Tree, 32, theme);
+            assert!(active.spans.iter().all(|span| {
+                span.style.fg == Some(theme.selection_fg)
+                    && span.style.bg == Some(theme.selection_bg)
+            }));
+
+            let inactive = tree_row_line(row, item.files(), true, FilesPane::Diff, 32, theme);
+            assert!(inactive.spans.iter().all(|span| {
+                span.style.fg == Some(theme.text) && span.style.bg == Some(theme.chrome_bg)
+            }));
+
+            let inspector = GithubInspector::number_prompt();
+            let backend = TestBackend::new(40, 1);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_tabs(frame, &inspector, &item, Rect::new(0, 0, 40, 1), theme);
+                })
+                .unwrap();
+            let selected_tab = terminal.backend().buffer().cell((1, 0)).unwrap();
+            assert_eq!(selected_tab.bg, theme.accent, "{name:?}");
+            assert_eq!(selected_tab.fg, theme.selection_fg, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn classic_inspector_keeps_existing_status_and_selection_colours() {
+        let theme = ThemeName::Classic.theme();
+        assert_eq!(status_marker("added", theme), ("A", Color::Green));
+        assert_eq!(status_marker("removed", theme), ("D", Color::Red));
+        assert_eq!(status_marker("modified", theme), ("M", Color::Yellow));
+        assert_eq!(status_marker("renamed", theme), ("R", Color::Magenta));
+
+        let item = pull(Some("@@ -1 +1 @@\n-old\n+new"));
+        let rows = file_tree::build_rows(item.files(), &Default::default());
+        let row = rows
+            .iter()
+            .find(|row| matches!(&row.kind, file_tree::RowKind::File { .. }))
+            .unwrap();
+        let selected = tree_row_line(row, item.files(), true, FilesPane::Tree, 32, theme);
+        assert!(selected.spans.iter().all(|span| {
+            span.style.fg == Some(Color::Black) && span.style.bg == Some(Color::Cyan)
+        }));
+
+        let inspector = GithubInspector::number_prompt();
+        let backend = TestBackend::new(40, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_tabs(frame, &inspector, &item, Rect::new(0, 0, 40, 1), theme);
+            })
+            .unwrap();
+        let selected_tab = terminal.backend().buffer().cell((1, 0)).unwrap();
+        assert_eq!(selected_tab.fg, Color::Black);
+        assert_eq!(selected_tab.bg, Color::Magenta);
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
@@ -1289,6 +1442,48 @@ mod tests {
             Some(first),
             "horizontal viewport cropping does not require re-highlighting"
         );
+    }
+
+    #[test]
+    fn theme_preview_invalidation_rebuilds_the_diff_cache() {
+        let mut app = app_with(pull(Some("@@ -1 +1 @@\n-let old = 1;\n+let new = 2;")));
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Files;
+
+        render(&mut app, 100, 28);
+        let classic = app
+            .github_inspector
+            .as_ref()
+            .unwrap()
+            .diff_render_cache
+            .clone()
+            .expect("classic draw populates the cache");
+
+        app.open_theme_picker();
+        app.move_theme_picker(2);
+        assert_eq!(app.theme_name(), ThemeName::Nord);
+        assert!(
+            app.github_inspector
+                .as_ref()
+                .unwrap()
+                .diff_render_cache
+                .is_none(),
+            "theme preview invalidates theme-dependent highlighted lines"
+        );
+
+        render(&mut app, 100, 28);
+        let nord = app
+            .github_inspector
+            .as_ref()
+            .unwrap()
+            .diff_render_cache
+            .clone()
+            .expect("preview redraw repopulates the cache");
+        assert_ne!(classic, nord);
+        assert!(nord.lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.bg == Some(ThemeName::Nord.theme().diff_add_bg))
+        }));
     }
 
     #[test]

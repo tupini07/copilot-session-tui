@@ -1,14 +1,16 @@
 #[cfg(test)]
 use crate::app::SettingsSection;
 use crate::app::{
-    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField,
-    TakeoverTarget, View,
+    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, TakeoverTarget,
+    View,
 };
 use crate::config;
 use crate::session::loader;
 use crate::session::manager;
 use crate::session::worktree;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use std::path::{Path, PathBuf};
 
 pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
@@ -43,6 +45,24 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
     if app.mode == Mode::Scratchpad {
         handle_scratchpad(app, event);
         return Ok(());
+    }
+
+    if app.mode == Mode::Settings && app.theme_picker.is_some() {
+        if let Event::Mouse(mouse) = event {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.move_theme_picker(-1),
+                MouseEventKind::ScrollDown => app.move_theme_picker(1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if app.select_theme_picker_at(mouse.column, mouse.row) {
+                        if let Err(error) = app.confirm_theme_picker() {
+                            app.status_message = Some(format!("Failed to save theme: {error}"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
     }
 
     // Replay a paste as typing, but only into a prompt that is actually collecting
@@ -784,6 +804,25 @@ fn handle_help(app: &mut App, key: KeyCode) {
 }
 
 fn handle_settings(app: &mut App, key: KeyCode) {
+    if app.theme_picker.is_some() {
+        match key {
+            KeyCode::Up => app.move_theme_picker(-1),
+            KeyCode::Down => app.move_theme_picker(1),
+            KeyCode::PageUp => app.move_theme_picker(-5),
+            KeyCode::PageDown => app.move_theme_picker(5),
+            KeyCode::Home => app.move_theme_picker(isize::MIN),
+            KeyCode::End => app.move_theme_picker(isize::MAX),
+            KeyCode::Enter => {
+                if let Err(error) = app.confirm_theme_picker() {
+                    app.status_message = Some(format!("Failed to save theme: {error}"));
+                }
+            }
+            KeyCode::Esc => app.cancel_theme_picker(),
+            _ => {}
+        }
+        return;
+    }
+
     if let Some(field) = app.settings_editing {
         match key {
             KeyCode::Esc => {
@@ -850,58 +889,59 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 app.config.model.clone().unwrap_or_default(),
             ),
             2 => cycle_reasoning_effort(app),
-            3 => begin_global_edit(
+            3 => app.open_theme_picker(),
+            4 => begin_global_edit(
                 app,
                 SettingsEditField::BranchPrefix,
                 app.config.worktree.branch_prefix.clone(),
             ),
-            4 => begin_global_edit(
+            5 => begin_global_edit(
                 app,
                 SettingsEditField::WorktreeRoot,
                 app.config.worktree.root.to_string_lossy().to_string(),
             ),
-            5 => {
+            6 => {
                 // The row reflects the persisted value; a `--mux` override only lasts
                 // for this invocation and must not be flipped by editing settings.
                 app.mux_on_disk = !app.mux_on_disk;
                 app.status_message =
                     Some("Multiplexer setting applies the next time CST starts".to_string());
             }
-            6 => begin_global_edit(
+            7 => begin_global_edit(
                 app,
                 SettingsEditField::MuxPrefix,
                 app.config.mux_prefix.clone(),
             ),
-            7 => begin_global_edit(
+            8 => begin_global_edit(
                 app,
                 SettingsEditField::TerminalShell,
                 app.config.terminal.shell.clone().unwrap_or_default(),
             ),
-            8 => {
+            9 => {
                 app.config.notifications.enabled = !app.config.notifications.enabled;
             }
-            9 => begin_global_edit(
+            10 => begin_global_edit(
                 app,
                 SettingsEditField::NtfyServer,
                 app.config.notifications.server.clone(),
             ),
-            10 => begin_global_edit(
+            11 => begin_global_edit(
                 app,
                 SettingsEditField::NtfyTopic,
                 app.config.notifications.topic.clone(),
             ),
-            11 => begin_global_edit(
+            12 => begin_global_edit(
                 app,
                 SettingsEditField::NtfyAccessToken,
                 app.config.ntfy_access_token.clone(),
             ),
-            12 => {
+            13 => {
                 app.config.ntfy_verbose = !app.config.ntfy_verbose;
             }
-            13 => {
+            14 => {
                 app.config.notifications.ready = !app.config.notifications.ready;
             }
-            14 => {
+            15 => {
                 app.config.notifications.error = !app.config.notifications.error;
             }
             _ => {}
@@ -1274,7 +1314,7 @@ mod tests {
     fn pasting_a_uuid_into_the_ntfy_topic_editor_keeps_it_editable() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.mode = Mode::Settings;
-        app.settings_selected = 10;
+        app.settings_selected = 11;
         app.settings_editing = Some(SettingsEditField::NtfyTopic);
         let topic = "f7dd1a49-c978-455a-a170-136c29ed39a4";
 
@@ -1327,7 +1367,7 @@ mod tests {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.mode = Mode::Settings;
         app.settings_section = SettingsSection::Notifications;
-        app.settings_selected = 8;
+        app.settings_selected = 9;
 
         handle_settings(&mut app, KeyCode::Enter);
         assert!(app.config.notifications.enabled);
@@ -1340,10 +1380,10 @@ mod tests {
             .unwrap()
             .contains("topic is required"));
 
-        app.settings_selected = 13;
+        app.settings_selected = 14;
         handle_settings(&mut app, KeyCode::Enter);
         assert!(!app.config.notifications.ready);
-        app.settings_selected = 14;
+        app.settings_selected = 15;
         handle_settings(&mut app, KeyCode::Enter);
         assert!(!app.config.notifications.error);
     }
@@ -1357,21 +1397,91 @@ mod tests {
                 .into_iter()
                 .flat_map(|section| section.rows().iter().copied())
                 .collect::<Vec<_>>(),
-            (0..15).collect::<Vec<_>>(),
+            (0..16).collect::<Vec<_>>(),
             "each settings row must belong to exactly one section"
         );
 
         handle_settings(&mut app, KeyCode::Tab);
         assert_eq!(app.settings_section, SettingsSection::Worktrees);
-        assert_eq!(app.settings_selected, 3);
-        handle_settings(&mut app, KeyCode::Down);
         assert_eq!(app.settings_selected, 4);
         handle_settings(&mut app, KeyCode::Down);
-        assert_eq!(app.settings_selected, 4);
+        assert_eq!(app.settings_selected, 5);
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.settings_selected, 5);
 
         handle_settings(&mut app, KeyCode::BackTab);
         assert_eq!(app.settings_section, SettingsSection::General);
         assert_eq!(app.settings_selected, 0);
+    }
+
+    #[test]
+    fn theme_picker_previews_cancels_and_confirms_without_hjkl() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::General;
+        app.settings_selected = 3;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert!(app.theme_picker.is_some());
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Gruvbox);
+        assert_eq!(app.config.theme, crate::theme::ThemeName::Classic);
+        handle_settings(&mut app, KeyCode::Esc);
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Classic);
+
+        handle_settings(&mut app, KeyCode::Enter);
+        handle_settings(&mut app, KeyCode::Down);
+        handle_settings(&mut app, KeyCode::Enter);
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.config.theme, crate::theme::ThemeName::Gruvbox);
+    }
+
+    #[test]
+    fn theme_picker_supports_mouse_wheel_and_click_preview() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        app.mode = Mode::Settings;
+        app.open_theme_picker();
+        app.set_theme_picker_hits(vec![(ratatui::layout::Rect::new(10, 5, 20, 1), 4)]);
+
+        handle_terminal_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .unwrap();
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Gruvbox);
+
+        handle_terminal_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .unwrap();
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::CatppuccinMocha);
+
+        handle_terminal_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .unwrap();
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.config.theme, crate::theme::ThemeName::CatppuccinMocha);
     }
 
     #[test]

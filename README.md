@@ -453,6 +453,36 @@ Press `,` for global settings. Existing global files containing only `yolo`, `mo
 and `reasoning_effort` remain valid. Terminal and worktree defaults are stored in the
 same config:
 
+#### Themes
+
+CST bundles ten themes in picker order: **CST Classic**, **Gruvbox**, **Nord**,
+**Dracula**, **Catppuccin Mocha**, **Palenight**, **Solarized Dark**,
+**Tokyo Night**, **Catppuccin Latte**, and **Solarized Light**. Open Global
+Settings with `,`, select **Theme**, and move through the picker to preview each
+theme live. `Enter` saves the selection; `Esc` closes the picker and restores the
+previously saved theme.
+
+The selection is the root-level `theme` field in the global `config.json`, using a
+kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`. Omitting it
+selects `"classic"`, which preserves CST's original behavior and inherits terminal
+defaults where appropriate. Saved theme changes propagate to other running CST
+instances through the existing config watcher; an instance with an open Global
+Settings editor defers the reload until editing finishes.
+
+Themes also apply to embedded Copilot chats and session terminals. Reset/default
+foreground and background colors become the theme's text and canvas colors, and ANSI
+colors 0–15 use the theme palette. Indexed colors 16–255, explicit RGB colors, and
+bold/dim/italic/underline/reverse modifiers are preserved. This lets Copilot's code
+viewer retain its explicit syntax and background colors; when it uses default text on
+an explicit code background, CST chooses readable contrasting text instead of washing
+the code out under a light theme.
+
+The theme covers cells CST renders inside the terminal. Native terminal chrome remains
+outside that boundary: in particular, the Windows Terminal tab strip keeps the color
+scheme configured in Windows Terminal.
+
+![The Global Settings theme picker previewing Catppuccin Latte over the themed CST interface](docs/img/theme-picker.svg)
+
 `model` and `reasoning_effort` are **new-session defaults**. CST does not pass them when
 resuming an existing session, so a model or effort selected inside that conversation
 survives reopening it. `yolo` remains a launch policy and is applied on both new and
@@ -469,6 +499,7 @@ missing file is also ignored instead of resetting a running instance to defaults
 ```json
 {
   "yolo": false,
+  "theme": "catppuccin-mocha",
   "terminal": {
     "shell": "pwsh"
   },
@@ -533,7 +564,8 @@ unmerged branch is preserved and reported, and CST never escalates automatically
 
 The images in this README are generated, not captured, so they never contain real
 session data. An off-by-default `screenshots` feature renders invented sessions
-through the same drawing code the app uses and writes the result as SVG:
+through the same drawing code the app uses and writes the result as SVG. Scenes choose
+their palettes explicitly, including a light Catppuccin Latte GitHub inspector:
 
 ```bash
 cargo run --features screenshots -- screenshots docs/img

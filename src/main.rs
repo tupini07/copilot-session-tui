@@ -16,6 +16,7 @@ mod session;
 mod snippets;
 mod terminal_pane;
 mod text;
+mod theme;
 mod ui;
 mod updater;
 mod windows_terminal;

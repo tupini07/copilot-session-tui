@@ -1,8 +1,9 @@
 use crate::app::App;
 use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
 use crate::text;
+use crate::theme::{fill_area, Theme};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -13,6 +14,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
     let area = super::popups::centered_rect(72, 76, f.area());
     f.render_widget(Clear, area);
+    fill_area(f.buffer_mut(), area, app.theme().surface);
     match modal.screen {
         SnippetScreen::List | SnippetScreen::ConfirmDelete => draw_list(f, app, area),
         SnippetScreen::Editor => draw_editor(f, app, area),
@@ -24,10 +26,17 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let modal = app.snippet_modal.as_ref().expect("snippet modal");
+    let theme = app.theme();
+    let surface_text = super::foreground_on(theme, theme.surface);
     let block = Block::default()
         .title(" Prompt Snippets ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(Style::default().fg(surface_text).bg(theme.surface))
+        .border_style(Style::default().fg(super::semantic_foreground_on(
+            theme,
+            theme.accent,
+            theme.surface,
+        )));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let chunks = Layout::default()
@@ -51,16 +60,33 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         .map(|(index, (scope, _, snippet))| {
             let selected = index == modal.selected;
             let style = if selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
+                super::row_selection_style(theme)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(surface_text).bg(theme.surface)
             };
             let scope_style = match scope {
-                SnippetScope::Global => Style::default().fg(Color::Cyan),
-                SnippetScope::Project => Style::default().fg(Color::Yellow),
+                SnippetScope::Global => {
+                    if selected {
+                        style
+                    } else {
+                        Style::default().fg(super::semantic_foreground_on(
+                            theme,
+                            theme.accent_alt,
+                            theme.surface,
+                        ))
+                    }
+                }
+                SnippetScope::Project => {
+                    if selected {
+                        style
+                    } else {
+                        Style::default().fg(super::semantic_foreground_on(
+                            theme,
+                            theme.warning,
+                            theme.surface,
+                        ))
+                    }
+                }
             };
             let preview = safe_terminal_text(&snippet.prompt).replace(['\r', '\n'], " ↵ ");
             ListItem::new(Line::from(vec![
@@ -74,9 +100,14 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::styled(
                     text::truncate_to_width(&preview, preview_width),
-                    style.fg(Color::Gray),
+                    style.fg(if selected {
+                        style.fg.unwrap_or(theme.selection_fg)
+                    } else {
+                        super::semantic_foreground_on(theme, theme.muted, theme.surface)
+                    }),
                 ),
             ]))
+            .style(style)
         })
         .collect();
     if items.is_empty() {
@@ -85,21 +116,34 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(""),
                 Line::from(Span::styled(
                     "  No snippets yet — press a to add one.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(super::semantic_foreground_on(
+                        theme,
+                        theme.muted,
+                        theme.surface,
+                    )),
                 )),
-            ]),
+            ])
+            .style(Style::default().fg(surface_text).bg(theme.surface)),
             chunks[0],
         );
     } else {
-        f.render_widget(List::new(items), chunks[0]);
+        f.render_widget(
+            List::new(items).style(Style::default().fg(surface_text).bg(theme.surface)),
+            chunks[0],
+        );
     }
 
     if let Some(error) = modal.error.as_deref() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {error}"),
-                Style::default().fg(Color::Red),
-            ))),
+                Style::default().fg(super::semantic_foreground_on(
+                    theme,
+                    theme.error,
+                    theme.surface,
+                )),
+            )))
+            .style(Style::default().fg(surface_text).bg(theme.surface)),
             chunks[1],
         );
     }
@@ -113,27 +157,37 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                key("↑↓"),
+                key("↑↓", theme, theme.surface),
                 Span::raw(" select  "),
-                key("Enter"),
+                key("Enter", theme, theme.surface),
                 Span::raw(" use  "),
-                key("a"),
+                key("a", theme, theme.surface),
                 Span::raw(" add  "),
-                key("e"),
+                key("e", theme, theme.surface),
                 Span::raw(" edit  "),
-                key("d"),
+                key("d", theme, theme.surface),
                 Span::raw(" delete  "),
-                key("q/Esc"),
+                key("q/Esc", theme, theme.surface),
                 Span::raw(" close"),
             ]),
-            Line::from(Span::styled(project, Style::default().fg(Color::DarkGray))),
-        ]),
+            Line::from(Span::styled(
+                project,
+                Style::default().fg(super::semantic_foreground_on(
+                    theme,
+                    theme.muted,
+                    theme.surface,
+                )),
+            )),
+        ])
+        .style(Style::default().fg(surface_text).bg(theme.surface)),
         chunks[2],
     );
 }
 
 fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
     let modal = app.snippet_modal.as_ref().expect("snippet modal");
+    let theme = app.theme();
+    let surface_text = super::foreground_on(theme, theme.surface);
     let title = if modal.editing.is_some() {
         " Edit Prompt Snippet "
     } else {
@@ -142,7 +196,12 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(Style::default().fg(surface_text).bg(theme.surface))
+        .border_style(Style::default().fg(super::semantic_foreground_on(
+            theme,
+            theme.accent,
+            theme.surface,
+        )));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let chunks = Layout::default()
@@ -165,10 +224,13 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
         safe_single_line_text(&modal.editor_name)
     };
     f.render_widget(
-        Paragraph::new(name).block(field_block(
-            " Name ",
-            modal.editor_field == SnippetEditorField::Name,
-        )),
+        Paragraph::new(name)
+            .style(Style::default().fg(theme.text).bg(theme.background))
+            .block(field_block(
+                " Name ",
+                modal.editor_field == SnippetEditorField::Name,
+                theme,
+            )),
         chunks[0],
     );
 
@@ -177,10 +239,13 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
         SnippetScope::Project => " Project — only this repository ",
     };
     f.render_widget(
-        Paragraph::new(scope).block(field_block(
-            " Scope (Space or Ctrl+G toggles) ",
-            modal.editor_field == SnippetEditorField::Scope,
-        )),
+        Paragraph::new(scope)
+            .style(Style::default().fg(theme.text).bg(theme.background))
+            .block(field_block(
+                " Scope (Space or Ctrl+G toggles) ",
+                modal.editor_field == SnippetEditorField::Scope,
+                theme,
+            )),
         chunks[1],
     );
 
@@ -202,54 +267,77 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
     let prompt_scroll = cursor_row.saturating_sub(prompt_height.saturating_sub(1));
     f.render_widget(
         Paragraph::new(prompt)
+            .style(Style::default().fg(theme.text).bg(theme.background))
             .wrap(Wrap { trim: false })
             .scroll((u16::try_from(prompt_scroll).unwrap_or(u16::MAX), 0))
             .block(field_block(
                 " Prompt ",
                 modal.editor_field == SnippetEditorField::Prompt,
+                theme,
             )),
         chunks[2],
     );
 
     if let Some(error) = modal.error.as_deref() {
         f.render_widget(
-            Paragraph::new(Span::styled(error, Style::default().fg(Color::Red))),
+            Paragraph::new(Span::styled(
+                error,
+                Style::default().fg(super::semantic_foreground_on(
+                    theme,
+                    theme.error,
+                    theme.surface,
+                )),
+            ))
+            .style(Style::default().fg(surface_text).bg(theme.surface)),
             chunks[3],
         );
     }
     f.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                key("Tab/Shift+Tab"),
+                key("Tab/Shift+Tab", theme, theme.surface),
                 Span::raw(" field  "),
-                key("Enter"),
+                key("Enter", theme, theme.surface),
                 Span::raw(" newline in prompt  "),
-                key("Ctrl+S"),
+                key("Ctrl+S", theme, theme.surface),
                 Span::raw(" save  "),
-                key("Esc"),
+                key("Esc", theme, theme.surface),
                 Span::raw(" cancel"),
             ]),
             Line::from(Span::styled(
                 "Using a snippet pastes it into chat without sending.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(super::semantic_foreground_on(
+                    theme,
+                    theme.muted,
+                    theme.surface,
+                )),
             )),
-        ]),
+        ])
+        .style(Style::default().fg(surface_text).bg(theme.surface)),
         chunks[4],
     );
 }
 
 fn draw_delete_confirm(f: &mut Frame, app: &App, parent: Rect) {
     let modal = app.snippet_modal.as_ref().expect("snippet modal");
+    let theme = app.theme();
+    let surface_text = super::foreground_on(theme, theme.surface);
     let name = modal
         .selected_entry()
         .map(|(_, _, snippet)| snippet.name.as_str())
         .unwrap_or("this snippet");
     let area = super::popups::centered_rect(62, 28, parent);
     f.render_widget(Clear, area);
+    fill_area(f.buffer_mut(), area, theme.surface);
     let block = Block::default()
         .title(" Delete Snippet? ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(surface_text).bg(theme.surface))
+        .border_style(Style::default().fg(super::semantic_foreground_on(
+            theme,
+            theme.error,
+            theme.surface,
+        )));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
@@ -260,35 +348,45 @@ fn draw_delete_confirm(f: &mut Frame, app: &App, parent: Rect) {
                 Span::styled(
                     safe_single_line_text(name),
                     Style::default()
-                        .fg(Color::White)
+                        .fg(surface_text)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("?"),
             ]),
             Line::from(""),
             Line::from(vec![
-                key("y/Enter"),
+                key("y/Enter", theme, theme.surface),
                 Span::raw(" delete permanently  "),
-                key("n/Esc"),
+                key("n/Esc", theme, theme.surface),
                 Span::raw(" cancel"),
             ]),
-        ]),
+        ])
+        .style(Style::default().fg(surface_text).bg(theme.surface)),
         inner,
     );
 }
 
-fn field_block(title: &str, active: bool) -> Block<'_> {
+fn field_block(title: &str, active: bool, theme: Theme) -> Block<'_> {
     Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if active { Color::Cyan } else { Color::DarkGray }))
+        .style(Style::default().fg(theme.text).bg(theme.background))
+        .border_style(Style::default().fg(if active {
+            super::semantic_foreground_on(theme, theme.accent_alt, theme.background)
+        } else {
+            theme.muted
+        }))
 }
 
-fn key(text: &str) -> Span<'_> {
+fn key(text: &str, theme: Theme, background: ratatui::style::Color) -> Span<'_> {
     Span::styled(
         text,
         Style::default()
-            .fg(Color::Cyan)
+            .fg(super::semantic_foreground_on(
+                theme,
+                theme.accent_alt,
+                background,
+            ))
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -356,20 +454,40 @@ mod tests {
     use super::*;
     use crate::config::{PromptSnippet, UserConfig};
     use crate::snippets::SnippetModal;
+    use crate::theme::ThemeName;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use std::path::PathBuf;
 
-    fn render(app: &App) -> String {
+    fn render_buffer(app: &App) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
+        terminal.backend().buffer().clone()
+    }
+
+    fn render(app: &App) -> String {
+        render_buffer(app)
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        let width = needle.chars().count() as u16;
+        for y in buffer.area.top()..buffer.area.bottom() {
+            for x in buffer.area.left()..=buffer.area.right().saturating_sub(width) {
+                let rendered = (x..x + width)
+                    .map(|column| buffer[(column, y)].symbol())
+                    .collect::<String>();
+                if rendered == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle:?} was not rendered");
     }
 
     #[test]
@@ -457,5 +575,68 @@ mod tests {
         assert!(!text.contains('\u{1b}'));
         assert!(!text.contains('\u{7}'));
         assert!(text.contains('�'));
+    }
+
+    #[test]
+    fn selected_snippet_uses_theme_selection_colors() {
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                theme: ThemeName::CatppuccinLatte,
+                ..UserConfig::default()
+            },
+        );
+        app.snippet_modal = Some(SnippetModal::new(
+            vec![PromptSnippet {
+                name: "Review".to_string(),
+                prompt: "Review this carefully".to_string(),
+            }],
+            Vec::new(),
+            None,
+        ));
+
+        let buffer = render_buffer(&app);
+        let (x, y) = find_text(&buffer, "Review");
+        let theme = app.theme();
+
+        assert_eq!(buffer[(x, y)].fg, theme.selection_fg);
+        assert_eq!(buffer[(x, y)].bg, theme.selection_bg);
+        let (x, y) = find_text(&buffer, "global");
+        assert_eq!(buffer[(x, y)].fg, theme.selection_fg);
+        assert_eq!(buffer[(x, y)].bg, theme.selection_bg);
+    }
+
+    #[test]
+    fn solarized_light_editor_repaints_clear_and_uses_readable_field_text() {
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                theme: ThemeName::SolarizedLight,
+                ..UserConfig::default()
+            },
+        );
+        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
+        modal.begin_add();
+        app.snippet_modal = Some(modal);
+
+        let buffer = render_buffer(&app);
+        let modal_area = super::super::popups::centered_rect(72, 76, buffer.area);
+        for y in modal_area.top()..modal_area.bottom() {
+            for x in modal_area.left()..modal_area.right() {
+                assert_ne!(buffer[(x, y)].bg, Color::Reset);
+            }
+        }
+
+        let (x, y) = find_text(&buffer, "Global");
+        let theme = app.theme();
+        assert_eq!(buffer[(x, y)].fg, theme.text);
+        assert_eq!(buffer[(x, y)].bg, theme.background);
+
+        let (x, y) = find_text(&buffer, "Add Prompt Snippet");
+        assert_eq!(
+            buffer[(x, y)].fg,
+            crate::ui::foreground_on(theme, theme.surface)
+        );
+        assert_eq!(buffer[(x, y)].bg, theme.surface);
     }
 }

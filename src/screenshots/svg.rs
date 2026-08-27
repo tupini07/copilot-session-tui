@@ -8,6 +8,8 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use std::fmt::Write as _;
 
+use crate::theme::Theme;
+
 /// Cell metrics. The advance width is the 0.6em that monospace faces use, so runs
 /// land on the grid even before `textLength` corrects for the viewer's own font.
 const FONT_SIZE: f32 = 15.0;
@@ -23,29 +25,13 @@ const CORNER: f32 = 8.0;
 const FONT_STACK: &str =
     "ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace";
 
-/// Catppuccin Mocha. Picked over a stock ANSI palette because CST leans on blue for
-/// directories and dark gray for hints, both of which are hard to read in the
-/// default Windows Terminal scheme.
-const BACKGROUND: &str = "#11111b";
-const FOREGROUND: &str = "#cdd6f4";
-
-const PALETTE: [&str; 16] = [
-    "#45475a", // black
-    "#f38ba8", // red
-    "#a6e3a1", // green
-    "#f9e2af", // yellow
-    "#89b4fa", // blue
-    "#cba6f7", // magenta
-    "#94e2d5", // cyan
-    "#bac2de", // white
-    "#585b70", // bright black
-    "#f38ba8", // bright red
-    "#a6e3a1", // bright green
-    "#f9e2af", // bright yellow
-    "#89b4fa", // bright blue
-    "#cba6f7", // bright magenta
-    "#94e2d5", // bright cyan
-    "#cdd6f4", // bright white
+/// Concrete fallbacks for CST Classic, whose Reset colors intentionally defer to
+/// the user's terminal. Standalone SVGs have no terminal defaults to inherit.
+const CLASSIC_BACKGROUND: &str = "#000000";
+const CLASSIC_FOREGROUND: &str = "#ffffff";
+const CLASSIC_ANSI: [&str; 16] = [
+    "#000000", "#800000", "#008000", "#808000", "#000080", "#800080", "#008080", "#c0c0c0",
+    "#808080", "#ff0000", "#00ff00", "#ffff00", "#0000ff", "#ff00ff", "#00ffff", "#ffffff",
 ];
 
 /// A run of adjacent cells that share every visual attribute.
@@ -61,21 +47,22 @@ struct Run {
     underlined: bool,
 }
 
-pub fn render(buffer: &Buffer) -> String {
+pub fn render(buffer: &Buffer, theme: Theme) -> String {
     let area = buffer.area;
     let width = PADDING * 2.0 + area.width as f32 * CELL_W;
     let height = PADDING * 2.0 + area.height as f32 * CELL_H;
+    let background = hex(theme.background, theme, false);
 
     let mut svg = String::new();
     let _ = write!(
         svg,
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{height:.0}" viewBox="0 0 {width:.0} {height:.0}" font-family="{FONT_STACK}" font-size="{FONT_SIZE}">
-<rect width="{width:.0}" height="{height:.0}" rx="{CORNER}" fill="{BACKGROUND}"/>
+<rect width="{width:.0}" height="{height:.0}" rx="{CORNER}" fill="{background}"/>
 "#
     );
 
-    write_backgrounds(&mut svg, buffer);
-    write_text(&mut svg, buffer);
+    write_backgrounds(&mut svg, buffer, theme, &background);
+    write_text(&mut svg, buffer, theme);
 
     svg.push_str("</svg>\n");
     svg
@@ -83,18 +70,18 @@ pub fn render(buffer: &Buffer) -> String {
 
 /// Emit one rect per horizontal run of identical background, skipping the default
 /// so the canvas fill shows through.
-fn write_backgrounds(svg: &mut String, buffer: &Buffer) {
+fn write_backgrounds(svg: &mut String, buffer: &Buffer, theme: Theme, background: &str) {
     let area = buffer.area;
     for y in 0..area.height {
         let mut x = 0;
         while x < area.width {
-            let fill = resolved(buffer, x, y).1;
-            if fill == BACKGROUND {
+            let fill = resolved(buffer, x, y, theme).1;
+            if fill == background {
                 x += 1;
                 continue;
             }
             let start = x;
-            while x < area.width && resolved(buffer, x, y).1 == fill {
+            while x < area.width && resolved(buffer, x, y, theme).1 == fill {
                 x += 1;
             }
             let _ = writeln!(
@@ -109,8 +96,8 @@ fn write_backgrounds(svg: &mut String, buffer: &Buffer) {
     }
 }
 
-fn write_text(svg: &mut String, buffer: &Buffer) {
-    for run in collect_runs(buffer) {
+fn write_text(svg: &mut String, buffer: &Buffer, theme: Theme) {
+    for run in collect_runs(buffer, theme) {
         if run.text.trim().is_empty() {
             continue;
         }
@@ -149,7 +136,7 @@ fn write_text(svg: &mut String, buffer: &Buffer) {
     }
 }
 
-fn collect_runs(buffer: &Buffer) -> Vec<Run> {
+fn collect_runs(buffer: &Buffer, theme: Theme) -> Vec<Run> {
     let area = buffer.area;
     let mut runs = Vec::new();
     for y in 0..area.height {
@@ -165,7 +152,7 @@ fn collect_runs(buffer: &Buffer) -> Vec<Run> {
                 }
                 continue;
             }
-            let (fg, _) = resolved(buffer, x, y);
+            let (fg, _) = resolved(buffer, x, y, theme);
             let modifier = cell.modifier;
             let matches = current.as_ref().is_some_and(|run| {
                 run.fg == fg
@@ -205,20 +192,33 @@ fn collect_runs(buffer: &Buffer) -> Vec<Run> {
 }
 
 /// Foreground and background for a cell, with `REVERSED` already applied.
-fn resolved(buffer: &Buffer, x: u16, y: u16) -> (String, String) {
+fn resolved(buffer: &Buffer, x: u16, y: u16, theme: Theme) -> (String, String) {
     let cell = &buffer[(x, y)];
-    let mut fg = hex(cell.fg, FOREGROUND);
-    let mut bg = hex(cell.bg, BACKGROUND);
+    let mut fg = hex(cell.fg, theme, true);
+    let mut bg = hex(cell.bg, theme, false);
     if cell.modifier.contains(Modifier::REVERSED) {
         std::mem::swap(&mut fg, &mut bg);
     }
     (fg, bg)
 }
 
-fn hex(color: Color, default: &str) -> String {
+fn hex(color: Color, theme: Theme, foreground: bool) -> String {
     let index = match color {
-        Color::Reset => return default.to_string(),
+        Color::Reset => {
+            let default = if foreground {
+                theme.text
+            } else {
+                theme.background
+            };
+            let fallback = if foreground {
+                CLASSIC_FOREGROUND
+            } else {
+                CLASSIC_BACKGROUND
+            };
+            return palette_color(default, fallback);
+        }
         Color::Rgb(r, g, b) => return format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(n @ 0..=15) => return ansi(theme, n),
         Color::Indexed(n) => return indexed(n),
         Color::Black => 0,
         Color::Red => 1,
@@ -237,13 +237,43 @@ fn hex(color: Color, default: &str) -> String {
         Color::LightCyan => 14,
         Color::White => 15,
     };
-    PALETTE[index].to_string()
+    ansi(theme, index)
 }
 
-/// The xterm-256 layout: 16 themed colors, a 6x6x6 cube, then a gray ramp.
+fn ansi(theme: Theme, index: u8) -> String {
+    palette_color(theme.ansi[index as usize], CLASSIC_ANSI[index as usize])
+}
+
+/// Materialize a color stored in a theme. Named colors here are terminal-independent
+/// fallbacks used by CST Classic; RGB themes never take this path.
+fn palette_color(color: Color, fallback: &str) -> String {
+    match color {
+        Color::Reset => fallback.to_string(),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(n @ 0..=15) => CLASSIC_ANSI[n as usize].to_string(),
+        Color::Indexed(n) => indexed(n),
+        Color::Black => CLASSIC_ANSI[0].to_string(),
+        Color::Red => CLASSIC_ANSI[1].to_string(),
+        Color::Green => CLASSIC_ANSI[2].to_string(),
+        Color::Yellow => CLASSIC_ANSI[3].to_string(),
+        Color::Blue => CLASSIC_ANSI[4].to_string(),
+        Color::Magenta => CLASSIC_ANSI[5].to_string(),
+        Color::Cyan => CLASSIC_ANSI[6].to_string(),
+        Color::Gray => CLASSIC_ANSI[7].to_string(),
+        Color::DarkGray => CLASSIC_ANSI[8].to_string(),
+        Color::LightRed => CLASSIC_ANSI[9].to_string(),
+        Color::LightGreen => CLASSIC_ANSI[10].to_string(),
+        Color::LightYellow => CLASSIC_ANSI[11].to_string(),
+        Color::LightBlue => CLASSIC_ANSI[12].to_string(),
+        Color::LightMagenta => CLASSIC_ANSI[13].to_string(),
+        Color::LightCyan => CLASSIC_ANSI[14].to_string(),
+        Color::White => CLASSIC_ANSI[15].to_string(),
+    }
+}
+
+/// The fixed part of the xterm-256 layout: a 6x6x6 cube, then a gray ramp.
 fn indexed(n: u8) -> String {
     match n {
-        0..=15 => PALETTE[n as usize].to_string(),
         16..=231 => {
             let n = n - 16;
             let level = |v: u8| if v == 0 { 0u8 } else { 55 + v * 40 };
@@ -254,10 +284,11 @@ fn indexed(n: u8) -> String {
                 level(n % 6)
             )
         }
-        _ => {
+        232..=255 => {
             let value = 8 + (n - 232) * 10;
             format!("#{value:02x}{value:02x}{value:02x}")
         }
+        _ => CLASSIC_ANSI[n as usize].to_string(),
     }
 }
 
@@ -287,6 +318,8 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Style;
 
+    use crate::theme::ThemeName;
+
     fn buffer_with(lines: &[&str]) -> Buffer {
         let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
         let mut buffer = Buffer::empty(Rect::new(0, 0, width, lines.len() as u16));
@@ -296,9 +329,13 @@ mod tests {
         buffer
     }
 
+    fn render_dark(buffer: &Buffer) -> String {
+        render(buffer, ThemeName::CatppuccinMocha.theme())
+    }
+
     #[test]
     fn markup_special_characters_survive_as_entities() {
-        let svg = render(&buffer_with(&["<a> & \"b\""]));
+        let svg = render_dark(&buffer_with(&["<a> & \"b\""]));
 
         assert!(svg.contains("&lt;a&gt; &amp; &quot;b&quot;"), "{svg}");
         assert!(!svg.contains(">a<"), "{svg}");
@@ -306,7 +343,7 @@ mod tests {
 
     #[test]
     fn adjacent_cells_of_one_style_become_a_single_run() {
-        let svg = render(&buffer_with(&["hello"]));
+        let svg = render_dark(&buffer_with(&["hello"]));
 
         assert_eq!(svg.matches("<text").count(), 1, "{svg}");
         assert!(svg.contains(">hello</text>"), "{svg}");
@@ -316,11 +353,12 @@ mod tests {
     fn a_style_change_starts_a_new_run() {
         let mut buffer = buffer_with(&["ab"]);
         buffer[(1, 0)].fg = Color::Red;
+        let theme = ThemeName::CatppuccinMocha.theme();
 
-        let svg = render(&buffer);
+        let svg = render(&buffer, theme);
 
         assert_eq!(svg.matches("<text").count(), 2, "{svg}");
-        assert!(svg.contains(PALETTE[1]), "{svg}");
+        assert!(svg.contains(&ansi(theme, 1)), "{svg}");
     }
 
     #[test]
@@ -328,16 +366,20 @@ mod tests {
         let mut buffer = buffer_with(&["x"]);
         buffer[(0, 0)].fg = Color::Green;
         buffer[(0, 0)].modifier = Modifier::REVERSED;
+        let theme = ThemeName::CatppuccinMocha.theme();
 
-        let svg = render(&buffer);
+        let svg = render(&buffer, theme);
 
         // Green becomes the fill of the rect, and the glyph takes the canvas color.
         assert!(
-            svg.contains(&format!(r#"fill="{}" shape-rendering"#, PALETTE[2])),
+            svg.contains(&format!(r#"fill="{}" shape-rendering"#, ansi(theme, 2))),
             "{svg}"
         );
         assert!(
-            svg.contains(&format!(r#"fill="{BACKGROUND}" textLength"#)),
+            svg.contains(&format!(
+                r#"fill="{}" textLength"#,
+                hex(theme.background, theme, false)
+            )),
             "{svg}"
         );
     }
@@ -346,7 +388,7 @@ mod tests {
     fn rule_runs_stretch_their_glyphs_so_borders_stay_unbroken() {
         let buffer = buffer_with(&["──", "ab"]);
 
-        let svg = render(&buffer);
+        let svg = render_dark(&buffer);
 
         // Padding the gaps between box-drawing glyphs would turn a border into a
         // dashed line, so those runs scale the glyphs instead.
@@ -356,23 +398,103 @@ mod tests {
 
     #[test]
     fn the_default_background_is_left_to_the_canvas() {
-        let svg = render(&buffer_with(&["ab"]));
+        let svg = render_dark(&buffer_with(&["ab"]));
 
         // Only the rounded canvas rect, no per-cell fills.
         assert_eq!(svg.matches("<rect").count(), 1, "{svg}");
     }
 
     #[test]
-    fn indexed_colors_follow_the_xterm_cube() {
+    fn light_theme_supplies_the_canvas_and_reset_foreground() {
+        let theme = ThemeName::CatppuccinLatte.theme();
+        let svg = render(&buffer_with(&["light"]), theme);
+
+        assert!(
+            svg.contains(&format!(
+                r#"<rect width="77" height="50" rx="8" fill="{}"/>"#,
+                hex(theme.background, theme, false)
+            )),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(&format!(
+                r#"<text x="16.0" y="29.5" fill="{}""#,
+                hex(theme.text, theme, true)
+            )),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn ansi_zero_through_fifteen_use_the_selected_theme_palette() {
+        let theme = ThemeName::SolarizedLight.theme();
+        let named = [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+            Color::White,
+        ];
+
+        for (index, color) in named.into_iter().enumerate() {
+            assert_eq!(hex(color, theme, true), ansi(theme, index as u8));
+            assert_eq!(
+                hex(Color::Indexed(index as u8), theme, true),
+                ansi(theme, index as u8)
+            );
+        }
+        assert_ne!(ansi(theme, 1), CLASSIC_ANSI[1]);
+    }
+
+    #[test]
+    fn high_indexed_and_rgb_colors_remain_literal() {
         assert_eq!(indexed(16), "#000000");
         assert_eq!(indexed(231), "#ffffff");
         assert_eq!(indexed(232), "#080808");
-        assert_eq!(indexed(1), PALETTE[1]);
+        assert_eq!(
+            hex(Color::Indexed(42), ThemeName::CatppuccinLatte.theme(), true),
+            "#00d787"
+        );
+        assert_eq!(
+            hex(
+                Color::Rgb(1, 2, 3),
+                ThemeName::CatppuccinLatte.theme(),
+                true
+            ),
+            "#010203"
+        );
+    }
+
+    #[test]
+    fn text_modifiers_survive_theme_color_resolution() {
+        let mut buffer = buffer_with(&["x"]);
+        buffer[(0, 0)].fg = Color::Indexed(42);
+        buffer[(0, 0)].modifier =
+            Modifier::BOLD | Modifier::DIM | Modifier::ITALIC | Modifier::UNDERLINED;
+
+        let svg = render(&buffer, ThemeName::CatppuccinLatte.theme());
+
+        assert!(svg.contains(r##"fill="#00d787""##), "{svg}");
+        assert!(svg.contains(r#"font-weight="bold""#), "{svg}");
+        assert!(svg.contains(r#"font-style="italic""#), "{svg}");
+        assert!(svg.contains(r#"text-decoration="underline""#), "{svg}");
+        assert!(svg.contains(r#"opacity="0.65""#), "{svg}");
     }
 
     #[test]
     fn the_canvas_is_sized_from_the_grid() {
-        let svg = render(&buffer_with(&["abc", "def"]));
+        let svg = render_dark(&buffer_with(&["abc", "def"]));
 
         let width = PADDING * 2.0 + 3.0 * CELL_W;
         let height = PADDING * 2.0 + 2.0 * CELL_H;

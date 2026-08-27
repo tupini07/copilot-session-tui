@@ -9,13 +9,14 @@ use tui_term::widget::PseudoTerminal;
 use crate::app::App;
 use crate::mux::{PaneStatus, PrefixState};
 use crate::text;
+use crate::theme::{apply_terminal_theme, fill_area, Theme, ThemeName};
 use crate::ui::tabs;
 
 /// Frames of the startup spinner. Braille dots read as motion even in a plain terminal.
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 /// Progress indicator shown while a freshly spawned session has yet to draw anything.
-fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
+fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration, theme: Theme) {
     let frame = SPINNER[(elapsed.as_millis() / 120) as usize % SPINNER.len()];
     let seconds = elapsed.as_secs();
 
@@ -24,7 +25,7 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
         Line::from(Span::styled(
             format!("  {frame}  Starting Copilot…"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         )),
     ];
@@ -32,7 +33,7 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
     if seconds >= 3 {
         lines.push(Line::from(Span::styled(
             format!("     {seconds}s — the CLI is still booting"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
 
@@ -47,6 +48,7 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration) {
 }
 
 pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
@@ -55,28 +57,31 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let border_color = if app.workspace_focus == crate::app::WorkspaceFocus::Chat {
-        Color::Cyan
+        theme.accent_alt
     } else {
-        Color::DarkGray
+        theme.inactive
     };
     let block = Block::default()
         .title(" Chat ")
         .borders(Borders::ALL)
+        .style(panel_style(theme))
         .border_style(Style::default().fg(border_color));
     let terminal_area = block.inner(area);
+    fill_area(f.buffer_mut(), area, theme.background);
     f.render_widget(block, area);
 
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen);
         f.render_widget(widget, terminal_area);
+        apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
     });
-    decorate_references(f, app, terminal_area);
+    decorate_references(f, app, terminal_area, theme);
 
     // Copilot needs a few seconds before it draws anything; without this the pane just
     // looks frozen.
     let starting = pane.is_running() && pane.is_blank();
     if starting {
-        draw_starting(f, terminal_area, pane.started_at.elapsed());
+        draw_starting(f, terminal_area, pane.started_at.elapsed(), theme);
     }
 
     // Mirror the child's cursor into the outer terminal so typing feels native.
@@ -96,8 +101,8 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 /// This works on the already-drawn cells rather than the child's output, so it
 /// stays correct however the terminal widget chose to lay the text out, and a
 /// reference that is not yet resolved simply stays plain.
-fn decorate_references(f: &mut Frame, app: &App, area: Rect) {
-    restyle_references(f.buffer_mut(), area, &|number| {
+fn decorate_references(f: &mut Frame, app: &App, area: Rect, theme: Theme) {
+    restyle_references(f.buffer_mut(), area, theme, &|number| {
         app.github_reference_status(number)
     });
 }
@@ -105,6 +110,7 @@ fn decorate_references(f: &mut Frame, app: &App, area: Rect) {
 fn restyle_references(
     buffer: &mut ratatui::buffer::Buffer,
     area: Rect,
+    theme: Theme,
     lookup: &dyn Fn(u64) -> Option<crate::github::ReferenceStatus>,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -144,9 +150,9 @@ fn restyle_references(
                 continue;
             }
             if let Some(status) = digits.parse::<u64>().ok().and_then(lookup) {
-                buffer[(x, y)].set_style(reference_marker_style(status));
+                buffer[(x, y)].set_style(reference_marker_style(theme, status));
                 for cell in (x + 1)..end {
-                    buffer[(cell, y)].set_style(reference_style(status));
+                    buffer[(cell, y)].set_style(reference_style(theme, status));
                 }
             }
             x = end;
@@ -161,11 +167,11 @@ fn restyle_references(
 /// indistinguishable. Tinting the hash leaves the layout untouched, which
 /// swapping in an icon glyph would not — a wide character would shift the rest
 /// of the child's line.
-fn reference_marker_style(status: crate::github::ReferenceStatus) -> Style {
+fn reference_marker_style(theme: Theme, status: crate::github::ReferenceStatus) -> Style {
     use crate::github::ReferenceKind;
     let color = match status.kind {
-        ReferenceKind::Issue => Color::Yellow,
-        ReferenceKind::PullRequest => Color::Cyan,
+        ReferenceKind::Issue => theme.warning,
+        ReferenceKind::PullRequest => theme.accent_alt,
     };
     Style::default()
         .fg(color)
@@ -173,18 +179,19 @@ fn reference_marker_style(status: crate::github::ReferenceStatus) -> Style {
 }
 
 /// Colour of the number, which carries the state; the underline says "this is a link".
-fn reference_style(status: crate::github::ReferenceStatus) -> Style {
+fn reference_style(theme: Theme, status: crate::github::ReferenceStatus) -> Style {
     use crate::github::{ReferenceKind, ReferenceState};
     let color = match status.state {
-        ReferenceState::Open => Color::Green,
+        ReferenceState::Open => theme.success,
         ReferenceState::Closed => match status.kind {
             // A closed issue and a closed pull request mean different things,
             // and GitHub itself colours them differently.
-            ReferenceKind::Issue => Color::Magenta,
-            ReferenceKind::PullRequest => Color::Red,
+            ReferenceKind::Issue => theme.accent,
+            ReferenceKind::PullRequest => theme.error,
         },
-        ReferenceState::Merged => Color::Magenta,
-        ReferenceState::Draft => Color::Gray,
+        ReferenceState::Merged => theme.accent,
+        ReferenceState::Draft if theme.name == ThemeName::Classic => Color::Gray,
+        ReferenceState::Draft => theme.muted,
     };
     Style::default()
         .fg(color)
@@ -192,6 +199,7 @@ fn reference_style(status: crate::github::ReferenceStatus) -> Style {
 }
 
 pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
@@ -204,46 +212,22 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // session name can never push the prefix reminder off screen.
     let hint: Vec<Span> = match pane.status {
         PaneStatus::Running if mux.prefix_state == PrefixState::Help => vec![
-            Span::styled(
-                " Help ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" Help ", badge_style(theme, theme.warning)),
             Span::raw(" e scratchpad  Esc cancel "),
         ],
         PaneStatus::Running if mux.prefix_state == PrefixState::Github => vec![
-            Span::styled(
-                " GitHub ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" GitHub ", badge_style(theme, theme.accent)),
             Span::raw(" i inspect  Esc cancel "),
         ],
         PaneStatus::Running if mux.prefix_state == PrefixState::Root => vec![
-            Span::styled(
-                format!(" {prefix} "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!(" {prefix} "), badge_style(theme, theme.warning)),
             Span::raw(root_command_hint(&prefix)),
         ],
         PaneStatus::Running
             if mux.prefix_state == PrefixState::Idle && app.update_notice.is_some() =>
         {
             vec![
-                Span::styled(
-                    " Update ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(" Update ", badge_style(theme, theme.accent_alt)),
                 Span::raw(format!(
                     " {} ",
                     text::truncate_to_width(
@@ -255,7 +239,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         PaneStatus::Running => vec![
             Span::raw(" "),
-            Span::styled(prefix.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(prefix.clone(), Style::default().fg(theme.accent_alt)),
             Span::raw(" for commands "),
         ],
         PaneStatus::Exited(code) => {
@@ -265,7 +249,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             };
             vec![Span::styled(
                 format!(" {text} — Enter to close "),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.warning),
             )]
         }
     };
@@ -293,28 +277,54 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for tab in &tab_list {
         let style = if tab.active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            badge_style(theme, theme.accent_alt)
         } else if tab.running {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.ansi[7])
         } else {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme.error)
         };
         spans.push(Span::styled(tab.label.clone(), style));
     }
     if hidden > 0 {
         spans.push(Span::styled(
             format!(" +{hidden} "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ));
     }
     spans.extend(hint);
 
-    let status =
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    fill_area(f.buffer_mut(), area, theme.chrome_bg);
+    let status = Paragraph::new(Line::from(spans)).style(status_style(theme));
     f.render_widget(status, area);
+}
+
+fn panel_style(theme: Theme) -> Style {
+    if theme.name == ThemeName::Classic {
+        Style::default()
+    } else {
+        Style::default().fg(theme.text).bg(theme.background)
+    }
+}
+
+fn status_style(theme: Theme) -> Style {
+    let style = Style::default().bg(theme.chrome_bg);
+    if theme.name == ThemeName::Classic {
+        style
+    } else {
+        style.fg(theme.text)
+    }
+}
+
+fn badge_style(theme: Theme, background: Color) -> Style {
+    let foreground = if theme.name == ThemeName::Classic {
+        Color::Black
+    } else {
+        theme.contrast_text(background)
+    };
+    Style::default()
+        .fg(foreground)
+        .bg(background)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn root_command_hint(prefix: &str) -> String {
@@ -371,22 +381,27 @@ mod tests {
             buffer[(index as u16, 0)].set_symbol(&character.to_string());
         }
 
-        restyle_references(&mut buffer, area, &|number| match number {
-            11 => Some(ReferenceStatus {
-                kind: ReferenceKind::Issue,
-                state: ReferenceState::Open,
-            }),
-            12 => Some(ReferenceStatus {
-                kind: ReferenceKind::PullRequest,
-                state: ReferenceState::Merged,
-            }),
-            // Resolvable on its own, but here it only appears glued to `v#`.
-            9 => Some(ReferenceStatus {
-                kind: ReferenceKind::Issue,
-                state: ReferenceState::Open,
-            }),
-            _ => None,
-        });
+        restyle_references(
+            &mut buffer,
+            area,
+            ThemeName::Classic.theme(),
+            &|number| match number {
+                11 => Some(ReferenceStatus {
+                    kind: ReferenceKind::Issue,
+                    state: ReferenceState::Open,
+                }),
+                12 => Some(ReferenceStatus {
+                    kind: ReferenceKind::PullRequest,
+                    state: ReferenceState::Merged,
+                }),
+                // Resolvable on its own, but here it only appears glued to `v#`.
+                9 => Some(ReferenceStatus {
+                    kind: ReferenceKind::Issue,
+                    state: ReferenceState::Open,
+                }),
+                _ => None,
+            },
+        );
 
         // The number carries the state...
         for x in 7..9 {
@@ -416,7 +431,7 @@ mod tests {
             buffer[(index as u16, 0)].set_symbol(&character.to_string());
         }
 
-        restyle_references(&mut buffer, area, &|number| {
+        restyle_references(&mut buffer, area, ThemeName::Classic.theme(), &|number| {
             Some(ReferenceStatus {
                 kind: if number == 11 {
                     ReferenceKind::Issue
@@ -435,17 +450,20 @@ mod tests {
 
     /// Render the whole UI into an off-screen buffer and return it as plain text.
     fn render(app: &mut App) -> String {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|f| crate::ui::draw(f, app))
-            .expect("draw succeeds");
-        let buffer = terminal.backend().buffer().clone();
-        buffer
+        render_buffer(app, 80, 24)
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, app))
+            .expect("draw succeeds");
+        terminal.backend().buffer().clone()
     }
 
     /// A child that stays alive without printing anything, standing in for Copilot's
@@ -484,6 +502,174 @@ mod tests {
             ..UserConfig::default()
         };
         App::new(Vec::new(), config)
+    }
+
+    fn mux_app_with_theme(theme: ThemeName) -> App {
+        let config = UserConfig {
+            mux: true,
+            theme,
+            ..UserConfig::default()
+        };
+        App::new(Vec::new(), config)
+    }
+
+    fn rgb_components(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("expected RGB color, got {other:?}"),
+        }
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        let luminance = |color| {
+            let (r, g, b) = rgb_components(color);
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let foreground = luminance(foreground);
+        let background = luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn light_theme_styles_attached_chrome_and_startup_spinner() {
+        let mut app = mux_app_with_theme(ThemeName::SolarizedLight);
+        let theme = app.theme();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+
+        let buffer = render_buffer(&mut app, 80, 24);
+
+        assert_eq!(buffer[(0, 0)].fg, theme.accent_alt);
+        assert_eq!(buffer[(0, 0)].bg, theme.background);
+        assert_eq!(buffer[(6, 2)].symbol(), "S");
+        assert_eq!(buffer[(6, 2)].fg, theme.accent_alt);
+        assert_eq!(buffer[(6, 2)].bg, theme.background);
+        assert_eq!(buffer[(0, 23)].bg, theme.accent_alt);
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn light_themes_keep_copilot_edit_output_readable_and_terminal_faithful() {
+        let transcript = concat!(
+            "ordinary \x1b[1;3mstyled\x1b[0m \x1b[38;5;42mhigh\x1b[0m ",
+            "\x1b[38;2;1;2;3mtrue\x1b[0m\r\n",
+            "\x1b[1;36mEdit\x1b[0m src/lib.rs\r\n",
+            "\x1b[90m 12 │ \x1b[35mfn\x1b[39m demo() {\x1b[0m\r\n",
+            "\x1b[48;2;18;52;31m\x1b[32m+\x1b[39m \x1b[90m13 │ ",
+            "\x1b[39m\x1b[36mlet\x1b[39m added = \x1b[33mtrue\x1b[39m;",
+            "\x1b[0m\r\n",
+            "\x1b[48;2;62;25;31m\x1b[31m-\x1b[39m \x1b[90m13 │ ",
+            "\x1b[39m\x1b[36mlet\x1b[39m deleted = \x1b[33mfalse\x1b[39m;",
+            "\x1b[0m"
+        );
+
+        for name in ThemeName::LIGHT {
+            let mut app = mux_app_with_theme(name);
+            let theme = app.theme();
+            let events = app.mux.as_ref().expect("mux").events.clone();
+            let mut pane = silent_pane(events);
+            let id = pane.id;
+            pane.feed_synthetic(transcript.as_bytes());
+            app.mux.as_mut().expect("mux").push(pane);
+            app.view = crate::app::View::Attached(id);
+
+            let buffer = render_buffer(&mut app, 80, 24);
+            let x = 1;
+            let y = 1;
+            let add_bg = Color::Rgb(18, 52, 31);
+            let delete_bg = Color::Rgb(62, 25, 31);
+
+            assert_eq!(buffer[(x, y)].fg, theme.text, "{}", name.label());
+            assert_eq!(buffer[(x, y)].bg, theme.background, "{}", name.label());
+            assert!(
+                buffer[(x + 9, y)].modifier.contains(Modifier::BOLD),
+                "{}",
+                name.label()
+            );
+            assert!(
+                buffer[(x + 9, y)].modifier.contains(Modifier::ITALIC),
+                "{}",
+                name.label()
+            );
+            assert_eq!(
+                buffer[(x + 16, y)].fg,
+                Color::Indexed(42),
+                "{}",
+                name.label()
+            );
+            assert_eq!(
+                buffer[(x + 21, y)].fg,
+                Color::Rgb(1, 2, 3),
+                "{}",
+                name.label()
+            );
+
+            assert_eq!(buffer[(x + 1, y + 2)].fg, theme.ansi[8]);
+            assert_eq!(buffer[(x + 6, y + 2)].fg, theme.ansi[5]);
+            assert!(contrast_ratio(theme.ansi[8], theme.background) >= 2.4);
+
+            assert_eq!(buffer[(x, y + 3)].fg, theme.ansi[2]);
+            assert_eq!(buffer[(x, y + 3)].bg, add_bg);
+            assert_eq!(buffer[(x + 7, y + 3)].fg, theme.ansi[6]);
+            assert_eq!(buffer[(x + 11, y + 3)].fg, theme.contrast_text(add_bg));
+            assert_eq!(buffer[(x + 11, y + 3)].bg, add_bg);
+            assert!(contrast_ratio(theme.ansi[2], add_bg) >= 2.8);
+            assert!(contrast_ratio(theme.ansi[6], add_bg) >= 2.8);
+
+            assert_eq!(buffer[(x, y + 4)].fg, theme.ansi[1]);
+            assert_eq!(buffer[(x, y + 4)].bg, delete_bg);
+            assert_eq!(buffer[(x + 7, y + 4)].fg, theme.ansi[6]);
+            assert_eq!(buffer[(x + 11, y + 4)].fg, theme.contrast_text(delete_bg));
+            assert_eq!(buffer[(x + 11, y + 4)].bg, delete_bg);
+            assert!(contrast_ratio(theme.ansi[1], delete_bg) >= 2.8);
+            assert!(contrast_ratio(theme.ansi[6], delete_bg) >= 2.8);
+
+            let _ = app.mux.as_mut().expect("mux").shutdown();
+        }
+    }
+
+    #[test]
+    fn themed_references_keep_terminal_backgrounds_and_modifiers() {
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buffer = Buffer::empty(area);
+        let theme = ThemeName::CatppuccinLatte.theme();
+        for (index, character) in "#123".chars().enumerate() {
+            buffer[(index as u16, 0)]
+                .set_symbol(&character.to_string())
+                .set_style(
+                    Style::default()
+                        .fg(theme.text)
+                        .bg(theme.diff_add_bg)
+                        .add_modifier(Modifier::ITALIC),
+                );
+        }
+
+        restyle_references(&mut buffer, area, theme, &|_| {
+            Some(ReferenceStatus {
+                kind: ReferenceKind::Issue,
+                state: ReferenceState::Open,
+            })
+        });
+
+        assert_eq!(buffer[(0, 0)].fg, theme.warning);
+        assert_eq!(buffer[(1, 0)].fg, theme.success);
+        for x in 0..4 {
+            assert_eq!(buffer[(x, 0)].bg, theme.diff_add_bg);
+            assert!(buffer[(x, 0)].modifier.contains(Modifier::ITALIC));
+            assert!(buffer[(x, 0)].modifier.contains(Modifier::UNDERLINED));
+            assert!(buffer[(x, 0)].modifier.contains(Modifier::BOLD));
+        }
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::app::{App, View};
 use crate::config::UserConfig;
 use crate::mux::{Pane, PaneSpec};
 use crate::session::Session;
+use crate::theme::ThemeName;
 
 /// Wide enough for the split panes to breathe and for the two-row key hints to fit,
 /// short enough to stay readable when GitHub scales the image to the README column.
@@ -44,6 +45,7 @@ pub fn run(out_dir: &Path) -> Result<()> {
 
     let scenes: Vec<(&str, Scene)> = vec![
         ("session-list", Box::new(session_list)),
+        ("theme-picker", Box::new(theme_picker)),
         ("workspace", {
             let root = sandbox.path().to_path_buf();
             Box::new(move || workspace(&root))
@@ -63,17 +65,21 @@ pub fn run(out_dir: &Path) -> Result<()> {
 
 /// Render one app state and return the SVG for it.
 fn capture(app: &mut App, width: u16, height: u16) -> Result<String> {
+    let theme = app.theme();
     let mut terminal = Terminal::new(TestBackend::new(width, height))
         .context("Failed to create the offscreen terminal")?;
     terminal
         .draw(|frame| crate::ui::draw(frame, app))
         .context("Failed to render the frame")?;
-    Ok(svg::render(terminal.backend().buffer()))
+    Ok(svg::render(terminal.backend().buffer(), theme))
 }
 
 fn session_list() -> Result<String> {
     let sessions = demo_sessions();
-    let mut config = UserConfig::default();
+    let mut config = UserConfig {
+        theme: ThemeName::CatppuccinMocha,
+        ..UserConfig::default()
+    };
     config.favorites.push(sessions[0].id.clone());
     config.favorites.push(sessions[1].id.clone());
 
@@ -83,9 +89,34 @@ fn session_list() -> Result<String> {
 }
 
 fn github_inspector() -> Result<String> {
-    let mut app = App::new(demo_sessions(), UserConfig::default());
+    // Keep one generated scene light so both sides of the theme system are covered
+    // whenever the README images are regenerated.
+    let config = UserConfig {
+        theme: ThemeName::CatppuccinLatte,
+        ..UserConfig::default()
+    };
+    let mut app = App::new(demo_sessions(), config);
     crate::ui::github_inspector::install_demo_pull_request(&mut app);
     capture(&mut app, WIDTH, 26)
+}
+
+fn theme_picker() -> Result<String> {
+    let mut app = App::new(
+        demo_sessions(),
+        UserConfig {
+            theme: ThemeName::CatppuccinMocha,
+            ..UserConfig::default()
+        },
+    );
+    app.mode = crate::app::Mode::Settings;
+    app.settings_section = crate::app::SettingsSection::General;
+    app.settings_selected = 3;
+    app.open_theme_picker();
+    app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL
+        .iter()
+        .position(|name| *name == ThemeName::CatppuccinLatte)
+        .unwrap();
+    capture(&mut app, WIDTH, HEIGHT)
 }
 
 /// The attached workspace: a Copilot pane beside its scratchpad.
@@ -93,6 +124,7 @@ fn workspace(sandbox: &Path) -> Result<String> {
     let session_id = "9f1c8e42-demo-4a77-9c31-5b6d0e2a4f18";
     let config = UserConfig {
         mux: true,
+        theme: ThemeName::TokyoNight,
         ..Default::default()
     };
     let mut app = App::new(demo_sessions(), config);

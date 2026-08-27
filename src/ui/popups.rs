@@ -5,6 +5,16 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, DeleteTarget, SettingsEditField, SettingsSection};
+use crate::theme::{fill_area, Theme, ThemeName};
+
+fn surface_style(theme: Theme) -> Style {
+    Style::default().fg(theme.text).bg(theme.surface)
+}
+
+fn prepare_popup(f: &mut Frame, area: Rect, theme: Theme) {
+    f.render_widget(Clear, area);
+    fill_area(f.buffer_mut(), area, theme.surface);
+}
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -31,6 +41,7 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
 /// Without a daemon, quitting CST really does terminate every pane — this is the main
 /// behavioural difference from tmux, so it must be stated plainly.
 pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let running: Vec<String> = app
         .mux
         .as_ref()
@@ -46,47 +57,47 @@ pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
     let height = (running.len() + 8).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
             format!("  Quit and end {} running session(s)?", running.len()),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
     for title in running.iter().take(8) {
         text.push(Line::from(Span::styled(
             format!("    • {title}"),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.accent_alt),
         )));
     }
     if running.len() > 8 {
         text.push(Line::from(Span::styled(
             format!("    … and {} more", running.len() - 8),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
         "  Sessions do not survive CST exiting.",
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(theme.warning),
     )));
     text.push(Line::from(""));
     text.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
             "y",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" quit and end them    "),
         Span::styled(
             "n",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" keep working"),
@@ -95,8 +106,12 @@ pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
     let block = Block::default()
         .title(" Quit ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.error));
+    let paragraph = Paragraph::new(text)
+        .style(surface_style(theme))
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 
@@ -110,14 +125,15 @@ fn project_label(cwd: &std::path::Path) -> String {
 }
 
 /// Blocking-work notice, drawn on the frame before the work actually starts.
-pub fn draw_busy(f: &mut Frame, title: &str, detail: &str) {
+pub fn draw_busy(f: &mut Frame, title: &str, detail: &str, theme: Theme) {
     let area = centered_rect(50, 20, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let block = Block::default()
         .title(format!(" {title} "))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent_alt));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -126,32 +142,39 @@ pub fn draw_busy(f: &mut Frame, title: &str, detail: &str) {
         Line::from(Span::styled(
             format!("  ⠿  {detail}"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "  This can take a few seconds.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
     ];
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
+    f.render_widget(
+        Paragraph::new(text)
+            .style(surface_style(theme))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
+    let theme = app.theme();
 
     let height = (mux.panes.len() + 5).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let block = Block::default()
         .title(" Sessions ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -173,52 +196,64 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             };
             let selected = index == app.pane_selected;
             let base = if selected {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
+                super::row_selection_style(theme)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.text).bg(theme.surface)
             };
-            let (marker, marker_style) = if !pane.is_running() {
-                ("✖", Style::default().fg(Color::Red))
+            let (marker, marker_color) = if !pane.is_running() {
+                ("✖", theme.error)
             } else if mux.focused == Some(pane.id) {
-                ("●", Style::default().fg(Color::Green))
+                ("●", theme.success)
             } else {
-                ("○", Style::default().fg(Color::DarkGray))
+                ("○", theme.inactive)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", index + 1), base.fg(Color::Cyan)),
-                Span::styled(marker, marker_style),
+                Span::styled(
+                    format!(" {} ", index + 1),
+                    if selected {
+                        base
+                    } else {
+                        base.fg(theme.accent_alt)
+                    },
+                ),
+                Span::styled(
+                    marker,
+                    if selected {
+                        base
+                    } else {
+                        base.fg(marker_color)
+                    },
+                ),
                 Span::styled(format!(" {title}"), base),
                 // Panes routinely span several projects, so the title alone is ambiguous.
                 Span::styled(
                     format!("  {}", project_label(&pane.cwd)),
-                    base.fg(Color::DarkGray),
+                    if selected { base } else { base.fg(theme.muted) },
                 ),
             ]))
         })
         .collect();
 
-    f.render_widget(List::new(items), chunks[0]);
+    f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
 
     let hint = Line::from(vec![
         Span::raw(" "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
         Span::raw(" select  "),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::styled("Enter", Style::default().fg(theme.accent_alt)),
         Span::raw(" attach  "),
-        Span::styled("x", Style::default().fg(Color::Cyan)),
+        Span::styled("x", Style::default().fg(theme.accent_alt)),
         Span::raw(" end  "),
-        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::styled("Esc", Style::default().fg(theme.accent_alt)),
         Span::raw(" close"),
     ]);
-    f.render_widget(Paragraph::new(hint), chunks[1]);
+    f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
 }
 
 pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let area = centered_rect(55, 36, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let name = app
         .selected_session()
@@ -240,7 +275,9 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(Span::styled(
             action,
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(format!("  {}", name)),
@@ -249,13 +286,13 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
     if managed {
         text.push(Line::from(Span::styled(
             "  The worktree will be removed before session metadata.",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.warning),
         )));
     }
     if dirty {
         text.push(Line::from(Span::styled(
             "  This worktree is dirty; another force confirmation follows.",
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.error),
         )));
     }
     text.extend([
@@ -265,13 +302,15 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
             Span::styled(
                 "y",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.success)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" Yes  "),
             Span::styled(
                 "any key",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" Cancel"),
         ]),
@@ -280,15 +319,20 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let block = Block::default()
         .title(" Confirm Delete ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.error));
 
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(text)
+        .style(surface_style(theme))
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 
 pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let area = centered_rect(60, 36, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
     let path = match &app.pending_delete {
         Some(DeleteTarget::Managed { entry, .. }) => entry.path.display().to_string(),
         _ => String::new(),
@@ -297,21 +341,25 @@ pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(Span::styled(
             "  FORCE REMOVE DIRTY WORKTREE?",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(format!("  {path}")),
         Line::from(""),
         Line::from(Span::styled(
             "  Modified, staged, and untracked files will be permanently lost.",
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.error),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  Press "),
             Span::styled(
                 "Shift+Y",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" to force delete; any other key cancels"),
         ]),
@@ -319,9 +367,13 @@ pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
     let block = Block::default()
         .title(" Destructive Confirmation ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.error));
     f.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        Paragraph::new(text)
+            .style(surface_style(theme))
+            .block(block)
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -330,12 +382,14 @@ pub fn draw_takeover_confirm(f: &mut Frame, app: &App) {
     let Some(target) = app.pending_takeover.as_ref() else {
         return;
     };
+    let theme = app.theme();
     let area = centered_rect(62, 50, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
     let block = Block::default()
         .title(" Take Over Active Session? ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.warning));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let owners = if target.pids.len() == 1 {
@@ -350,70 +404,72 @@ pub fn draw_takeover_confirm(f: &mut Frame, app: &App) {
                 Span::raw("  "),
                 Span::styled(
                     &target.title,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(""),
             Line::from(Span::styled(
                 format!("  This session is active in another process ({owners})."),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.warning),
             )),
             Line::from(Span::styled(
                 "  Taking over ends that exact Copilot process, then resumes the",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.muted),
             )),
             Line::from(Span::styled(
                 "  session in this CST instance. In-flight work will be interrupted.",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.muted),
             )),
             Line::from(""),
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
                     "y/Enter",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" take over    "),
                 Span::styled(
                     "n/Esc",
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(theme.success)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" cancel"),
             ]),
         ])
+        .style(surface_style(theme))
         .wrap(Wrap { trim: false }),
         inner,
     );
 }
 
 pub fn draw_rename(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let area = centered_rect(50, 20, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Enter new name:",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(&app.rename_input, Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(&app.rename_input, Style::default().fg(theme.text)),
+            Span::styled("█", Style::default().fg(theme.warning)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::styled("Enter", Style::default().fg(theme.accent_alt)),
             Span::raw(" Save  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::styled("Esc", Style::default().fg(theme.accent_alt)),
             Span::raw(" Cancel"),
         ]),
     ];
@@ -421,24 +477,29 @@ pub fn draw_rename(f: &mut Frame, app: &App) {
     let block = Block::default()
         .title(" Rename Session ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.warning));
 
-    let paragraph = Paragraph::new(text).block(block);
+    let paragraph = Paragraph::new(text)
+        .style(surface_style(theme))
+        .block(block);
     f.render_widget(paragraph, area);
 }
 
 pub fn draw_project_filter(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let filtered = app.filtered_project_indices();
     let item_count = filtered.len() + 1; // +1 for "All Projects"
     let height = (item_count + 5).min(20) as u16; // +5 for search input, borders, padding
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(80.0) as u16;
     let area = centered_rect(50, percent_y.max(25), f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let block = Block::default()
         .title(" Select Project ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent_alt));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -455,18 +516,21 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
 
     // Search input
     let search_line = Line::from(vec![
-        Span::styled(" 🔍 ", Style::default().fg(Color::Yellow)),
-        Span::styled(&app.project_search_query, Style::default().fg(Color::White)),
-        Span::styled("█", Style::default().fg(Color::Yellow)),
+        Span::styled(" 🔍 ", Style::default().fg(theme.warning)),
+        Span::styled(&app.project_search_query, Style::default().fg(theme.text)),
+        Span::styled("█", Style::default().fg(theme.warning)),
     ]);
-    f.render_widget(Paragraph::new(search_line), chunks[0]);
+    f.render_widget(
+        Paragraph::new(search_line).style(surface_style(theme)),
+        chunks[0],
+    );
 
     // Separator
     let sep = Line::from(Span::styled(
         "─".repeat(chunks[1].width as usize),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ));
-    f.render_widget(Paragraph::new(sep), chunks[1]);
+    f.render_widget(Paragraph::new(sep).style(surface_style(theme)), chunks[1]);
 
     // Project list
     let has_all_option = app.project_search_query.is_empty();
@@ -478,12 +542,9 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     // "All Projects" option (only shown when search is empty)
     if has_all_option {
         let all_style = if app.project_selected == 0 {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
+            super::row_selection_style(theme)
         } else {
-            Style::default().fg(Color::White)
+            surface_style(theme)
         };
         all_items.push((
             0,
@@ -514,14 +575,11 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
         };
 
         let style = if is_selected {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD)
+            super::row_selection_style(theme)
         } else if is_active {
-            Style::default().fg(Color::Cyan)
+            surface_style(theme).fg(theme.accent_alt)
         } else {
-            Style::default().fg(Color::White)
+            surface_style(theme)
         };
 
         all_items.push((
@@ -537,50 +595,51 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
         .map(|(_, item)| item)
         .collect();
 
-    let list = List::new(items);
+    let list = List::new(items).style(surface_style(theme));
     f.render_widget(list, chunks[2]);
 }
 
 pub fn draw_help(f: &mut Frame, app: &mut App) {
+    let theme = app.theme();
     let area = centered_rect(55, 70, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Copilot Session Manager - Keyboard Shortcuts",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             format!("  CST v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
-        help_line("↑/k ↓/j", "Navigate sessions"),
-        help_line("Home/End", "Jump to first/last"),
-        help_line("Enter", "Resume selected session"),
-        help_line("n", "New session in current project"),
-        help_line("N", "New isolated worktree session"),
-        help_line("Space", "Toggle selected session favorite"),
-        help_line("g", "Grab a favorite, then ↑/↓ to reorder"),
-        help_line("T", "Open favorites in Windows Terminal tabs"),
-        help_line("e", "Open selected session scratchpad"),
-        help_line("r", "Rename selected session"),
-        help_line("d", "Delete selected session"),
+        help_line(theme, "↑/k ↓/j", "Navigate sessions"),
+        help_line(theme, "Home/End", "Jump to first/last"),
+        help_line(theme, "Enter", "Resume selected session"),
+        help_line(theme, "n", "New session in current project"),
+        help_line(theme, "N", "New isolated worktree session"),
+        help_line(theme, "Space", "Toggle selected session favorite"),
+        help_line(theme, "g", "Grab a favorite, then ↑/↓ to reorder"),
+        help_line(theme, "T", "Open favorites in Windows Terminal tabs"),
+        help_line(theme, "e", "Open selected session scratchpad"),
+        help_line(theme, "r", "Rename selected session"),
+        help_line(theme, "d", "Delete selected session"),
         Line::from(""),
-        help_line("/", "Search / fuzzy filter"),
-        help_line("f/p", "Filter by project (type to search)"),
-        help_line("c", "Clear project filter"),
-        help_line("s", "Cycle sort order"),
+        help_line(theme, "/", "Search / fuzzy filter"),
+        help_line(theme, "f/p", "Filter by project (type to search)"),
+        help_line(theme, "c", "Clear project filter"),
+        help_line(theme, "s", "Cycle sort order"),
         Line::from(""),
-        help_line(",", "Global settings"),
-        help_line(".", "Filtered-project settings"),
-        help_line("?", "Toggle this help"),
-        help_line("u", "Update (when available)"),
-        help_line("q/Esc", "Quit"),
-        help_line("Ctrl+C", "Force quit"),
+        help_line(theme, ",", "Global settings"),
+        help_line(theme, ".", "Filtered-project settings"),
+        help_line(theme, "?", "Toggle this help"),
+        help_line(theme, "u", "Update (when available)"),
+        help_line(theme, "q/Esc", "Quit"),
+        help_line(theme, "Ctrl+C", "Force quit"),
         Line::from(""),
     ];
 
@@ -588,71 +647,90 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(Line::from(Span::styled(
             format!("  Multiplexer (prefix {prefix})"),
             Style::default()
-                .fg(Color::Magenta)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         text.push(help_line(
+            theme,
             &format!("{prefix} d"),
             "Back to the list (session keeps running)",
         ));
-        text.push(help_line(&format!("{prefix} w"), "Session switcher"));
-        text.push(help_line(&format!("{prefix} c"), "Focus the session chat"));
+        text.push(help_line(theme, &format!("{prefix} w"), "Session switcher"));
         text.push(help_line(
+            theme,
+            &format!("{prefix} c"),
+            "Focus the session chat",
+        ));
+        text.push(help_line(
+            theme,
             &format!("{prefix} e"),
             "Toggle/focus the session scratchpad",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} t"),
             "Toggle/focus the session terminal",
         ));
-        text.push(help_line(&format!("{prefix} s"), "Open prompt snippets"));
         text.push(help_line(
+            theme,
+            &format!("{prefix} s"),
+            "Open prompt snippets",
+        ));
+        text.push(help_line(
+            theme,
             &format!("{prefix} u"),
             "Install update without stopping sessions",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} C-g i"),
             "Inspect a GitHub issue or pull request",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} C-h e"),
             "Open scratchpad shortcut help",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} n/p"),
             "Next / previous session",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} 1-9"),
             "Jump to session by number",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} x"),
             "End the focused session for good",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} q"),
             "End the focused session and quit CST",
         ));
         text.push(help_line(
+            theme,
             &format!("{prefix} {prefix}"),
             "Send the prefix key itself",
         ));
-        text.push(help_line("", "These work from this list too"));
+        text.push(help_line(theme, "", "These work from this list too"));
         text.push(Line::from(""));
         text.push(Line::from(Span::styled(
             "  GitHub references in the chat",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
-        text.extend(reference_legend());
+        text.extend(reference_legend(theme));
         text.push(Line::from(""));
     }
 
     text.push(Line::from(Span::styled(
         "  ↑/↓ PageUp/PageDown scroll · Esc/q/Enter/? close",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     // The list has outgrown the popup, so without scrolling the tail of it --
@@ -669,9 +747,11 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent_alt));
 
     let paragraph = Paragraph::new(text)
+        .style(surface_style(theme))
         .block(block)
         .scroll((u16::try_from(app.help_scroll).unwrap_or(u16::MAX), 0));
     f.render_widget(paragraph, area);
@@ -681,50 +761,52 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
 ///
 /// The kind lives in the hash and the state in the number, which is not
 /// guessable, so the help screen spells it out.
-fn reference_legend() -> Vec<Line<'static>> {
+fn reference_legend(theme: Theme) -> Vec<Line<'static>> {
     let sample = |hash: Color, number: Color, label: &str| -> Vec<Span<'static>> {
         let link = Modifier::UNDERLINED | Modifier::BOLD;
         vec![
             Span::styled("#", Style::default().fg(hash).add_modifier(link)),
             Span::styled("12", Style::default().fg(number).add_modifier(link)),
-            Span::styled(format!(" {label}"), Style::default().fg(Color::White)),
+            Span::styled(format!(" {label}"), Style::default().fg(theme.text)),
         ]
     };
 
     let mut kinds = vec![Span::raw("  ")];
-    kinds.extend(sample(Color::Yellow, Color::Green, "issue     "));
-    kinds.extend(sample(Color::Cyan, Color::Green, "pull request"));
+    kinds.extend(sample(theme.warning, theme.success, "issue     "));
+    kinds.extend(sample(theme.accent_alt, theme.success, "pull request"));
 
     let mut states = vec![Span::raw("  ")];
-    states.extend(sample(Color::Cyan, Color::Green, "open  "));
-    states.extend(sample(Color::Cyan, Color::Red, "closed  "));
-    states.extend(sample(Color::Cyan, Color::Magenta, "merged  "));
-    states.extend(sample(Color::Cyan, Color::Gray, "draft"));
+    states.extend(sample(theme.accent_alt, theme.success, "open  "));
+    states.extend(sample(theme.accent_alt, theme.error, "closed  "));
+    states.extend(sample(theme.accent_alt, theme.accent, "merged  "));
+    states.extend(sample(theme.accent_alt, theme.muted, "draft"));
 
     vec![Line::from(kinds), Line::from(states)]
 }
 
-fn help_line(key: &str, desc: &str) -> Line<'static> {
+fn help_line(theme: Theme, key: &str, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
         Span::styled(
             format!("{:<12}", key),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(desc.to_string(), Style::default().fg(Color::White)),
+        Span::styled(desc.to_string(), Style::default().fg(theme.text)),
     ])
 }
 
-pub fn draw_settings(f: &mut Frame, app: &App) {
+pub fn draw_settings(f: &mut Frame, app: &mut App) {
+    let theme = app.theme();
     let area = centered_rect(65, 78, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
 
     let block = Block::default()
         .title(" Global Settings ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -744,19 +826,22 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             format!(" {} ", section.label()),
             if selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Magenta)
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme.muted).bg(theme.surface)
             },
         ));
         tab_spans.push(Span::raw(" "));
     }
-    f.render_widget(Paragraph::new(Line::from(tab_spans)), sections[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(tab_spans)).style(surface_style(theme)),
+        sections[0],
+    );
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut setting_lines = vec![1usize, 4, 7, 10, 13, 16, 19, 22];
+    let mut setting_lines = Vec::new();
     let general_start = lines.len();
 
     lines.push(Line::from(""));
@@ -764,11 +849,13 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     // Row 0: Yolo mode
     let yolo_value = if app.config.yolo { "ON" } else { "OFF" };
     let yolo_color = if app.config.yolo {
-        Color::Green
+        theme.success
     } else {
-        Color::Red
+        theme.error
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Yolo Mode",
         yolo_value,
         yolo_color,
@@ -777,7 +864,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     ));
     lines.push(Line::from(Span::styled(
         "    Pass --yolo flag (allow all permissions)",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -794,11 +881,13 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             .to_string()
     };
     let model_color = if app.config.model.is_some() {
-        Color::Cyan
+        theme.accent_alt
     } else {
-        Color::DarkGray
+        theme.muted
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Model",
         &model_display,
         model_color,
@@ -807,7 +896,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     ));
     lines.push(Line::from(Span::styled(
         "    Default for new sessions only (e.g. gpt-5.2, claude-sonnet-4)",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -819,11 +908,13 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         .as_deref()
         .unwrap_or("(default)");
     let effort_color = if app.config.reasoning_effort.is_some() {
-        Color::Yellow
+        theme.warning
     } else {
-        Color::DarkGray
+        theme.muted
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Reasoning Effort",
         effort_display,
         effort_color,
@@ -832,7 +923,24 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     ));
     lines.push(Line::from(Span::styled(
         "    Default for new sessions only (low/medium/high/xhigh)",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
+    )));
+
+    lines.push(Line::from(""));
+
+    // Row 3: Theme
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Theme",
+        app.theme_name().label(),
+        theme.accent_alt,
+        app.settings_selected == 3,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Preview and choose CST colors",
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -844,16 +952,18 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     } else {
         app.config.worktree.branch_prefix.clone()
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Branch Prefix",
         &prefix_display,
-        Color::Cyan,
-        app.settings_selected == 3,
+        theme.accent_alt,
+        app.settings_selected == 4,
         prefix_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Default branch prefix for isolated sessions",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -863,16 +973,18 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     } else {
         app.config.worktree.root.to_string_lossy().to_string()
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Worktree Root",
         &root_display,
-        Color::Cyan,
-        app.settings_selected == 4,
+        theme.accent_alt,
+        app.settings_selected == 5,
         root_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Relative paths resolve from the global config directory",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -880,20 +992,22 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     let terminal_start = lines.len();
     let mux_value = if app.mux_on_disk { "ON" } else { "OFF" };
     let mux_color = if app.mux_on_disk {
-        Color::Green
+        theme.success
     } else {
-        Color::Red
+        theme.error
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Multiplexer",
         mux_value,
         mux_color,
-        app.settings_selected == 5,
+        app.settings_selected == 6,
         false,
     ));
     lines.push(Line::from(Span::styled(
         "    Run sessions inside CST as panes (applies on restart)",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -903,16 +1017,18 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     } else {
         app.config.mux_prefix.clone()
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Mux Prefix",
         &mux_prefix_display,
-        Color::Cyan,
-        app.settings_selected == 6,
+        theme.accent_alt,
+        app.settings_selected == 7,
         mux_prefix_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Prefix key for pane commands, e.g. C-b, C-g, C-a",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -928,20 +1044,22 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             .to_string()
     };
     let shell_color = if app.config.terminal.shell.is_some() {
-        Color::Cyan
+        theme.accent_alt
     } else {
-        Color::DarkGray
+        theme.muted
     };
+    setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Terminal Shell",
         &shell_display,
         shell_color,
-        app.settings_selected == 7,
+        app.settings_selected == 8,
         shell_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Executable or path; blank uses the platform default",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     lines.push(Line::from(""));
@@ -950,7 +1068,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     lines.push(Line::from(Span::styled(
         "  Notifications (ntfy HTTP)",
         Style::default()
-            .fg(Color::Magenta)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
@@ -958,19 +1076,20 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     setting_lines.push(lines.len());
     let notifications_enabled = app.config.notifications.enabled;
     lines.push(settings_row(
+        theme,
         "Notifications",
         if notifications_enabled { "ON" } else { "OFF" },
         if notifications_enabled {
-            Color::Green
+            theme.success
         } else {
-            Color::Red
+            theme.error
         },
-        app.settings_selected == 8,
+        app.settings_selected == 9,
         false,
     ));
     lines.push(Line::from(Span::styled(
         "    Publish ready/error history directly over HTTP",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
 
@@ -982,15 +1101,16 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         app.config.notifications.server.clone()
     };
     lines.push(settings_row(
+        theme,
         "ntfy Server",
         &server_display,
-        Color::Cyan,
-        app.settings_selected == 9,
+        theme.accent_alt,
+        app.settings_selected == 10,
         server_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Defaults to https://ntfy.sh; self-hosted URLs are supported",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
 
@@ -1004,19 +1124,20 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         "•••••••••••• (configured)".to_string()
     };
     lines.push(settings_row(
+        theme,
         "ntfy Topic",
         &topic_display,
         if app.config.notifications.topic.is_empty() && app.settings_input.is_empty() {
-            Color::DarkGray
+            theme.muted
         } else {
-            Color::Cyan
+            theme.accent_alt
         },
-        app.settings_selected == 10,
+        app.settings_selected == 11,
         topic_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Secret topic; never shown outside edit mode",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
 
@@ -1030,24 +1151,26 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         "•••••••••••• (configured)".to_string()
     };
     lines.push(settings_row(
+        theme,
         "Access Token",
         &token_display,
         if app.config.ntfy_access_token.is_empty() && app.settings_input.is_empty() {
-            Color::DarkGray
+            theme.muted
         } else {
-            Color::Cyan
+            theme.accent_alt
         },
-        app.settings_selected == 11,
+        app.settings_selected == 12,
         token_editing,
     ));
     lines.push(Line::from(Span::styled(
         "    Optional Bearer token; stored in config, so prefer HTTPS",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
 
     setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Detailed Content",
         if app.config.ntfy_verbose {
             "LATEST RESPONSE"
@@ -1055,25 +1178,26 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             "STATUS ONLY"
         },
         if app.config.ntfy_verbose {
-            Color::Yellow
+            theme.warning
         } else {
-            Color::Green
+            theme.success
         },
-        app.settings_selected == 12,
+        app.settings_selected == 13,
         false,
     ));
     lines.push(Line::from(Span::styled(
         "    May send sensitive assistant text; use a private authenticated server",
         Style::default().fg(if app.config.ntfy_verbose {
-            Color::Yellow
+            theme.warning
         } else {
-            Color::DarkGray
+            theme.muted
         }),
     )));
     lines.push(Line::from(""));
 
     setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Ready Events",
         if app.config.notifications.ready {
             "ON"
@@ -1081,21 +1205,22 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             "OFF"
         },
         if app.config.notifications.ready {
-            Color::Green
+            theme.success
         } else {
-            Color::Red
+            theme.error
         },
-        app.settings_selected == 13,
+        app.settings_selected == 14,
         false,
     ));
     lines.push(Line::from(Span::styled(
         "    Questions, approvals, or completed work ready for review",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
 
     setting_lines.push(lines.len());
     lines.push(settings_row(
+        theme,
         "Error Events",
         if app.config.notifications.error {
             "ON"
@@ -1103,16 +1228,16 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
             "OFF"
         },
         if app.config.notifications.error {
-            Color::Green
+            theme.success
         } else {
-            Color::Red
+            theme.error
         },
-        app.settings_selected == 14,
+        app.settings_selected == 15,
         false,
     ));
     lines.push(Line::from(Span::styled(
         "    Copilot OSC progress error state",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
     let notifications_end = lines.len();
@@ -1127,15 +1252,16 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Tab/Shift+Tab", Style::default().fg(Color::Magenta)),
+            Span::styled("Tab/Shift+Tab", Style::default().fg(theme.accent)),
             Span::raw(" Section  "),
-            Span::styled("↑/↓", Style::default().fg(Color::Magenta)),
+            Span::styled("↑/↓", Style::default().fg(theme.accent)),
             Span::raw(" Select  "),
-            Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
+            Span::styled("Enter/Space", Style::default().fg(theme.accent)),
             Span::raw(" Edit/Toggle  "),
-            Span::styled("Esc/,", Style::default().fg(Color::Magenta)),
+            Span::styled("Esc/,", Style::default().fg(theme.accent)),
             Span::raw(" Save"),
-        ])),
+        ]))
+        .style(surface_style(theme)),
         sections[3],
     );
 
@@ -1150,17 +1276,174 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         .saturating_sub(1)
         .min(max_scroll)
         .min(u16::MAX as usize) as u16;
-    let paragraph = Paragraph::new(visible_lines).scroll((scroll, 0));
+    let paragraph = Paragraph::new(visible_lines)
+        .style(surface_style(theme))
+        .scroll((scroll, 0));
     f.render_widget(paragraph, sections[2]);
+
+    if app.theme_picker.is_some() {
+        draw_theme_picker(f, app);
+    } else {
+        app.set_theme_picker_hits(Vec::new());
+    }
+}
+
+fn draw_theme_picker(f: &mut Frame, app: &mut App) {
+    let Some(picker) = app.theme_picker else {
+        return;
+    };
+    let theme = app.theme();
+    let area = centered_rect(54, 68, f.area());
+    f.render_widget(Clear, area);
+    fill_area(f.buffer_mut(), area, theme.chrome_bg);
+    let picker_style = Style::default().fg(theme.text).bg(theme.chrome_bg);
+    let block = Block::default()
+        .title(format!(
+            " Theme Picker · Preview: {} ",
+            app.theme_name().label()
+        ))
+        .borders(Borders::ALL)
+        .style(picker_style)
+        .border_style(Style::default().fg(theme.accent_alt));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let classic = [ThemeName::Classic];
+    let groups: [(&str, &[ThemeName]); 3] = [
+        ("Classic", &classic),
+        ("Dark", &ThemeName::DARK),
+        ("Light", &ThemeName::LIGHT),
+    ];
+    let mut entries: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+    for (group_index, (label, names)) in groups.into_iter().enumerate() {
+        if group_index > 0 {
+            entries.push((Line::from(""), None));
+        }
+        entries.push((
+            Line::from(Span::styled(
+                format!("  {label}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            None,
+        ));
+        for name in names {
+            let theme_index = ThemeName::ALL
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap_or_default();
+            let selected = picker.selected_theme() == *name;
+            let saved = picker.original == *name;
+            let row_style = if selected {
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                picker_style
+            };
+            let marker = if selected { "▸" } else { " " };
+            let saved_label = if saved { " ● saved" } else { "" };
+            let preview_label = if selected { " ◀ preview" } else { "" };
+            let saved_style = if selected {
+                row_style
+            } else {
+                picker_style.fg(theme.success)
+            };
+            entries.push((
+                Line::from(vec![
+                    Span::styled(format!("  {marker} {:<20}", name.label()), row_style),
+                    Span::styled(saved_label, saved_style),
+                    Span::styled(preview_label, row_style),
+                ]),
+                Some(theme_index),
+            ));
+        }
+    }
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(inner);
+    let visible_rows = sections[0].height as usize;
+    let selected_row = entries
+        .iter()
+        .position(|(_, index)| *index == Some(picker.selected))
+        .unwrap_or_default();
+    let max_offset = entries.len().saturating_sub(visible_rows);
+    let offset = selected_row
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(max_offset);
+    let visible: Vec<Line<'static>> = entries
+        .iter()
+        .skip(offset)
+        .take(visible_rows)
+        .map(|(line, _)| line.clone())
+        .collect();
+    let hits = entries
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_rows)
+        .filter_map(|(entry_row, (_, theme_index))| {
+            theme_index.map(|theme_index| {
+                let row = sections[0].y + u16::try_from(entry_row - offset).unwrap_or(u16::MAX);
+                (
+                    Rect::new(sections[0].x, row, sections[0].width, 1),
+                    theme_index,
+                )
+            })
+        })
+        .collect();
+    f.render_widget(Paragraph::new(visible).style(picker_style), sections[0]);
+    let hints = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  ↑/↓",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" select · PageUp/PageDown/Home/End jump", picker_style),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Enter",
+                Style::default()
+                    .fg(theme.success)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" apply · ", picker_style),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(theme.error)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" cancel · restore {}", picker.original.label()),
+                picker_style,
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(hints).style(picker_style), sections[1]);
+    app.set_theme_picker_hits(hits);
 }
 
 pub fn draw_project_settings(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let area = centered_rect(70, 50, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
     let block = Block::default()
         .title(" Project Settings (.cst.json) ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.directory));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1184,10 +1467,11 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(Span::styled(
             format!("  Repository: {}", settings.repository_root.display()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
         project_settings_row(
+            theme,
             "Branch Prefix",
             &prefix_value,
             prefix_override,
@@ -1196,10 +1480,11 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
         ),
         Line::from(Span::styled(
             "    Effective prefix used to prepopulate isolated branches",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
         project_settings_row(
+            theme,
             "Worktree Root",
             &root_value,
             root_override,
@@ -1208,56 +1493,69 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
         ),
         Line::from(Span::styled(
             "    Relative overrides resolve from the repository root",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Space", Style::default().fg(Color::Blue)),
+            Span::styled("Space", Style::default().fg(theme.directory)),
             Span::raw(" Inherit/Override  "),
-            Span::styled("Enter", Style::default().fg(Color::Blue)),
+            Span::styled("Enter", Style::default().fg(theme.directory)),
             Span::raw(" Edit  "),
-            Span::styled("Esc/.", Style::default().fg(Color::Blue)),
+            Span::styled("Esc/.", Style::default().fg(theme.directory)),
             Span::raw(" Save & Close"),
         ]),
     ];
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(surface_style(theme))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 pub fn draw_branch_name(f: &mut Frame, app: &App) {
+    let theme = app.theme();
     let area = centered_rect(65, 28, f.area());
-    f.render_widget(Clear, area);
+    prepare_popup(f, area, theme);
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "  Branch for isolated worktree session:",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(&app.branch_input, Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled(&app.branch_input, Style::default().fg(theme.text)),
+            Span::styled("█", Style::default().fg(theme.accent_alt)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Enter", Style::default().fg(Color::Cyan)),
+            Span::styled("Enter", Style::default().fg(theme.accent_alt)),
             Span::raw(" Create  "),
-            Span::styled("Esc", Style::default().fg(Color::Cyan)),
+            Span::styled("Esc", Style::default().fg(theme.accent_alt)),
             Span::raw(" Cancel"),
         ]),
     ];
     let block = Block::default()
         .title(" New Isolated Session ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    f.render_widget(Paragraph::new(text).block(block), area);
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent_alt));
+    f.render_widget(
+        Paragraph::new(text)
+            .style(surface_style(theme))
+            .block(block),
+        area,
+    );
 }
 
 fn settings_row<'a>(
+    theme: Theme,
     label: &str,
     value: &str,
     value_color: Color,
@@ -1266,26 +1564,43 @@ fn settings_row<'a>(
 ) -> Line<'a> {
     let pointer = if is_selected { "▸ " } else { "  " };
     let label_style = if is_selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
+        if theme.name == ThemeName::Classic {
+            Style::default()
+                .fg(theme.text)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            super::row_selection_style(theme)
+        }
     } else {
-        Style::default().fg(Color::White)
+        surface_style(theme)
     };
-    let value_style = if is_editing {
-        Style::default().fg(Color::Yellow)
+    let pointer_style = if is_selected {
+        if theme.name == ThemeName::Classic {
+            Style::default().fg(theme.accent).bg(theme.surface)
+        } else {
+            super::row_selection_style(theme)
+        }
     } else {
-        Style::default().fg(value_color)
+        Style::default().fg(theme.accent).bg(theme.surface)
+    };
+    let value_style = if is_selected && theme.name != ThemeName::Classic {
+        super::row_selection_style(theme)
+    } else if is_editing {
+        Style::default().fg(theme.warning).bg(theme.surface)
+    } else {
+        Style::default().fg(value_color).bg(theme.surface)
     };
 
     Line::from(vec![
-        Span::styled(pointer.to_string(), Style::default().fg(Color::Magenta)),
+        Span::styled(pointer.to_string(), pointer_style),
         Span::styled(format!("{:<20}", label), label_style),
         Span::styled(value.to_string(), value_style),
     ])
 }
 
 fn project_settings_row<'a>(
+    theme: Theme,
     label: &str,
     value: &str,
     is_override: bool,
@@ -1295,20 +1610,27 @@ fn project_settings_row<'a>(
     let pointer = if is_selected { "▸ " } else { "  " };
     let state = if is_override { "Override" } else { "Inherited" };
     let state_color = if is_override {
-        Color::Yellow
+        theme.warning
     } else {
-        Color::DarkGray
+        theme.muted
     };
     let value_color = if is_editing {
-        Color::Yellow
+        theme.warning
     } else {
-        Color::Cyan
+        theme.accent_alt
+    };
+    let row_style = |color| {
+        if is_selected && theme.name != ThemeName::Classic {
+            super::row_selection_style(theme)
+        } else {
+            Style::default().fg(color).bg(theme.surface)
+        }
     };
     Line::from(vec![
-        Span::styled(pointer.to_string(), Style::default().fg(Color::Blue)),
-        Span::styled(format!("{:<18}", label), Style::default().fg(Color::White)),
-        Span::styled(format!("[{state:<9}] "), Style::default().fg(state_color)),
-        Span::styled(value.to_string(), Style::default().fg(value_color)),
+        Span::styled(pointer.to_string(), row_style(theme.directory)),
+        Span::styled(format!("{:<18}", label), row_style(theme.text)),
+        Span::styled(format!("[{state:<9}] "), row_style(state_color)),
+        Span::styled(value.to_string(), row_style(value_color)),
     ])
 }
 
@@ -1318,7 +1640,28 @@ mod help_tests {
     use crate::app::App;
     use crate::config::UserConfig;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    fn buffer_rows(buffer: &Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn rendered_settings(app: &mut App, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw_settings(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
 
     fn rendered_with(
         config: UserConfig,
@@ -1332,13 +1675,7 @@ mod help_tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| draw_help(f, &mut app)).expect("draw");
-        let text = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let text = buffer_text(terminal.backend().buffer());
         (text, app.help_scroll)
     }
 
@@ -1431,13 +1768,15 @@ mod help_tests {
     fn notification_settings_mask_the_saved_topic_but_reveal_it_while_editing() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         app.settings_section = SettingsSection::Notifications;
-        app.settings_selected = 14;
+        app.settings_selected = 15;
         app.config.notifications.enabled = true;
         app.config.notifications.topic = "super_secret_phone_topic".to_string();
         app.config.ntfy_access_token = "tk_super_secret_token".to_string();
         let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
 
-        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| draw_settings(frame, &mut app))
+            .unwrap();
 
         let text: String = terminal
             .backend()
@@ -1459,10 +1798,12 @@ mod help_tests {
             "token leaked outside edit mode:\n{text}"
         );
 
-        app.settings_selected = 10;
+        app.settings_selected = 11;
         app.settings_editing = Some(SettingsEditField::NtfyTopic);
         app.settings_input = "super_secret_phone_topic".to_string();
-        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| draw_settings(frame, &mut app))
+            .unwrap();
         let editing: String = terminal
             .backend()
             .buffer()
@@ -1475,10 +1816,12 @@ mod help_tests {
             "editable topic and cursor missing:\n{editing}"
         );
 
-        app.settings_selected = 11;
+        app.settings_selected = 12;
         app.settings_editing = Some(SettingsEditField::NtfyAccessToken);
         app.settings_input = "tk_super_secret_token".to_string();
-        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+        terminal
+            .draw(|frame| draw_settings(frame, &mut app))
+            .unwrap();
         let editing: String = terminal
             .backend()
             .buffer()
@@ -1490,5 +1833,260 @@ mod help_tests {
             editing.contains("tk_super_secret_token█"),
             "editable token and cursor missing:\n{editing}"
         );
+    }
+
+    #[test]
+    fn settings_rendering_maps_all_rows_to_the_shared_section_indexes() {
+        let cases = [
+            (SettingsSection::General, 0, "Yolo Mode"),
+            (SettingsSection::General, 1, "Model"),
+            (SettingsSection::General, 2, "Reasoning Effort"),
+            (SettingsSection::General, 3, "Theme"),
+            (SettingsSection::Worktrees, 4, "Branch Prefix"),
+            (SettingsSection::Worktrees, 5, "Worktree Root"),
+            (SettingsSection::Terminal, 6, "Multiplexer"),
+            (SettingsSection::Terminal, 7, "Mux Prefix"),
+            (SettingsSection::Terminal, 8, "Terminal Shell"),
+            (SettingsSection::Notifications, 9, "Notifications"),
+            (SettingsSection::Notifications, 10, "ntfy Server"),
+            (SettingsSection::Notifications, 11, "ntfy Topic"),
+            (SettingsSection::Notifications, 12, "Access Token"),
+            (SettingsSection::Notifications, 13, "Detailed Content"),
+            (SettingsSection::Notifications, 14, "Ready Events"),
+            (SettingsSection::Notifications, 15, "Error Events"),
+        ];
+
+        for (section, selected, label) in cases {
+            let mut app = App::new(Vec::new(), UserConfig::default());
+            app.settings_section = section;
+            app.settings_selected = selected;
+            let rows = buffer_rows(&rendered_settings(&mut app, 120, 40));
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains('▸') && row.contains(label)),
+                "row {selected} did not select {label}:\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn theme_picker_groups_themes_and_marks_saved_and_previewed_choices() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL
+            .iter()
+            .position(|name| *name == ThemeName::CatppuccinLatte)
+            .unwrap();
+
+        let rows = buffer_rows(&rendered_settings(&mut app, 120, 44));
+        let text = rows.join("\n");
+        assert!(rows.iter().any(|row| row.contains("│  Classic")), "{text}");
+        assert!(rows.iter().any(|row| row.contains("│  Dark")), "{text}");
+        assert!(rows.iter().any(|row| row.contains("│  Light")), "{text}");
+        assert!(
+            rows.iter().any(|row| {
+                row.contains('▸') && row.contains("Catppuccin Latte") && row.contains("◀ preview")
+            }),
+            "{text}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("CST Classic") && row.contains("● saved")),
+            "{text}"
+        );
+        assert!(text.contains("PageUp/PageDown/Home/End"), "{text}");
+        assert!(text.contains("Enter apply"), "{text}");
+        assert!(text.contains("Esc cancel"), "{text}");
+    }
+
+    #[test]
+    fn theme_picker_registers_one_hit_target_per_theme_and_clears_stale_targets() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+
+        let buffer = rendered_settings(&mut app, 120, 44);
+        let rows = buffer_rows(&buffer);
+        assert_eq!(app.theme_picker_hits.len(), ThemeName::ALL.len());
+        for (expected_index, (area, theme_index)) in app.theme_picker_hits.iter().enumerate() {
+            assert_eq!(*theme_index, expected_index);
+            assert_eq!(area.height, 1);
+            assert!(area.width > 0);
+            assert!(
+                rows[area.y as usize].contains(ThemeName::ALL[*theme_index].label()),
+                "hit target {theme_index} does not cover its rendered row:\n{}",
+                rows.join("\n")
+            );
+        }
+
+        app.theme_picker = None;
+        app.set_theme_picker_hits(vec![(Rect::new(1, 1, 1, 1), usize::MAX)]);
+        rendered_settings(&mut app, 120, 44);
+        assert!(app.theme_picker_hits.is_empty());
+    }
+
+    #[test]
+    fn theme_picker_keeps_the_last_light_theme_visible_in_a_short_terminal() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL.len() - 1;
+
+        let text = buffer_text(&rendered_settings(&mut app, 90, 24));
+
+        assert!(text.contains("Solarized Light"), "{text}");
+        assert!(text.contains("Enter"), "{text}");
+        assert!(text.contains("Esc"), "{text}");
+    }
+
+    #[test]
+    fn narrow_theme_picker_keeps_rows_and_mouse_targets_one_to_one() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL.len() - 1;
+
+        rendered_settings(&mut app, 60, 24);
+
+        assert!(app
+            .theme_picker_hits
+            .iter()
+            .any(|(_, index)| *index == ThemeName::ALL.len() - 1));
+        let mut rows: Vec<u16> = app
+            .theme_picker_hits
+            .iter()
+            .map(|(area, _)| area.y)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows.len(), app.theme_picker_hits.len());
+    }
+
+    #[test]
+    fn classic_settings_selection_keeps_the_legacy_unfilled_row() {
+        let theme = ThemeName::Classic.theme();
+        let line = settings_row(theme, "Theme", "CST Classic", theme.accent_alt, true, false);
+
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent));
+        assert_eq!(line.spans[0].style.bg, Some(Color::Reset));
+        assert_eq!(line.spans[1].style.fg, Some(Color::White));
+        assert_eq!(line.spans[1].style.bg, Some(Color::Reset));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[2].style.fg, Some(theme.accent_alt));
+        assert_eq!(line.spans[2].style.bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn theme_picker_preview_colors_the_settings_surface_and_overlay() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL
+            .iter()
+            .position(|name| *name == ThemeName::Nord)
+            .unwrap();
+        let preview = ThemeName::Nord.theme();
+        let width = 120;
+        let height = 44;
+        let buffer = rendered_settings(&mut app, width, height);
+        let frame = Rect::new(0, 0, width, height);
+        let settings = centered_rect(65, 78, frame);
+        let picker = centered_rect(54, 68, frame);
+
+        assert_eq!(buffer[(settings.x, settings.y)].fg, preview.accent);
+        assert_eq!(buffer[(settings.x, settings.y)].bg, preview.surface);
+        assert_eq!(buffer[(picker.x, picker.y)].fg, preview.accent_alt);
+        assert_eq!(buffer[(picker.x, picker.y)].bg, preview.chrome_bg);
+        let mut selected = None;
+        for y in picker.top()..picker.bottom() {
+            for x in picker.left()..picker.right() {
+                if buffer[(x, y)].symbol() == "▸" {
+                    selected = Some((x, y));
+                }
+            }
+        }
+        let selected = selected.expect("selected theme marker");
+        assert_eq!(buffer[selected].fg, preview.selection_fg);
+        assert_eq!(buffer[selected].bg, preview.selection_bg);
+    }
+
+    #[test]
+    fn picker_cancel_hint_names_the_saved_theme_and_cancel_restores_its_presentation() {
+        let config = UserConfig {
+            theme: ThemeName::Gruvbox,
+            ..UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config.clone());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL
+            .iter()
+            .position(|name| *name == ThemeName::SolarizedLight)
+            .unwrap();
+
+        let preview = buffer_text(&rendered_settings(&mut app, 120, 44));
+        assert!(preview.contains("restore Gruvbox"), "{preview}");
+        assert_eq!(app.config.theme, ThemeName::Gruvbox);
+
+        app.cancel_theme_picker();
+        let restored = buffer_text(&rendered_settings(&mut app, 120, 44));
+        assert!(!restored.contains("Theme Picker"), "{restored}");
+        assert!(
+            restored.contains("Theme               Gruvbox"),
+            "{restored}"
+        );
+        assert_eq!(app.theme_name(), ThemeName::Gruvbox);
+    }
+
+    #[test]
+    fn light_theme_fills_help_and_settings_popups_without_reset_backgrounds() {
+        let config = UserConfig {
+            theme: ThemeName::SolarizedLight,
+            ..UserConfig::default()
+        };
+        let width = 120;
+        let height = 44;
+        let frame = Rect::new(0, 0, width, height);
+
+        let mut help_app = App::new(Vec::new(), config.clone());
+        let mut help_terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        help_terminal.draw(|f| draw_help(f, &mut help_app)).unwrap();
+        let help = help_terminal.backend().buffer();
+        let help_area = centered_rect(55, 70, frame);
+        assert!((help_area.top()..help_area.bottom()).all(|y| {
+            (help_area.left()..help_area.right()).all(|x| help[(x, y)].bg != Color::Reset)
+        }));
+
+        let mut settings_app = App::new(Vec::new(), config);
+        let settings = rendered_settings(&mut settings_app, width, height);
+        let settings_area = centered_rect(65, 78, frame);
+        assert!((settings_area.top()..settings_area.bottom()).all(|y| {
+            (settings_area.left()..settings_area.right())
+                .all(|x| settings[(x, y)].bg != Color::Reset)
+        }));
+    }
+
+    #[test]
+    fn busy_popup_infers_and_fills_the_rendered_light_theme() {
+        let theme = ThemeName::CatppuccinLatte.theme();
+        let width = 100;
+        let height = 30;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                fill_area(frame.buffer_mut(), area, theme.background);
+                draw_busy(frame, "Working", "Applying changes", theme);
+            })
+            .unwrap();
+
+        let area = centered_rect(50, 20, Rect::new(0, 0, width, height));
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.x, area.y)].fg, theme.accent_alt);
+        assert_eq!(buffer[(area.x, area.y)].bg, theme.surface);
+        assert!((area.top()..area.bottom())
+            .all(|y| { (area.left()..area.right()).all(|x| buffer[(x, y)].bg != Color::Reset) }));
     }
 }

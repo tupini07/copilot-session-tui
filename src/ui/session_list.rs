@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 use ratatui::Frame;
@@ -8,10 +8,14 @@ use crate::app::App;
 use crate::text;
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme();
+    let selection_style = super::row_selection_style(theme);
+    let selection_fg = selection_style.fg.unwrap_or(theme.selection_fg);
     let block = Block::default()
         .title(" Sessions ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme.text).bg(theme.background))
+        .border_style(Style::default().fg(theme.muted));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -22,8 +26,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         } else {
             "  No sessions found"
         };
-        let empty =
-            ratatui::widgets::Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
+        let empty = ratatui::widgets::Paragraph::new(hint).style(
+            Style::default()
+                .fg(super::semantic_foreground_on(
+                    theme,
+                    theme.muted,
+                    theme.background,
+                ))
+                .bg(theme.background),
+        );
         f.render_widget(empty, inner);
         return;
     }
@@ -51,9 +62,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             // Panes we own read differently from a foreign `inuse` lock: ours can be
             // re-attached, theirs cannot.
             let active_indicator = if app.has_running_pane_for(&session.id) {
-                Span::styled("▶ ", Style::default().fg(Color::Magenta))
+                Span::styled(
+                    "▶ ",
+                    Style::default().fg(if is_selected {
+                        selection_fg
+                    } else {
+                        super::semantic_foreground_on(theme, theme.accent, theme.background)
+                    }),
+                )
             } else if session.is_active {
-                Span::styled("● ", Style::default().fg(Color::Green))
+                Span::styled(
+                    "● ",
+                    Style::default().fg(if is_selected {
+                        selection_fg
+                    } else {
+                        super::semantic_foreground_on(theme, theme.success, theme.background)
+                    }),
+                )
             } else {
                 Span::raw("  ")
             };
@@ -63,12 +88,19 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(
                     "⇕ ",
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
+                        .fg(super::badge_foreground(theme, theme.warning))
+                        .bg(theme.warning)
                         .add_modifier(Modifier::BOLD),
                 )
             } else if is_favorite {
-                Span::styled("★ ", Style::default().fg(Color::Yellow))
+                Span::styled(
+                    "★ ",
+                    Style::default().fg(if is_selected {
+                        selection_fg
+                    } else {
+                        super::semantic_foreground_on(theme, theme.warning, theme.background)
+                    }),
+                )
             } else {
                 Span::raw("  ")
             };
@@ -80,10 +112,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
             let name_style = if is_selected {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(selection_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.text)
             };
 
             let time = session.relative_time();
@@ -97,7 +129,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::styled(
                     format!(" {:>8}", time),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(if is_selected {
+                        selection_fg
+                    } else {
+                        super::semantic_foreground_on(theme, theme.muted, theme.background)
+                    }),
                 ),
             ]);
 
@@ -113,7 +149,21 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                     Span::raw("    "),
                     Span::styled(
                         truncated_project,
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                        Style::default()
+                            .fg(if is_selected {
+                                selection_fg
+                            } else {
+                                super::semantic_foreground_on(
+                                    theme,
+                                    theme.directory,
+                                    theme.background,
+                                )
+                            })
+                            .add_modifier(if theme.is_light {
+                                Modifier::empty()
+                            } else {
+                                Modifier::DIM
+                            }),
                     ),
                 ]);
                 vec![line, project_line]
@@ -124,31 +174,37 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             // and the selection index needs no translation.
             if grouped {
                 if display_idx == 0 && is_favorite {
-                    items.push(header("★ Favorites", Color::Yellow));
+                    items.push(header(
+                        "★ Favorites",
+                        super::semantic_foreground_on(theme, theme.warning, theme.background),
+                    ));
                 } else if !is_favorite
                     && app
                         .filtered_indices
                         .get(display_idx.wrapping_sub(1))
                         .is_some_and(|&previous| app.is_favorite(&app.sessions[previous].id))
                 {
-                    items.push(header("Sessions", Color::DarkGray));
+                    items.push(header(
+                        "Sessions",
+                        super::semantic_foreground_on(theme, theme.muted, theme.background),
+                    ));
                 }
             }
 
             if is_selected {
-                items.push(ListItem::new(lines).style(Style::default().bg(Color::DarkGray)));
+                items.push(ListItem::new(lines).style(selection_style));
             } else {
                 items.push(ListItem::new(lines));
             }
         }
     }
 
-    let list = List::new(items);
+    let list = List::new(items).style(Style::default().fg(theme.text).bg(theme.background));
     f.render_widget(list, inner);
 }
 
 /// A one-line group label separating the arranged favorites from everything else.
-fn header(label: &str, color: Color) -> ListItem<'static> {
+fn header(label: &str, color: ratatui::style::Color) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(
         format!("  {label}"),
         Style::default()
@@ -162,6 +218,7 @@ pub mod tests {
     use crate::app::App;
     use crate::config::UserConfig;
     use crate::session::Session;
+    use crate::theme::ThemeName;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
@@ -354,5 +411,35 @@ pub mod tests {
         // The marker replaces that row's star rather than adding a column.
         assert!(after.contains('⇕'), "got:\n{after}");
         assert_eq!(after.matches('★').count(), 2, "got:\n{after}");
+    }
+
+    #[test]
+    fn light_theme_selected_row_keeps_markers_and_text_readable() {
+        let mut session = session_named("Selected session");
+        session.is_active = true;
+        let app = App::new(
+            vec![session],
+            UserConfig {
+                theme: ThemeName::CatppuccinLatte,
+                favorites: vec!["abcdef123456".to_string()],
+                ..UserConfig::default()
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+
+        terminal
+            .draw(|frame| super::draw(frame, &app, frame.area()))
+            .unwrap();
+
+        let theme = app.theme();
+        let buffer = terminal.backend().buffer();
+        for symbol in ["●", "★", "S"] {
+            let cell = buffer
+                .content()
+                .iter()
+                .find(|cell| cell.symbol() == symbol && cell.bg == theme.selection_bg)
+                .unwrap_or_else(|| panic!("{symbol:?} was not rendered in the selected row"));
+            assert_eq!(cell.fg, theme.selection_fg);
+        }
     }
 }

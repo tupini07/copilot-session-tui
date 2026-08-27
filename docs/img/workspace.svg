@@ -1,227 +1,194 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1148" height="644" viewBox="0 0 1148 644" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono',monospace" font-size="15">
-<rect width="1148" height="644" rx="8" fill="#11111b"/>
-<rect x="745.0" y="16.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="34.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="52.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="70.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="88.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="106.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="124.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="142.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="160.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="178.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="196.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="214.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="232.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="250.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="268.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="286.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="304.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="322.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="340.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="358.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="376.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="394.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="412.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="430.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="448.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="466.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="484.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="502.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="520.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="61.0" y="538.0" width="9.0" height="18.0" fill="#cdd6f4" shape-rendering="crispEdges"/>
-<rect x="745.0" y="538.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="556.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="574.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="745.0" y="592.0" width="387.0" height="18.0" fill="#45475a" shape-rendering="crispEdges"/>
-<rect x="16.0" y="610.0" width="351.0" height="18.0" fill="#94e2d5" shape-rendering="crispEdges"/>
-<rect x="367.0" y="610.0" width="765.0" height="18.0" fill="#1e1e28" shape-rendering="crispEdges"/>
-<text x="16.0" y="29.5" fill="#94e2d5" textLength="729.0" lengthAdjust="spacing" xml:space="preserve">┌ Chat ─────────────────────────────────────────────────────────────────────────┐</text>
-<text x="745.0" y="29.5" fill="#585b70" textLength="387.0" lengthAdjust="spacing" xml:space="preserve">┌ Scratchpad ─────────────────────────────┐</text>
-<text x="16.0" y="47.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<rect width="1148" height="644" rx="8" fill="#1a1b26"/>
+<rect x="61.0" y="538.0" width="9.0" height="18.0" fill="#a9b1d6" shape-rendering="crispEdges"/>
+<rect x="16.0" y="610.0" width="351.0" height="18.0" fill="#73daca" shape-rendering="crispEdges"/>
+<rect x="367.0" y="610.0" width="765.0" height="18.0" fill="#24283b" shape-rendering="crispEdges"/>
+<text x="16.0" y="29.5" fill="#73daca" textLength="729.0" lengthAdjust="spacing" xml:space="preserve">┌ Chat ─────────────────────────────────────────────────────────────────────────┐</text>
+<text x="745.0" y="29.5" fill="#565f89" textLength="387.0" lengthAdjust="spacing" xml:space="preserve">┌ Scratchpad ─────────────────────────────┐</text>
+<text x="16.0" y="47.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
 <text x="25.0" y="47.5" fill="#ff87d7" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="43.0" y="47.5" fill="#cdd6f4" textLength="162.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">GitHub Copilot CLI</text>
-<text x="736.0" y="47.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="47.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="47.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Files tab rework                         </text>
-<text x="1123.0" y="47.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="65.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="65.5" fill="#585b70" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">──────────────────────────────────────────────────────</text>
-<text x="736.0" y="65.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="65.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="65.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [x] tree with folded single-child dirs </text>
-<text x="1123.0" y="65.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="83.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="83.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="83.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="83.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [x] diff follows the cursor            </text>
-<text x="1123.0" y="83.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="101.5" fill="#94e2d5" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
-<text x="34.0" y="101.5" fill="#cdd6f4" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Show the changed files as a tree and put the diff                            </text>
-<text x="736.0" y="101.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="101.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="101.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [ ] ask about huge PRs (300+ files)    </text>
-<text x="1123.0" y="101.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="119.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="119.5" fill="#cdd6f4" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  next to it.                                                                  </text>
-<text x="736.0" y="119.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="119.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="119.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="137.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="137.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="137.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="137.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Perf: events.jsonl for the big session   </text>
-<text x="1123.0" y="137.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="155.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="47.5" fill="#a9b1d6" textLength="162.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">GitHub Copilot CLI</text>
+<text x="736.0" y="47.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="47.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="47.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Files tab rework                         </text>
+<text x="1123.0" y="47.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="65.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="65.5" fill="#565f89" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">──────────────────────────────────────────────────────</text>
+<text x="736.0" y="65.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="65.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="65.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [x] tree with folded single-child dirs </text>
+<text x="1123.0" y="65.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="83.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="83.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="83.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="83.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [x] diff follows the cursor            </text>
+<text x="1123.0" y="83.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="101.5" fill="#73daca" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
+<text x="34.0" y="101.5" fill="#a9b1d6" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Show the changed files as a tree and put the diff                            </text>
+<text x="736.0" y="101.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="101.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="101.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">- [ ] ask about huge PRs (300+ files)    </text>
+<text x="1123.0" y="101.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="119.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="119.5" fill="#a9b1d6" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  next to it.                                                                  </text>
+<text x="736.0" y="119.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="119.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="119.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="137.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="137.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="137.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="137.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Perf: events.jsonl for the big session   </text>
+<text x="1123.0" y="137.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="155.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
 <text x="25.0" y="155.5" fill="#ff87d7" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="34.0" y="155.5" fill="#cdd6f4" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Splitting the Files tab now. The tree collapses                              </text>
-<text x="736.0" y="155.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="155.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="155.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">is 385 MB. Keep the incremental parse    </text>
-<text x="1123.0" y="155.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="173.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="173.5" fill="#cdd6f4" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  single-child directories so deep paths stay narrow.                          </text>
-<text x="736.0" y="173.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="173.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="173.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">on the selection path or the list        </text>
-<text x="1123.0" y="173.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="191.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="191.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="191.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="191.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">stutters again.                          </text>
-<text x="1123.0" y="191.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="209.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="43.0" y="209.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="61.0" y="209.5" fill="#cdd6f4" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Create</text>
-<text x="115.0" y="209.5" fill="#cdd6f4" textLength="621.0" lengthAdjust="spacing" xml:space="preserve"> src/ui/file_tree.rs                                                 </text>
-<text x="736.0" y="209.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="209.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="209.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="227.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="43.0" y="227.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="61.0" y="227.5" fill="#cdd6f4" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Edit</text>
-<text x="97.0" y="227.5" fill="#cdd6f4" textLength="270.0" lengthAdjust="spacing" xml:space="preserve">   src/ui/github_inspector.rs </text>
-<text x="367.0" y="227.5" fill="#a6e3a1" textLength="36.0" lengthAdjust="spacing" xml:space="preserve">+218</text>
-<text x="412.0" y="227.5" fill="#f38ba8" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">-96</text>
-<text x="736.0" y="227.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="227.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="227.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Ship note: bump to 0.12.0 before the     </text>
-<text x="1123.0" y="227.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="245.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="43.0" y="245.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="61.0" y="245.5" fill="#cdd6f4" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Edit</text>
-<text x="97.0" y="245.5" fill="#cdd6f4" textLength="180.0" lengthAdjust="spacing" xml:space="preserve">   src/mux_input.rs </text>
-<text x="277.0" y="245.5" fill="#a6e3a1" textLength="36.0" lengthAdjust="spacing" xml:space="preserve">+164</text>
-<text x="322.0" y="245.5" fill="#f38ba8" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">-31</text>
-<text x="736.0" y="245.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="245.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="754.0" y="245.5" fill="#cdd6f4" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">tag, the workflow builds from it.        </text>
-<text x="1123.0" y="245.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="263.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="43.0" y="263.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="61.0" y="263.5" fill="#cdd6f4" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Bash</text>
-<text x="97.0" y="263.5" fill="#cdd6f4" textLength="639.0" lengthAdjust="spacing" xml:space="preserve">   cargo test --quiet                                                  </text>
-<text x="736.0" y="263.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="263.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="263.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="281.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="61.0" y="281.5" fill="#a6e3a1" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">✓</text>
-<text x="70.0" y="281.5" fill="#cdd6f4" textLength="666.0" lengthAdjust="spacing" xml:space="preserve"> 210 passed in 4.1s                                                       </text>
-<text x="736.0" y="281.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="281.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="281.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="299.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="299.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="299.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="299.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="317.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="34.0" y="155.5" fill="#a9b1d6" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Splitting the Files tab now. The tree collapses                              </text>
+<text x="736.0" y="155.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="155.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="155.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">is 385 MB. Keep the incremental parse    </text>
+<text x="1123.0" y="155.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="173.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="173.5" fill="#a9b1d6" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  single-child directories so deep paths stay narrow.                          </text>
+<text x="736.0" y="173.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="173.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="173.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">on the selection path or the list        </text>
+<text x="1123.0" y="173.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="191.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="191.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="191.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="191.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">stutters again.                          </text>
+<text x="1123.0" y="191.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="209.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="209.5" fill="#9ece6a" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
+<text x="61.0" y="209.5" fill="#a9b1d6" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Create</text>
+<text x="115.0" y="209.5" fill="#a9b1d6" textLength="621.0" lengthAdjust="spacing" xml:space="preserve"> src/ui/file_tree.rs                                                 </text>
+<text x="736.0" y="209.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="209.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="209.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="227.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="227.5" fill="#9ece6a" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
+<text x="61.0" y="227.5" fill="#a9b1d6" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Edit</text>
+<text x="97.0" y="227.5" fill="#a9b1d6" textLength="270.0" lengthAdjust="spacing" xml:space="preserve">   src/ui/github_inspector.rs </text>
+<text x="367.0" y="227.5" fill="#9ece6a" textLength="36.0" lengthAdjust="spacing" xml:space="preserve">+218</text>
+<text x="412.0" y="227.5" fill="#f7768e" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">-96</text>
+<text x="736.0" y="227.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="227.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="227.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">Ship note: bump to 0.12.0 before the     </text>
+<text x="1123.0" y="227.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="245.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="245.5" fill="#9ece6a" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
+<text x="61.0" y="245.5" fill="#a9b1d6" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Edit</text>
+<text x="97.0" y="245.5" fill="#a9b1d6" textLength="180.0" lengthAdjust="spacing" xml:space="preserve">   src/mux_input.rs </text>
+<text x="277.0" y="245.5" fill="#9ece6a" textLength="36.0" lengthAdjust="spacing" xml:space="preserve">+164</text>
+<text x="322.0" y="245.5" fill="#f7768e" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">-31</text>
+<text x="736.0" y="245.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="245.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="754.0" y="245.5" fill="#a9b1d6" textLength="369.0" lengthAdjust="spacing" xml:space="preserve">tag, the workflow builds from it.        </text>
+<text x="1123.0" y="245.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="263.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="263.5" fill="#9ece6a" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
+<text x="61.0" y="263.5" fill="#a9b1d6" textLength="36.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Bash</text>
+<text x="97.0" y="263.5" fill="#a9b1d6" textLength="639.0" lengthAdjust="spacing" xml:space="preserve">   cargo test --quiet                                                  </text>
+<text x="736.0" y="263.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="263.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="263.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="281.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="61.0" y="281.5" fill="#9ece6a" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">✓</text>
+<text x="70.0" y="281.5" fill="#a9b1d6" textLength="666.0" lengthAdjust="spacing" xml:space="preserve"> 210 passed in 4.1s                                                       </text>
+<text x="736.0" y="281.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="281.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="281.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="299.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="299.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="299.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="299.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="317.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
 <text x="25.0" y="317.5" fill="#ff87d7" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="34.0" y="317.5" fill="#cdd6f4" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Done. The diff follows the tree cursor, so opening a                         </text>
-<text x="736.0" y="317.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="317.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="317.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="335.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="335.5" fill="#cdd6f4" textLength="207.0" lengthAdjust="spacing" xml:space="preserve">  file no longer needs </text>
-<text x="232.0" y="335.5" fill="#cdd6f4" textLength="45.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Enter</text>
-<text x="277.0" y="335.5" fill="#cdd6f4" textLength="459.0" lengthAdjust="spacing" xml:space="preserve">.                                                  </text>
-<text x="736.0" y="335.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="335.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="335.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="353.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="353.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="353.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="353.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="371.5" fill="#94e2d5" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
-<text x="34.0" y="371.5" fill="#cdd6f4" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Nice. Fold single-child chains too?                                          </text>
-<text x="736.0" y="371.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="371.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="371.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="389.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="389.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="389.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="389.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="407.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="34.0" y="317.5" fill="#a9b1d6" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Done. The diff follows the tree cursor, so opening a                         </text>
+<text x="736.0" y="317.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="317.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="317.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="335.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="335.5" fill="#a9b1d6" textLength="207.0" lengthAdjust="spacing" xml:space="preserve">  file no longer needs </text>
+<text x="232.0" y="335.5" fill="#a9b1d6" textLength="45.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">Enter</text>
+<text x="277.0" y="335.5" fill="#a9b1d6" textLength="459.0" lengthAdjust="spacing" xml:space="preserve">.                                                  </text>
+<text x="736.0" y="335.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="335.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="335.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="353.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="353.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="353.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="353.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="371.5" fill="#73daca" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
+<text x="34.0" y="371.5" fill="#a9b1d6" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Nice. Fold single-child chains too?                                          </text>
+<text x="736.0" y="371.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="371.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="371.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="389.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="389.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="389.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="389.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="407.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
 <text x="25.0" y="407.5" fill="#ff87d7" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="34.0" y="407.5" fill="#cdd6f4" textLength="117.0" lengthAdjust="spacing" xml:space="preserve"> Already in: </text>
-<text x="151.0" y="407.5" fill="#cdd6f4" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">src/ui</text>
-<text x="205.0" y="407.5" fill="#cdd6f4" textLength="531.0" lengthAdjust="spacing" xml:space="preserve"> renders as one row.                                       </text>
-<text x="736.0" y="407.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="407.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="407.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="425.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="425.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="425.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="425.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="443.5" fill="#94e2d5" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
-<text x="34.0" y="443.5" fill="#cdd6f4" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Great. Ship it and cut a release.                                            </text>
-<text x="736.0" y="443.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="443.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="443.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="461.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="461.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="461.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="461.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="479.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="34.0" y="407.5" fill="#a9b1d6" textLength="117.0" lengthAdjust="spacing" xml:space="preserve"> Already in: </text>
+<text x="151.0" y="407.5" fill="#a9b1d6" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">src/ui</text>
+<text x="205.0" y="407.5" fill="#a9b1d6" textLength="531.0" lengthAdjust="spacing" xml:space="preserve"> renders as one row.                                       </text>
+<text x="736.0" y="407.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="407.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="407.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="425.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="425.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="425.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="425.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="443.5" fill="#73daca" textLength="18.0" lengthAdjust="spacing" xml:space="preserve">│›</text>
+<text x="34.0" y="443.5" fill="#a9b1d6" textLength="702.0" lengthAdjust="spacing" xml:space="preserve"> Great. Ship it and cut a release.                                            </text>
+<text x="736.0" y="443.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="443.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="443.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="461.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="461.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="461.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="461.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="479.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
 <text x="25.0" y="479.5" fill="#ff87d7" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">●</text>
-<text x="34.0" y="479.5" fill="#cdd6f4" textLength="99.0" lengthAdjust="spacing" xml:space="preserve"> Bumped to </text>
-<text x="133.0" y="479.5" fill="#cdd6f4" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">0.12.0</text>
-<text x="187.0" y="479.5" fill="#cdd6f4" textLength="549.0" lengthAdjust="spacing" xml:space="preserve">, tagged, and the release workflow                           </text>
-<text x="736.0" y="479.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="479.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="479.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="497.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="497.5" fill="#cdd6f4" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  is green on all three targets.                                               </text>
-<text x="736.0" y="497.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="497.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="497.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="515.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="515.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="515.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="515.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="533.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="533.5" fill="#585b70" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">╭────────────────────────────────────────────────────╮</text>
-<text x="736.0" y="533.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="533.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="533.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="551.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="551.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="43.0" y="551.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">&gt;</text>
-<text x="502.0" y="551.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="551.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="551.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="551.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="569.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="25.0" y="569.5" fill="#585b70" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">╰────────────────────────────────────────────────────╯</text>
-<text x="736.0" y="569.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="569.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="569.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="587.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="736.0" y="587.5" fill="#94e2d5" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="745.0" y="587.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="1123.0" y="587.5" fill="#585b70" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
-<text x="16.0" y="605.5" fill="#94e2d5" textLength="729.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└───────────────────────────────────────────────────────────────────────────────┘</text>
-<text x="745.0" y="605.5" fill="#585b70" textLength="387.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─────────────────────────────────────────┘</text>
-<text x="16.0" y="623.5" fill="#45475a" textLength="351.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> 1:Add a tree view to the PR inspector </text>
-<text x="376.0" y="623.5" fill="#94e2d5" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">C-b</text>
-<text x="403.0" y="623.5" fill="#cdd6f4" textLength="729.0" lengthAdjust="spacing" xml:space="preserve"> for commands                                                                    </text>
+<text x="34.0" y="479.5" fill="#a9b1d6" textLength="99.0" lengthAdjust="spacing" xml:space="preserve"> Bumped to </text>
+<text x="133.0" y="479.5" fill="#a9b1d6" textLength="54.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve">0.12.0</text>
+<text x="187.0" y="479.5" fill="#a9b1d6" textLength="549.0" lengthAdjust="spacing" xml:space="preserve">, tagged, and the release workflow                           </text>
+<text x="736.0" y="479.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="479.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="479.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="497.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="497.5" fill="#a9b1d6" textLength="711.0" lengthAdjust="spacing" xml:space="preserve">  is green on all three targets.                                               </text>
+<text x="736.0" y="497.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="497.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="497.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="515.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="515.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="515.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="515.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="533.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="533.5" fill="#565f89" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">╭────────────────────────────────────────────────────╮</text>
+<text x="736.0" y="533.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="533.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="533.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="551.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="551.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="43.0" y="551.5" fill="#73daca" textLength="9.0" lengthAdjust="spacing" xml:space="preserve">&gt;</text>
+<text x="502.0" y="551.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="551.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="551.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="551.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="569.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="25.0" y="569.5" fill="#565f89" textLength="486.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">╰────────────────────────────────────────────────────╯</text>
+<text x="736.0" y="569.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="569.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="569.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="587.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="736.0" y="587.5" fill="#73daca" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="745.0" y="587.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="1123.0" y="587.5" fill="#565f89" textLength="9.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="16.0" y="605.5" fill="#73daca" textLength="729.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└───────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="745.0" y="605.5" fill="#565f89" textLength="387.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─────────────────────────────────────────┘</text>
+<text x="16.0" y="623.5" fill="#1a1b26" textLength="351.0" lengthAdjust="spacing" font-weight="bold" xml:space="preserve"> 1:Add a tree view to the PR inspector </text>
+<text x="376.0" y="623.5" fill="#73daca" textLength="27.0" lengthAdjust="spacing" xml:space="preserve">C-b</text>
+<text x="403.0" y="623.5" fill="#a9b1d6" textLength="729.0" lengthAdjust="spacing" xml:space="preserve"> for commands                                                                    </text>
 </svg>

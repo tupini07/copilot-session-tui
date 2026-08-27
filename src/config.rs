@@ -40,6 +40,9 @@ pub struct UserConfig {
     #[serde(default)]
     pub yolo: bool,
 
+    #[serde(default)]
+    pub theme: crate::theme::ThemeName,
+
     /// Starred sessions, in the order the user arranged them.
     ///
     /// Deliberately a list rather than a set: the order is the feature, and it drives
@@ -139,6 +142,7 @@ impl Default for UserConfig {
     fn default() -> Self {
         Self {
             yolo: false,
+            theme: crate::theme::ThemeName::Classic,
             favorites: Vec::new(),
             snippets: Vec::new(),
             model: None,
@@ -916,6 +920,7 @@ mod tests {
     fn notification_defaults_are_disabled_and_private() {
         let config: UserConfig = serde_json::from_str("{}").unwrap();
 
+        assert_eq!(config.theme, crate::theme::ThemeName::Classic);
         assert!(!config.notifications.enabled);
         assert_eq!(config.notifications.server, DEFAULT_NTFY_SERVER);
         assert!(config.notifications.topic.is_empty());
@@ -936,6 +941,7 @@ mod tests {
         }
 
         let current = UserConfig {
+            theme: crate::theme::ThemeName::SolarizedLight,
             ntfy_access_token: "tk_private_token".to_string(),
             ntfy_verbose: true,
             ..UserConfig::default()
@@ -947,6 +953,7 @@ mod tests {
 
         assert_eq!(restored.ntfy_access_token, "tk_private_token");
         assert!(restored.ntfy_verbose);
+        assert_eq!(restored.theme, crate::theme::ThemeName::SolarizedLight);
     }
 
     #[test]

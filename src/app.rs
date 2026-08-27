@@ -8,6 +8,7 @@ use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::snippets::{SnippetModal, SnippetUpdate};
 use crate::terminal_pane::TerminalManager;
+use crate::theme::{Theme, ThemeName};
 use crate::updater::{UpdateCheckResult, UpdateInfo, UpdateInstallOutcome, UpdateInstallResult};
 use crate::workspace_state;
 use anyhow::{Context, Result};
@@ -148,10 +149,10 @@ impl SettingsSection {
 
     pub const fn rows(self) -> &'static [usize] {
         match self {
-            Self::General => &[0, 1, 2],
-            Self::Worktrees => &[3, 4],
-            Self::Terminal => &[5, 6, 7],
-            Self::Notifications => &[8, 9, 10, 11, 12, 13, 14],
+            Self::General => &[0, 1, 2, 3],
+            Self::Worktrees => &[4, 5],
+            Self::Terminal => &[6, 7, 8],
+            Self::Notifications => &[9, 10, 11, 12, 13, 14, 15],
         }
     }
 
@@ -166,6 +167,23 @@ impl SettingsSection {
             (index + Self::ALL.len() - 1) % Self::ALL.len()
         };
         Self::ALL[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemePicker {
+    pub original: ThemeName,
+    pub selected: usize,
+}
+
+impl ThemePicker {
+    pub fn selected_theme(self) -> ThemeName {
+        ThemeName::ALL[self.selected.min(ThemeName::ALL.len() - 1)]
+    }
+
+    pub fn move_by(&mut self, amount: isize) {
+        let selected = (self.selected as isize).saturating_add(amount);
+        self.selected = selected.clamp(0, ThemeName::ALL.len() as isize - 1) as usize;
     }
 }
 
@@ -464,6 +482,10 @@ pub struct App {
     pub settings_section: SettingsSection,
     pub settings_editing: Option<SettingsEditField>,
     pub settings_input: String,
+    pub theme_picker: Option<ThemePicker>,
+    pub theme_picker_hits: Vec<(Rect, usize)>,
+    theme_picker_last_click: Option<(usize, Instant)>,
+    theme_save_reloaded_external: bool,
     pub project_settings: Option<ProjectSettings>,
     pub project_settings_selected: usize,
     pub project_settings_editing: bool,
@@ -601,6 +623,10 @@ impl App {
             settings_section: SettingsSection::General,
             settings_editing: None,
             settings_input: String::new(),
+            theme_picker: None,
+            theme_picker_hits: Vec::new(),
+            theme_picker_last_click: None,
+            theme_save_reloaded_external: false,
             project_settings: None,
             project_settings_selected: 0,
             project_settings_editing: false,
@@ -798,6 +824,7 @@ impl App {
         // Remember the refreshed disk value for future saves but keep the live mode.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let favorites_changed = self.config.favorites != persisted.favorites;
+        let theme_changed = self.config.theme != persisted.theme;
         let runtime_mux = self.config.mux;
         self.mux_on_disk = persisted.mux;
         persisted.mux = runtime_mux;
@@ -816,6 +843,9 @@ impl App {
             }
         }
         self.config = persisted;
+        if theme_changed {
+            self.invalidate_theme_caches();
+        }
         if let Some(settings) = self.project_settings.as_mut() {
             settings.refresh_global(&self.config);
         }
@@ -902,12 +932,114 @@ impl App {
         self.settings_section = SettingsSection::General;
         self.settings_editing = None;
         self.settings_input.clear();
+        self.theme_picker = None;
         let current = config::config_revision(&self.global_config_path).ok();
         self.settings_config_revision = (current == self.applied_config_revision)
             .then_some(current)
             .flatten();
         self.config_reload_pending = false;
         self.mode = Mode::Settings;
+    }
+
+    pub fn theme_name(&self) -> ThemeName {
+        self.theme_picker
+            .map(ThemePicker::selected_theme)
+            .unwrap_or(self.config.theme)
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.theme_name().theme()
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        let original = self.config.theme;
+        let selected = ThemeName::ALL
+            .iter()
+            .position(|theme| *theme == original)
+            .unwrap_or_default();
+        self.theme_picker = Some(ThemePicker { original, selected });
+        self.theme_picker_hits.clear();
+        self.theme_picker_last_click = None;
+        self.theme_save_reloaded_external = false;
+        self.invalidate_theme_caches();
+    }
+
+    pub fn move_theme_picker(&mut self, amount: isize) {
+        if let Some(picker) = self.theme_picker.as_mut() {
+            picker.move_by(amount);
+            self.invalidate_theme_caches();
+        }
+    }
+
+    pub fn cancel_theme_picker(&mut self) {
+        if self.theme_picker.take().is_some() {
+            self.theme_picker_hits.clear();
+            self.theme_picker_last_click = None;
+            self.invalidate_theme_caches();
+        }
+    }
+
+    pub fn confirm_theme_picker(&mut self) -> anyhow::Result<()> {
+        let Some(picker) = self.theme_picker else {
+            return Ok(());
+        };
+        let selected = picker.selected_theme();
+        let previous = self.config.theme;
+        self.config.theme = selected;
+        self.theme_save_reloaded_external = false;
+        match self.save_global_settings() {
+            Ok(()) => {
+                self.theme_picker = None;
+                self.theme_picker_hits.clear();
+                self.theme_picker_last_click = None;
+                self.invalidate_theme_caches();
+                Ok(())
+            }
+            Err(error) => {
+                if self.theme_save_reloaded_external {
+                    if let Some(picker) = self.theme_picker.as_mut() {
+                        picker.original = self.config.theme;
+                    }
+                } else {
+                    self.config.theme = previous;
+                }
+                self.invalidate_theme_caches();
+                Err(error)
+            }
+        }
+    }
+
+    fn invalidate_theme_caches(&mut self) {
+        if let Some(inspector) = self.github_inspector.as_mut() {
+            inspector.diff_render_cache = None;
+        }
+    }
+
+    pub fn set_theme_picker_hits(&mut self, hits: Vec<(Rect, usize)>) {
+        self.theme_picker_hits = hits;
+    }
+
+    pub fn select_theme_picker_at(&mut self, column: u16, row: u16) -> bool {
+        let selected = self
+            .theme_picker_hits
+            .iter()
+            .find(|(area, _)| {
+                column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+            })
+            .map(|(_, selected)| *selected);
+        if let (Some(picker), Some(selected)) = (self.theme_picker.as_mut(), selected) {
+            picker.selected = selected.min(ThemeName::ALL.len() - 1);
+            self.invalidate_theme_caches();
+            let now = Instant::now();
+            let confirm = self
+                .theme_picker_last_click
+                .is_some_and(|(previous, clicked)| {
+                    previous == selected && clicked.elapsed() <= Duration::from_millis(500)
+                });
+            self.theme_picker_last_click = Some((selected, now));
+            return confirm;
+        }
+        false
     }
 
     /// Status message that also warns when the prefix key had to be defaulted.
@@ -1740,6 +1872,7 @@ impl App {
                     self.set_applied_config_revision(revision);
                     self.settings_config_revision = Some(revision);
                     self.config_reload_pending = false;
+                    self.theme_save_reloaded_external = true;
                     anyhow::bail!(
                         "Reloaded restored global settings instead of overwriting them; review and save again"
                     );
@@ -1775,6 +1908,7 @@ impl App {
                 self.set_applied_config_revision(revision);
                 self.settings_config_revision = Some(revision);
                 self.config_reload_pending = false;
+                self.theme_save_reloaded_external = true;
                 anyhow::bail!(
                     "Global settings changed in another instance; reloaded them instead of overwriting"
                 );
@@ -2866,6 +3000,7 @@ mod tests {
             serde_json::to_vec(&UserConfig {
                 mux: false,
                 mux_prefix: "C-a".to_string(),
+                theme: ThemeName::SolarizedLight,
                 notifications: crate::config::NotificationConfig {
                     enabled: true,
                     server: "https://ntfy.example.test".to_string(),
@@ -2893,6 +3028,7 @@ mod tests {
         );
         assert_eq!(app.config.notifications.server, "https://ntfy.example.test");
         assert_eq!(app.config.ntfy_access_token, "tk_new_token");
+        assert_eq!(app.theme_name(), ThemeName::SolarizedLight);
     }
 
     #[test]
@@ -3008,6 +3144,35 @@ mod tests {
         let save_error = app.save_config().unwrap_err().to_string();
         assert!(save_error.contains("no valid loaded revision"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "{invalid");
+    }
+
+    #[test]
+    fn unknown_external_theme_keeps_the_last_known_good_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                theme: ThemeName::Nord,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        assert!(app.request_config_reload());
+        assert_eq!(app.theme_name(), ThemeName::Nord);
+
+        std::fs::write(&path, r#"{"theme":"unknown-theme"}"#).unwrap();
+        assert!(app.request_config_reload());
+
+        assert_eq!(app.theme_name(), ThemeName::Nord);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("Cannot reload global settings"));
     }
 
     #[test]
@@ -3161,6 +3326,40 @@ mod tests {
         let saved: UserConfig =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(saved.model.as_deref(), Some("external"));
+    }
+
+    #[test]
+    fn theme_save_conflict_keeps_the_theme_reloaded_from_another_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&UserConfig::default()).unwrap()).unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        app.begin_global_settings();
+        app.open_theme_picker();
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL
+            .iter()
+            .position(|name| *name == ThemeName::Gruvbox)
+            .unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                theme: ThemeName::Nord,
+                model: Some("external".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(app.confirm_theme_picker().is_err());
+
+        assert_eq!(app.config.theme, ThemeName::Nord);
+        assert_eq!(app.config.model.as_deref(), Some("external"));
+        assert_eq!(app.theme_picker.unwrap().original, ThemeName::Nord);
+        assert_eq!(app.theme_name(), ThemeName::Gruvbox);
+        app.cancel_theme_picker();
+        assert_eq!(app.theme_name(), ThemeName::Nord);
     }
 
     #[test]

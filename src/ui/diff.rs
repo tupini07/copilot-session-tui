@@ -1,3 +1,4 @@
+use crate::theme::Theme;
 use edtui::syntect::easy::HighlightLines;
 use edtui::syntect::highlighting::{FontStyle, Style as SyntaxStyle};
 use ratatui::style::{Color, Modifier, Style};
@@ -5,13 +6,6 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 use unicode_segmentation::UnicodeSegmentation;
 
-const ADD_BG: Color = Color::Rgb(18, 52, 31);
-const DELETE_BG: Color = Color::Rgb(62, 25, 31);
-const CONTEXT_BG: Color = Color::Rgb(15, 17, 22);
-const HUNK_BG: Color = Color::Rgb(24, 40, 67);
-const META_BG: Color = Color::Rgb(31, 31, 42);
-const CODE_FG: Color = Color::Rgb(205, 214, 244);
-const GUTTER_FG: Color = Color::Rgb(108, 112, 134);
 const MAX_HIGHLIGHT_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +25,7 @@ struct DiffRow {
     content: String,
 }
 
-pub fn render_patch(path: &str, patch: &str) -> Vec<Line<'static>> {
+pub fn render_patch(path: &str, patch: &str, theme: Theme) -> Vec<Line<'static>> {
     let rows = parse_patch(patch);
     let number_width = rows
         .iter()
@@ -51,32 +45,40 @@ pub fn render_patch(path: &str, patch: &str) -> Vec<Line<'static>> {
                 .and_then(|value| value.to_str())
                 .and_then(|extension| edtui::SYNTAX_SET.find_syntax_by_extension(extension))
         });
-    let theme = edtui::THEME_SET
+    let syntax_theme = edtui::THEME_SET
         .themes
-        .get("dracula")
+        .get(theme.syntax_theme)
+        .or_else(|| {
+            edtui::THEME_SET.themes.get(if theme.is_light {
+                "inspired-github"
+            } else {
+                "dracula"
+            })
+        })
         .or_else(|| edtui::THEME_SET.themes.values().next());
     let mut old_highlighter = syntax
-        .zip(theme)
-        .map(|(syntax, theme)| HighlightLines::new(syntax, theme));
+        .zip(syntax_theme)
+        .map(|(syntax, syntax_theme)| HighlightLines::new(syntax, syntax_theme));
     let mut new_highlighter = syntax
-        .zip(theme)
-        .map(|(syntax, theme)| HighlightLines::new(syntax, theme));
+        .zip(syntax_theme)
+        .map(|(syntax, syntax_theme)| HighlightLines::new(syntax, syntax_theme));
 
     rows.into_iter()
         .map(|row| {
             if row.kind == DiffKind::Hunk {
                 old_highlighter = syntax
-                    .zip(theme)
-                    .map(|(syntax, theme)| HighlightLines::new(syntax, theme));
+                    .zip(syntax_theme)
+                    .map(|(syntax, syntax_theme)| HighlightLines::new(syntax, syntax_theme));
                 new_highlighter = syntax
-                    .zip(theme)
-                    .map(|(syntax, theme)| HighlightLines::new(syntax, theme));
+                    .zip(syntax_theme)
+                    .map(|(syntax, syntax_theme)| HighlightLines::new(syntax, syntax_theme));
             }
             render_row(
                 row,
                 number_width,
                 &mut old_highlighter,
                 &mut new_highlighter,
+                theme,
             )
         })
         .collect()
@@ -88,12 +90,13 @@ pub fn viewport_lines(
     height: usize,
     horizontal_offset: usize,
     width: usize,
+    theme: Theme,
 ) -> Vec<Line<'static>> {
     lines
         .iter()
         .skip(vertical_offset)
         .take(height)
-        .map(|line| crop_line(line, horizontal_offset, width))
+        .map(|line| crop_line(line, horizontal_offset, width, theme.diff_context_bg))
         .collect()
 }
 
@@ -177,16 +180,17 @@ fn render_row(
     number_width: usize,
     old_highlighter: &mut Option<HighlightLines<'_>>,
     new_highlighter: &mut Option<HighlightLines<'_>>,
+    theme: Theme,
 ) -> Line<'static> {
     let (background, marker, marker_color) = match row.kind {
-        DiffKind::Context => (CONTEXT_BG, " ", Color::DarkGray),
-        DiffKind::Addition => (ADD_BG, "+", Color::Green),
-        DiffKind::Deletion => (DELETE_BG, "-", Color::Red),
-        DiffKind::Hunk => (HUNK_BG, " ", Color::Cyan),
-        DiffKind::Meta => (META_BG, " ", Color::Magenta),
+        DiffKind::Context => (theme.diff_context_bg, " ", theme.muted),
+        DiffKind::Addition => (theme.diff_add_bg, "+", theme.success),
+        DiffKind::Deletion => (theme.diff_delete_bg, "-", theme.error),
+        DiffKind::Hunk => (theme.diff_hunk_bg, " ", theme.info),
+        DiffKind::Meta => (theme.diff_meta_bg, " ", theme.accent),
     };
-    let base = Style::default().fg(CODE_FG).bg(background);
-    let gutter_style = Style::default().fg(GUTTER_FG).bg(background);
+    let base = Style::default().fg(theme.diff_code_fg).bg(background);
+    let gutter_style = Style::default().fg(theme.diff_gutter_fg).bg(background);
     let mut spans = vec![
         Span::styled(" ", gutter_style),
         Span::styled(line_number(row.old, number_width), gutter_style),
@@ -198,31 +202,56 @@ fn render_row(
     ];
 
     let mut code = match row.kind {
-        DiffKind::Addition => highlight(&row.content, new_highlighter, background),
-        DiffKind::Deletion => highlight(&row.content, old_highlighter, background),
+        DiffKind::Addition => highlight(
+            &row.content,
+            new_highlighter,
+            background,
+            theme.diff_code_fg,
+        ),
+        DiffKind::Deletion => highlight(
+            &row.content,
+            old_highlighter,
+            background,
+            theme.diff_code_fg,
+        ),
         DiffKind::Context => {
-            let _ = highlight(&row.content, old_highlighter, background);
-            highlight(&row.content, new_highlighter, background)
+            let _ = highlight(
+                &row.content,
+                old_highlighter,
+                background,
+                theme.diff_code_fg,
+            );
+            highlight(
+                &row.content,
+                new_highlighter,
+                background,
+                theme.diff_code_fg,
+            )
         }
         DiffKind::Hunk => vec![Span::styled(
             row.content,
-            base.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            base.fg(theme.info).add_modifier(Modifier::BOLD),
         )],
         DiffKind::Meta => vec![Span::styled(
             row.content,
-            base.fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            base.fg(theme.accent).add_modifier(Modifier::BOLD),
         )],
     };
     spans.append(&mut code);
     Line::from(spans)
 }
 
-fn crop_line(line: &Line<'_>, offset: usize, width: usize) -> Line<'static> {
+fn crop_line(
+    line: &Line<'_>,
+    offset: usize,
+    width: usize,
+    default_background: Color,
+) -> Line<'static> {
     let background = line
         .spans
         .first()
         .and_then(|span| span.style.bg)
-        .unwrap_or(CONTEXT_BG);
+        .unwrap_or(default_background);
     let mut source_column = 0;
     let mut output_width = 0;
     let mut output = Vec::new();
@@ -279,25 +308,26 @@ fn highlight(
     code: &str,
     highlighter: &mut Option<HighlightLines<'_>>,
     background: Color,
+    fallback_foreground: Color,
 ) -> Vec<Span<'static>> {
     if code.len() > MAX_HIGHLIGHT_LINE_BYTES {
         *highlighter = None;
         return vec![Span::styled(
             code.to_string(),
-            Style::default().fg(CODE_FG).bg(background),
+            Style::default().fg(fallback_foreground).bg(background),
         )];
     }
     let Some(highlighter) = highlighter else {
         return vec![Span::styled(
             code.to_string(),
-            Style::default().fg(CODE_FG).bg(background),
+            Style::default().fg(fallback_foreground).bg(background),
         )];
     };
     let source = format!("{code}\n");
     let Ok(regions) = highlighter.highlight_line(&source, &edtui::SYNTAX_SET) else {
         return vec![Span::styled(
             code.to_string(),
-            Style::default().fg(CODE_FG).bg(background),
+            Style::default().fg(fallback_foreground).bg(background),
         )];
     };
     regions
@@ -342,6 +372,13 @@ fn digits(number: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::ThemeName;
+
+    const TEST_THEMES: [ThemeName; 3] = [
+        ThemeName::Nord,
+        ThemeName::CatppuccinLatte,
+        ThemeName::SolarizedLight,
+    ];
 
     #[test]
     fn parser_assigns_old_and_new_line_numbers() {
@@ -370,78 +407,180 @@ mod tests {
 
     #[test]
     fn renderer_uses_gutters_and_full_row_diff_backgrounds() {
-        let lines = render_patch("demo.py", "@@ -1 +1 @@\n-print('old')\n+print('new')");
-        let deleted = &lines[1];
-        let added = &lines[2];
+        let patch =
+            "diff --git a/demo.py b/demo.py\n@@ -1,2 +1,2 @@\n context\n-print('old')\n+print('new')\n\\ No newline";
+        for name in TEST_THEMES {
+            let theme = name.theme();
+            let lines = render_patch("demo.py", patch, theme);
+            let expected_backgrounds = [
+                theme.diff_meta_bg,
+                theme.diff_hunk_bg,
+                theme.diff_context_bg,
+                theme.diff_delete_bg,
+                theme.diff_add_bg,
+                theme.diff_meta_bg,
+            ];
 
-        assert!(deleted.to_string().contains("  1    -│ print('old')"));
-        assert!(added.to_string().contains("     1 +│ print('new')"));
-        assert!(deleted
-            .spans
-            .iter()
-            .all(|span| span.style.bg == Some(DELETE_BG)));
-        assert!(added.spans.iter().all(|span| span.style.bg == Some(ADD_BG)));
-        let viewport = viewport_lines(&lines, 1, 1, 0, 60);
-        assert_eq!(line_width(&viewport[0]), 60);
-        assert!(viewport[0]
-            .spans
-            .iter()
-            .all(|span| span.style.bg == Some(DELETE_BG)));
+            assert!(lines[3].to_string().contains("  2    -│ print('old')"));
+            assert!(lines[4].to_string().contains("     2 +│ print('new')"));
+            for (line, expected) in lines.iter().zip(expected_backgrounds) {
+                assert!(
+                    line.spans
+                        .iter()
+                        .all(|span| span.style.bg == Some(expected)),
+                    "{name:?} row did not use {expected:?}: {line:?}"
+                );
+                for index in [0, 1, 2, 3, 4, 6] {
+                    assert_eq!(
+                        line.spans[index].style.fg,
+                        Some(theme.diff_gutter_fg),
+                        "{name:?} gutter span {index}: {line:?}"
+                    );
+                }
+            }
+
+            let viewport = viewport_lines(&lines, 3, 1, 0, 60, theme);
+            assert_eq!(line_width(&viewport[0]), 60);
+            assert!(viewport[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.diff_delete_bg)));
+        }
+    }
+
+    #[test]
+    fn classic_diff_keeps_the_existing_palette() {
+        let theme = ThemeName::Classic.theme();
+        let lines = render_patch(
+            "demo.rs",
+            "diff --git a/demo.rs b/demo.rs\n@@ -1 +1 @@\n-old\n+new",
+            theme,
+        );
+
+        assert_eq!(lines[0].spans[0].style.bg, Some(Color::Rgb(31, 31, 42)));
+        assert_eq!(lines[1].spans[0].style.bg, Some(Color::Rgb(24, 40, 67)));
+        assert_eq!(lines[2].spans[0].style.bg, Some(Color::Rgb(62, 25, 31)));
+        assert_eq!(lines[3].spans[0].style.bg, Some(Color::Rgb(18, 52, 31)));
+        assert_eq!(lines[2].spans[0].style.fg, Some(Color::Rgb(108, 112, 134)));
     }
 
     #[test]
     fn supported_extensions_receive_syntax_colours() {
-        let lines = render_patch("demo.py", "@@ -0,0 +1 @@\n+def greet(name):");
-        let mut foregrounds = Vec::new();
-        for foreground in lines[1].spans.iter().filter_map(|span| span.style.fg) {
-            if !foregrounds.contains(&foreground) {
-                foregrounds.push(foreground);
+        let mut rendered_foregrounds = Vec::new();
+        for name in TEST_THEMES {
+            let theme = name.theme();
+            let lines = render_patch("demo.py", "@@ -0,0 +1 @@\n+def greet(name):", theme);
+            let mut foregrounds = Vec::new();
+            for foreground in lines[1].spans[7..].iter().filter_map(|span| span.style.fg) {
+                if !foregrounds.contains(&foreground) {
+                    foregrounds.push(foreground);
+                }
             }
-        }
 
-        assert!(
-            foregrounds.len() > 2,
-            "expected gutter plus multiple syntax colours: {foregrounds:?}"
-        );
+            assert!(
+                foregrounds.len() > 1,
+                "{name:?} expected multiple syntax colours: {foregrounds:?}"
+            );
+            assert!(lines[1].spans[7..]
+                .iter()
+                .all(|span| span.style.bg == Some(theme.diff_add_bg)));
+            rendered_foregrounds.push(foregrounds);
+        }
+        assert_ne!(rendered_foregrounds[0], rendered_foregrounds[1]);
+        assert_eq!(rendered_foregrounds[1], rendered_foregrounds[2]);
+    }
+
+    #[test]
+    fn missing_syntax_theme_falls_back_safely() {
+        let mut theme = ThemeName::Nord.theme();
+        theme.syntax_theme = "missing-cst-theme";
+
+        let lines = render_patch("demo.py", "@@ -0,0 +1 @@\n+def greet(name):", theme);
+        let code_foregrounds: Vec<Color> = lines[1].spans[7..]
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .collect();
+
+        assert!(code_foregrounds.len() > 1, "{code_foregrounds:?}");
+    }
+
+    #[test]
+    fn syntax_background_override_preserves_font_modifiers() {
+        let syntax = SyntaxStyle {
+            foreground: edtui::syntect::highlighting::Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+            background: edtui::syntect::highlighting::Color {
+                r: 200,
+                g: 210,
+                b: 220,
+                a: 255,
+            },
+            font_style: FontStyle::BOLD | FontStyle::ITALIC | FontStyle::UNDERLINE,
+        };
+        let background = ThemeName::SolarizedLight.theme().diff_add_bg;
+
+        let style = syntax_style(syntax, background);
+
+        assert_eq!(style.fg, Some(Color::Rgb(10, 20, 30)));
+        assert_eq!(style.bg, Some(background));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
     fn shorter_rows_keep_their_background_after_horizontal_scrolling() {
-        let lines = render_patch(
-            "demo.rs",
-            "@@ -1 +1,2 @@\n-short\n+short\n+this line is deliberately much much much longer",
-        );
-        let viewport = viewport_lines(&lines, 1, 2, 15, 30);
+        for name in TEST_THEMES {
+            let theme = name.theme();
+            let lines = render_patch(
+                "demo.rs",
+                "@@ -1 +1,2 @@\n-short\n+short\n+this line is deliberately much much much longer",
+                theme,
+            );
+            let viewport = viewport_lines(&lines, 1, 2, 15, 30, theme);
 
-        assert_eq!(line_width(&viewport[0]), 30);
-        assert_eq!(line_width(&viewport[1]), 30);
-        assert!(viewport[0]
-            .spans
-            .iter()
-            .all(|span| span.style.bg == Some(DELETE_BG)));
-        assert!(viewport[1]
-            .spans
-            .iter()
-            .all(|span| span.style.bg == Some(ADD_BG)));
+            assert_eq!(line_width(&viewport[0]), 30);
+            assert_eq!(line_width(&viewport[1]), 30);
+            assert!(viewport[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.diff_delete_bg)));
+            assert!(viewport[1]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme.diff_add_bg)));
+        }
     }
 
     #[test]
     fn horizontal_viewport_reveals_columns_beyond_the_initial_width() {
-        let lines = render_patch("demo.txt", "@@ -0,0 +1 @@\n+abcdefghijklmnopqrstuvwxyz");
-        let left = viewport_lines(&lines, 1, 1, 0, 16)[0].to_string();
-        let right = viewport_lines(&lines, 1, 1, 16, 16)[0].to_string();
+        for name in TEST_THEMES {
+            let theme = name.theme();
+            let lines = render_patch(
+                "demo.txt",
+                "@@ -0,0 +1 @@\n+abcdefghijklmnopqrstuvwxyz",
+                theme,
+            );
+            let left = viewport_lines(&lines, 1, 1, 0, 16, theme)[0].to_string();
+            let right = viewport_lines(&lines, 1, 1, 16, 16, theme)[0].to_string();
 
-        assert_ne!(left, right);
-        assert!(right.contains("ghijklmnopqrstuv"), "got {right:?}");
+            assert_ne!(left, right, "{name:?}");
+            assert!(right.contains("ghijklmnopqrstuv"), "{name:?} got {right:?}");
+        }
     }
 
     #[test]
     fn viewport_crops_wide_graphemes_without_splitting_them() {
+        let theme = ThemeName::Nord.theme();
         let lines = vec![Line::from(Span::styled(
             "a🚀bc",
-            Style::default().bg(ADD_BG),
+            Style::default().bg(theme.diff_add_bg),
         ))];
-        let cropped = viewport_lines(&lines, 0, 1, 2, 3);
+        let cropped = viewport_lines(&lines, 0, 1, 2, 3, theme);
 
         assert_eq!(line_width(&cropped[0]), 3);
         assert!(!cropped[0].to_string().contains('🚀'));
