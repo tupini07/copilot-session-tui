@@ -2068,7 +2068,9 @@ impl App {
         };
         let configured = &effective.notifications;
         let event_enabled = match kind {
-            NotificationKind::Ready => configured.ready,
+            NotificationKind::Ready
+            | NotificationKind::Question
+            | NotificationKind::PlanApproval => configured.ready,
             NotificationKind::Error => configured.error,
         };
         if !configured.enabled || !event_enabled {
@@ -2610,6 +2612,7 @@ impl App {
         args: Vec<String>,
     ) -> Result<()> {
         let (rows, cols) = self.pane_size;
+        let events_path = self.notification_events_path(&session_id);
         let Some(mux) = self.mux.as_mut() else {
             anyhow::bail!("Multiplexing is disabled");
         };
@@ -2629,6 +2632,7 @@ impl App {
                 session_id,
                 program,
                 args,
+                events_path: Some(events_path),
             },
             rows,
             cols,
@@ -3497,6 +3501,7 @@ mod tests {
                 session_id: session_id.to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,
@@ -4108,6 +4113,7 @@ mod tests {
                 session_id: "current-session".to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,

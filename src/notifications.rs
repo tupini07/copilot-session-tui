@@ -18,6 +18,8 @@ const EVENT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationKind {
     Ready,
+    Question,
+    PlanApproval,
     Error,
 }
 
@@ -25,6 +27,8 @@ impl NotificationKind {
     fn message(self) -> &'static str {
         match self {
             Self::Ready => "Ready for attention",
+            Self::Question => "Question waiting for your response",
+            Self::PlanApproval => "Plan waiting for approval",
             Self::Error => "Copilot reported an error",
         }
     }
@@ -32,13 +36,16 @@ impl NotificationKind {
     fn priority(self) -> u8 {
         match self {
             Self::Ready => 3,
+            Self::Question | Self::PlanApproval => 4,
             Self::Error => 4,
         }
     }
 
     fn tags(self) -> [&'static str; 2] {
         match self {
-            Self::Ready => ["robot", "question"],
+            Self::Ready => ["robot", "white_check_mark"],
+            Self::Question => ["robot", "question"],
+            Self::PlanApproval => ["robot", "clipboard"],
             Self::Error => ["robot", "warning"],
         }
     }
@@ -168,9 +175,12 @@ fn notification_message(request: &NotificationRequest) -> String {
         request.events_start,
         request.events_end,
     ) {
-        (NotificationKind::Ready, Some(path), Some(start), Some(end)) if end > start => {
-            latest_assistant_message(path, start, end)
-        }
+        (
+            NotificationKind::Ready | NotificationKind::Question | NotificationKind::PlanApproval,
+            Some(path),
+            Some(start),
+            Some(end),
+        ) if end > start => latest_assistant_message(path, start, end),
         _ => None,
     };
     match context {
@@ -362,9 +372,58 @@ mod tests {
         assert_eq!(payload["title"], "CST · Plan review");
         assert_eq!(payload["message"], "Ready for attention");
         assert_eq!(payload["priority"], 3);
-        assert_eq!(payload["tags"], serde_json::json!(["robot", "question"]));
+        assert_eq!(
+            payload["tags"],
+            serde_json::json!(["robot", "white_check_mark"])
+        );
         assert!(!body.contains("project"));
         assert!(!body.contains("session_id"));
+    }
+
+    #[test]
+    fn question_and_plan_approval_payloads_use_high_priority_distinct_tag_pairs() {
+        let (url, request_receiver) = mock_server_responses(vec![200, 200]);
+        for (kind, message, tag) in [
+            (
+                NotificationKind::Question,
+                "Question waiting for your response",
+                "question",
+            ),
+            (
+                NotificationKind::PlanApproval,
+                "Plan waiting for approval",
+                "clipboard",
+            ),
+        ] {
+            let request = NotificationRequest {
+                config: NotificationConfig {
+                    enabled: true,
+                    server: url.clone(),
+                    topic: "private_topic".to_string(),
+                    ..NotificationConfig::default()
+                },
+                access_token: String::new(),
+                verbose: false,
+                session_title: "Agent".to_string(),
+                kind,
+                events_path: None,
+                events_start: None,
+                events_end: None,
+            };
+
+            publish_once(&request).unwrap();
+            let request = request_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            let payload = request_payload(&request);
+            assert_eq!(payload["message"], message);
+            assert_eq!(
+                payload["priority"], 4,
+                "{kind:?} should use ntfy high priority"
+            );
+            assert_eq!(payload["tags"], serde_json::json!(["robot", tag]));
+            assert_eq!(payload["tags"].as_array().unwrap().len(), 2);
+        }
     }
 
     #[test]
@@ -392,6 +451,7 @@ mod tests {
             .unwrap();
         let payload: serde_json::Value =
             serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(payload["message"], "Copilot reported an error");
         assert_eq!(payload["priority"], 4);
         assert_eq!(payload["tags"], serde_json::json!(["robot", "warning"]));
     }
@@ -549,6 +609,56 @@ mod tests {
         assert!(!message.contains("Older response"));
         assert!(message.len() <= MAX_MESSAGE_BYTES);
         assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn verbose_context_is_available_for_attention_kinds_without_tool_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "assistant.message",
+                    "data": {"content": "Persisted assistant response"}
+                }),
+                serde_json::json!({
+                    "type": "tool.execution_start",
+                    "data": {
+                        "arguments": {
+                            "prompt": "private tool argument mentioning assistant.message"
+                        }
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        let events_end = std::fs::metadata(&events).unwrap().len();
+
+        for (kind, status) in [
+            (NotificationKind::Ready, "Ready for attention"),
+            (
+                NotificationKind::Question,
+                "Question waiting for your response",
+            ),
+            (NotificationKind::PlanApproval, "Plan waiting for approval"),
+        ] {
+            let request = NotificationRequest {
+                config: NotificationConfig::default(),
+                access_token: String::new(),
+                verbose: true,
+                session_title: "Verbose".to_string(),
+                kind,
+                events_path: Some(events.clone()),
+                events_start: Some(0),
+                events_end: Some(events_end),
+            };
+
+            let message = notification_message(&request);
+            assert_eq!(message, format!("{status}\n\nPersisted assistant response"));
+            assert!(!message.contains("private tool argument"));
+        }
     }
 
     #[test]

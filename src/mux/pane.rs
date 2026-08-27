@@ -6,6 +6,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::events::lifecycle::{InputKind, LifecycleEvent, LifecycleMonitor};
+
 use super::callbacks::{PaneCallbacks, PaneSignalEvent, PaneSignals};
 use super::keys;
 use super::pty::{pty_size, PtyChunk, PtySession};
@@ -67,10 +69,13 @@ pub struct Pane {
     pub started_at: Instant,
     parser: PaneParser,
     has_visible_output: Arc<AtomicBool>,
+    _lifecycle_monitor: Option<LifecycleMonitor>,
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
     working: bool,
+    progress_state: crate::host_terminal::ProgressState,
+    pending_inputs: Vec<(String, InputKind)>,
     needs_attention: bool,
     ready_sent_in_cycle: bool,
     error_sent_in_cycle: bool,
@@ -84,6 +89,8 @@ pub struct PaneSignalOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneNotification {
     Ready,
+    Question,
+    PlanApproval,
     Error,
 }
 
@@ -95,6 +102,7 @@ pub struct PaneSpec {
     pub session_id: String,
     pub program: String,
     pub args: Vec<String>,
+    pub events_path: Option<PathBuf>,
 }
 
 impl Pane {
@@ -106,8 +114,13 @@ impl Pane {
             session_id,
             program,
             args,
+            events_path,
         } = spec;
         let size = pty_size(rows, cols);
+        let lifecycle_baseline = events_path
+            .as_deref()
+            .map(crate::events::lifecycle::capture_file_baseline)
+            .transpose()?;
 
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
         let pty = PtySession::spawn(&program, &args, Some(&cwd), size, chunk_tx)?;
@@ -118,12 +131,13 @@ impl Pane {
             size.cols,
             // Scrollback keeps output above the viewport reachable once copy-mode lands.
             5000,
-            PaneCallbacks::new(pty.writer_handle(), events.clone()),
+            PaneCallbacks::new(id, pty.writer_handle(), events.clone()),
         )));
 
         let pump_parser = Arc::clone(&parser);
         let has_visible_output = Arc::new(AtomicBool::new(false));
         let pump_has_visible_output = Arc::clone(&has_visible_output);
+        let lifecycle_events = events.clone();
         std::thread::spawn(move || {
             while let Ok(chunk) = chunk_rx.recv() {
                 match chunk {
@@ -151,6 +165,13 @@ impl Pane {
                 }
             }
         });
+        let lifecycle_monitor = events_path.zip(lifecycle_baseline).map(|(path, baseline)| {
+            LifecycleMonitor::start_from_baseline(path, baseline, move |event| {
+                lifecycle_events
+                    .send(MuxEvent::SessionLifecycle(id, event))
+                    .is_ok()
+            })
+        });
 
         Ok(Self {
             id,
@@ -161,6 +182,7 @@ impl Pane {
             started_at: Instant::now(),
             parser,
             has_visible_output,
+            _lifecycle_monitor: lifecycle_monitor,
             pty,
             mouse_captured: false,
             viewport: Viewport {
@@ -170,6 +192,8 @@ impl Pane {
                 cols: size.cols,
             },
             working: false,
+            progress_state: crate::host_terminal::ProgressState::Clear,
+            pending_inputs: Vec::new(),
             needs_attention: false,
             ready_sent_in_cycle: false,
             error_sent_in_cycle: false,
@@ -182,6 +206,18 @@ impl Pane {
 
     pub fn is_working(&self) -> bool {
         self.working
+    }
+
+    pub fn effective_progress_state(&self) -> crate::host_terminal::ProgressState {
+        if self.requires_user_action() {
+            crate::host_terminal::ProgressState::Clear
+        } else {
+            self.progress_state
+        }
+    }
+
+    pub fn record_progress_state(&mut self, state: crate::host_terminal::ProgressState) {
+        self.progress_state = state;
     }
 
     /// True while the child has produced nothing visible yet.
@@ -220,6 +256,10 @@ impl Pane {
 
     pub fn mark_exited(&mut self, code: Option<u32>) {
         self.status = PaneStatus::Exited(code);
+        self._lifecycle_monitor.take();
+        self.working = false;
+        self.progress_state = crate::host_terminal::ProgressState::Clear;
+        self.pending_inputs.clear();
     }
 
     /// Run `f` against the current screen. The parser lock is held for the call, so
@@ -283,12 +323,15 @@ impl Pane {
         for event in signals.events {
             match event {
                 PaneSignalEvent::Progress(progress) if progress.is_working() => {
+                    self.progress_state = progress;
                     if !self.working {
                         self.ready_sent_in_cycle = false;
                         self.error_sent_in_cycle = false;
                     }
                     self.working = true;
-                    self.needs_attention = false;
+                    if !self.requires_user_action() {
+                        self.needs_attention = false;
+                    }
                     if progress == crate::host_terminal::ProgressState::Error
                         && !self.error_sent_in_cycle
                     {
@@ -297,20 +340,31 @@ impl Pane {
                     }
                 }
                 PaneSignalEvent::Progress(_) if self.working => {
+                    self.progress_state = crate::host_terminal::ProgressState::Clear;
                     self.working = false;
-                    self.needs_attention = !attended;
-                    if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+                    if !self.requires_user_action() {
+                        self.needs_attention = !attended;
+                    }
+                    if !self.requires_user_action()
+                        && !self.error_sent_in_cycle
+                        && !self.ready_sent_in_cycle
+                    {
                         notifications.push(PaneNotification::Ready);
                         self.ready_sent_in_cycle = true;
                     }
                 }
-                PaneSignalEvent::Progress(_) => {}
+                PaneSignalEvent::Progress(_) => {
+                    self.progress_state = crate::host_terminal::ProgressState::Clear;
+                }
                 PaneSignalEvent::Bell => {
                     outcome.bell = true;
-                    if !attended {
+                    if !attended && !self.requires_user_action() {
                         self.needs_attention = true;
                     }
-                    if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+                    if !self.requires_user_action()
+                        && !self.error_sent_in_cycle
+                        && !self.ready_sent_in_cycle
+                    {
                         notifications.push(PaneNotification::Ready);
                         self.ready_sent_in_cycle = true;
                     }
@@ -318,6 +372,47 @@ impl Pane {
             }
         }
         (outcome, notifications)
+    }
+
+    pub fn apply_lifecycle(&mut self, event: LifecycleEvent) -> Option<PaneNotification> {
+        match event {
+            LifecycleEvent::InputRequested { tool_call_id, kind } => {
+                if self
+                    .pending_inputs
+                    .iter()
+                    .any(|(pending_id, _)| pending_id == &tool_call_id)
+                {
+                    return None;
+                }
+                self.pending_inputs.push((tool_call_id, kind));
+                self.ready_sent_in_cycle = true;
+                Some(match kind {
+                    InputKind::Question => PaneNotification::Question,
+                    InputKind::PlanApproval => PaneNotification::PlanApproval,
+                })
+            }
+            LifecycleEvent::InputResolved { tool_call_id, kind } => {
+                let previous_len = self.pending_inputs.len();
+                self.pending_inputs.retain(|(pending_id, pending_kind)| {
+                    pending_id != &tool_call_id || *pending_kind != kind
+                });
+                if previous_len != self.pending_inputs.len() && self.pending_inputs.is_empty() {
+                    self.needs_attention = false;
+                    self.ready_sent_in_cycle = false;
+                    self.error_sent_in_cycle = false;
+                }
+                None
+            }
+            LifecycleEvent::Reset => {
+                if !self.pending_inputs.is_empty() {
+                    self.pending_inputs.clear();
+                    self.needs_attention = false;
+                    self.ready_sent_in_cycle = false;
+                    self.error_sent_in_cycle = false;
+                }
+                None
+            }
+        }
     }
 
     #[cfg(test)]
@@ -334,7 +429,11 @@ impl Pane {
     }
 
     pub fn needs_attention(&self) -> bool {
-        self.needs_attention
+        self.needs_attention || self.requires_user_action()
+    }
+
+    pub fn requires_user_action(&self) -> bool {
+        !self.pending_inputs.is_empty()
     }
 
     pub fn acknowledge_attention(&mut self) {
@@ -342,7 +441,7 @@ impl Pane {
     }
 
     pub fn display_title(&self) -> String {
-        if self.needs_attention {
+        if self.needs_attention() {
             format!("? {}", self.title)
         } else {
             self.title.clone()
@@ -596,6 +695,7 @@ fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use std::io::Write;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -682,6 +782,7 @@ mod tests {
             session_id: format!("test-session-{id}"),
             program,
             args,
+            events_path: None,
         }
     }
 
@@ -699,6 +800,67 @@ mod tests {
             }
         }
         None
+    }
+
+    fn wait_for_lifecycle(rx: &mpsc::Receiver<MuxEvent>) -> LifecycleEvent {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(MuxEvent::SessionLifecycle(_, event)) => return event,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        panic!("timed out waiting for session lifecycle event");
+    }
+
+    #[test]
+    fn pane_monitor_forwards_lifecycle_appends_after_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let events_path = directory.path().join("events.jsonl");
+        std::fs::write(&events_path, "{\"type\":\"session.start\"}\n").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut spec = test_spec(39, program, args);
+        spec.events_path = Some(events_path.clone());
+        let mut pane = Pane::spawn(spec, 24, 80, tx).unwrap();
+
+        let mut events = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events_path)
+            .unwrap();
+        writeln!(
+            events,
+            r#"{{"type":"tool.execution_start","data":{{"toolName":"ask_user","toolCallId":"question-1"}}}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        assert_eq!(
+            wait_for_lifecycle(&rx),
+            LifecycleEvent::InputRequested {
+                tool_call_id: "question-1".into(),
+                kind: InputKind::Question,
+            }
+        );
+
+        writeln!(
+            events,
+            r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"question-1","success":true}}}}"#
+        )
+        .unwrap();
+        events.flush().unwrap();
+        assert_eq!(
+            wait_for_lifecycle(&rx),
+            LifecycleEvent::InputResolved {
+                tool_call_id: "question-1".into(),
+                kind: InputKind::Question,
+            }
+        );
+        pane.shutdown().unwrap();
     }
 
     #[test]
@@ -805,6 +967,113 @@ mod tests {
             vec![PaneNotification::Ready],
             "phone history is independent of focus"
         );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn question_state_overrides_progress_until_matching_completion() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(37, program, args), 24, 80, tx).unwrap();
+        pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Indeterminate,
+                )],
+                ..Default::default()
+            },
+            true,
+        );
+
+        assert_eq!(
+            pane.apply_lifecycle(LifecycleEvent::InputRequested {
+                tool_call_id: "question-1".into(),
+                kind: InputKind::Question,
+            }),
+            Some(PaneNotification::Question)
+        );
+        assert!(pane.requires_user_action());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+        pane.acknowledge_attention();
+        assert!(
+            pane.needs_attention(),
+            "focus cannot dismiss a live question"
+        );
+        assert!(pane.display_title().starts_with("? "));
+
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Indeterminate,
+                )],
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(notifications.is_empty());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+
+        pane.apply_lifecycle(LifecycleEvent::InputResolved {
+            tool_call_id: "another-question".into(),
+            kind: InputKind::Question,
+        });
+        assert!(pane.requires_user_action());
+        pane.apply_lifecycle(LifecycleEvent::InputResolved {
+            tool_call_id: "question-1".into(),
+            kind: InputKind::Question,
+        });
+        assert!(!pane.requires_user_action());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
+        );
+        assert_eq!(pane.display_title(), pane.title);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn all_pending_inputs_must_resolve_and_reset_clears_stale_waits() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(38, program, args), 24, 80, tx).unwrap();
+
+        assert_eq!(
+            pane.apply_lifecycle(LifecycleEvent::InputRequested {
+                tool_call_id: "question".into(),
+                kind: InputKind::Question,
+            }),
+            Some(PaneNotification::Question)
+        );
+        assert_eq!(
+            pane.apply_lifecycle(LifecycleEvent::InputRequested {
+                tool_call_id: "plan".into(),
+                kind: InputKind::PlanApproval,
+            }),
+            Some(PaneNotification::PlanApproval)
+        );
+        pane.apply_lifecycle(LifecycleEvent::InputResolved {
+            tool_call_id: "question".into(),
+            kind: InputKind::Question,
+        });
+        assert!(pane.requires_user_action());
+
+        pane.apply_lifecycle(LifecycleEvent::Reset);
+        assert!(!pane.requires_user_action());
+        assert!(!pane.needs_attention());
         pane.shutdown().unwrap();
     }
 

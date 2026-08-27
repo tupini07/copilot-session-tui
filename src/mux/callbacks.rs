@@ -20,6 +20,7 @@ pub enum PaneSignalEvent {
 /// while starting up and *blocks* until it gets a response, so without this the very
 /// first child produces no output at all.
 pub struct PaneCallbacks {
+    pane_id: crate::mux::PaneId,
     replies: Sender<Vec<u8>>,
     events: Sender<MuxEvent>,
     title: Option<String>,
@@ -27,8 +28,13 @@ pub struct PaneCallbacks {
 }
 
 impl PaneCallbacks {
-    pub fn new(replies: Sender<Vec<u8>>, events: Sender<MuxEvent>) -> Self {
+    pub fn new(
+        pane_id: crate::mux::PaneId,
+        replies: Sender<Vec<u8>>,
+        events: Sender<MuxEvent>,
+    ) -> Self {
         Self {
+            pane_id,
             replies,
             events,
             title: None,
@@ -61,7 +67,9 @@ impl vt100::Callbacks for PaneCallbacks {
         sequence.push(b';');
         sequence.extend_from_slice(data);
         sequence.extend_from_slice(b"\x1b\\");
-        let _ = self.events.send(MuxEvent::HostSequence(sequence));
+        let _ = self
+            .events
+            .send(MuxEvent::HostSequence(self.pane_id, sequence));
     }
 
     fn audible_bell(&mut self, _: &mut vt100::Screen) {
@@ -83,7 +91,9 @@ impl vt100::Callbacks for PaneCallbacks {
             self.signals.push(PaneSignalEvent::Progress(progress));
         }
         if let Some(sequence) = crate::host_terminal::progress_sequence(params) {
-            let _ = self.events.send(MuxEvent::HostSequence(sequence));
+            let _ = self
+                .events
+                .send(MuxEvent::HostSequence(self.pane_id, sequence));
         }
     }
 
@@ -136,7 +146,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         (
-            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(tx, event_tx)),
+            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(7, tx, event_tx)),
             rx,
             event_rx,
         )
@@ -203,9 +213,10 @@ mod tests {
 
         parser.process(b"\x1b]52;c;Q29waWVkIHRleHQ=\x07");
 
-        let MuxEvent::HostSequence(sequence) = events.try_recv().unwrap() else {
+        let MuxEvent::HostSequence(id, sequence) = events.try_recv().unwrap() else {
             panic!("expected host sequence");
         };
+        assert_eq!(id, 7);
         assert_eq!(sequence, b"\x1b]52;c;Q29waWVkIHRleHQ=\x1b\\");
     }
 
@@ -215,9 +226,10 @@ mod tests {
 
         parser.process(b"\x1b]9;4;3;0\x07");
 
-        let MuxEvent::HostSequence(sequence) = events.try_recv().unwrap() else {
+        let MuxEvent::HostSequence(id, sequence) = events.try_recv().unwrap() else {
             panic!("expected host sequence");
         };
+        assert_eq!(id, 7);
         assert_eq!(sequence, b"\x1b]9;4;3;0\x1b\\");
         assert_eq!(
             parser.callbacks_mut().take_signals().events,

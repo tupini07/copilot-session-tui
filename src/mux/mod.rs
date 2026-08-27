@@ -14,7 +14,8 @@ pub use pane::{Pane, PaneId, PaneSpec, PaneStatus};
 pub enum MuxEvent {
     Output(PaneId, callbacks::PaneSignals),
     Exited(PaneId, Option<u32>),
-    HostSequence(Vec<u8>),
+    SessionLifecycle(PaneId, crate::events::lifecycle::LifecycleEvent),
+    HostSequence(PaneId, Vec<u8>),
     ConfigChanged,
     Term(crossterm::event::Event),
 }

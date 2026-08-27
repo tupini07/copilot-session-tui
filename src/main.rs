@@ -761,9 +761,16 @@ fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
 
 fn desired_terminal_title(app: &App) -> String {
     match app.view {
-        app::View::Attached(_) => app
-            .focused_pane_title()
-            .unwrap_or_else(|| "Copilot Session Manager".to_string()),
+        app::View::Attached(_) => {
+            let title = app
+                .focused_pane_title()
+                .unwrap_or_else(|| "Copilot Session Manager".to_string());
+            if app.any_pane_needs_attention() && !title.starts_with("? ") {
+                format!("? {title}")
+            } else {
+                title
+            }
+        }
         app::View::List if app.any_pane_needs_attention() => {
             "? Copilot Session Manager".to_string()
         }
@@ -1001,6 +1008,7 @@ mod tests {
                 session_id: "latency-test".to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,
@@ -1058,6 +1066,7 @@ mod tests {
                 session_id: "attention-title".to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,

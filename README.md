@@ -354,12 +354,16 @@ Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;
 states are forwarded through the mux so Copilot retains the outer terminal's scrolling,
 paste, copy, and Windows Terminal tab-spinner behavior.
 
-When a background Copilot pane transitions from working to waiting/complete (or rings the
-terminal bell), CST prepends `?` to its internal pane tab and the outer Windows Terminal
-tab title. This makes questions, plan approvals, and completed tasks visible without
-opening every tab. The marker persists until that pane is focused or receives input.
-Progress state—not text heuristics—drives the notification, so it can also mean “task
-finished and ready for review,” which still requires attention.
+When a background Copilot pane transitions from working to complete (or rings the terminal
+bell), CST prepends `?` to its internal pane tab and the outer Windows Terminal tab title.
+That ordinary completion marker is acknowledged when the pane is focused or receives input.
+
+Questions and plan approvals are authoritative rather than unread markers. CST follows the
+structured `ask_user` and `exit_plan_mode` lifecycle in the session event log, clears the
+outer spinner while Copilot waits, and keeps `?` visible even after the pane is focused.
+Copilot's repeated working-progress signal cannot dismiss the marker or restart the spinner;
+only the matching tool completion does. CST then resumes the pane's latest real progress
+state. No screen-text matching or prompt contents are used for this detection.
 
 ### Phone notifications with ntfy
 
@@ -392,9 +396,10 @@ Messages on public ntfy servers may be readable by anyone who discovers the topi
 
 Notifications are published for every configured work cycle regardless of whether the
 terminal tab is focused, giving the ntfy app a useful history. The default **Status only**
-mode sends `CST · <session title>` plus either `Ready for attention` or
-`Copilot reported an error`. Project paths, session IDs, prompts, visible chat text, tool
-output, and transcripts are not sent.
+mode sends `CST · <session title>` plus `Ready for attention`, `Question waiting for your
+response`, `Plan waiting for approval`, or `Copilot reported an error`. The **Ready Events**
+setting controls all three ready/question/approval messages. Project paths, session IDs,
+prompts, visible chat text, tool output, and transcripts are not sent.
 
 The opt-in **Latest response** mode appends the newest assistant message persisted during that
 specific work cycle, truncated below ntfy's 4,096-byte message limit. If no current response

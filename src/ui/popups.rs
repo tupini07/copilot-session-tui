@@ -716,6 +716,11 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
             &format!("{prefix} {prefix}"),
             "Send the prefix key itself",
         ));
+        text.push(help_line(
+            theme,
+            "?",
+            "Copilot is waiting for a response or has completed work",
+        ));
         text.push(help_line(theme, "", "These work from this list too"));
         text.push(Line::from(""));
         text.push(Line::from(Span::styled(

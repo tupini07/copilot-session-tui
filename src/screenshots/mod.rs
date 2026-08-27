@@ -157,6 +157,7 @@ fn workspace(sandbox: &Path) -> Result<String> {
             session_id: session_id.to_string(),
             program,
             args,
+            events_path: None,
         },
         rows,
         cols,

@@ -51,6 +51,26 @@ pub fn progress_sequence(params: &[&[u8]]) -> Option<Vec<u8>> {
     Some(sequence)
 }
 
+pub fn progress_sequence_for_state(state: ProgressState) -> Vec<u8> {
+    let state = match state {
+        ProgressState::Clear => 0,
+        ProgressState::Normal => 1,
+        ProgressState::Error => 2,
+        ProgressState::Indeterminate => 3,
+        ProgressState::Warning => 4,
+    };
+    format!("\x1b]9;4;{state};0\x1b\\").into_bytes()
+}
+
+pub fn progress_state_from_sequence(sequence: &[u8]) -> Option<ProgressState> {
+    let body = sequence
+        .strip_prefix(b"\x1b]")?
+        .strip_suffix(b"\x1b\\")
+        .or_else(|| sequence.strip_prefix(b"\x1b]")?.strip_suffix(b"\x07"))?;
+    let params: Vec<&[u8]> = body.split(|byte| *byte == b';').collect();
+    progress_state(&params)
+}
+
 fn parse_number(value: &[u8]) -> Option<u16> {
     if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
         return None;
@@ -94,5 +114,22 @@ mod tests {
         assert!(progress_sequence(&[b"9", b"4", b"5", b"0"]).is_none());
         assert!(progress_sequence(&[b"9", b"4", b"1", b"101"]).is_none());
         assert!(progress_sequence(&[b"9", b"4", b"busy", b"0"]).is_none());
+    }
+
+    #[test]
+    fn canonical_progress_sequences_round_trip() {
+        for state in [
+            ProgressState::Clear,
+            ProgressState::Normal,
+            ProgressState::Error,
+            ProgressState::Indeterminate,
+            ProgressState::Warning,
+        ] {
+            assert_eq!(
+                progress_state_from_sequence(&progress_sequence_for_state(state)),
+                Some(state)
+            );
+        }
+        assert!(progress_state_from_sequence(b"\x1b]52;c;copy\x1b\\").is_none());
     }
 }

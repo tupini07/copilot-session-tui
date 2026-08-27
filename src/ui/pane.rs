@@ -488,6 +488,7 @@ mod tests {
                 session_id: "booting-session".to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,

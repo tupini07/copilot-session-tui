@@ -1085,8 +1085,20 @@ fn toggle_attached_terminal(app: &mut App) {
     }
 }
 
+fn sync_outer_progress(app: &mut App) {
+    let state = app
+        .mux
+        .as_ref()
+        .and_then(|mux| mux.focused_pane())
+        .map(|pane| pane.effective_progress_state())
+        .unwrap_or(crate::host_terminal::ProgressState::Clear);
+    app.host_sequences
+        .push(crate::host_terminal::progress_sequence_for_state(state));
+}
+
 pub fn sync_workspace_panels(app: &mut App) {
     app.acknowledge_focused_pane();
+    sync_outer_progress(app);
     let Some((pane_id, session_id, title, cwd)) = focused_workspace_context(app) else {
         let _ = close_scratchpad(app);
         app.terminal.hide();
@@ -1101,6 +1113,7 @@ pub fn sync_workspace_panels(app: &mut App) {
         if !close_scratchpad(app) {
             return;
         }
+
         if app.scratchpad_open.contains(&pane_id) {
             match crate::scratchpad::Scratchpad::open(&session_id) {
                 Ok(scratchpad) => {
@@ -1389,6 +1402,8 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             for notification in notifications {
                 let kind = match notification {
                     PaneNotification::Ready => NotificationKind::Ready,
+                    PaneNotification::Question => NotificationKind::Question,
+                    PaneNotification::PlanApproval => NotificationKind::PlanApproval,
                     PaneNotification::Error => NotificationKind::Error,
                 };
                 app.enqueue_notification(kind, title.clone(), Some(&session_id));
@@ -1410,6 +1425,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 || notification_changed
         }
         MuxEvent::Exited(id, code) => {
+            let was_focused = app.mux.as_ref().is_some_and(|mux| mux.focused == Some(id));
             if let Some(mux) = app.mux.as_mut() {
                 if let Some(pane) = mux.pane_mut(id) {
                     pane.mark_exited(code);
@@ -1425,13 +1441,72 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 Some(0) | None => format!("Session '{title}' finished"),
                 Some(code) => format!("Session '{title}' exited with code {code}"),
             });
-            app.host_sequences
-                .push(crate::host_terminal::CLEAR_PROGRESS.to_vec());
+            if was_focused {
+                app.host_sequences
+                    .push(crate::host_terminal::CLEAR_PROGRESS.to_vec());
+            }
             true
         }
-        MuxEvent::HostSequence(sequence) => {
-            app.host_sequences.push(sequence);
-            true
+        MuxEvent::SessionLifecycle(id, event) => {
+            let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
+            let (notification, attention_changed, action_changed, title, session_id) = app
+                .mux
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .and_then(|pane| {
+                    if !pane.is_running() {
+                        return None;
+                    }
+                    let attention_before = pane.needs_attention();
+                    let action_before = pane.requires_user_action();
+                    let notification = pane.apply_lifecycle(event);
+                    Some((
+                        notification,
+                        attention_before != pane.needs_attention(),
+                        action_before != pane.requires_user_action(),
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                    ))
+                })
+                .unwrap_or_default();
+            if let Some(notification) = notification {
+                let kind = match notification {
+                    PaneNotification::Question => NotificationKind::Question,
+                    PaneNotification::PlanApproval => NotificationKind::PlanApproval,
+                    PaneNotification::Ready => NotificationKind::Ready,
+                    PaneNotification::Error => NotificationKind::Error,
+                };
+                app.enqueue_notification(kind, title, Some(&session_id));
+            }
+            if focused && action_changed {
+                sync_outer_progress(app);
+            }
+            focused || attention_changed || action_changed || notification.is_some()
+        }
+        MuxEvent::HostSequence(id, sequence) => {
+            let progress = crate::host_terminal::progress_state_from_sequence(&sequence);
+            if let Some(progress) = progress {
+                if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.pane_mut(id)) {
+                    if pane.is_running() {
+                        pane.record_progress_state(progress);
+                    }
+                }
+            }
+            let focused = app.mux.as_ref().and_then(|mux| mux.focused);
+            let waiting = app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane(id))
+                .is_some_and(|pane| pane.requires_user_action());
+            if progress.is_none()
+                || (focused == Some(id)
+                    && !progress.is_some_and(|state| state.is_working() && waiting))
+            {
+                app.host_sequences.push(sequence);
+                true
+            } else {
+                false
+            }
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
         MuxEvent::Term(_) => true,
@@ -1523,6 +1598,7 @@ mod tests {
                 session_id: session_id.to_string(),
                 program,
                 args,
+                events_path: None,
             },
             24,
             80,
@@ -2505,14 +2581,188 @@ mod tests {
 
     #[test]
     fn host_progress_sequences_still_request_the_outer_terminal_flush() {
-        let mut app = mux_app();
+        let mut app = attached_mux_app("foreground");
         let sequence = b"\x1b]9;4;3;0\x1b\\".to_vec();
 
         assert!(handle_mux_event(
             &mut app,
-            MuxEvent::HostSequence(sequence.clone())
+            MuxEvent::HostSequence(1, sequence.clone())
         ));
         assert_eq!(app.host_sequences, vec![sequence]);
+    }
+
+    #[test]
+    fn background_pane_progress_cannot_override_the_focused_tab_spinner() {
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        let sequence = b"\x1b]9;4;0;0\x1b\\".to_vec();
+
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(2, sequence)
+        ));
+        assert!(app.host_sequences.is_empty());
+    }
+
+    #[test]
+    fn progress_sequence_updates_background_state_before_a_focus_switch() {
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background");
+        app.mux.as_mut().unwrap().focused = Some(1);
+
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(2, b"\x1b]9;4;3;0\x1b\\".to_vec())
+        ));
+        handle_mux_event(
+            &mut app,
+            MuxEvent::Output(
+                2,
+                crate::mux::callbacks::PaneSignals {
+                    events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                        crate::host_terminal::ProgressState::Indeterminate,
+                    )],
+                    ..Default::default()
+                },
+            ),
+        );
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(2, b"\x1b]9;4;0;0\x1b\\".to_vec())
+        ));
+
+        app.mux.as_mut().unwrap().focused = Some(2);
+        app.view = View::Attached(2);
+        sync_workspace_panels(&mut app);
+        assert_eq!(
+            app.host_sequences.last(),
+            Some(&crate::host_terminal::CLEAR_PROGRESS.to_vec()),
+            "the clear sequence must be recorded before its later Output event"
+        );
+    }
+
+    #[test]
+    fn focused_question_clears_and_suppresses_progress_until_resolved() {
+        use crate::events::lifecycle::{InputKind, LifecycleEvent};
+
+        let mut app = attached_mux_app("foreground-question");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        app.terminal_focused = true;
+
+        let working = crate::mux::callbacks::PaneSignals {
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Indeterminate,
+            )],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, working.clone()));
+        app.host_sequences.clear();
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                1,
+                LifecycleEvent::InputRequested {
+                    tool_call_id: "question-1".into(),
+                    kind: InputKind::Question,
+                },
+            )
+        ));
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::CLEAR_PROGRESS.to_vec()]
+        );
+        assert_eq!(app.notification_requests.len(), 1);
+        assert_eq!(
+            app.notification_requests[0].kind,
+            NotificationKind::Question
+        );
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        app.acknowledge_focused_pane();
+        assert!(
+            app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention(),
+            "a focused question remains visible until it is answered"
+        );
+
+        app.host_sequences.clear();
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(1, b"\x1b]9;4;3;0\x1b\\".to_vec())
+        ));
+        assert!(app.host_sequences.is_empty());
+        handle_mux_event(&mut app, MuxEvent::Output(1, working));
+
+        handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                1,
+                LifecycleEvent::InputResolved {
+                    tool_call_id: "not-the-question".into(),
+                    kind: InputKind::Question,
+                },
+            ),
+        );
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        assert!(app.host_sequences.is_empty());
+
+        handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                1,
+                LifecycleEvent::InputResolved {
+                    tool_call_id: "question-1".into(),
+                    kind: InputKind::Question,
+                },
+            ),
+        );
+        assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::progress_sequence_for_state(
+                crate::host_terminal::ProgressState::Indeterminate
+            )]
+        );
+
+        let complete = crate::mux::callbacks::PaneSignals {
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(
+                crate::host_terminal::ProgressState::Clear,
+            )],
+            ..Default::default()
+        };
+        handle_mux_event(&mut app, MuxEvent::Output(1, complete));
+        assert_eq!(app.notification_requests.len(), 2);
+        assert_eq!(app.notification_requests[1].kind, NotificationKind::Ready);
+    }
+
+    #[test]
+    fn background_plan_approval_marks_attention_without_changing_outer_progress() {
+        use crate::events::lifecycle::{InputKind, LifecycleEvent};
+
+        let mut app = attached_mux_app("foreground");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        push_test_pane(&mut app, 2, "background-plan");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.host_sequences.clear();
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                2,
+                LifecycleEvent::InputRequested {
+                    tool_call_id: "plan-1".into(),
+                    kind: InputKind::PlanApproval,
+                },
+            )
+        ));
+        assert!(app.host_sequences.is_empty());
+        assert!(app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention());
+        assert_eq!(
+            app.notification_requests[0].kind,
+            NotificationKind::PlanApproval
+        );
     }
 
     #[test]
@@ -2691,15 +2941,55 @@ mod tests {
 
     #[test]
     fn exit_events_report_the_status() {
-        let mut app = mux_app();
+        use crate::events::lifecycle::{InputKind, LifecycleEvent};
+
+        let mut app = attached_mux_app("exiting");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(1, b"\x1b]9;4;3;0\x1b\\".to_vec()),
+        );
+        app.host_sequences.clear();
 
         assert!(handle_mux_event(&mut app, MuxEvent::Exited(1, Some(2))));
 
-        let message = app.status_message.unwrap();
+        let message = app.status_message.as_deref().unwrap();
         assert!(message.contains("code 2"), "unexpected message: {message}");
         assert_eq!(
             app.host_sequences,
             vec![crate::host_terminal::CLEAR_PROGRESS.to_vec()]
         );
+        let pane = app.mux.as_ref().unwrap().pane(1).unwrap();
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+        assert!(!pane.is_working());
+
+        app.host_sequences.clear();
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                1,
+                LifecycleEvent::InputRequested {
+                    tool_call_id: "late-question".into(),
+                    kind: InputKind::Question,
+                }
+            )
+        ));
+        assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
+        assert!(app.notification_requests.is_empty());
+        assert!(app.host_sequences.is_empty());
+    }
+
+    #[test]
+    fn background_exit_does_not_clear_the_focused_pane_progress() {
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background");
+        app.mux.as_mut().unwrap().focused = Some(1);
+
+        assert!(handle_mux_event(&mut app, MuxEvent::Exited(2, Some(0))));
+        assert!(app.host_sequences.is_empty());
     }
 }
