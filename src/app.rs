@@ -118,6 +118,55 @@ pub enum SettingsEditField {
     TerminalShell,
     NtfyServer,
     NtfyTopic,
+    NtfyAccessToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    General,
+    Worktrees,
+    Terminal,
+    Notifications,
+}
+
+impl SettingsSection {
+    pub const ALL: [Self; 4] = [
+        Self::General,
+        Self::Worktrees,
+        Self::Terminal,
+        Self::Notifications,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Worktrees => "Worktrees",
+            Self::Terminal => "Terminal",
+            Self::Notifications => "Notifications",
+        }
+    }
+
+    pub const fn rows(self) -> &'static [usize] {
+        match self {
+            Self::General => &[0, 1, 2],
+            Self::Worktrees => &[3, 4],
+            Self::Terminal => &[5, 6, 7],
+            Self::Notifications => &[8, 9, 10, 11, 12, 13, 14],
+        }
+    }
+
+    pub fn next(self, forward: bool) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|section| *section == self)
+            .unwrap_or(0);
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,6 +447,7 @@ pub struct App {
     notification_worker: Option<NotificationWorker>,
     notification_pending: usize,
     notification_drain_started: Option<Instant>,
+    notification_cycle_offsets: HashMap<String, u64>,
     #[cfg(test)]
     pub notification_requests: Vec<NotificationRequest>,
     #[cfg(test)]
@@ -405,6 +455,7 @@ pub struct App {
     pub config: UserConfig,
     pub copilot_home: PathBuf,
     pub settings_selected: usize,
+    pub settings_section: SettingsSection,
     pub settings_editing: Option<SettingsEditField>,
     pub settings_input: String,
     pub project_settings: Option<ProjectSettings>,
@@ -527,6 +578,7 @@ impl App {
             notification_worker: None,
             notification_pending: 0,
             notification_drain_started: None,
+            notification_cycle_offsets: HashMap::new(),
             #[cfg(test)]
             notification_requests: Vec::new(),
             #[cfg(test)]
@@ -534,6 +586,7 @@ impl App {
             config,
             copilot_home: crate::session::loader::copilot_home(),
             settings_selected: 0,
+            settings_section: SettingsSection::General,
             settings_editing: None,
             settings_input: String::new(),
             project_settings: None,
@@ -1637,7 +1690,34 @@ impl App {
         self.detail_pending.is_some()
     }
 
-    pub fn enqueue_notification(&mut self, kind: NotificationKind, session_title: String) {
+    pub fn begin_notification_cycle(&mut self, session_id: &str) {
+        if session_id.is_empty() {
+            return;
+        }
+        if !self.config.notifications.enabled || !self.config.ntfy_verbose {
+            self.notification_cycle_offsets.remove(session_id);
+            return;
+        }
+        let length = std::fs::metadata(self.notification_events_path(session_id))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        self.notification_cycle_offsets
+            .insert(session_id.to_string(), length);
+    }
+
+    fn notification_events_path(&self, session_id: &str) -> PathBuf {
+        self.copilot_home
+            .join("session-state")
+            .join(session_id)
+            .join("events.jsonl")
+    }
+
+    pub fn enqueue_notification(
+        &mut self,
+        kind: NotificationKind,
+        session_title: String,
+        session_id: Option<&str>,
+    ) {
         if self.notification_drain_started.is_some() {
             return;
         }
@@ -1649,14 +1729,29 @@ impl App {
         if !configured.enabled || !event_enabled {
             return;
         }
-        if let Err(error) = config::validate_notification_config(configured) {
+        if let Err(error) = config::validate_user_notification_config(&self.config) {
             self.status_message = Some(format!("Notifications disabled: {error}"));
             return;
         }
+        let events_path = session_id
+            .filter(|session_id| self.config.ntfy_verbose && !session_id.is_empty())
+            .map(|session_id| self.notification_events_path(session_id));
+        let events_start = session_id
+            .and_then(|session_id| self.notification_cycle_offsets.get(session_id))
+            .copied();
+        let events_end = events_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len());
         let request = NotificationRequest {
             config: configured.clone(),
+            access_token: self.config.ntfy_access_token.clone(),
+            verbose: self.config.ntfy_verbose,
             session_title,
             kind,
+            events_path,
+            events_start,
+            events_end,
         };
         #[cfg(test)]
         {
@@ -3735,14 +3830,14 @@ mod tests {
 
         app.config.notifications.enabled = true;
         app.config.notifications.topic = "private_topic".to_string();
-        app.enqueue_notification(NotificationKind::Ready, "Late event".to_string());
+        app.enqueue_notification(NotificationKind::Ready, "Late event".to_string(), None);
         assert!(
             app.notification_requests.is_empty(),
             "draining rejects events that were not already accepted"
         );
 
         app.cancel_notification_drain();
-        app.enqueue_notification(NotificationKind::Ready, "Recovered event".to_string());
+        app.enqueue_notification(NotificationKind::Ready, "Recovered event".to_string(), None);
         assert_eq!(
             app.notification_requests.len(),
             1,
@@ -3752,5 +3847,22 @@ mod tests {
         assert!(app.exit_waits_for_notifications());
         app.notification_drain_started = Some(Instant::now() - Duration::from_secs(3));
         assert!(!app.exit_waits_for_notifications());
+    }
+
+    #[test]
+    fn disabling_detailed_notifications_invalidates_the_previous_cycle_offset() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.config.notifications.enabled = true;
+        app.config.ntfy_verbose = true;
+        app.begin_notification_cycle("session");
+        assert_eq!(
+            app.notification_cycle_offsets.get("session"),
+            Some(&0),
+            "a missing event log starts at byte zero"
+        );
+
+        app.config.ntfy_verbose = false;
+        app.begin_notification_cycle("session");
+        assert!(!app.notification_cycle_offsets.contains_key("session"));
     }
 }

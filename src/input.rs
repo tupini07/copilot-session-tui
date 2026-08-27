@@ -1,6 +1,6 @@
 use crate::app::{
-    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, TakeoverTarget,
-    View,
+    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField,
+    SettingsSection, TakeoverTarget, View,
 };
 use crate::config;
 use crate::session::loader;
@@ -309,6 +309,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char(',') => {
             app.settings_selected = 0;
+            app.settings_section = SettingsSection::General;
             app.settings_editing = None;
             app.settings_input.clear();
             app.mode = Mode::Settings;
@@ -784,8 +785,6 @@ fn handle_help(app: &mut App, key: KeyCode) {
     }
 }
 
-const SETTINGS_COUNT: usize = 13;
-
 fn handle_settings(app: &mut App, key: KeyCode) {
     if let Some(field) = app.settings_editing {
         match key {
@@ -805,7 +804,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
 
     match key {
         KeyCode::Esc | KeyCode::Char(',') => {
-            if let Err(error) = config::validate_notification_config(&app.config.notifications) {
+            if let Err(error) = config::validate_user_notification_config(&app.config) {
                 app.status_message = Some(error.to_string());
                 return;
             }
@@ -820,12 +819,28 @@ fn handle_settings(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.settings_selected = app.settings_selected.saturating_sub(1);
+            let rows = app.settings_section.rows();
+            let position = rows
+                .iter()
+                .position(|row| *row == app.settings_selected)
+                .unwrap_or(0);
+            app.settings_selected = rows[position.saturating_sub(1)];
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.settings_selected + 1 < SETTINGS_COUNT {
-                app.settings_selected += 1;
-            }
+            let rows = app.settings_section.rows();
+            let position = rows
+                .iter()
+                .position(|row| *row == app.settings_selected)
+                .unwrap_or(0);
+            app.settings_selected = rows[(position + 1).min(rows.len() - 1)];
+        }
+        KeyCode::Tab | KeyCode::Right => {
+            app.settings_section = app.settings_section.next(true);
+            app.settings_selected = app.settings_section.rows()[0];
+        }
+        KeyCode::BackTab | KeyCode::Left => {
+            app.settings_section = app.settings_section.next(false);
+            app.settings_selected = app.settings_section.rows()[0];
         }
         KeyCode::Enter | KeyCode::Char(' ') => match app.settings_selected {
             0 => {
@@ -877,10 +892,18 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::NtfyTopic,
                 app.config.notifications.topic.clone(),
             ),
-            11 => {
+            11 => begin_global_edit(
+                app,
+                SettingsEditField::NtfyAccessToken,
+                app.config.ntfy_access_token.clone(),
+            ),
+            12 => {
+                app.config.ntfy_verbose = !app.config.ntfy_verbose;
+            }
+            13 => {
                 app.config.notifications.ready = !app.config.notifications.ready;
             }
-            12 => {
+            14 => {
                 app.config.notifications.error = !app.config.notifications.error;
             }
             _ => {}
@@ -945,6 +968,13 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
                 }
             }
             app.config.notifications.topic = value;
+        }
+        SettingsEditField::NtfyAccessToken => {
+            if let Err(error) = config::validate_ntfy_access_token(&value) {
+                app.status_message = Some(error.to_string());
+                return;
+            }
+            app.config.ntfy_access_token = value;
         }
     }
     app.settings_editing = None;
@@ -1298,6 +1328,7 @@ mod tests {
     fn notification_settings_toggle_and_require_a_topic_before_save() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::Notifications;
         app.settings_selected = 8;
 
         handle_settings(&mut app, KeyCode::Enter);
@@ -1311,12 +1342,38 @@ mod tests {
             .unwrap()
             .contains("topic is required"));
 
-        app.settings_selected = 11;
+        app.settings_selected = 13;
         handle_settings(&mut app, KeyCode::Enter);
         assert!(!app.config.notifications.ready);
-        app.settings_selected = 12;
+        app.settings_selected = 14;
         handle_settings(&mut app, KeyCode::Enter);
         assert!(!app.config.notifications.error);
+    }
+
+    #[test]
+    fn global_settings_tabs_keep_selection_inside_the_active_section() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        assert_eq!(
+            SettingsSection::ALL
+                .into_iter()
+                .flat_map(|section| section.rows().iter().copied())
+                .collect::<Vec<_>>(),
+            (0..15).collect::<Vec<_>>(),
+            "each settings row must belong to exactly one section"
+        );
+
+        handle_settings(&mut app, KeyCode::Tab);
+        assert_eq!(app.settings_section, SettingsSection::Worktrees);
+        assert_eq!(app.settings_selected, 3);
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.settings_selected, 4);
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.settings_selected, 4);
+
+        handle_settings(&mut app, KeyCode::BackTab);
+        assert_eq!(app.settings_section, SettingsSection::General);
+        assert_eq!(app.settings_selected, 0);
     }
 
     #[test]

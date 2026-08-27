@@ -2,6 +2,9 @@
 
 use crate::config::{normalize_ntfy_server, NotificationConfig};
 use serde::Serialize;
+use serde_json::Value;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -9,6 +12,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const ATTEMPTS: usize = 2;
 const MAX_TITLE_CHARS: usize = 120;
+const MAX_MESSAGE_BYTES: usize = 3_500;
+const EVENT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationKind {
@@ -42,8 +47,13 @@ impl NotificationKind {
 #[derive(Debug, Clone)]
 pub struct NotificationRequest {
     pub config: NotificationConfig,
+    pub access_token: String,
+    pub verbose: bool,
     pub session_title: String,
     pub kind: NotificationKind,
+    pub events_path: Option<PathBuf>,
+    pub events_start: Option<u64>,
+    pub events_end: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +97,7 @@ impl NotificationWorker {
 
 #[derive(Serialize)]
 struct NtfyPayload<'a> {
+    topic: &'a str,
     message: &'a str,
     title: &'a str,
     priority: u8,
@@ -113,10 +124,13 @@ fn publish_once(request: &NotificationRequest) -> Result<(), PublishError> {
         .map_err(|_| PublishError::permanent("invalid ntfy server configuration"))?;
     crate::config::validate_ntfy_topic(request.config.topic.trim())
         .map_err(|_| PublishError::permanent("invalid ntfy topic configuration"))?;
-    let url = format!("{server}/{}", request.config.topic.trim());
+    crate::config::validate_ntfy_access_token(request.access_token.trim())
+        .map_err(|_| PublishError::permanent("invalid ntfy access token configuration"))?;
     let title = notification_title(&request.session_title);
+    let message = notification_message(request);
     let payload = NtfyPayload {
-        message: request.kind.message(),
+        topic: request.config.topic.trim(),
+        message: &message,
         title: &title,
         priority: request.kind.priority(),
         tags: request.kind.tags(),
@@ -125,15 +139,105 @@ fn publish_once(request: &NotificationRequest) -> Result<(), PublishError> {
         .timeout_global(Some(REQUEST_TIMEOUT))
         .build()
         .into();
-    agent
-        .post(&url)
+    let mut publish = agent
+        .post(&server)
         .header(
             "User-Agent",
             concat!("copilot-session-tui/", env!("CARGO_PKG_VERSION")),
         )
+        // Keep this exact: ntfy otherwise treats the body as an ordinary text publish.
+        .header("Content-Type", "application/json");
+    let token = request.access_token.trim();
+    if !token.is_empty() {
+        publish = publish.header("Authorization", &format!("Bearer {token}"));
+    }
+    publish
         .send_json(&payload)
         .map(|_| ())
         .map_err(sanitize_ureq_error)
+}
+
+fn notification_message(request: &NotificationRequest) -> String {
+    let status = request.kind.message();
+    if !request.verbose {
+        return status.to_string();
+    }
+    let context = match (
+        request.kind,
+        request.events_path.as_deref(),
+        request.events_start,
+        request.events_end,
+    ) {
+        (NotificationKind::Ready, Some(path), Some(start), Some(end)) if end > start => {
+            latest_assistant_message(path, start, end)
+        }
+        _ => None,
+    };
+    match context {
+        Some(context) => truncate_utf8(&format!("{status}\n\n{context}"), MAX_MESSAGE_BYTES),
+        None => format!("{status}\n\nNo assistant response was persisted for this work cycle."),
+    }
+}
+
+fn latest_assistant_message(path: &Path, cycle_start: u64, cycle_end: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len().min(cycle_end);
+    let start = cycle_start.max(length.saturating_sub(EVENT_TAIL_BYTES));
+    if start >= length {
+        return None;
+    }
+    let skip_partial = if start > 0 {
+        file.seek(SeekFrom::Start(start - 1)).ok()?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous).ok()?;
+        previous[0] != b'\n'
+    } else {
+        false
+    };
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![0; (length - start) as usize];
+    file.read_exact(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if skip_partial {
+        lines.next();
+    }
+    lines
+        .rev()
+        .filter(|line| line.contains("assistant.message"))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|event| {
+            (event["type"].as_str() == Some("assistant.message"))
+                .then(|| event["data"]["content"].as_str())
+                .flatten()
+                .map(sanitize_message)
+                .filter(|message| !message.is_empty())
+        })
+}
+
+fn sanitize_message(message: &str) -> String {
+    message
+        .chars()
+        .filter_map(|character| match character {
+            '\r' => None,
+            '\n' | '\t' => Some(character),
+            character if character.is_control() => Some(' '),
+            character => Some(character),
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn truncate_utf8(message: &str, max_bytes: usize) -> String {
+    if message.len() <= max_bytes {
+        return message.to_string();
+    }
+    let mut end = max_bytes.saturating_sub('…'.len_utf8()).min(message.len());
+    while !message.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}…", &message[..end])
 }
 
 fn notification_title(title: &str) -> String {
@@ -223,8 +327,13 @@ mod tests {
                 topic: "private_topic".to_string(),
                 ..NotificationConfig::default()
             },
+            access_token: String::new(),
+            verbose: false,
             session_title: "Plan review".to_string(),
             kind: NotificationKind::Ready,
+            events_path: None,
+            events_start: None,
+            events_end: None,
         };
 
         publish_once(&request).unwrap();
@@ -232,9 +341,24 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
 
-        assert!(request.starts_with("POST /private_topic HTTP/1.1"));
+        assert!(request.starts_with("POST / HTTP/1.1"));
+        let content_types: Vec<&str> = request
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.trim())
+            .collect();
+        assert_eq!(
+            content_types,
+            ["application/json"],
+            "ntfy requires one exact JSON media type:\n{request}"
+        );
         let body = request.split("\r\n\r\n").nth(1).unwrap();
         let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["topic"], "private_topic");
         assert_eq!(payload["title"], "CST · Plan review");
         assert_eq!(payload["message"], "Ready for attention");
         assert_eq!(payload["priority"], 3);
@@ -253,8 +377,13 @@ mod tests {
                 topic: "private_topic".to_string(),
                 ..NotificationConfig::default()
             },
+            access_token: String::new(),
+            verbose: false,
             session_title: "Agent".to_string(),
             kind: NotificationKind::Error,
+            events_path: None,
+            events_start: None,
+            events_end: None,
         };
 
         publish_once(&request).unwrap();
@@ -280,8 +409,13 @@ mod tests {
                         topic: "private_topic".to_string(),
                         ..NotificationConfig::default()
                     },
+                    access_token: String::new(),
+                    verbose: false,
                     session_title: title.to_string(),
                     kind: NotificationKind::Ready,
+                    events_path: None,
+                    events_start: None,
+                    events_end: None,
                 })
                 .unwrap();
         }
@@ -318,8 +452,13 @@ mod tests {
                 topic: "private_topic".to_string(),
                 ..NotificationConfig::default()
             },
+            access_token: String::new(),
+            verbose: false,
             session_title: "Retry".to_string(),
             kind: NotificationKind::Ready,
+            events_path: None,
+            events_start: None,
+            events_end: None,
         };
 
         publish_with_retry(&request).unwrap();
@@ -330,6 +469,196 @@ mod tests {
         request_receiver
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn access_token_uses_bearer_auth_without_entering_the_payload() {
+        let (url, request_receiver) = mock_server(200);
+        let request = NotificationRequest {
+            config: NotificationConfig {
+                enabled: true,
+                server: url,
+                topic: "private_topic".to_string(),
+                ..NotificationConfig::default()
+            },
+            access_token: "tk_example_private_token".to_string(),
+            verbose: false,
+            session_title: "Authenticated".to_string(),
+            kind: NotificationKind::Ready,
+            events_path: None,
+            events_start: None,
+            events_end: None,
+        };
+
+        publish_once(&request).unwrap();
+        let request = request_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization: bearer tk_example_private_token\r\n"));
+        assert!(!request_payload(&request)
+            .to_string()
+            .contains("tk_example_private_token"));
+    }
+
+    #[test]
+    fn verbose_mode_uses_the_latest_assistant_message_with_a_size_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({
+                    "type": "assistant.turn_start",
+                    "data": {"turnId": "current-turn"}
+                }),
+                serde_json::json!({
+                    "type": "assistant.message",
+                    "data": {"turnId": "current-turn", "content": "Older response"}
+                }),
+                serde_json::json!({
+                    "type": "assistant.message",
+                    "data": {
+                        "turnId": "current-turn",
+                        "content": format!("Useful final context {}", "🚀".repeat(2_000))
+                    }
+                })
+            ),
+        )
+        .unwrap();
+        let request = NotificationRequest {
+            config: NotificationConfig::default(),
+            access_token: String::new(),
+            verbose: true,
+            session_title: "Verbose".to_string(),
+            kind: NotificationKind::Ready,
+            events_path: Some(events),
+            events_start: Some(0),
+            events_end: Some(
+                std::fs::metadata(temp.path().join("events.jsonl"))
+                    .unwrap()
+                    .len(),
+            ),
+        };
+
+        let message = notification_message(&request);
+
+        assert!(message.starts_with("Ready for attention\n\nUseful final context"));
+        assert!(!message.contains("Older response"));
+        assert!(message.len() <= MAX_MESSAGE_BYTES);
+        assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn verbose_mode_never_reuses_a_previous_work_cycles_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        let previous = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "assistant.turn_start",
+                "data": {"turnId": "previous-turn"}
+            }),
+            serde_json::json!({
+                "type": "assistant.message",
+                "data": {"turnId": "previous-turn", "content": "Stale previous answer"}
+            })
+        );
+        std::fs::write(&events, &previous).unwrap();
+        let cycle_start = previous.len() as u64;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "assistant.turn_start",
+                        "data": {"turnId": "current-turn"}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut request = NotificationRequest {
+            config: NotificationConfig::default(),
+            access_token: String::new(),
+            verbose: true,
+            session_title: "Verbose".to_string(),
+            kind: NotificationKind::Ready,
+            events_path: Some(events.clone()),
+            events_start: Some(cycle_start),
+            events_end: Some(std::fs::metadata(&events).unwrap().len()),
+        };
+
+        let message = notification_message(&request);
+        assert!(message.contains("No assistant response was persisted"));
+        assert!(!message.contains("Stale previous answer"));
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "assistant.message",
+                        "data": {"turnId": "current-turn", "content": "Current answer"}
+                    })
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        request.events_end = Some(std::fs::metadata(&events).unwrap().len());
+        assert!(notification_message(&request).contains("Current answer"));
+
+        request.kind = NotificationKind::Error;
+        let error = notification_message(&request);
+        assert!(error.contains("No assistant response was persisted"));
+        assert!(!error.contains("Current answer"));
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly approved CST_NTFY_TEST_TOPIC"]
+    fn live_ntfy_parses_the_structured_json_payload() {
+        let topic = std::env::var("CST_NTFY_TEST_TOPIC")
+            .expect("set CST_NTFY_TEST_TOPIC only after the user approves the exact topic");
+        crate::config::validate_ntfy_topic(&topic).unwrap();
+        let request = NotificationRequest {
+            config: NotificationConfig {
+                enabled: true,
+                server: "https://ntfy.sh".to_string(),
+                topic: topic.clone(),
+                ..NotificationConfig::default()
+            },
+            access_token: String::new(),
+            verbose: false,
+            session_title: "Structured JSON E2E".to_string(),
+            kind: NotificationKind::Ready,
+            events_path: None,
+            events_start: None,
+            events_end: None,
+        };
+
+        if std::env::var_os("CST_NTFY_VERIFY_EXISTING").is_none() {
+            publish_once(&request).unwrap();
+        }
+
+        let mut response = ureq::get(format!("https://ntfy.sh/{topic}/json?poll=1&since=all"))
+            .call()
+            .unwrap();
+        let body = response.body_mut().read_to_string().unwrap();
+        let event = body
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| event["event"] == "message")
+            .expect("published message event");
+        assert_eq!(event["title"], "CST · Structured JSON E2E");
+        assert_eq!(event["message"], "Ready for attention");
     }
 
     fn mock_server(status: u16) -> (String, mpsc::Receiver<String>) {

@@ -77,6 +77,14 @@ pub struct UserConfig {
     #[serde(default)]
     pub notifications: NotificationConfig,
 
+    /// Kept at the root so older CST versions preserve it through `extra` when saving.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ntfy_access_token: String,
+
+    /// Kept at the root so older CST versions preserve it through `extra` when saving.
+    #[serde(default)]
+    pub ntfy_verbose: bool,
+
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }
@@ -139,6 +147,8 @@ impl Default for UserConfig {
             worktree: WorktreeConfig::default(),
             terminal: TerminalConfig::default(),
             notifications: NotificationConfig::default(),
+            ntfy_access_token: String::new(),
+            ntfy_verbose: false,
             extra: BTreeMap::new(),
         }
     }
@@ -440,6 +450,17 @@ pub fn validate_ntfy_topic(topic: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_ntfy_access_token(token: &str) -> Result<()> {
+    if token.len() > 512
+        || token.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || !character.is_ascii()
+        })
+    {
+        anyhow::bail!("ntfy access token must be printable ASCII without spaces");
+    }
+    Ok(())
+}
+
 pub fn normalize_ntfy_server(server: &str) -> Result<String> {
     let server = server.trim().trim_end_matches('/');
     let uri: ureq::http::Uri = server
@@ -452,10 +473,11 @@ pub fn normalize_ntfy_server(server: &str) -> Result<String> {
         || uri
             .authority()
             .is_none_or(|authority| !valid_http_authority(authority.as_str()))
+        || !matches!(uri.path(), "" | "/")
         || uri.query().is_some()
         || server.contains('#')
     {
-        anyhow::bail!("ntfy server must contain a valid host and no query or fragment");
+        anyhow::bail!("ntfy server must contain a valid host and no path, query, or fragment");
     }
     Ok(server.to_string())
 }
@@ -493,6 +515,14 @@ pub fn validate_notification_config(config: &NotificationConfig) -> Result<()> {
     }
     let _ = normalize_ntfy_server(&config.server)?;
     validate_ntfy_topic(config.topic.trim())?;
+    Ok(())
+}
+
+pub fn validate_user_notification_config(config: &UserConfig) -> Result<()> {
+    validate_notification_config(&config.notifications)?;
+    if config.notifications.enabled {
+        validate_ntfy_access_token(config.ntfy_access_token.trim())?;
+    }
     Ok(())
 }
 
@@ -712,8 +742,34 @@ mod tests {
         assert!(!config.notifications.enabled);
         assert_eq!(config.notifications.server, DEFAULT_NTFY_SERVER);
         assert!(config.notifications.topic.is_empty());
+        assert!(config.ntfy_access_token.is_empty());
+        assert!(!config.ntfy_verbose);
         assert!(config.notifications.ready);
         assert!(config.notifications.error);
+    }
+
+    #[test]
+    fn older_root_flattening_preserves_new_ntfy_credentials() {
+        #[derive(Serialize, Deserialize)]
+        struct OlderConfig {
+            #[serde(default)]
+            notifications: NotificationConfig,
+            #[serde(flatten)]
+            extra: BTreeMap<String, Value>,
+        }
+
+        let current = UserConfig {
+            ntfy_access_token: "tk_private_token".to_string(),
+            ntfy_verbose: true,
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        let old: OlderConfig = serde_json::from_str(&json).unwrap();
+        let rewritten = serde_json::to_string(&old).unwrap();
+        let restored: UserConfig = serde_json::from_str(&rewritten).unwrap();
+
+        assert_eq!(restored.ntfy_access_token, "tk_private_token");
+        assert!(restored.ntfy_verbose);
     }
 
     #[test]
@@ -742,6 +798,11 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+        notifications.server = "https://ntfy.example.test/unintended-topic".to_string();
+        assert!(
+            validate_notification_config(&notifications).is_err(),
+            "a server path would route JSON to the wrong ntfy topic"
+        );
 
         notifications.enabled = false;
         notifications.server.clear();
@@ -750,6 +811,20 @@ mod tests {
             validate_notification_config(&notifications).is_ok(),
             "disabled integration must not block unrelated settings saves"
         );
+
+        let mut config = UserConfig {
+            notifications: NotificationConfig {
+                enabled: true,
+                server: "https://ntfy.example.test".to_string(),
+                topic: "private_topic".to_string(),
+                ..NotificationConfig::default()
+            },
+            ntfy_access_token: "token with spaces".to_string(),
+            ..UserConfig::default()
+        };
+        assert!(validate_user_notification_config(&config).is_err());
+        config.ntfy_access_token = "tk_valid-token_123".to_string();
+        assert!(validate_user_notification_config(&config).is_ok());
     }
 
     #[test]

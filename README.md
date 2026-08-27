@@ -374,20 +374,37 @@ HTTP. The ntfy CLI is **not** required. Configure it from Global Settings (`,`):
     "topic": "long-private-random-topic",
     "ready": true,
     "error": true
-  }
+  },
+  "ntfy_access_token": "",
+  "ntfy_verbose": false
 }
 ```
 
 `https://ntfy.sh` is the default; self-hosted `http://` or `https://` servers are
-supported. ntfy topics are effectively passwords, so use a long, unguessable topic. CST
-masks it in the settings UI and never includes it in status/error output.
+supported. Set `ntfy_access_token` to an [ntfy access token](https://docs.ntfy.sh/config/#access-tokens)
+to publish with `Authorization: Bearer …`. The token is masked outside edit mode and never
+included in status/error output, but it is stored in CST's local config file; use HTTPS and
+protect that file like any other credential. The token and detailed-mode switch are root-level
+fields so older CST instances preserve them if they save the shared config.
+
+Unauthenticated ntfy topics are effectively passwords, so use a long, unguessable topic.
+Messages on public ntfy servers may be readable by anyone who discovers the topic.
 
 Notifications are published for every configured work cycle regardless of whether the
-terminal tab is focused, giving the ntfy app a useful history. Payloads are intentionally
-title-only: `CST · <session title>` plus either `Ready for attention` or
+terminal tab is focused, giving the ntfy app a useful history. The default **Status only**
+mode sends `CST · <session title>` plus either `Ready for attention` or
 `Copilot reported an error`. Project paths, session IDs, prompts, visible chat text, tool
-output, and transcripts are never sent. Delivery is serialized on a background worker
-with bounded timeout/retry behavior, so it cannot block typing or Copilot output.
+output, and transcripts are not sent.
+
+The opt-in **Latest response** mode appends the newest assistant message persisted during that
+specific work cycle, truncated below ntfy's 4,096-byte message limit. If no current response
+is safely available—such as an error before Copilot writes one—the notification says so rather
+than reusing stale text from an older turn. Detailed content can contain source code, paths,
+task details, or other sensitive conversation data. Prefer an authenticated private deployment;
+CST warns but does not block this mode on an unauthenticated or public server. It reads the
+existing session event log and does not make an additional model call. Delivery is serialized
+on a background worker with bounded timeout/retry behavior, so it cannot block typing or
+Copilot output.
 
 This integration is outbound only. Replies, Telegram bots, remote approvals, arbitrary
 keypresses, and remote session control are intentionally unsupported.

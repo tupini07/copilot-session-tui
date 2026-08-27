@@ -1354,30 +1354,44 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         MuxEvent::Output(id, signals) => {
             let attended = app.terminal_focused
                 && matches!(app.view, View::Attached(focused) if focused == id);
-            let (outcome, notifications, attention_changed, title_changed, title) = app
+            let (
+                outcome,
+                notifications,
+                attention_changed,
+                title_changed,
+                cycle_started,
+                title,
+                session_id,
+            ) = app
                 .mux
                 .as_mut()
                 .and_then(|mux| mux.pane_mut(id))
                 .map(|pane| {
                     let before = pane.needs_attention();
                     let title_before = pane.title.clone();
+                    let cycle_started = signals_start_cycle(pane.is_working(), &signals.events);
                     let (outcome, notifications) = pane.apply_signals(signals, attended);
                     (
                         outcome,
                         notifications,
                         before != pane.needs_attention(),
                         title_before != pane.title,
+                        cycle_started,
                         pane.title.clone(),
+                        pane.session_id.clone(),
                     )
                 })
                 .unwrap_or_default();
+            if cycle_started {
+                app.begin_notification_cycle(&session_id);
+            }
             let notification_changed = !notifications.is_empty();
             for notification in notifications {
                 let kind = match notification {
                     PaneNotification::Ready => NotificationKind::Ready,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                app.enqueue_notification(kind, title.clone());
+                app.enqueue_notification(kind, title.clone(), Some(&session_id));
             }
             if outcome.bell {
                 if let Some(title) = app
@@ -1423,6 +1437,25 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
     }
 }
 
+fn signals_start_cycle(
+    initially_working: bool,
+    events: &[crate::mux::callbacks::PaneSignalEvent],
+) -> bool {
+    let mut working = initially_working;
+    let mut started = false;
+    for event in events {
+        if let crate::mux::callbacks::PaneSignalEvent::Progress(progress) = event {
+            if progress.is_working() {
+                started |= !working;
+                working = true;
+            } else {
+                working = false;
+            }
+        }
+    }
+    started
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,6 +1472,22 @@ mod tests {
         app.disable_workspace_state_persistence();
         app.disable_config_persistence();
         app
+    }
+
+    #[test]
+    fn a_clear_then_working_batch_starts_a_fresh_notification_cycle() {
+        use crate::host_terminal::ProgressState::{Clear, Indeterminate};
+        use crate::mux::callbacks::PaneSignalEvent::Progress;
+
+        assert!(!signals_start_cycle(true, &[Progress(Clear)]));
+        assert!(signals_start_cycle(
+            true,
+            &[Progress(Clear), Progress(Indeterminate)]
+        ));
+        assert!(signals_start_cycle(
+            false,
+            &[Progress(Indeterminate), Progress(Clear)]
+        ));
     }
 
     fn attached_mux_app(session_id: &str) -> App {
@@ -2585,6 +2634,9 @@ mod tests {
         let mut app = attached_mux_app("notification-history");
         app.config.notifications.enabled = true;
         app.config.notifications.topic = "private_topic".to_string();
+        app.config.ntfy_verbose = true;
+        let copilot_home = tempfile::tempdir().unwrap();
+        app.copilot_home = copilot_home.path().to_path_buf();
         app.terminal_focused = true;
 
         let ready = crate::mux::callbacks::PaneSignals {
@@ -2601,6 +2653,17 @@ mod tests {
         handle_mux_event(&mut app, MuxEvent::Output(1, ready));
         assert!(!app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention());
         assert_eq!(app.notification_requests[0].kind, NotificationKind::Ready);
+        assert_eq!(
+            app.notification_requests[0].events_path.as_deref(),
+            Some(
+                copilot_home
+                    .path()
+                    .join("session-state")
+                    .join("notification-history")
+                    .join("events.jsonl")
+                    .as_path()
+            )
+        );
 
         let error = crate::mux::callbacks::PaneSignals {
             events: vec![crate::mux::callbacks::PaneSignalEvent::Progress(

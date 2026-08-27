@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DeleteTarget, SettingsEditField};
+use crate::app::{App, DeleteTarget, SettingsEditField, SettingsSection};
 
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -728,9 +728,36 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
 
     let inner = block.inner(area);
     f.render_widget(block, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let mut tab_spans = vec![Span::raw("  ")];
+    for section in SettingsSection::ALL {
+        let selected = section == app.settings_section;
+        tab_spans.push(Span::styled(
+            format!(" {} ", section.label()),
+            if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+        tab_spans.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(tab_spans)), sections[0]);
 
     let mut lines: Vec<Line> = Vec::new();
     let mut setting_lines = vec![1usize, 4, 7, 10, 13, 16, 19, 22];
+    let general_start = lines.len();
 
     lines.push(Line::from(""));
 
@@ -809,6 +836,8 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     )));
 
     lines.push(Line::from(""));
+    let general_end = lines.len();
+    let worktrees_start = lines.len();
     let prefix_editing = app.settings_editing == Some(SettingsEditField::BranchPrefix);
     let prefix_display = if prefix_editing {
         format!("{}█", app.settings_input)
@@ -847,6 +876,8 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     )));
 
     lines.push(Line::from(""));
+    let worktrees_end = lines.len();
+    let terminal_start = lines.len();
     let mux_value = if app.mux_on_disk { "ON" } else { "OFF" };
     let mux_color = if app.mux_on_disk {
         Color::Green
@@ -914,6 +945,8 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     )));
 
     lines.push(Line::from(""));
+    let terminal_end = lines.len();
+    let notifications_start = lines.len();
     lines.push(Line::from(Span::styled(
         "  Notifications (ntfy HTTP)",
         Style::default()
@@ -988,6 +1021,58 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     setting_lines.push(lines.len());
+    let token_editing = app.settings_editing == Some(SettingsEditField::NtfyAccessToken);
+    let token_display = if token_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.ntfy_access_token.is_empty() {
+        "(not configured)".to_string()
+    } else {
+        "•••••••••••• (configured)".to_string()
+    };
+    lines.push(settings_row(
+        "Access Token",
+        &token_display,
+        if app.config.ntfy_access_token.is_empty() && app.settings_input.is_empty() {
+            Color::DarkGray
+        } else {
+            Color::Cyan
+        },
+        app.settings_selected == 11,
+        token_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Optional Bearer token; stored in config, so prefer HTTPS",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        "Detailed Content",
+        if app.config.ntfy_verbose {
+            "LATEST RESPONSE"
+        } else {
+            "STATUS ONLY"
+        },
+        if app.config.ntfy_verbose {
+            Color::Yellow
+        } else {
+            Color::Green
+        },
+        app.settings_selected == 12,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    May send sensitive assistant text; use a private authenticated server",
+        Style::default().fg(if app.config.ntfy_verbose {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        }),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
     lines.push(settings_row(
         "Ready Events",
         if app.config.notifications.ready {
@@ -1000,7 +1085,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         } else {
             Color::Red
         },
-        app.settings_selected == 11,
+        app.settings_selected == 13,
         false,
     ));
     lines.push(Line::from(Span::styled(
@@ -1022,7 +1107,7 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         } else {
             Color::Red
         },
-        app.settings_selected == 12,
+        app.settings_selected == 14,
         false,
     ));
     lines.push(Line::from(Span::styled(
@@ -1030,27 +1115,43 @@ pub fn draw_settings(f: &mut Frame, app: &App) {
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(""));
+    let notifications_end = lines.len();
 
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
-        Span::raw(" Edit/Toggle  "),
-        Span::styled("Esc/,", Style::default().fg(Color::Magenta)),
-        Span::raw(" Save & Close"),
-    ]));
+    let (section_start, section_end) = match app.settings_section {
+        SettingsSection::General => (general_start, general_end),
+        SettingsSection::Worktrees => (worktrees_start, worktrees_end),
+        SettingsSection::Terminal => (terminal_start, terminal_end),
+        SettingsSection::Notifications => (notifications_start, notifications_end),
+    };
+    let visible_lines = lines[section_start..section_end].to_vec();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Tab/Shift+Tab", Style::default().fg(Color::Magenta)),
+            Span::raw(" Section  "),
+            Span::styled("↑/↓", Style::default().fg(Color::Magenta)),
+            Span::raw(" Select  "),
+            Span::styled("Enter/Space", Style::default().fg(Color::Magenta)),
+            Span::raw(" Edit/Toggle  "),
+            Span::styled("Esc/,", Style::default().fg(Color::Magenta)),
+            Span::raw(" Save"),
+        ])),
+        sections[3],
+    );
 
-    let viewport = inner.height as usize;
+    let viewport = sections[2].height as usize;
     let selected_line = setting_lines
         .get(app.settings_selected)
         .copied()
-        .unwrap_or_default();
-    let max_scroll = lines.len().saturating_sub(viewport);
+        .unwrap_or(section_start)
+        .saturating_sub(section_start);
+    let max_scroll = visible_lines.len().saturating_sub(viewport);
     let scroll = selected_line
-        .saturating_sub(2)
+        .saturating_sub(1)
         .min(max_scroll)
         .min(u16::MAX as usize) as u16;
-    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
-    f.render_widget(paragraph, inner);
+    let paragraph = Paragraph::new(visible_lines).scroll((scroll, 0));
+    f.render_widget(paragraph, sections[2]);
 }
 
 pub fn draw_project_settings(f: &mut Frame, app: &App) {
@@ -1329,9 +1430,11 @@ mod help_tests {
     #[test]
     fn notification_settings_mask_the_saved_topic_but_reveal_it_while_editing() {
         let mut app = App::new(Vec::new(), UserConfig::default());
-        app.settings_selected = 12;
+        app.settings_section = SettingsSection::Notifications;
+        app.settings_selected = 14;
         app.config.notifications.enabled = true;
         app.config.notifications.topic = "super_secret_phone_topic".to_string();
+        app.config.ntfy_access_token = "tk_super_secret_token".to_string();
         let mut terminal = Terminal::new(TestBackend::new(100, 35)).unwrap();
 
         terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
@@ -1343,13 +1446,17 @@ mod help_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(text.contains("Notifications (ntfy HTTP)"), "got:\n{text}");
+        assert!(text.contains("General   Worktrees   Terminal   Notifications"));
         assert!(text.contains("Error Events"), "got:\n{text}");
-        assert!(text.contains("Save & Close"), "got:\n{text}");
+        assert!(text.contains("Tab/Shift+Tab"), "got:\n{text}");
         assert!(text.contains("(configured)"), "got:\n{text}");
         assert!(
             !text.contains("super_secret_phone_topic"),
             "topic leaked outside edit mode:\n{text}"
+        );
+        assert!(
+            !text.contains("tk_super_secret_token"),
+            "token leaked outside edit mode:\n{text}"
         );
 
         app.settings_selected = 10;
@@ -1366,6 +1473,22 @@ mod help_tests {
         assert!(
             editing.contains("super_secret_phone_topic█"),
             "editable topic and cursor missing:\n{editing}"
+        );
+
+        app.settings_selected = 11;
+        app.settings_editing = Some(SettingsEditField::NtfyAccessToken);
+        app.settings_input = "tk_super_secret_token".to_string();
+        terminal.draw(|frame| draw_settings(frame, &app)).unwrap();
+        let editing: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            editing.contains("tk_super_secret_token█"),
+            "editable token and cursor missing:\n{editing}"
         );
     }
 }

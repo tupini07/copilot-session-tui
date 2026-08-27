@@ -180,6 +180,10 @@ impl Pane {
         self.status == PaneStatus::Running
     }
 
+    pub fn is_working(&self) -> bool {
+        self.working
+    }
+
     /// True while the child has produced nothing visible yet.
     ///
     /// Copilot takes a few seconds to draw its first frame, and ConPTY emits control
