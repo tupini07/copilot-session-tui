@@ -448,6 +448,12 @@ pub struct App {
     notification_pending: usize,
     notification_drain_started: Option<Instant>,
     notification_cycle_offsets: HashMap<String, u64>,
+    config_reload_pending: bool,
+    global_config_path: PathBuf,
+    applied_config_revision: Option<config::ConfigRevision>,
+    config_watch_revision: Arc<std::sync::Mutex<Option<config::ConfigRevision>>>,
+    settings_config_revision: Option<config::ConfigRevision>,
+    last_config_reload_attempt: Instant,
     #[cfg(test)]
     pub notification_requests: Vec<NotificationRequest>,
     #[cfg(test)]
@@ -579,6 +585,12 @@ impl App {
             notification_pending: 0,
             notification_drain_started: None,
             notification_cycle_offsets: HashMap::new(),
+            config_reload_pending: false,
+            global_config_path: config::config_path(),
+            applied_config_revision: None,
+            config_watch_revision: Arc::new(std::sync::Mutex::new(None)),
+            settings_config_revision: None,
+            last_config_reload_attempt: Instant::now() - Duration::from_secs(1),
             #[cfg(test)]
             notification_requests: Vec::new(),
             #[cfg(test)]
@@ -684,7 +696,7 @@ impl App {
 
     pub fn open_snippets(&mut self) {
         let (global, global_error) = if self.config_persistence_enabled {
-            match config::load_checked() {
+            match config::load_checked_from(&self.global_config_path) {
                 Ok(persisted) => {
                     let snippets = persisted.snippets.clone();
                     self.adopt_persisted_config(persisted);
@@ -784,10 +796,118 @@ impl App {
     fn adopt_persisted_config(&mut self, mut persisted: UserConfig) {
         // Mux is fixed for the lifetime of this App, including a CLI-only override.
         // Remember the refreshed disk value for future saves but keep the live mode.
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        let favorites_changed = self.config.favorites != persisted.favorites;
         let runtime_mux = self.config.mux;
         self.mux_on_disk = persisted.mux;
         persisted.mux = runtime_mux;
+        match KeyChord::parse(&persisted.mux_prefix) {
+            Some(prefix) => {
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.prefix = prefix;
+                }
+            }
+            None => {
+                self.status_message = Some(format!(
+                    "Cannot apply invalid mux prefix '{}' from global settings",
+                    persisted.mux_prefix
+                ));
+                persisted.mux_prefix = self.config.mux_prefix.clone();
+            }
+        }
         self.config = persisted;
+        if let Some(settings) = self.project_settings.as_mut() {
+            settings.refresh_global(&self.config);
+        }
+        if favorites_changed {
+            self.apply_filter();
+            if let Some(session_id) = selected_id {
+                self.focus_session(&session_id);
+            }
+        }
+    }
+
+    pub fn request_config_reload(&mut self) -> bool {
+        if !self.config_persistence_enabled {
+            return false;
+        }
+        if self.mode == Mode::Settings {
+            if config::config_revision(&self.global_config_path)
+                .ok()
+                .as_ref()
+                == self.settings_config_revision.as_ref()
+            {
+                return false;
+            }
+            self.config_reload_pending = true;
+            return false;
+        }
+        self.config_reload_pending = false;
+        self.last_config_reload_attempt = Instant::now();
+        match config::load_existing_base_config_with_revision(&self.global_config_path) {
+            Ok(Some((mut persisted, revision))) => {
+                // Global snippets have an authoritative locked sidecar. Reloading the
+                // base config must not replace that live snapshot with a legacy field.
+                persisted.snippets = self.config.snippets.clone();
+                self.adopt_persisted_config(persisted);
+                self.set_applied_config_revision(revision);
+                true
+            }
+            Ok(None) => {
+                if self.applied_config_revision.is_none() {
+                    self.set_applied_config_revision(config::ConfigRevision::Missing);
+                } else {
+                    self.config_reload_pending = true;
+                }
+                false
+            }
+            Err(error) => {
+                self.config_reload_pending = true;
+                self.status_message = Some(format!("Cannot reload global settings: {error}"));
+                true
+            }
+        }
+    }
+
+    pub fn poll_config_reload(&mut self) -> bool {
+        if !self.config_reload_pending
+            || self.mode == Mode::Settings
+            || self.last_config_reload_attempt.elapsed() < Duration::from_secs(1)
+        {
+            return false;
+        }
+        self.request_config_reload()
+    }
+
+    fn set_applied_config_revision(&mut self, revision: config::ConfigRevision) {
+        self.applied_config_revision = Some(revision);
+        if let Ok(mut watched) = self.config_watch_revision.lock() {
+            *watched = Some(revision);
+        }
+    }
+
+    pub(crate) fn config_revision_handle(
+        &self,
+    ) -> Arc<std::sync::Mutex<Option<config::ConfigRevision>>> {
+        Arc::clone(&self.config_watch_revision)
+    }
+
+    pub(crate) fn config_revision_is_applied(&self, revision: config::ConfigRevision) -> bool {
+        self.applied_config_revision == Some(revision)
+    }
+
+    pub fn begin_global_settings(&mut self) {
+        self.request_config_reload();
+        self.settings_selected = 0;
+        self.settings_section = SettingsSection::General;
+        self.settings_editing = None;
+        self.settings_input.clear();
+        let current = config::config_revision(&self.global_config_path).ok();
+        self.settings_config_revision = (current == self.applied_config_revision)
+            .then_some(current)
+            .flatten();
+        self.config_reload_pending = false;
+        self.mode = Mode::Settings;
     }
 
     /// Status message that also warns when the prefix key had to be defaulted.
@@ -1583,16 +1703,93 @@ impl App {
     }
 
     /// Write the user config, unless a test has opted out of touching real files.
-    fn save_config(&self) -> anyhow::Result<()> {
+    fn save_config(&mut self) -> anyhow::Result<()> {
         if !self.config_persistence_enabled {
             return Ok(());
         }
-        config::save(&self.persistable_config())
+        let Some(expected) = self.applied_config_revision else {
+            anyhow::bail!(
+                "Global settings have no valid loaded revision; current file was not overwritten"
+            );
+        };
+        match config::save_if_revision(
+            &self.global_config_path,
+            Some(expected),
+            &self.persistable_config(),
+        )? {
+            config::ConfigSaveOutcome::Saved(revision) => {
+                self.set_applied_config_revision(revision);
+                Ok(())
+            }
+            config::ConfigSaveOutcome::Changed => {
+                self.config_reload_pending = true;
+                anyhow::bail!("Global settings changed in another instance; reload and retry")
+            }
+        }
+    }
+
+    pub(crate) fn save_global_settings(&mut self) -> anyhow::Result<()> {
+        if !self.config_persistence_enabled {
+            return Ok(());
+        }
+        let Some(expected) = self.settings_config_revision else {
+            match config::load_existing_base_config_with_revision(&self.global_config_path)? {
+                Some((mut persisted, revision)) => {
+                    persisted.snippets = self.config.snippets.clone();
+                    self.adopt_persisted_config(persisted);
+                    self.set_applied_config_revision(revision);
+                    self.settings_config_revision = Some(revision);
+                    self.config_reload_pending = false;
+                    anyhow::bail!(
+                        "Reloaded restored global settings instead of overwriting them; review and save again"
+                    );
+                }
+                None => anyhow::bail!(
+                    "Global settings file is temporarily unavailable; current values were not overwritten"
+                ),
+            }
+        };
+        match config::save_if_revision(
+            &self.global_config_path,
+            Some(expected),
+            &self.persistable_config(),
+        )? {
+            config::ConfigSaveOutcome::Saved(revision) => {
+                self.set_applied_config_revision(revision);
+                self.settings_config_revision = Some(revision);
+                self.config_reload_pending = false;
+                Ok(())
+            }
+            config::ConfigSaveOutcome::Changed => {
+                let Some((mut persisted, revision)) =
+                    config::load_existing_base_config_with_revision(&self.global_config_path)?
+                else {
+                    self.config_reload_pending = true;
+                    self.settings_config_revision = None;
+                    anyhow::bail!(
+                        "Global settings file is temporarily unavailable; current values were not overwritten"
+                    );
+                };
+                persisted.snippets = self.config.snippets.clone();
+                self.adopt_persisted_config(persisted);
+                self.set_applied_config_revision(revision);
+                self.settings_config_revision = Some(revision);
+                self.config_reload_pending = false;
+                anyhow::bail!(
+                    "Global settings changed in another instance; reloaded them instead of overwriting"
+                );
+            }
+        }
     }
 
     #[cfg(test)]
     pub fn disable_config_persistence(&mut self) {
         self.config_persistence_enabled = false;
+    }
+
+    #[cfg(test)]
+    fn set_global_config_path(&mut self, path: PathBuf) {
+        self.global_config_path = path;
     }
 
     #[cfg(test)]
@@ -1694,10 +1891,6 @@ impl App {
         if session_id.is_empty() {
             return;
         }
-        if !self.config.notifications.enabled || !self.config.ntfy_verbose {
-            self.notification_cycle_offsets.remove(session_id);
-            return;
-        }
         let length = std::fs::metadata(self.notification_events_path(session_id))
             .map(|metadata| metadata.len())
             .unwrap_or(0);
@@ -1721,7 +1914,25 @@ impl App {
         if self.notification_drain_started.is_some() {
             return;
         }
-        let configured = &self.config.notifications;
+        // Notification routing and credentials are side-effect-critical. While
+        // Settings is open, read a separate disk snapshot so unsaved UI edits remain
+        // untouched but another instance can still revoke or redirect delivery.
+        let effective = if self.mode == Mode::Settings {
+            match config::load_existing_base_config(&self.global_config_path) {
+                Ok(Some(config)) => config,
+                Ok(None) => return,
+                Err(error) => {
+                    self.status_message = Some(format!(
+                        "Notification skipped: cannot read global settings: {error}"
+                    ));
+                    return;
+                }
+            }
+        } else {
+            self.request_config_reload();
+            self.config.clone()
+        };
+        let configured = &effective.notifications;
         let event_enabled = match kind {
             NotificationKind::Ready => configured.ready,
             NotificationKind::Error => configured.error,
@@ -1729,12 +1940,12 @@ impl App {
         if !configured.enabled || !event_enabled {
             return;
         }
-        if let Err(error) = config::validate_user_notification_config(&self.config) {
+        if let Err(error) = config::validate_user_notification_config(&effective) {
             self.status_message = Some(format!("Notifications disabled: {error}"));
             return;
         }
         let events_path = session_id
-            .filter(|session_id| self.config.ntfy_verbose && !session_id.is_empty())
+            .filter(|session_id| effective.ntfy_verbose && !session_id.is_empty())
             .map(|session_id| self.notification_events_path(session_id));
         let events_start = session_id
             .and_then(|session_id| self.notification_cycle_offsets.get(session_id))
@@ -1745,8 +1956,8 @@ impl App {
             .map(|metadata| metadata.len());
         let request = NotificationRequest {
             config: configured.clone(),
-            access_token: self.config.ntfy_access_token.clone(),
-            verbose: self.config.ntfy_verbose,
+            access_token: effective.ntfy_access_token,
+            verbose: effective.ntfy_verbose,
             session_title,
             kind,
             events_path,
@@ -2644,6 +2855,383 @@ mod tests {
         assert!(!app.mux_on_disk, "future saves retain the disk value");
         assert_eq!(app.config.model.as_deref(), Some("fresh-model"));
         assert_eq!(app.config.snippets[0].name, "Fresh");
+    }
+
+    #[test]
+    fn live_reload_adopts_notification_changes_and_runtime_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                mux: false,
+                mux_prefix: "C-a".to_string(),
+                notifications: crate::config::NotificationConfig {
+                    enabled: true,
+                    server: "https://ntfy.example.test".to_string(),
+                    topic: "new_topic".to_string(),
+                    ..Default::default()
+                },
+                ntfy_access_token: "tk_new_token".to_string(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(true);
+        app.mux_on_disk = true;
+        app.set_global_config_path(path.clone());
+
+        assert!(app.request_config_reload());
+
+        assert!(app.config.mux, "the running mux cannot change in place");
+        assert!(!app.mux_on_disk);
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix.label(),
+            "C-a",
+            "safe runtime settings update immediately"
+        );
+        assert_eq!(app.config.notifications.server, "https://ntfy.example.test");
+        assert_eq!(app.config.ntfy_access_token, "tk_new_token");
+    }
+
+    #[test]
+    fn live_reload_waits_until_the_settings_modal_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                model: Some("new-model".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path);
+        app.mode = Mode::Settings;
+        app.settings_input = "unsaved text".to_string();
+
+        assert!(!app.request_config_reload());
+        assert_eq!(app.settings_input, "unsaved text");
+        assert!(app.config.model.is_none());
+
+        app.mode = Mode::Normal;
+        assert!(app.poll_config_reload());
+        assert_eq!(app.config.model.as_deref(), Some("new-model"));
+    }
+
+    #[test]
+    fn opening_settings_loads_the_revision_used_as_its_save_baseline() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                model: Some("external".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.config.model = Some("stale".to_string());
+        app.set_global_config_path(path);
+
+        app.begin_global_settings();
+
+        assert_eq!(app.config.model.as_deref(), Some("external"));
+        assert!(app.settings_config_revision.is_some());
+    }
+
+    #[test]
+    fn invalid_config_cannot_be_overwritten_from_the_settings_modal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, "{invalid").unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+
+        app.begin_global_settings();
+        let error = app.save_global_settings().unwrap_err().to_string();
+
+        assert!(error.contains("Invalid global settings"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{invalid");
+    }
+
+    #[test]
+    fn invalid_reloaded_prefix_keeps_the_working_runtime_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                mux: true,
+                mux_prefix: "not-a-chord".to_string(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(true);
+        app.set_global_config_path(path);
+
+        assert!(app.request_config_reload());
+
+        assert_eq!(app.mux.as_ref().unwrap().prefix.label(), "C-b");
+        assert_eq!(app.config.mux_prefix, "C-b");
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("invalid mux prefix"));
+    }
+
+    #[test]
+    fn invalid_external_config_keeps_the_last_known_good_runtime_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, "{invalid").unwrap();
+        let mut app = app_with(false);
+        app.config.model = Some("known-good".to_string());
+        app.set_global_config_path(path.clone());
+
+        assert!(app.request_config_reload());
+
+        assert_eq!(app.config.model.as_deref(), Some("known-good"));
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("Cannot reload global settings"));
+        let save_error = app.save_config().unwrap_err().to_string();
+        assert!(save_error.contains("no valid loaded revision"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{invalid");
+    }
+
+    #[test]
+    fn temporarily_missing_config_keeps_the_last_known_good_runtime_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                model: Some("known-good".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        assert!(app.request_config_reload());
+        std::fs::remove_file(path).unwrap();
+
+        assert!(!app.request_config_reload());
+        assert_eq!(app.config.model.as_deref(), Some("known-good"));
+        assert!(app.config_reload_pending);
+    }
+
+    #[test]
+    fn first_run_missing_config_can_be_created_from_explicit_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        assert!(!app.request_config_reload());
+        app.config.model = Some("first-save".to_string());
+
+        app.save_config().unwrap();
+
+        let saved: UserConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("first-save"));
+    }
+
+    #[test]
+    fn external_favorite_changes_resort_without_losing_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                favorites: vec!["beta".to_string()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = App::new(
+            vec![
+                session("alpha", "project", "2026-08-21T10:00:00Z"),
+                session("beta", "project", "2026-08-20T10:00:00Z"),
+            ],
+            UserConfig::default(),
+        );
+        app.focus_session("alpha");
+        app.set_global_config_path(path);
+
+        assert!(app.request_config_reload());
+
+        assert_eq!(visible_ids(&app), vec!["beta", "alpha"]);
+        assert_eq!(app.selected_session().unwrap().id, "alpha");
+    }
+
+    #[test]
+    fn live_reload_refreshes_open_project_settings_global_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                worktree: crate::config::WorktreeConfig {
+                    branch_prefix: "fresh/".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.project_settings = Some(ProjectSettings::load(project.path(), &app.config).unwrap());
+        app.mode = Mode::ProjectSettings;
+        app.set_global_config_path(path);
+
+        assert!(app.request_config_reload());
+
+        assert_eq!(
+            app.project_settings
+                .as_ref()
+                .unwrap()
+                .effective_branch_prefix(),
+            "fresh/"
+        );
+    }
+
+    #[test]
+    fn redirected_config_reads_and_writes_the_same_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        app.begin_global_settings();
+        app.config.model = Some("saved-model".to_string());
+
+        app.save_global_settings().unwrap();
+
+        let saved: UserConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("saved-model"));
+    }
+
+    #[test]
+    fn settings_save_refuses_to_overwrite_another_instances_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                model: Some("initial".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path.clone());
+        app.begin_global_settings();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                model: Some("external".to_string()),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        app.config.model = Some("mine".to_string());
+
+        let error = app.save_global_settings().unwrap_err().to_string();
+
+        assert!(error.contains("changed in another instance"));
+        assert_eq!(app.config.model.as_deref(), Some("external"));
+        let saved: UserConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.model.as_deref(), Some("external"));
+    }
+
+    #[test]
+    fn settings_save_updates_its_revision_before_the_watcher_echoes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&UserConfig::default()).unwrap()).unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path);
+        app.begin_global_settings();
+        app.config.model = Some("mine".to_string());
+
+        app.save_global_settings().unwrap();
+
+        assert!(
+            !app.request_config_reload(),
+            "the watcher echo for this instance's own save must not look external"
+        );
+        assert!(!app.config_reload_pending);
+    }
+
+    #[test]
+    fn notification_enqueue_refreshes_external_routing_without_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UserConfig {
+                notifications: crate::config::NotificationConfig {
+                    enabled: true,
+                    server: "https://ntfy.example.test".to_string(),
+                    topic: "fresh_topic".to_string(),
+                    ..Default::default()
+                },
+                ntfy_access_token: "tk_fresh_token".to_string(),
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path);
+
+        app.enqueue_notification(NotificationKind::Ready, "Fresh route".to_string(), None);
+
+        assert_eq!(app.notification_requests.len(), 1);
+        assert_eq!(
+            app.notification_requests[0].config.server,
+            "https://ntfy.example.test"
+        );
+        assert_eq!(app.notification_requests[0].config.topic, "fresh_topic");
+        assert_eq!(app.notification_requests[0].access_token, "tk_fresh_token");
+    }
+
+    #[test]
+    fn notification_enqueue_honors_external_revocation_while_settings_are_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&UserConfig::default()).unwrap()).unwrap();
+        let mut app = app_with(false);
+        app.set_global_config_path(path);
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "stale_topic".to_string();
+        app.mode = Mode::Settings;
+
+        app.enqueue_notification(NotificationKind::Ready, "Revoked".to_string(), None);
+
+        assert!(
+            app.notification_requests.is_empty(),
+            "the current disk snapshot disabled notifications"
+        );
     }
 
     #[test]
@@ -3819,6 +4407,7 @@ mod tests {
     #[test]
     fn exit_uses_a_bounded_notification_drain_and_stops_new_enqueues() {
         let mut app = App::new(Vec::new(), UserConfig::default());
+        app.disable_config_persistence();
         app.notification_pending = 1;
 
         assert!(app.exit_waits_for_notifications());
@@ -3850,19 +4439,33 @@ mod tests {
     }
 
     #[test]
-    fn disabling_detailed_notifications_invalidates_the_previous_cycle_offset() {
+    fn every_work_cycle_refreshes_the_context_offset_even_when_detailed_is_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp
+            .path()
+            .join("session-state")
+            .join("session")
+            .join("events.jsonl");
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        std::fs::write(&events, "old").unwrap();
         let mut app = App::new(Vec::new(), UserConfig::default());
+        app.copilot_home = temp.path().to_path_buf();
         app.config.notifications.enabled = true;
         app.config.ntfy_verbose = true;
         app.begin_notification_cycle("session");
         assert_eq!(
             app.notification_cycle_offsets.get("session"),
-            Some(&0),
-            "a missing event log starts at byte zero"
+            Some(&3),
+            "the first cycle starts after existing events"
         );
 
+        std::fs::write(&events, "old-new").unwrap();
         app.config.ntfy_verbose = false;
         app.begin_notification_cycle("session");
-        assert!(!app.notification_cycle_offsets.contains_key("session"));
+        assert_eq!(
+            app.notification_cycle_offsets.get("session"),
+            Some(&7),
+            "a later detailed-mode change cannot reuse the previous cycle"
+        );
     }
 }

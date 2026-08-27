@@ -377,7 +377,44 @@ fn existing_or_current_dir(cwd: &str) -> String {
         .unwrap_or_else(|_| cwd.to_string())
 }
 
+fn spawn_config_watcher(
+    events: std::sync::mpsc::Sender<mux::MuxEvent>,
+    path: PathBuf,
+    applied: std::sync::Arc<std::sync::Mutex<Option<config::ConfigRevision>>>,
+    interval: std::time::Duration,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(interval);
+        let Ok(next) = config::config_revision(&path) else {
+            continue;
+        };
+        if applied
+            .lock()
+            .ok()
+            .is_some_and(|revision| *revision == Some(next))
+        {
+            continue;
+        }
+        if events.send(mux::MuxEvent::ConfigChanged).is_err() {
+            return;
+        }
+    })
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    let config_path = config::config_path();
+    // The watcher compares against the revision actually applied by App, so a quick
+    // A -> B -> A reversion cannot be hidden by a stale watcher-local baseline.
+    app.request_config_reload();
+    let _config_watcher = app.mux.as_ref().map(|mux| {
+        spawn_config_watcher(
+            mux.events.clone(),
+            config_path.clone(),
+            app.config_revision_handle(),
+            std::time::Duration::from_secs(1),
+        )
+    });
+    let mut last_non_mux_config_check = std::time::Instant::now();
     // In mux mode a dedicated thread feeds terminal events into the same channel as PTY
     // output, so the loop can wait on both at once instead of polling. Reading through
     // `paste` rebuilds the paste events Windows delivers as bare keystrokes; because the
@@ -403,6 +440,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     let mut last_paint = std::time::Instant::now();
 
     loop {
+        repaint |= app.poll_config_reload();
+        if app.mux.is_none()
+            && last_non_mux_config_check.elapsed() >= std::time::Duration::from_secs(1)
+        {
+            if let Ok(next) = config::config_revision(&config_path) {
+                if !app.config_revision_is_applied(next) {
+                    repaint |= app.request_config_reload();
+                }
+            }
+            last_non_mux_config_check = std::time::Instant::now();
+        }
         app.collapse_stopped_terminals();
 
         let desired_title = desired_terminal_title(app);
@@ -862,6 +910,45 @@ mod tests {
 
         app.detail_pending = Some(("large-session".to_string(), std::time::Instant::now()));
         assert_eq!(mux_wait_timeout(&app, false), 100);
+    }
+
+    #[test]
+    fn config_watcher_wakes_the_mux_only_after_content_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        std::fs::write(&path, r#"{"model":"first"}"#).unwrap();
+        let initial = config::config_revision(&path).unwrap();
+        let applied = std::sync::Arc::new(std::sync::Mutex::new(Some(initial)));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let watcher = spawn_config_watcher(
+            sender,
+            path.clone(),
+            std::sync::Arc::clone(&applied),
+            std::time::Duration::from_millis(5),
+        );
+
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_millis(30))
+            .is_err());
+        std::fs::write(&path, r#"{"model":"second"}"#).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(mux::MuxEvent::ConfigChanged)
+        ));
+        let second = config::config_revision(&path).unwrap();
+        *applied.lock().unwrap() = Some(second);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        while receiver.try_recv().is_ok() {}
+
+        std::fs::write(&path, r#"{"model":"first"}"#).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(mux::MuxEvent::ConfigChanged)
+        ));
+
+        drop(receiver);
+        std::fs::write(&path, r#"{"model":"third"}"#).unwrap();
+        watcher.join().unwrap();
     }
 
     #[test]

@@ -458,6 +458,14 @@ resuming an existing session, so a model or effort selected inside that conversa
 survives reopening it. `yolo` remains a launch policy and is applied on both new and
 resumed sessions.
 
+Running CST instances watch the global `config.json` and adopt changes made by another
+instance or an external editor without restarting. Notification routing and credentials
+are refreshed again immediately before each notification is queued. The current mux/non-mux mode remains
+fixed for the lifetime of a process, but a changed mux prefix takes effect live. Reload is
+deferred while Global Settings is open so unsaved input is not overwritten; invalid JSON
+leaves the last known-good runtime configuration active and reports an error. A temporarily
+missing file is also ignored instead of resetting a running instance to defaults.
+
 ```json
 {
   "yolo": false,

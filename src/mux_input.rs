@@ -1433,6 +1433,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             app.host_sequences.push(sequence);
             true
         }
+        MuxEvent::ConfigChanged => app.request_config_reload(),
         MuxEvent::Term(_) => true,
     }
 }

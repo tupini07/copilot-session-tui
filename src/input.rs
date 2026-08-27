@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::app::SettingsSection;
 use crate::app::{
     App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField,
-    SettingsSection, TakeoverTarget, View,
+    TakeoverTarget, View,
 };
 use crate::config;
 use crate::session::loader;
@@ -308,11 +310,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.mode = Mode::Help;
         }
         KeyCode::Char(',') => {
-            app.settings_selected = 0;
-            app.settings_section = SettingsSection::General;
-            app.settings_editing = None;
-            app.settings_input.clear();
-            app.mode = Mode::Settings;
+            app.begin_global_settings();
         }
         KeyCode::Char('.') => begin_project_settings(app),
         KeyCode::Char('u') => app.request_update(),
@@ -808,7 +806,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 app.status_message = Some(error.to_string());
                 return;
             }
-            match config::save(&app.persistable_config()) {
+            match app.save_global_settings() {
                 Ok(()) => {
                     app.mode = Mode::Normal;
                     app.status_message = Some("Global settings saved".to_string());
@@ -979,7 +977,7 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
     }
     app.settings_editing = None;
     app.settings_input.clear();
-    if let Err(error) = config::save(&app.persistable_config()) {
+    if let Err(error) = app.save_global_settings() {
         app.status_message = Some(format!("Failed to save global settings: {error}"));
     }
 }

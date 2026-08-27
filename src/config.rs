@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -282,6 +283,10 @@ impl ProjectSettings {
         self.config.snippets = snippets;
     }
 
+    pub fn refresh_global(&mut self, global: &UserConfig) {
+        self.global = global_worktree(global);
+    }
+
     fn worktree_mut(&mut self) -> &mut ProjectWorktreeConfig {
         self.config
             .worktree
@@ -379,8 +384,32 @@ pub fn load() -> UserConfig {
     config
 }
 
-pub fn load_checked() -> Result<UserConfig> {
-    load_checked_in(&config_path(), &global_snippets_path())
+pub(crate) fn load_checked_from(config_path: &Path) -> Result<UserConfig> {
+    let snippets_path = config_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("snippets.json");
+    load_checked_in(config_path, &snippets_path)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigRevision {
+    Missing,
+    Present([u8; 32]),
+}
+
+pub(crate) fn config_revision(path: &Path) -> Result<ConfigRevision> {
+    match fs::read(path) {
+        Ok(content) => Ok(content_revision(&content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ConfigRevision::Missing),
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to inspect global settings: {}", path.display())),
+    }
+}
+
+fn content_revision(content: &[u8]) -> ConfigRevision {
+    ConfigRevision::Present(Sha256::digest(content).into())
 }
 
 fn load_checked_in(config_path: &Path, snippets_path: &Path) -> Result<UserConfig> {
@@ -389,11 +418,25 @@ fn load_checked_in(config_path: &Path, snippets_path: &Path) -> Result<UserConfi
     Ok(config)
 }
 
-fn load_base_config(config_path: &Path) -> Result<UserConfig> {
+pub(crate) fn load_base_config(config_path: &Path) -> Result<UserConfig> {
+    Ok(load_existing_base_config(config_path)?.unwrap_or_default())
+}
+
+pub(crate) fn load_existing_base_config(config_path: &Path) -> Result<Option<UserConfig>> {
+    Ok(load_existing_base_config_with_revision(config_path)?.map(|(config, _revision)| config))
+}
+
+pub(crate) fn load_existing_base_config_with_revision(
+    config_path: &Path,
+) -> Result<Option<(UserConfig, ConfigRevision)>> {
     match fs::read_to_string(config_path) {
-        Ok(content) => serde_json::from_str(&content)
-            .with_context(|| format!("Invalid global settings in {}", config_path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
+        Ok(content) => {
+            let revision = content_revision(content.as_bytes());
+            serde_json::from_str(&content)
+                .map(|config| Some((config, revision)))
+                .with_context(|| format!("Invalid global settings in {}", config_path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error)
             .with_context(|| format!("Failed to read global settings: {}", config_path.display())),
     }
@@ -432,8 +475,30 @@ fn overlay_global_snippets_locked(config: &mut UserConfig, snippets_path: &Path)
     Ok(())
 }
 
-pub fn save(config: &UserConfig) -> Result<()> {
-    write_json_atomic(&config_path(), config)
+#[cfg(test)]
+pub(crate) fn save_to(path: &Path, config: &UserConfig) -> Result<()> {
+    let _lock = ConfigLock::acquire(path)?;
+    write_json_atomic(path, config)
+}
+
+pub(crate) enum ConfigSaveOutcome {
+    Saved(ConfigRevision),
+    Changed,
+}
+
+pub(crate) fn save_if_revision(
+    path: &Path,
+    expected: Option<ConfigRevision>,
+    config: &UserConfig,
+) -> Result<ConfigSaveOutcome> {
+    let _lock = ConfigLock::acquire(path)?;
+    let current = config_revision(path)?;
+    if expected.is_some_and(|expected| expected != current) {
+        return Ok(ConfigSaveOutcome::Changed);
+    }
+    Ok(ConfigSaveOutcome::Saved(write_json_atomic_with_revision(
+        path, config,
+    )?))
 }
 
 pub fn validate_ntfy_topic(topic: &str) -> Result<()> {
@@ -593,6 +658,41 @@ impl Drop for SnippetLock {
     }
 }
 
+struct ConfigLock {
+    file: fs::File,
+}
+
+impl ConfigLock {
+    fn acquire(config_path: &Path) -> Result<Self> {
+        let lock_path = config_path.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open config lock {}", lock_path.display()))?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file }),
+            Err(TryLockError::WouldBlock) => {
+                anyhow::bail!("Another CST instance is saving global settings")
+            }
+            Err(TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("Failed to lock {}", lock_path.display()))
+            }
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 fn load_project_config(repository_root: &Path) -> Result<ProjectConfig> {
     let path = project_config_path(repository_root);
     if !path.exists() {
@@ -622,22 +722,30 @@ fn save_project_config(repository_root: &Path, config: &ProjectConfig) -> Result
 }
 
 fn write_json_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_atomic_with_revision(path, value).map(|_| ())
+}
+
+fn write_json_atomic_with_revision<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<ConfigRevision> {
     let parent = path
         .parent()
         .context("Configuration path has no parent directory")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
 
+    let mut content = serde_json::to_vec_pretty(value).context("Failed to serialize config")?;
+    content.push(b'\n');
+    let revision = content_revision(&content);
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("Failed to create temporary config in {}", parent.display()))?;
-    serde_json::to_writer_pretty(temp.as_file_mut(), value)
-        .context("Failed to serialize config")?;
-    temp.as_file_mut().write_all(b"\n")?;
+    temp.as_file_mut().write_all(&content)?;
     temp.as_file_mut().sync_all()?;
     temp.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to replace config atomically: {}", path.display()))?;
-    Ok(())
+    Ok(revision)
 }
 
 fn resolve_path(path: &Path, base: &Path) -> PathBuf {
@@ -733,6 +841,75 @@ mod tests {
         let saved: Value = serde_json::to_value(loaded).unwrap();
 
         assert_eq!(saved["future_setting"]["enabled"], 7);
+    }
+
+    #[test]
+    fn config_revision_detects_atomic_replacement_even_at_the_same_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        write_json_atomic(&path, &serde_json::json!({"model": "first"})).unwrap();
+        let first = config_revision(&path).unwrap();
+
+        write_json_atomic(&path, &serde_json::json!({"model": "second"})).unwrap();
+        let second = config_revision(&path).unwrap();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn compare_and_save_refuses_to_overwrite_a_newer_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        save_to(
+            &path,
+            &UserConfig {
+                model: Some("initial".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected = config_revision(&path).unwrap();
+        save_to(
+            &path,
+            &UserConfig {
+                model: Some("external".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let outcome = save_if_revision(
+            &path,
+            Some(expected),
+            &UserConfig {
+                model: Some("stale".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, ConfigSaveOutcome::Changed));
+        assert_eq!(
+            load_existing_base_config(&path)
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("external")
+        );
+    }
+
+    #[test]
+    fn config_writers_share_a_cross_process_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let _held = ConfigLock::acquire(&path).unwrap();
+
+        let error = save_to(&path, &UserConfig::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Another CST instance"));
     }
 
     #[test]

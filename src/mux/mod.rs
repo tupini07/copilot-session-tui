@@ -15,6 +15,7 @@ pub enum MuxEvent {
     Output(PaneId, callbacks::PaneSignals),
     Exited(PaneId, Option<u32>),
     HostSequence(Vec<u8>),
+    ConfigChanged,
     Term(crossterm::event::Event),
 }
 
