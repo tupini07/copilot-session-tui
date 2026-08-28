@@ -276,13 +276,13 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `s` | Open prompt snippets |
 | `prefix` `u` | Install an update without stopping running sessions |
-| `prefix` `Ctrl+H` `e` | Open scratchpad shortcut help |
-| `prefix` `Ctrl+G` `i` | Inspect a GitHub issue, pull request, or discussion |
+| `prefix` `h` `e` | Open scratchpad shortcut help |
+| `prefix` `g` `i` | Inspect a GitHub issue, pull request, or discussion |
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
 | `prefix` `q` | End the focused session and quit CST together |
-| `prefix` `prefix` | Send a literal prefix keystroke to Copilot |
+| `prefix` `prefix` | Search every CST command |
 
 ### Prompt snippets
 
@@ -434,6 +434,16 @@ autosave retain 100–250 ms polling.
 The prefix also works from the session list, so detaching never strands a running pane:
 `prefix` `w` opens the switcher, `prefix` `n`/`p` and `prefix` `1`–`9` re-attach directly,
 and `prefix` `x` ends the focused one. The footer shows how many panes are running.
+
+Pressing the prefix opens a Doom Emacs-style grouped command overlay instead of squeezing
+every shortcut into the status line. The groups separate workspace, session, tool, and
+lifecycle actions while direct key sequences remain unchanged. Press the prefix a second
+time to open fuzzy **Command Search**. It includes both attached-session and session-picker
+actions; commands that do not apply in the current context remain visible with a reason.
+Type to filter, use arrows/PageUp/PageDown or the wheel to move, and press Enter or click
+to run. The old literal-prefix action remains available through Command Search. The `g`
+and `h` group keys work with every configured prefix; legacy `Ctrl+G` and `Ctrl+H` group
+sequences remain accepted.
 
 In the session list, a magenta `▶` marks sessions running as panes in this CST instance,
 distinct from the green `●` that marks sessions held by some other process.

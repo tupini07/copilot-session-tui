@@ -1,4 +1,5 @@
 mod app;
+mod command_palette;
 mod config;
 mod debug_keys;
 mod events;
@@ -1186,6 +1187,7 @@ fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> b
         || app.workspace_focus != app::WorkspaceFocus::Chat
         || app.confirm_quit
         || app.confirm_update_restart
+        || app.command_palette.is_some()
         || app.github_inspector.is_some()
         || app.snippet_modal.is_some()
         || app.workspace_help.is_some()
@@ -1686,6 +1688,10 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL,
         ));
         assert!(terminal_event_needs_repaint(&app, &prefix));
+
+        app.open_command_palette();
+        assert!(terminal_event_needs_repaint(&app, &character));
+        app.close_command_palette();
 
         app.update_notice = Some("Update ready".to_string());
         assert!(terminal_event_needs_repaint(&app, &character));

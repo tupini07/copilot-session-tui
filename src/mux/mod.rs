@@ -111,6 +111,46 @@ impl KeyChord {
         }
         label
     }
+
+    pub fn literal_key_event(self) -> KeyEvent {
+        let mut modifiers = self.modifiers;
+        let code = match self.code {
+            KeyCode::Char(character) if modifiers.contains(KeyModifiers::SHIFT) => {
+                modifiers.remove(KeyModifiers::SHIFT);
+                KeyCode::Char(shifted_character(character))
+            }
+            code => code,
+        };
+        KeyEvent::new(code, modifiers)
+    }
+}
+
+fn shifted_character(character: char) -> char {
+    match character {
+        'a'..='z' => character.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        character => character,
+    }
 }
 
 /// Ignore modifiers that terminals report inconsistently (e.g. KEYPAD/SUPER on Windows).
@@ -136,14 +176,14 @@ pub enum PrefixCommand {
     /// `prefix q` — end the focused session and CST together.
     Quit,
     SelectIndex(usize),
-    /// `prefix prefix` — send a literal prefix keystroke to the child.
-    Literal,
+    /// `prefix prefix` — search every CST command.
+    CommandPalette,
     Cancel,
 }
 
 pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<PrefixCommand> {
     if prefix.matches(key) {
-        return Some(PrefixCommand::Literal);
+        return Some(PrefixCommand::CommandPalette);
     }
     match key.code {
         KeyCode::Char('d') => Some(PrefixCommand::Detach),
@@ -157,6 +197,8 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('s') => Some(PrefixCommand::Snippets),
         KeyCode::Char('u') => Some(PrefixCommand::Update),
         KeyCode::Char('q') => Some(PrefixCommand::Quit),
+        KeyCode::Char('h') => Some(PrefixCommand::Help),
+        KeyCode::Char('g') => Some(PrefixCommand::Github),
         KeyCode::Char(character)
             if character.eq_ignore_ascii_case(&'h')
                 && key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -391,6 +433,17 @@ mod tests {
     }
 
     #[test]
+    fn literal_shifted_character_chords_preserve_the_shifted_character() {
+        let shifted = KeyChord::parse("S-x").unwrap().literal_key_event();
+        assert_eq!(shifted.code, KeyCode::Char('X'));
+        assert!(!shifted.modifiers.contains(KeyModifiers::SHIFT));
+
+        let alt_shifted = KeyChord::parse("M-S-1").unwrap().literal_key_event();
+        assert_eq!(alt_shifted.code, KeyCode::Char('!'));
+        assert_eq!(alt_shifted.modifiers, KeyModifiers::ALT);
+    }
+
+    #[test]
     fn rejects_chords_that_would_swallow_typing() {
         assert!(KeyChord::parse("b").is_none());
         assert!(KeyChord::parse("").is_none());
@@ -424,7 +477,7 @@ mod tests {
         let chord = KeyChord::parse("C-b").unwrap();
         let command =
             resolve_prefix_command(&key(KeyCode::Char('b'), KeyModifiers::CONTROL), &chord);
-        assert_eq!(command, Some(PrefixCommand::Literal));
+        assert_eq!(command, Some(PrefixCommand::CommandPalette));
     }
 
     #[test]
@@ -468,6 +521,14 @@ mod tests {
             Some(PrefixCommand::Github)
         );
         assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('h'), none), &chord),
+            Some(PrefixCommand::Help)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('g'), none), &chord),
+            Some(PrefixCommand::Github)
+        );
+        assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('q'), none), &chord),
             Some(PrefixCommand::Quit)
         );
@@ -482,6 +543,23 @@ mod tests {
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Char('z'), none), &chord),
             None
+        );
+    }
+
+    #[test]
+    fn group_namespaces_remain_reachable_when_control_key_is_the_prefix() {
+        let prefix = KeyChord::parse("C-g").unwrap();
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('g'), KeyModifiers::CONTROL), &prefix),
+            Some(PrefixCommand::CommandPalette)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('g'), KeyModifiers::NONE), &prefix),
+            Some(PrefixCommand::Github)
+        );
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('h'), KeyModifiers::NONE), &prefix),
+            Some(PrefixCommand::Help)
         );
     }
 

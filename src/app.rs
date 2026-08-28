@@ -570,6 +570,7 @@ pub struct App {
     pub terminal_focused: bool,
     pub workspace_help: Option<WorkspaceHelp>,
     pub snippet_modal: Option<SnippetModal>,
+    pub command_palette: Option<crate::command_palette::CommandPalette>,
     pub workspace_areas: WorkspaceAreas,
     pub host_sequences: Vec<Vec<u8>>,
     pub github_inspector: Option<GithubInspector>,
@@ -708,6 +709,7 @@ impl App {
             terminal_focused: false,
             workspace_help: None,
             snippet_modal: None,
+            command_palette: None,
             workspace_areas: WorkspaceAreas::default(),
             host_sequences: Vec::new(),
             github_inspector: None,
@@ -1142,6 +1144,18 @@ impl App {
         if let Some(pane) = self.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
             pane.acknowledge_attention();
         }
+    }
+
+    pub fn open_command_palette(&mut self) {
+        self.release_favorite_grab();
+        self.command_palette = Some(crate::command_palette::CommandPalette::default());
+        if let Some(mux) = self.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+    }
+
+    pub fn close_command_palette(&mut self) {
+        self.command_palette = None;
     }
 
     pub fn open_github_inspector(&mut self) {
@@ -3211,6 +3225,7 @@ impl App {
         self.mode != Mode::Normal
             || self.workspace_focus == WorkspaceFocus::Scratchpad
             || self.snippet_modal.is_some()
+            || self.command_palette.is_some()
             || self.pending_worktree.is_some()
             || self.github_inspector.as_ref().is_some_and(|inspector| {
                 matches!(
@@ -4426,6 +4441,36 @@ mod tests {
 
         assert_eq!(app.config.favorites, vec!["alpha", "beta", "zebra"]);
         assert_eq!(visible_ids(&app), vec!["alpha", "beta", "zebra"]);
+    }
+
+    #[test]
+    fn opening_command_palette_releases_an_active_favorite_grab() {
+        let mut app = reorderable_app();
+        app.toggle_favorite_grab();
+        assert!(app.grabbed_favorite.is_some());
+
+        app.open_command_palette();
+
+        assert!(app.grabbed_favorite.is_none());
+        assert!(app.command_palette.is_some());
+    }
+
+    #[test]
+    fn reorder_favorite_palette_command_is_disabled_while_filtering() {
+        let mut app = reorderable_app();
+        app.search_query = "alpha".to_string();
+        app.apply_filter();
+        app.open_command_palette();
+
+        let reorder = crate::command_palette::filtered_commands(&app)
+            .into_iter()
+            .find(|command| command.id == crate::command_palette::CommandId::ReorderFavorite)
+            .unwrap();
+
+        assert!(!reorder.enabled);
+        assert!(reorder
+            .unavailable_reason
+            .is_some_and(|reason| reason.contains("unfiltered favorites")));
     }
 
     #[test]

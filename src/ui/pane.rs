@@ -225,7 +225,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ],
         PaneStatus::Running if mux.prefix_state == PrefixState::Root => vec![
             Span::styled(format!(" {prefix} "), badge_style(theme, theme.warning)),
-            Span::raw(root_command_hint(&prefix)),
+            Span::raw(format!(" choose a command · {prefix} search · Esc close ")),
         ],
         PaneStatus::Running
             if mux.prefix_state == PrefixState::Idle && app.update_notice.is_some() =>
@@ -331,13 +331,6 @@ fn badge_style(theme: Theme, background: Color) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn root_command_hint(prefix: &str) -> String {
-    format!(
-        " c chat e scratch t term s snippets u update C-h help C-g gh d list w switch \
-         n/p cycle 1-9 jump x end q quit {prefix} send Esc "
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,34 +341,6 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::sync::mpsc;
-
-    #[test]
-    fn live_prefix_menu_covers_every_root_command() {
-        let hint = root_command_hint("C-b");
-        for entry in [
-            "c chat",
-            "e scratch",
-            "t term",
-            "s snippets",
-            "u update",
-            "C-h help",
-            "C-g gh",
-            "d list",
-            "w switch",
-            "n/p cycle",
-            "1-9 jump",
-            "x end",
-            "q quit",
-            "C-b send",
-            "Esc",
-        ] {
-            assert!(hint.contains(entry), "missing {entry:?} from {hint:?}");
-        }
-        assert!(
-            text::display_width(&hint) <= 125,
-            "keep the complete menu usable in a typical 128-column terminal: {hint:?}"
-        );
-    }
 
     #[test]
     fn known_references_are_styled_and_others_left_alone() {

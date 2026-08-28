@@ -1,4 +1,5 @@
 use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
+use crate::command_palette::CommandId;
 use crate::input::{handle_quit_confirm, handle_update_restart_confirm, request_quit};
 use crate::mux::pane::PaneNotification;
 use crate::mux::{
@@ -52,6 +53,11 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 }
             }
         }
+        return;
+    }
+
+    if app.command_palette.is_some() {
+        handle_command_palette_event(app, event);
         return;
     }
 
@@ -465,6 +471,192 @@ fn use_selected_snippet(app: &mut App) {
     focus_chat(app);
 }
 
+pub fn handle_command_palette_event(app: &mut App, event: Event) {
+    let commands = crate::command_palette::filtered_commands(app);
+    match event {
+        Event::Paste(text) => {
+            if let Some(palette) = app.command_palette.as_mut() {
+                palette
+                    .query
+                    .extend(text.chars().filter(|character| !character.is_control()));
+                palette.reset_filter();
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => move_command_palette(app, -3),
+            MouseEventKind::ScrollDown => move_command_palette(app, 3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = app.command_palette.as_ref().and_then(|palette| {
+                    palette
+                        .hits
+                        .iter()
+                        .find(|(area, _)| contains(*area, mouse.column, mouse.row))
+                        .map(|(_, command)| *command)
+                });
+                if let Some(command) = clicked {
+                    if let Some(index) = commands.iter().position(|entry| entry.id == command) {
+                        if let Some(palette) = app.command_palette.as_mut() {
+                            palette.set_selected(index, commands.len());
+                        }
+                        execute_command_palette_selection(app);
+                    }
+                }
+            }
+            _ => {}
+        },
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if key.code == KeyCode::Esc {
+                app.close_command_palette();
+                return;
+            }
+            match key.code {
+                KeyCode::Enter => execute_command_palette_selection(app),
+                KeyCode::Up => move_command_palette(app, -1),
+                KeyCode::Down => move_command_palette(app, 1),
+                KeyCode::PageUp => {
+                    let page = app
+                        .command_palette
+                        .as_ref()
+                        .map(|palette| palette.visible_rows.max(1))
+                        .unwrap_or(1);
+                    move_command_palette(app, -(page as isize));
+                }
+                KeyCode::PageDown => {
+                    let page = app
+                        .command_palette
+                        .as_ref()
+                        .map(|palette| palette.visible_rows.max(1))
+                        .unwrap_or(1);
+                    move_command_palette(app, page as isize);
+                }
+                KeyCode::Home => {
+                    if let Some(palette) = app.command_palette.as_mut() {
+                        palette.set_selected(0, commands.len());
+                    }
+                }
+                KeyCode::End => {
+                    if let Some(palette) = app.command_palette.as_mut() {
+                        palette.set_selected(commands.len().saturating_sub(1), commands.len());
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(palette) = app.command_palette.as_mut() {
+                        palette.query.pop();
+                        palette.reset_filter();
+                    }
+                }
+                KeyCode::Char(character)
+                    if !key.modifiers.intersects(
+                        crossterm::event::KeyModifiers::CONTROL
+                            | crossterm::event::KeyModifiers::ALT,
+                    ) =>
+                {
+                    if let Some(palette) = app.command_palette.as_mut() {
+                        palette.query.push(character);
+                        palette.reset_filter();
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn move_command_palette(app: &mut App, delta: isize) {
+    let count = crate::command_palette::filtered_commands(app).len();
+    if let Some(palette) = app.command_palette.as_mut() {
+        palette.move_selection(delta, count);
+    }
+}
+
+fn execute_command_palette_selection(app: &mut App) {
+    let commands = crate::command_palette::filtered_commands(app);
+    let selected = app
+        .command_palette
+        .as_ref()
+        .map(|palette| palette.selected)
+        .unwrap_or_default();
+    let Some(command) = commands.get(selected) else {
+        return;
+    };
+    if !command.enabled {
+        if let Some(palette) = app.command_palette.as_mut() {
+            palette.error = command.unavailable_reason.map(str::to_string);
+        }
+        return;
+    }
+    let command = command.id;
+    app.close_command_palette();
+    execute_palette_command(app, command);
+}
+
+fn execute_palette_command(app: &mut App, command: CommandId) {
+    use CommandId::*;
+    match command {
+        FocusChat => focus_chat(app),
+        ToggleScratchpad => toggle_attached_scratchpad(app),
+        ToggleTerminal => toggle_attached_terminal(app),
+        OpenSnippets => app.open_snippets(),
+        OpenScratchpadHelp => app.workspace_help = Some(WorkspaceHelp::Scratchpad),
+        BackToSessionList => app.detach(),
+        SwitchSession => app.open_pane_list(),
+        NextSession => {
+            let from_list = matches!(app.view, View::List);
+            if let Some(mux) = app.mux.as_mut() {
+                mux.cycle(true);
+            }
+            if from_list {
+                attach_focused(app);
+            } else {
+                sync_workspace_panels(app);
+            }
+        }
+        PreviousSession => {
+            let from_list = matches!(app.view, View::List);
+            if let Some(mux) = app.mux.as_mut() {
+                mux.cycle(false);
+            }
+            if from_list {
+                attach_focused(app);
+            } else {
+                sync_workspace_panels(app);
+            }
+        }
+        InspectGithub => app.open_github_inspector(),
+        CheckForUpdates => app.request_update(),
+        SendLiteralPrefix => {
+            let key = app.mux.as_ref().map(|mux| mux.prefix.literal_key_event());
+            if let (Some(key), Some(pane)) =
+                (key, app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()))
+            {
+                if let Err(error) = pane.send_key(&key) {
+                    app.status_message = Some(format!("Cannot send prefix: {error}"));
+                }
+            }
+        }
+        EndSession => kill_focused(app),
+        Quit => request_quit(app),
+        ResumeSelected
+        | NewSession
+        | NewWorktreeSession
+        | OpenSelectedScratchpad
+        | ToggleFavorite
+        | ReorderFavorite
+        | OpenFavoriteTabs
+        | RenameSelected
+        | DeleteSelected
+        | SearchSessions
+        | FilterProject
+        | ClearProjectFilter
+        | CycleSort
+        | GlobalSettings
+        | ProjectSettings
+        | OpenHelp => crate::input::execute_palette_list_command(app, command),
+    }
+    sync_view(app);
+}
+
 fn handle_attached_key(app: &mut App, key: KeyEvent) {
     let Some((prefix_state, prefix)) = app.mux.as_ref().map(|mux| (mux.prefix_state, mux.prefix))
     else {
@@ -497,12 +689,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             mux.prefix_state = PrefixState::Idle;
         }
         match command {
-            Some(PrefixCommand::Literal) => {
-                // Double prefix: the child gets a real prefix keystroke.
-                if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
-                    let _ = pane.send_key(&key);
-                }
-            }
+            Some(PrefixCommand::CommandPalette) => app.open_command_palette(),
             Some(PrefixCommand::Detach) => app.detach(),
             Some(PrefixCommand::NextPane) => {
                 if let Some(mux) = app.mux.as_mut() {
@@ -1291,6 +1478,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         app.request_update();
         return true;
     }
+    if matches!(command, Some(PrefixCommand::CommandPalette)) {
+        app.open_command_palette();
+        return true;
+    }
     if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
         app.status_message = Some("No sessions are running".to_string());
         return true;
@@ -1299,7 +1490,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
     match command {
         // There is no child to re-attach to and nothing to detach from, so the only
         // sensible reading of these from the list is "show me what's running".
-        Some(PrefixCommand::Detach) | Some(PrefixCommand::Literal) => app.open_pane_list(),
+        Some(PrefixCommand::Detach) => app.open_pane_list(),
+        Some(PrefixCommand::CommandPalette) => {
+            unreachable!("handled before pane availability")
+        }
         Some(PrefixCommand::PaneList) => app.open_pane_list(),
         Some(PrefixCommand::Chat) => {
             attach_focused(app);
@@ -2058,6 +2252,120 @@ mod tests {
             "the prefix must not fall through to list bindings"
         );
         assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Root);
+    }
+
+    #[test]
+    fn double_prefix_opens_command_search_from_list_without_panes() {
+        let mut app = mux_app();
+        app.view = View::List;
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        assert!(handle_list_prefix(&mut app, prefix));
+        assert!(handle_list_prefix(&mut app, prefix));
+
+        assert!(app.command_palette.is_some());
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+    }
+
+    #[test]
+    fn double_prefix_opens_command_search_without_sending_to_copilot() {
+        let mut app = attached_mux_app("command-search");
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        handle_attached_key(&mut app, prefix);
+        handle_attached_key(&mut app, prefix);
+
+        assert!(app.command_palette.is_some());
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn command_search_fuzzy_executes_list_commands() {
+        let mut app = mux_app();
+        app.view = View::List;
+        app.open_command_palette();
+        for character in "global settings".chars() {
+            handle_command_palette_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+            );
+        }
+
+        handle_command_palette_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.mode, crate::app::Mode::Settings);
+    }
+
+    #[test]
+    fn disabled_command_stays_open_and_explains_why() {
+        let mut app = mux_app();
+        app.view = View::List;
+        app.open_command_palette();
+        app.command_palette.as_mut().unwrap().query = "focus chat".to_string();
+
+        handle_command_palette_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        assert!(app.command_palette.is_some());
+        assert!(app
+            .command_palette
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("attached running session"));
+    }
+
+    #[test]
+    fn clicking_a_palette_result_executes_it() {
+        let mut app = mux_app();
+        app.view = View::List;
+        app.open_command_palette();
+        app.command_palette
+            .as_mut()
+            .unwrap()
+            .hits
+            .push((Rect::new(10, 10, 30, 1), CommandId::GlobalSettings));
+
+        handle_command_palette_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(app.command_palette.is_none());
+        assert_eq!(app.mode, crate::app::Mode::Settings);
+    }
+
+    #[test]
+    fn next_session_from_list_attaches_the_newly_focused_pane() {
+        let mut app = attached_mux_app("session-one");
+        push_test_pane(&mut app, 2, "session-two");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::List;
+        app.open_command_palette();
+        app.command_palette.as_mut().unwrap().query = "next session".to_string();
+
+        handle_command_palette_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        assert_eq!(app.view, View::Attached(2));
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]

@@ -763,12 +763,12 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         ));
         text.push(help_line(
             theme,
-            &format!("{prefix} C-g i"),
+            &format!("{prefix} g i"),
             "Inspect a GitHub issue, pull request, or discussion",
         ));
         text.push(help_line(
             theme,
-            &format!("{prefix} C-h e"),
+            &format!("{prefix} h e"),
             "Open scratchpad shortcut help",
         ));
         text.push(help_line(
@@ -794,7 +794,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(help_line(
             theme,
             &format!("{prefix} {prefix}"),
-            "Send the prefix key itself",
+            "Search every CST command",
         ));
         text.push(help_line(
             theme,
@@ -1812,7 +1812,7 @@ mod help_tests {
             text.contains("GitHub references in the chat"),
             "got:\n{text}"
         );
-        assert!(text.contains("C-b C-g i"), "got:\n{text}");
+        assert!(text.contains("C-b g i"), "got:\n{text}");
         assert!(text.contains("Inspect a GitHub issue"), "got:\n{text}");
         assert!(text.contains("pull request"), "got:\n{text}");
     }

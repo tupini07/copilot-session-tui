@@ -37,6 +37,11 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    if app.command_palette.is_some() {
+        crate::mux_input::handle_command_palette_event(app, event);
+        return Ok(());
+    }
+
     if app.workspace_help.is_some() {
         if matches!(
             event,
@@ -357,6 +362,33 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         KeyCode::Char('u') => app.request_update(),
         _ => {}
     }
+}
+
+pub(crate) fn execute_palette_list_command(
+    app: &mut App,
+    command: crate::command_palette::CommandId,
+) {
+    use crate::command_palette::CommandId;
+    let key = match command {
+        CommandId::ResumeSelected => KeyCode::Enter,
+        CommandId::NewSession => KeyCode::Char('n'),
+        CommandId::NewWorktreeSession => KeyCode::Char('N'),
+        CommandId::OpenSelectedScratchpad => KeyCode::Char('e'),
+        CommandId::ToggleFavorite => KeyCode::Char(' '),
+        CommandId::ReorderFavorite => KeyCode::Char('g'),
+        CommandId::OpenFavoriteTabs => KeyCode::Char('T'),
+        CommandId::RenameSelected => KeyCode::Char('r'),
+        CommandId::DeleteSelected => KeyCode::Char('d'),
+        CommandId::SearchSessions => KeyCode::Char('/'),
+        CommandId::FilterProject => KeyCode::Char('f'),
+        CommandId::ClearProjectFilter => KeyCode::Char('c'),
+        CommandId::CycleSort => KeyCode::Char('s'),
+        CommandId::GlobalSettings => KeyCode::Char(','),
+        CommandId::ProjectSettings => KeyCode::Char('.'),
+        CommandId::OpenHelp => KeyCode::Char('?'),
+        _ => return,
+    };
+    handle_normal(app, key);
 }
 
 fn open_favorite_tabs(app: &mut App) {

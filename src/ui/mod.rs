@@ -1,3 +1,4 @@
+pub mod command_palette;
 pub mod diff;
 pub mod file_tree;
 pub mod github_inspector;
@@ -87,6 +88,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.github_inspector.is_some() && !github_inspector::is_prompt(app) {
         github_inspector::draw(f, app);
+        command_palette::draw_overlays(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }
@@ -97,6 +99,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             scratchpad::draw_with_theme(f, scratchpad, theme);
         }
+        command_palette::draw_overlays(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }
@@ -145,11 +148,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
-        if app.confirm_quit {
-            popups::draw_quit_confirm(f, app);
-        }
+        command_palette::draw_overlays(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
+        }
+        if app.confirm_quit {
+            popups::draw_quit_confirm(f, app);
         }
         return;
     }
@@ -245,11 +249,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         scratchpad::draw_help_with_theme(f, size, theme);
     }
 
-    if app.confirm_quit {
-        popups::draw_quit_confirm(f, app);
-    }
+    command_palette::draw_overlays(f, app);
     if app.confirm_update_restart {
         popups::draw_update_restart_confirm(f, app);
+    }
+    if app.confirm_quit {
+        popups::draw_quit_confirm(f, app);
     }
 
     // Drawn last so it covers everything: the next loop iteration blocks on Git, and
