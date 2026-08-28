@@ -253,6 +253,21 @@ fn main() -> Result<()> {
         None => {}
     }
 
+    let hook_refresh_notice = match hook_plugin::refresh_if_needed(&copilot_home) {
+        Ok(hook_plugin::RefreshOutcome::Refreshed) => Some(format!(
+            "CST lifecycle hooks refreshed for v{}; restart other active Copilot sessions to load them.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        Ok(
+            hook_plugin::RefreshOutcome::NotManaged
+            | hook_plugin::RefreshOutcome::Current
+            | hook_plugin::RefreshOutcome::Removed,
+        ) => None,
+        Err(error) => Some(format!(
+            "Could not refresh installed CST lifecycle hooks: {error}. Run `cst hooks install` to retry."
+        )),
+    };
+
     // The path controls both CST's session loader and the Copilot process it resumes.
     // Generated favorite tabs receive an explicit path before any child processes start.
 
@@ -307,6 +322,9 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>();
 
     if cli.open_favorites {
+        if let Some(notice) = hook_refresh_notice.as_deref() {
+            eprintln!("{notice}");
+        }
         let mux_override = if cli.mux {
             Some(true)
         } else if cli.no_mux {
@@ -323,6 +341,9 @@ fn main() -> Result<()> {
     }
 
     if let Some(session) = startup_session.as_ref().filter(|_| !user_config.mux) {
+        if let Some(notice) = hook_refresh_notice.as_deref() {
+            eprintln!("{notice}");
+        }
         eprintln!(
             "Resuming session {} in {}...",
             short_session_id(&session.id),
@@ -400,6 +421,9 @@ fn main() -> Result<()> {
     }
     if restart_startup_aborted(&cli) {
         return Ok(());
+    }
+    if let Some(notice) = hook_refresh_notice {
+        app.status_message = Some(notice);
     }
 
     loop {

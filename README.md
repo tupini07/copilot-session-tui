@@ -439,6 +439,12 @@ session ID, timestamp, coarse lifecycle state, and attention kind to that sessio
 responses are never persisted. CST tails these records while retaining its existing OSC and
 structured `events.jsonl` fallbacks for sessions without the plugin.
 
+After this one-time opt-in, each new CST version automatically refreshes the managed plugin
+before starting or reopening sessions. CST never enables hooks for users who did not install
+them, and a plugin removed directly through Copilot is not reinstalled. A non-interactive
+`cst update` refreshes hooks on the next CST launch, when the new binary and its bundled hook
+definitions are available.
+
 ### Phone notifications with ntfy
 
 CST can publish the same ready/error lifecycle events directly to an ntfy server over
