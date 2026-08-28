@@ -120,6 +120,8 @@ enum Commands {
     /// Report how this terminal delivers key presses (used to pick a mux prefix key)
     #[command(hide = true)]
     DebugKeys,
+    /// Check GitHub Releases and install the latest CST
+    Update,
     /// Manage the optional Copilot lifecycle hook plugin
     Hooks {
         #[command(subcommand)]
@@ -203,6 +205,20 @@ fn main() -> Result<()> {
         }
         Some(Commands::DebugKeys) => {
             return debug_keys::run();
+        }
+        Some(Commands::Update) => {
+            match updater::update_now()? {
+                updater::UpdateCommandOutcome::Current(version) => {
+                    println!("CST v{version} is already current.");
+                }
+                updater::UpdateCommandOutcome::Installed(version) => {
+                    println!("Updated CST to v{version}.");
+                }
+                updater::UpdateCommandOutcome::AlreadyInstalled(version) => {
+                    println!("CST v{version} is already installed.");
+                }
+            }
+            return Ok(());
         }
         Some(Commands::Hooks { action }) => {
             match action {
@@ -1448,6 +1464,12 @@ mod tests {
             event.command,
             Some(Commands::HookEvent { ref event }) if event == "working"
         ));
+    }
+
+    #[test]
+    fn update_subcommand_parses_without_starting_the_tui() {
+        let cli = Cli::try_parse_from(["cst", "update"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Update)));
     }
 
     #[test]

@@ -28,6 +28,13 @@ pub enum UpdateInstallOutcome {
     AlreadyInstalled(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCommandOutcome {
+    Current(String),
+    Installed(String),
+    AlreadyInstalled(String),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCache {
     last_checked: String,
@@ -142,6 +149,31 @@ pub fn check_for_updates_async() -> mpsc::Receiver<UpdateCheckResult> {
 /// Bypass the startup cache after an explicit user request.
 pub fn force_check_for_updates_async() -> mpsc::Receiver<UpdateCheckResult> {
     spawn_update_check(true)
+}
+
+pub fn update_now() -> Result<UpdateCommandOutcome> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let latest = check_latest_version(true)?;
+    update_command_from_versions(current, latest, run_update_helper)
+}
+
+fn update_command_from_versions<F>(
+    current: String,
+    latest: String,
+    install: F,
+) -> Result<UpdateCommandOutcome>
+where
+    F: FnOnce(&str) -> Result<UpdateInstallOutcome>,
+{
+    let Some(update) = compare_versions(current.clone(), latest)? else {
+        return Ok(UpdateCommandOutcome::Current(current));
+    };
+    Ok(match install(&update.latest_version)? {
+        UpdateInstallOutcome::Installed(version) => UpdateCommandOutcome::Installed(version),
+        UpdateInstallOutcome::AlreadyInstalled(version) => {
+            UpdateCommandOutcome::AlreadyInstalled(version)
+        }
+    })
 }
 
 /// Install an update without stopping the current CST process or any panes it owns.
@@ -392,5 +424,35 @@ mod tests {
         assert!(!relocated.exists());
         assert!(unrelated.exists());
         assert!(malformed.exists());
+    }
+
+    #[test]
+    fn command_update_uses_semantic_check_and_maps_helper_outcomes() {
+        let current =
+            update_command_from_versions("1.2.3".to_string(), "1.2.3".to_string(), |_| {
+                panic!("an up-to-date command must not run the installer")
+            })
+            .unwrap();
+        assert_eq!(current, UpdateCommandOutcome::Current("1.2.3".to_string()));
+
+        let installed =
+            update_command_from_versions("1.2.3".to_string(), "1.3.0".to_string(), |version| {
+                Ok(UpdateInstallOutcome::Installed(version.to_string()))
+            })
+            .unwrap();
+        assert_eq!(
+            installed,
+            UpdateCommandOutcome::Installed("1.3.0".to_string())
+        );
+
+        let already =
+            update_command_from_versions("1.2.3".to_string(), "1.3.0".to_string(), |version| {
+                Ok(UpdateInstallOutcome::AlreadyInstalled(version.to_string()))
+            })
+            .unwrap();
+        assert_eq!(
+            already,
+            UpdateCommandOutcome::AlreadyInstalled("1.3.0".to_string())
+        );
     }
 }

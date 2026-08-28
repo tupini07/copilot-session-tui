@@ -78,6 +78,12 @@ flow is closed so unsaved input is not discarded.
 The invoking shell remains attached throughout the handoff. A cross-process lock prevents
 multiple CST instances from replacing the executable concurrently.
 
+For scripts or a shell without CST integration, run `copilot-session-tui update`. If the
+generated shell wrapper is loaded, the shorter `cst update` works too. It performs the
+same forced release check and locked self-update without opening the TUI. The command owns
+no session panes, so it installs the release and exits; the next CST invocation uses the
+new version.
+
 ### Usage
 
 ```bash
