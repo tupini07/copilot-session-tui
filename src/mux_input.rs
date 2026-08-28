@@ -8,8 +8,12 @@ use crate::mux::{
 };
 use crate::notifications::NotificationKind;
 use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use ratatui::layout::Rect;
+
+const HOOK_READY_GRACE: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Route a terminal event while a pane is focused.
 ///
@@ -747,6 +751,9 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    if key_resolves_permission(&key) {
+        clear_focused_permission_wait(app);
+    }
     if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
         if pane.is_running() {
             let _ = pane.send_key(&key);
@@ -757,6 +764,37 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
             // A dead pane keeps its final screen until dismissed.
             kill_focused(app);
         }
+    }
+}
+
+fn clear_focused_permission_wait(app: &mut App) {
+    let changed = app
+        .mux
+        .as_mut()
+        .and_then(|mux| mux.focused_pane_mut())
+        .is_some_and(|pane| pane.clear_hook_permission_wait());
+    if changed {
+        sync_outer_progress(app);
+    }
+}
+
+fn key_resolves_permission(key: &KeyEvent) -> bool {
+    if key.modifiers.intersects(
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::META
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER,
+    ) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Enter | KeyCode::Esc => !key.modifiers.contains(KeyModifiers::SHIFT),
+        KeyCode::Char('y' | 'n') => key.modifiers.is_empty(),
+        KeyCode::Char('Y' | 'N') => {
+            key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+        }
+        _ => false,
     }
 }
 
@@ -1694,25 +1732,113 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             }
             focused || attention_changed || action_changed || notification.is_some()
         }
+        MuxEvent::HookLifecycle(id, event) => {
+            let attended = app.terminal_focused
+                && matches!(app.view, View::Attached(focused) if focused == id);
+            let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
+            let (outcome, attention_changed, action_changed, title, session_id) = app
+                .mux
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .and_then(|pane| {
+                    if !pane.is_running() {
+                        return None;
+                    }
+                    let attention_before = pane.needs_attention();
+                    let action_before = pane.requires_user_action();
+                    let outcome = pane.apply_hook(event, attended);
+                    Some((
+                        outcome,
+                        attention_before != pane.needs_attention(),
+                        action_before != pane.requires_user_action(),
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                    ))
+                })
+                .unwrap_or_default();
+            if outcome.cycle_started {
+                app.begin_notification_cycle(&session_id);
+            }
+            if let Some(timestamp) = outcome.ready_confirmation {
+                if let Some(events) = app.mux.as_ref().map(|mux| mux.events.clone()) {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(HOOK_READY_GRACE);
+                        let _ = events.send(MuxEvent::HookReadyConfirmed(id, timestamp));
+                    });
+                }
+            }
+            if let Some(notification) = outcome.notification {
+                let kind = match notification {
+                    PaneNotification::Question => NotificationKind::Question,
+                    PaneNotification::PlanApproval => NotificationKind::PlanApproval,
+                    PaneNotification::Ready => NotificationKind::Ready,
+                    PaneNotification::Error => NotificationKind::Error,
+                };
+                app.enqueue_notification(kind, title, Some(&session_id));
+            }
+            if focused {
+                sync_outer_progress(app);
+            }
+            focused
+                || attention_changed
+                || action_changed
+                || outcome.notification.is_some()
+                || outcome.cycle_started
+        }
+        MuxEvent::HookReadyConfirmed(id, timestamp) => {
+            let attended = app.terminal_focused
+                && matches!(app.view, View::Attached(focused) if focused == id);
+            let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
+            let (notification, title, session_id) = app
+                .mux
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .and_then(|pane| {
+                    if !pane.is_running() {
+                        return None;
+                    }
+                    Some((
+                        pane.confirm_hook_ready(timestamp, attended),
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                    ))
+                })
+                .unwrap_or_default();
+            if let Some(notification) = notification {
+                let kind = match notification {
+                    PaneNotification::Ready => NotificationKind::Ready,
+                    PaneNotification::Question => NotificationKind::Question,
+                    PaneNotification::PlanApproval => NotificationKind::PlanApproval,
+                    PaneNotification::Error => NotificationKind::Error,
+                };
+                app.enqueue_notification(kind, title, Some(&session_id));
+            }
+            if focused {
+                sync_outer_progress(app);
+            }
+            focused || notification.is_some()
+        }
         MuxEvent::HostSequence(id, sequence) => {
             let progress = crate::host_terminal::progress_state_from_sequence(&sequence);
+            let mut cycle_started = None;
             if let Some(progress) = progress {
                 if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.pane_mut(id)) {
-                    if pane.is_running() {
-                        pane.record_progress_state(progress);
+                    if pane.is_running() && pane.record_progress_state(progress) {
+                        cycle_started = Some(pane.session_id.clone());
                     }
                 }
             }
+            if let Some(session_id) = cycle_started {
+                app.begin_notification_cycle(&session_id);
+            }
             let focused = app.mux.as_ref().and_then(|mux| mux.focused);
-            let waiting = app
-                .mux
-                .as_ref()
-                .and_then(|mux| mux.pane(id))
-                .is_some_and(|pane| pane.requires_user_action());
-            if progress.is_none()
-                || (focused == Some(id)
-                    && !progress.is_some_and(|state| state.is_working() && waiting))
-            {
+            let forward_progress = progress.is_some_and(|state| {
+                app.mux
+                    .as_ref()
+                    .and_then(|mux| mux.pane(id))
+                    .is_some_and(|pane| pane.should_forward_raw_progress(state))
+            });
+            if progress.is_none() || (focused == Some(id) && forward_progress) {
                 app.host_sequences.push(sequence);
                 true
             } else {
@@ -3188,6 +3314,246 @@ mod tests {
         handle_mux_event(&mut app, MuxEvent::Output(1, complete));
         assert_eq!(app.notification_requests.len(), 2);
         assert_eq!(app.notification_requests[1].kind, NotificationKind::Ready);
+    }
+
+    #[test]
+    fn focused_hook_lifecycle_drives_outer_spinner_without_raw_osc() {
+        use crate::events::hooks::HookLifecycleEvent;
+
+        let mut app = attached_mux_app("hook-status");
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Working { timestamp: 1 })
+        ));
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::progress_sequence_for_state(
+                crate::host_terminal::ProgressState::Indeterminate
+            )]
+        );
+
+        app.host_sequences.clear();
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(1, crate::host_terminal::CLEAR_PROGRESS.to_vec())
+        ));
+        assert!(app.host_sequences.is_empty());
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Ready { timestamp: 2 })
+        ));
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::CLEAR_PROGRESS.to_vec()]
+        );
+        assert!(app.notification_requests.is_empty());
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::HookReadyConfirmed(1, 2)
+        ));
+        assert!(app.notification_requests.is_empty());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn raw_reentry_after_hook_ready_starts_a_fresh_notification_boundary() {
+        use crate::events::hooks::HookLifecycleEvent;
+
+        let home = tempfile::tempdir().unwrap();
+        let session_id = "hook-raw-reentry";
+        let session_dir = home.path().join("session-state").join(session_id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let events = session_dir.join("events.jsonl");
+        std::fs::write(&events, "first cycle").unwrap();
+        let mut app = attached_mux_app(session_id);
+        app.copilot_home = home.path().to_path_buf();
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Working { timestamp: 1 }),
+        );
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Ready { timestamp: 2 }),
+        );
+        handle_mux_event(&mut app, MuxEvent::HookReadyConfirmed(1, 2));
+
+        std::fs::write(&events, "second cycle is longer").unwrap();
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(1, b"\x1b]9;4;3;0\x1b\\".to_vec()),
+        );
+
+        assert_eq!(
+            app.notification_cycle_offset(session_id),
+            Some(std::fs::metadata(events).unwrap().len())
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn background_hook_lifecycle_never_controls_outer_spinner() {
+        use crate::events::hooks::HookLifecycleEvent;
+
+        let mut app = attached_mux_app("foreground");
+        push_test_pane(&mut app, 2, "background-hook");
+        app.mux.as_mut().unwrap().focused = Some(1);
+
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(2, HookLifecycleEvent::Working { timestamp: 1 })
+        ));
+        assert!(app.host_sequences.is_empty());
+        assert!(app.mux.as_ref().unwrap().pane(2).unwrap().is_working());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn forwarding_permission_response_restores_authoritative_working_spinner() {
+        use crate::events::hooks::{HookAttention, HookLifecycleEvent};
+
+        let mut app = attached_mux_app("permission-hook");
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Working { timestamp: 1 }),
+        );
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(
+                1,
+                HookLifecycleEvent::Awaiting {
+                    timestamp: 2,
+                    attention: HookAttention::Permission,
+                },
+            ),
+        );
+        app.host_sequences.clear();
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+        );
+
+        assert!(!app
+            .mux
+            .as_ref()
+            .unwrap()
+            .pane(1)
+            .unwrap()
+            .requires_user_action());
+        assert_eq!(
+            app.host_sequences,
+            vec![crate::host_terminal::progress_sequence_for_state(
+                crate::host_terminal::ProgressState::Indeterminate
+            )]
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn local_mouse_event_does_not_clear_permission_wait() {
+        use crate::events::hooks::{HookAttention, HookLifecycleEvent};
+
+        let mut app = attached_mux_app("permission-mouse");
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Working { timestamp: 1 }),
+        );
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(
+                1,
+                HookLifecycleEvent::Awaiting {
+                    timestamp: 2,
+                    attention: HookAttention::Permission,
+                },
+            ),
+        );
+
+        handle_attached_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert!(app
+            .mux
+            .as_ref()
+            .unwrap()
+            .pane(1)
+            .unwrap()
+            .requires_user_action());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn permission_navigation_key_does_not_clear_wait() {
+        use crate::events::hooks::{HookAttention, HookLifecycleEvent};
+
+        let mut app = attached_mux_app("permission-navigation");
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(1, HookLifecycleEvent::Working { timestamp: 1 }),
+        );
+        handle_mux_event(
+            &mut app,
+            MuxEvent::HookLifecycle(
+                1,
+                HookLifecycleEvent::Awaiting {
+                    timestamp: 2,
+                    attention: HookAttention::Permission,
+                },
+            ),
+        );
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+
+        assert!(app
+            .mux
+            .as_ref()
+            .unwrap()
+            .pane(1)
+            .unwrap()
+            .requires_user_action());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn permission_resolution_keys_require_literal_unmodified_input() {
+        assert!(key_resolves_permission(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(key_resolves_permission(&KeyEvent::new(
+            KeyCode::Char('Y'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(!key_resolves_permission(&KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!key_resolves_permission(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT
+        )));
     }
 
     #[test]

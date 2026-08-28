@@ -15,6 +15,8 @@ pub enum MuxEvent {
     Output(PaneId, callbacks::PaneSignals),
     Exited(PaneId, Option<u32>),
     SessionLifecycle(PaneId, crate::events::lifecycle::LifecycleEvent),
+    HookLifecycle(PaneId, crate::events::hooks::HookLifecycleEvent),
+    HookReadyConfirmed(PaneId, u64),
     HostSequence(PaneId, Vec<u8>),
     ConfigChanged,
     Term(crossterm::event::Event),

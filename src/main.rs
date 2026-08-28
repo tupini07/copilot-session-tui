@@ -4,6 +4,7 @@ mod config;
 mod debug_keys;
 mod events;
 mod github;
+mod hook_plugin;
 mod host_terminal;
 mod input;
 mod mux;
@@ -119,6 +120,17 @@ enum Commands {
     /// Report how this terminal delivers key presses (used to pick a mux prefix key)
     #[command(hide = true)]
     DebugKeys,
+    /// Manage the optional Copilot lifecycle hook plugin
+    Hooks {
+        #[command(subcommand)]
+        action: HookPluginCommand,
+    },
+    /// Receive one lifecycle event from the Copilot hook plugin
+    #[command(hide = true)]
+    HookEvent {
+        #[arg(value_name = "EVENT")]
+        event: String,
+    },
     /// Regenerate the README screenshots from invented sessions
     #[cfg(feature = "screenshots")]
     #[command(hide = true)]
@@ -127,6 +139,16 @@ enum Commands {
         #[arg(default_value = "docs/img")]
         out_dir: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum HookPluginCommand {
+    /// Install or refresh authoritative Copilot lifecycle reporting
+    Install,
+    /// Show whether the lifecycle plugin is installed
+    Status,
+    /// Remove the lifecycle plugin
+    Uninstall,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -143,6 +165,19 @@ struct RestartManifestPane {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let copilot_home = cli
+        .copilot_home
+        .clone()
+        .unwrap_or_else(loader::copilot_home);
+    if cli.copilot_home.is_some() {
+        std::env::set_var("COPILOT_HOME", &copilot_home);
+    }
+    if let Some(Commands::HookEvent { event }) = &cli.command {
+        let command = events::hooks::HookCommand::parse(event)
+            .with_context(|| format!("Unknown CST lifecycle hook event: {event}"))?;
+        events::hooks::record_stdin(command, &copilot_home)?;
+        return Ok(());
+    }
 
     let restart_manifest = match (cli.restart_gate.as_deref(), cli.restart_parent_pid) {
         (Some(gate), Some(parent_pid)) => {
@@ -169,6 +204,32 @@ fn main() -> Result<()> {
         Some(Commands::DebugKeys) => {
             return debug_keys::run();
         }
+        Some(Commands::Hooks { action }) => {
+            match action {
+                HookPluginCommand::Install => {
+                    hook_plugin::install(&copilot_home)?;
+                    println!(
+                        "Installed CST lifecycle hooks. Restart active Copilot sessions to load them."
+                    );
+                }
+                HookPluginCommand::Status => match hook_plugin::status(&copilot_home)? {
+                    hook_plugin::PluginStatus::Installed => {
+                        println!("CST lifecycle hooks are installed.");
+                    }
+                    hook_plugin::PluginStatus::NotInstalled => {
+                        println!("CST lifecycle hooks are not installed.");
+                    }
+                },
+                HookPluginCommand::Uninstall => {
+                    hook_plugin::uninstall(&copilot_home)?;
+                    println!(
+                        "Uninstalled CST lifecycle hooks. Restart active Copilot sessions to unload them."
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::HookEvent { .. }) => unreachable!("handled before normal startup"),
         #[cfg(feature = "screenshots")]
         Some(Commands::Screenshots { out_dir }) => {
             return screenshots::run(out_dir);
@@ -176,16 +237,8 @@ fn main() -> Result<()> {
         None => {}
     }
 
-    let copilot_home = cli
-        .copilot_home
-        .clone()
-        .unwrap_or_else(loader::copilot_home);
     // The path controls both CST's session loader and the Copilot process it resumes.
-    // Generated favorite tabs receive an explicit path, so export it before any child
-    // processes or background threads are started.
-    if cli.copilot_home.is_some() {
-        std::env::set_var("COPILOT_HOME", &copilot_home);
-    }
+    // Generated favorite tabs receive an explicit path before any child processes start.
 
     let mut user_config = config::load();
     // CLI flags win for this invocation only; they are never written back to disk.
@@ -1378,6 +1431,23 @@ mod tests {
         assert_eq!(handoff.restart_parent_pid, Some(42));
         assert_eq!(handoff.restart_gate, Some(PathBuf::from("gate")));
         assert!(Cli::try_parse_from(["cst", "--restart-gate", "gate"]).is_err());
+    }
+
+    #[test]
+    fn lifecycle_hook_subcommands_parse_without_starting_the_tui() {
+        let install = Cli::try_parse_from(["cst", "hooks", "install"]).unwrap();
+        assert!(matches!(
+            install.command,
+            Some(Commands::Hooks {
+                action: HookPluginCommand::Install
+            })
+        ));
+
+        let event = Cli::try_parse_from(["cst", "hook-event", "working"]).unwrap();
+        assert!(matches!(
+            event.command,
+            Some(Commands::HookEvent { ref event }) if event == "working"
+        ));
     }
 
     #[test]

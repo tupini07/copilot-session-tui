@@ -1,0 +1,12 @@
+{
+  "name": "cst-lifecycle",
+  "description": "Reports privacy-minimized Copilot CLI lifecycle state to Copilot Session TUI.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Copilot Session TUI"
+  },
+  "repository": "https://github.com/tupini07/copilot-session-tui",
+  "license": "MIT",
+  "keywords": ["cst", "lifecycle", "status"],
+  "hooks": "hooks.json"
+}

@@ -2334,6 +2334,11 @@ impl App {
             .insert(session_id.to_string(), length);
     }
 
+    #[cfg(test)]
+    pub fn notification_cycle_offset(&self, session_id: &str) -> Option<u64> {
+        self.notification_cycle_offsets.get(session_id).copied()
+    }
+
     fn notification_events_path(&self, session_id: &str) -> PathBuf {
         self.copilot_home
             .join("session-state")

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "copilot-session-tui hook-event session-start",
+        "timeoutSec": 2
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "command": "copilot-session-tui hook-event working",
+        "timeoutSec": 2
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "copilot-session-tui hook-event ready",
+        "timeoutSec": 2
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "command": "copilot-session-tui hook-event error",
+        "timeoutSec": 2
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "command": "copilot-session-tui hook-event session-end",
+        "timeoutSec": 2
+      }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "matcher": "permission_prompt|elicitation_dialog",
+        "command": "copilot-session-tui hook-event notification",
+        "timeoutSec": 2
+      }
+    ]
+  }
+}

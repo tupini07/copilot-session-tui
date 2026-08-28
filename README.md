@@ -50,6 +50,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
   `--session-id` arrived. CST names each new session itself so that a session's
   scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
+  Copilot CLI 1.0.82+ is recommended for the optional authoritative lifecycle hooks.
 
 ### Build from source
 
@@ -376,6 +377,27 @@ outer spinner while Copilot waits, and keeps `?` visible even after the pane is 
 Copilot's repeated working-progress signal cannot dismiss the marker or restart the spinner;
 only the matching tool completion does. CST then resumes the pane's latest real progress
 state. No screen-text matching or prompt contents are used for this detection.
+
+### Authoritative Copilot lifecycle hooks
+
+OSC progress remains available as a zero-configuration fallback, but terminals can lose or
+coalesce those escape sequences. Copilot CLI 1.0.82+ exposes real lifecycle hooks for prompt
+submission, agent completion, errors, permission prompts, elicitation dialogs, and session
+start/end. Install CST's bundled Copilot plugin for authoritative tab progress:
+
+```bash
+cst hooks install
+cst hooks status
+# cst hooks uninstall
+```
+
+Restart already-running Copilot sessions after installing or uninstalling the plugin; hook
+configuration is loaded when Copilot starts. The installer generates a plugin bound to the
+exact CST executable and installs it through `copilot plugin install`. Hooks write only a
+session ID, timestamp, coarse lifecycle state, and attention kind to that session's
+`.cst-lifecycle.jsonl`. Prompts, tool arguments/results, notification text, paths, and model
+responses are never persisted. CST tails these records while retaining its existing OSC and
+structured `events.jsonl` fallbacks for sessions without the plugin.
 
 ### Phone notifications with ntfy
 

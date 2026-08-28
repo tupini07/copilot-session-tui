@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::events::hooks::{HookAttention, HookLifecycleEvent, HookMonitor};
 use crate::events::lifecycle::{InputKind, LifecycleEvent, LifecycleMonitor};
 
 use super::callbacks::{PaneCallbacks, PaneSignalEvent, PaneSignals};
@@ -70,20 +71,44 @@ pub struct Pane {
     parser: PaneParser,
     has_visible_output: Arc<AtomicBool>,
     _lifecycle_monitor: Option<LifecycleMonitor>,
+    _hook_monitor: Option<HookMonitor>,
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
     working: bool,
     progress_state: crate::host_terminal::ProgressState,
+    raw_progress_generation: u64,
+    hook_state: Option<HookActivity>,
+    hook_waiting: Option<HookAttention>,
+    hook_timestamp: u64,
+    hook_ready_pending: Option<u64>,
+    hook_ready_raw_generation: u64,
+    raw_completion_pending: bool,
+    hook_completion_window: bool,
+    attention_resolved_at: u64,
     pending_inputs: Vec<(String, InputKind)>,
     needs_attention: bool,
     ready_sent_in_cycle: bool,
     error_sent_in_cycle: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookActivity {
+    Idle,
+    Working,
+    Error,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PaneSignalOutcome {
     pub bell: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneHookOutcome {
+    pub notification: Option<PaneNotification>,
+    pub cycle_started: bool,
+    pub ready_confirmation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +154,13 @@ impl Pane {
             .as_deref()
             .map(crate::events::lifecycle::capture_file_baseline)
             .transpose()?;
+        let hook_events_path = events_path
+            .as_ref()
+            .map(|path| path.with_file_name(".cst-lifecycle.jsonl"));
+        let hook_baseline = hook_events_path
+            .as_deref()
+            .map(crate::events::hooks::capture_file_len)
+            .unwrap_or_default();
 
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
         let pty = PtySession::spawn(&program, &args, Some(&cwd), size, chunk_tx)?;
@@ -146,6 +178,7 @@ impl Pane {
         let has_visible_output = Arc::new(AtomicBool::new(false));
         let pump_has_visible_output = Arc::clone(&has_visible_output);
         let lifecycle_events = events.clone();
+        let hook_events = events.clone();
         std::thread::spawn(move || {
             while let Ok(chunk) = chunk_rx.recv() {
                 match chunk {
@@ -180,6 +213,11 @@ impl Pane {
                     .is_ok()
             })
         });
+        let hook_monitor = hook_events_path.map(|path| {
+            HookMonitor::start(path, hook_baseline, move |event| {
+                hook_events.send(MuxEvent::HookLifecycle(id, event)).is_ok()
+            })
+        });
 
         Ok(Self {
             id,
@@ -191,6 +229,7 @@ impl Pane {
             parser,
             has_visible_output,
             _lifecycle_monitor: lifecycle_monitor,
+            _hook_monitor: hook_monitor,
             pty,
             mouse_captured: false,
             viewport: Viewport {
@@ -201,6 +240,15 @@ impl Pane {
             },
             working: false,
             progress_state: crate::host_terminal::ProgressState::Clear,
+            raw_progress_generation: 0,
+            hook_state: None,
+            hook_waiting: None,
+            hook_timestamp: 0,
+            hook_ready_pending: None,
+            hook_ready_raw_generation: 0,
+            raw_completion_pending: false,
+            hook_completion_window: false,
+            attention_resolved_at: 0,
             pending_inputs: Vec::new(),
             needs_attention: false,
             ready_sent_in_cycle: false,
@@ -220,12 +268,68 @@ impl Pane {
         if self.requires_user_action() {
             crate::host_terminal::ProgressState::Clear
         } else {
-            self.progress_state
+            match self.hook_state {
+                Some(HookActivity::Idle) => crate::host_terminal::ProgressState::Clear,
+                Some(HookActivity::Working)
+                    if matches!(
+                        self.progress_state,
+                        crate::host_terminal::ProgressState::Normal
+                            | crate::host_terminal::ProgressState::Indeterminate
+                    ) =>
+                {
+                    self.progress_state
+                }
+                Some(HookActivity::Working) => crate::host_terminal::ProgressState::Indeterminate,
+                Some(HookActivity::Error) => crate::host_terminal::ProgressState::Error,
+                None => self.progress_state,
+            }
         }
     }
 
-    pub fn record_progress_state(&mut self, state: crate::host_terminal::ProgressState) {
+    pub fn should_forward_raw_progress(&self, state: crate::host_terminal::ProgressState) -> bool {
+        if self.requires_user_action() {
+            return state == crate::host_terminal::ProgressState::Clear;
+        }
+        match self.hook_state {
+            None => true,
+            Some(HookActivity::Idle) => state == crate::host_terminal::ProgressState::Clear,
+            Some(HookActivity::Working) => matches!(
+                state,
+                crate::host_terminal::ProgressState::Normal
+                    | crate::host_terminal::ProgressState::Indeterminate
+            ),
+            Some(HookActivity::Error) => state == crate::host_terminal::ProgressState::Error,
+        }
+    }
+
+    pub fn record_progress_state(&mut self, state: crate::host_terminal::ProgressState) -> bool {
+        self.raw_progress_generation = self.raw_progress_generation.wrapping_add(1);
+        let mut cycle_started = false;
+        let compatible_working = matches!(
+            state,
+            crate::host_terminal::ProgressState::Normal
+                | crate::host_terminal::ProgressState::Indeterminate
+        );
+        let continuation_after_clear = self.hook_ready_pending.is_some()
+            && self.hook_state == Some(HookActivity::Idle)
+            && self.progress_state == crate::host_terminal::ProgressState::Clear
+            && compatible_working;
+        if (self.hook_ready_pending.is_none() || continuation_after_clear)
+            && self.hook_state == Some(HookActivity::Idle)
+            && compatible_working
+        {
+            self.hook_ready_pending = None;
+            self.hook_state = Some(HookActivity::Working);
+            self.working = true;
+            self.needs_attention = false;
+            self.ready_sent_in_cycle = false;
+            self.error_sent_in_cycle = false;
+            self.raw_completion_pending = false;
+            self.hook_completion_window = false;
+            cycle_started = true;
+        }
         self.progress_state = state;
+        cycle_started
     }
 
     /// True while the child has produced nothing visible yet.
@@ -265,8 +369,14 @@ impl Pane {
     pub fn mark_exited(&mut self, code: Option<u32>) {
         self.status = PaneStatus::Exited(code);
         self._lifecycle_monitor.take();
+        self._hook_monitor.take();
         self.working = false;
         self.progress_state = crate::host_terminal::ProgressState::Clear;
+        self.hook_state = Some(HookActivity::Idle);
+        self.hook_waiting = None;
+        self.hook_ready_pending = None;
+        self.raw_completion_pending = false;
+        self.hook_completion_window = false;
         self.pending_inputs.clear();
     }
 
@@ -332,6 +442,12 @@ impl Pane {
             match event {
                 PaneSignalEvent::Progress(progress) if progress.is_working() => {
                     self.progress_state = progress;
+                    if self.hook_state.is_some() {
+                        if self.hook_state == Some(HookActivity::Working) {
+                            self.raw_completion_pending = false;
+                        }
+                        continue;
+                    }
                     if !self.working {
                         self.ready_sent_in_cycle = false;
                         self.error_sent_in_cycle = false;
@@ -347,8 +463,33 @@ impl Pane {
                         self.error_sent_in_cycle = true;
                     }
                 }
+                PaneSignalEvent::Progress(_)
+                    if self.hook_state == Some(HookActivity::Idle)
+                        && self.hook_completion_window =>
+                {
+                    self.progress_state = crate::host_terminal::ProgressState::Clear;
+                    self.hook_ready_pending = None;
+                    self.hook_completion_window = false;
+                    self.raw_completion_pending = false;
+                    self.working = false;
+                    self.needs_attention = !attended;
+                    if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+                        notifications.push(PaneNotification::Ready);
+                        self.ready_sent_in_cycle = true;
+                    }
+                }
                 PaneSignalEvent::Progress(_) if self.working => {
                     self.progress_state = crate::host_terminal::ProgressState::Clear;
+                    if matches!(
+                        self.hook_state,
+                        Some(HookActivity::Working | HookActivity::Error)
+                    ) {
+                        if self.hook_state == Some(HookActivity::Working) {
+                            self.raw_completion_pending = true;
+                        }
+                        continue;
+                    }
+                    self.hook_ready_pending = None;
                     self.working = false;
                     if !self.requires_user_action() {
                         self.needs_attention = !attended;
@@ -366,6 +507,21 @@ impl Pane {
                 }
                 PaneSignalEvent::Bell => {
                     outcome.bell = true;
+                    if matches!(
+                        self.hook_state,
+                        Some(HookActivity::Working | HookActivity::Error)
+                    ) {
+                        if self.hook_state == Some(HookActivity::Working) {
+                            self.raw_completion_pending = true;
+                        }
+                        continue;
+                    }
+                    if self.hook_state == Some(HookActivity::Idle) {
+                        self.hook_ready_pending = None;
+                        self.hook_completion_window = false;
+                        self.raw_completion_pending = false;
+                        self.working = false;
+                    }
                     if !attended && !self.requires_user_action() {
                         self.needs_attention = true;
                     }
@@ -392,12 +548,16 @@ impl Pane {
                 {
                     return None;
                 }
+                let already_waiting = self.requires_user_action();
+                let hook_elicitation = self.hook_waiting == Some(HookAttention::Elicitation);
                 self.pending_inputs.push((tool_call_id, kind));
                 self.ready_sent_in_cycle = true;
-                Some(match kind {
-                    InputKind::Question => PaneNotification::Question,
-                    InputKind::PlanApproval => PaneNotification::PlanApproval,
-                })
+                (!already_waiting || hook_elicitation || kind == InputKind::PlanApproval).then_some(
+                    match kind {
+                        InputKind::Question => PaneNotification::Question,
+                        InputKind::PlanApproval => PaneNotification::PlanApproval,
+                    },
+                )
             }
             LifecycleEvent::InputResolved { tool_call_id, kind } => {
                 let previous_len = self.pending_inputs.len();
@@ -405,6 +565,8 @@ impl Pane {
                     pending_id != &tool_call_id || *pending_kind != kind
                 });
                 if previous_len != self.pending_inputs.len() && self.pending_inputs.is_empty() {
+                    self.attention_resolved_at = current_timestamp();
+                    self.hook_waiting = None;
                     self.needs_attention = false;
                     self.ready_sent_in_cycle = false;
                     self.error_sent_in_cycle = false;
@@ -420,6 +582,172 @@ impl Pane {
                 }
                 None
             }
+        }
+    }
+
+    pub fn apply_hook(&mut self, event: HookLifecycleEvent, attended: bool) -> PaneHookOutcome {
+        let timestamp = event.timestamp();
+        let previous_timestamp = self.hook_timestamp;
+        if timestamp < previous_timestamp {
+            return PaneHookOutcome::default();
+        }
+        self.hook_timestamp = timestamp;
+        match event {
+            HookLifecycleEvent::SessionStarted { .. } => {
+                // Startup alone says nothing about whether this hook process will
+                // remain available, so keep raw OSC as the fallback until a real
+                // working/ready lifecycle transition arrives.
+                self.hook_state = None;
+                self.hook_waiting = None;
+                self.hook_ready_pending = None;
+                self.raw_completion_pending = false;
+                self.hook_completion_window = false;
+                PaneHookOutcome::default()
+            }
+            HookLifecycleEvent::Working { .. } => {
+                let cycle_started = self.hook_state != Some(HookActivity::Working);
+                self.hook_state = Some(HookActivity::Working);
+                self.hook_waiting = None;
+                self.hook_ready_pending = None;
+                self.raw_completion_pending = false;
+                self.hook_completion_window = false;
+                if !matches!(
+                    self.progress_state,
+                    crate::host_terminal::ProgressState::Normal
+                        | crate::host_terminal::ProgressState::Indeterminate
+                ) {
+                    self.progress_state = crate::host_terminal::ProgressState::Clear;
+                }
+                if cycle_started {
+                    self.ready_sent_in_cycle = false;
+                    self.error_sent_in_cycle = false;
+                }
+                self.working = true;
+                self.needs_attention = false;
+                PaneHookOutcome {
+                    notification: None,
+                    cycle_started,
+                    ready_confirmation: None,
+                }
+            }
+            HookLifecycleEvent::Ready { .. } => {
+                let continuation_observed = self.hook_ready_pending.is_some()
+                    && self.raw_progress_generation != self.hook_ready_raw_generation
+                    && matches!(
+                        self.progress_state,
+                        crate::host_terminal::ProgressState::Normal
+                            | crate::host_terminal::ProgressState::Indeterminate
+                    );
+                if self.hook_ready_pending.is_some() && !continuation_observed {
+                    return PaneHookOutcome::default();
+                }
+                if continuation_observed {
+                    self.ready_sent_in_cycle = false;
+                    self.error_sent_in_cycle = false;
+                }
+                let was_working = continuation_observed
+                    || self.hook_state == Some(HookActivity::Working)
+                    || self.working;
+                self.hook_state = Some(HookActivity::Idle);
+                self.hook_waiting = None;
+                self.needs_attention = false;
+                let ready_confirmation =
+                    (was_working && !self.error_sent_in_cycle && !self.ready_sent_in_cycle)
+                        .then_some(timestamp);
+                self.hook_ready_pending = ready_confirmation;
+                self.hook_ready_raw_generation = self.raw_progress_generation;
+                self.hook_completion_window = was_working;
+                PaneHookOutcome {
+                    notification: None,
+                    cycle_started: false,
+                    ready_confirmation,
+                }
+            }
+            HookLifecycleEvent::Error { .. } => {
+                self.hook_state = Some(HookActivity::Error);
+                self.hook_waiting = None;
+                self.hook_ready_pending = None;
+                self.raw_completion_pending = false;
+                self.hook_completion_window = false;
+                self.working = false;
+                self.needs_attention = !attended;
+                let notification = (!self.error_sent_in_cycle).then_some(PaneNotification::Error);
+                self.error_sent_in_cycle = true;
+                PaneHookOutcome {
+                    notification,
+                    cycle_started: false,
+                    ready_confirmation: None,
+                }
+            }
+            HookLifecycleEvent::Awaiting { attention, .. } => {
+                if timestamp <= self.attention_resolved_at
+                    || (timestamp == previous_timestamp
+                        && matches!(
+                            self.hook_state,
+                            Some(HookActivity::Idle | HookActivity::Error)
+                        ))
+                {
+                    return PaneHookOutcome::default();
+                }
+                let changed = self.hook_waiting != Some(attention);
+                self.hook_waiting = Some(attention);
+                self.hook_ready_pending = None;
+                self.raw_completion_pending = false;
+                self.hook_completion_window = false;
+                self.ready_sent_in_cycle = true;
+                PaneHookOutcome {
+                    notification: (changed && attention == HookAttention::Permission)
+                        .then_some(PaneNotification::Question),
+                    cycle_started: false,
+                    ready_confirmation: None,
+                }
+            }
+            HookLifecycleEvent::SessionEnded { .. } => {
+                self.hook_state = Some(HookActivity::Idle);
+                self.hook_waiting = None;
+                self.hook_ready_pending = None;
+                self.raw_completion_pending = false;
+                self.hook_completion_window = false;
+                self.working = false;
+                PaneHookOutcome::default()
+            }
+        }
+    }
+
+    pub fn confirm_hook_ready(
+        &mut self,
+        timestamp: u64,
+        _attended: bool,
+    ) -> Option<PaneNotification> {
+        if self.hook_ready_pending != Some(timestamp) || self.hook_state != Some(HookActivity::Idle)
+        {
+            return None;
+        }
+        if self.raw_progress_generation != self.hook_ready_raw_generation
+            && matches!(
+                self.progress_state,
+                crate::host_terminal::ProgressState::Normal
+                    | crate::host_terminal::ProgressState::Indeterminate
+            )
+        {
+            self.hook_ready_pending = None;
+            self.hook_state = Some(HookActivity::Working);
+            self.working = true;
+            self.needs_attention = false;
+            self.ready_sent_in_cycle = false;
+            return None;
+        }
+        self.hook_ready_pending = None;
+        self.working = false;
+        if self.raw_completion_pending && !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
+            self.raw_completion_pending = false;
+            self.hook_completion_window = false;
+            self.needs_attention = !_attended;
+            self.ready_sent_in_cycle = true;
+            Some(PaneNotification::Ready)
+        } else {
+            self.needs_attention = false;
+            None
         }
     }
 
@@ -441,11 +769,23 @@ impl Pane {
     }
 
     pub fn requires_user_action(&self) -> bool {
-        !self.pending_inputs.is_empty()
+        !self.pending_inputs.is_empty() || self.hook_waiting.is_some()
     }
 
     pub fn acknowledge_attention(&mut self) {
         self.needs_attention = false;
+    }
+
+    pub fn clear_hook_permission_wait(&mut self) -> bool {
+        self.attention_resolved_at = current_timestamp();
+        if self.hook_waiting == Some(HookAttention::Permission) {
+            self.hook_waiting = None;
+            self.ready_sent_in_cycle = false;
+            self.error_sent_in_cycle = false;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn display_title(&self) -> String {
@@ -514,9 +854,9 @@ impl Pane {
         self.pty.write(&bytes)
     }
 
-    pub fn handle_mouse(&mut self, event: MouseEvent) -> Result<()> {
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> Result<bool> {
         if !self.is_running() {
-            return Ok(());
+            return Ok(false);
         }
         let Some((mode, encoding)) = self.with_screen(|screen| {
             (
@@ -524,20 +864,19 @@ impl Pane {
                 screen.mouse_protocol_encoding(),
             )
         }) else {
-            return Ok(());
+            return Ok(false);
         };
         let coordinates = self.viewport.coordinates(event.column, event.row);
 
         if mode == vt100::MouseProtocolMode::None {
             if coordinates.is_some() {
                 match event.kind {
-                    MouseEventKind::ScrollUp => self.scroll(3),
-                    MouseEventKind::ScrollDown => self.scroll(-3),
-                    _ => Ok(()),
+                    MouseEventKind::ScrollUp => self.scroll(3)?,
+                    MouseEventKind::ScrollDown => self.scroll(-3)?,
+                    _ => {}
                 }
-            } else {
-                Ok(())
             }
+            Ok(false)
         } else {
             if matches!(event.kind, MouseEventKind::Down(_)) && coordinates.is_some() {
                 self.mouse_captured = true;
@@ -554,8 +893,9 @@ impl Pane {
             }
             if let Some(sequence) = sequence {
                 self.pty.write(&sequence)?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         }
     }
 
@@ -619,6 +959,14 @@ impl Pane {
 }
 
 /// Text of one screen row, as characters, for reference scanning.
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn row_characters(screen: &vt100::Screen, row: u16, cols: u16) -> Vec<char> {
     (0..cols)
         .map(|col| {
@@ -825,6 +1173,18 @@ mod tests {
         panic!("timed out waiting for session lifecycle event");
     }
 
+    fn wait_for_hook(rx: &mpsc::Receiver<MuxEvent>) -> HookLifecycleEvent {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(MuxEvent::HookLifecycle(_, event)) => return event,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        panic!("timed out waiting for hook lifecycle event");
+    }
+
     #[test]
     fn pane_monitor_forwards_lifecycle_appends_after_spawn() {
         let directory = tempfile::tempdir().unwrap();
@@ -925,6 +1285,38 @@ mod tests {
         assert!(!pane.is_blank());
         assert!(!pane.is_blank(), "subsequent checks are atomic reads");
 
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pane_monitor_forwards_authoritative_hook_appends_after_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let events_path = directory.path().join("events.jsonl");
+        std::fs::write(&events_path, "{\"type\":\"session.start\"}\n").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut spec = test_spec(44, program, args);
+        spec.events_path = Some(events_path);
+        let mut pane = Pane::spawn(spec, 24, 80, tx).unwrap();
+        let hook_path = directory.path().join(".cst-lifecycle.jsonl");
+
+        std::fs::write(
+            &hook_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&HookLifecycleEvent::Working { timestamp: 1 }).unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            wait_for_hook(&rx),
+            HookLifecycleEvent::Working { timestamp: 1 }
+        );
         pane.shutdown().unwrap();
     }
 
@@ -1085,6 +1477,342 @@ mod tests {
         pane.apply_lifecycle(LifecycleEvent::Reset);
         assert!(!pane.requires_user_action());
         assert!(!pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn hook_lifecycle_overrides_patchy_raw_progress_until_next_turn() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(42, program, args), 24, 80, tx).unwrap();
+
+        let working = pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        assert!(working.cycle_started);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
+        );
+        assert!(!pane.should_forward_raw_progress(crate::host_terminal::ProgressState::Clear));
+        assert!(
+            pane.should_forward_raw_progress(crate::host_terminal::ProgressState::Indeterminate)
+        );
+
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert!(ready.notification.is_none());
+        assert_eq!(ready.ready_confirmation, Some(2));
+        assert!(!pane.needs_attention());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+        assert!(
+            !pane.should_forward_raw_progress(crate::host_terminal::ProgressState::Indeterminate)
+        );
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+        assert!(!pane.needs_attention());
+
+        pane.record_progress_state(crate::host_terminal::ProgressState::Error);
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 3 }, false);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate,
+            "a previous raw error cannot leak into a new authoritative cycle"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn late_async_attention_cannot_override_newer_ready_state() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(45, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 10 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 30 }, false);
+
+        let stale = pane.apply_hook(
+            HookLifecycleEvent::Awaiting {
+                timestamp: 20,
+                attention: HookAttention::Permission,
+            },
+            false,
+        );
+
+        assert_eq!(stale, PaneHookOutcome::default());
+        assert!(!pane.requires_user_action());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn raw_work_after_agent_stop_cancels_premature_ready_confirmation() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(47, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        assert!(!pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate));
+        let pending = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(pending.ready_confirmation, Some(2));
+
+        assert!(!pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate));
+        let final_ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 3 }, false);
+        assert_eq!(final_ready.ready_confirmation, Some(3));
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+        assert_eq!(pane.confirm_hook_ready(3, false), None);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn raw_work_after_confirmed_ready_reenters_authoritative_working() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(48, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+
+        assert!(pane.is_working());
+        assert!(!pane.needs_attention());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
+        );
+        let final_ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 3 }, false);
+        assert_eq!(final_ready.ready_confirmation, Some(3));
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn bell_finalizes_hook_ready_candidate() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(49, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+
+        let (outcome, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Bell],
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert!(outcome.bell);
+        assert_eq!(notifications, vec![PaneNotification::Ready]);
+        assert!(pane.needs_attention());
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn raw_clear_before_delayed_ready_hook_is_preserved_as_completion_evidence() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(51, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(notifications.is_empty());
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+
+        assert_eq!(ready.ready_confirmation, Some(2));
+        assert_eq!(
+            pane.confirm_hook_ready(2, false),
+            Some(PaneNotification::Ready)
+        );
+        assert!(pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn raw_clear_after_ready_confirmation_still_finalizes_completion() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(52, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(notifications, vec![PaneNotification::Ready]);
+        assert!(pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn coalesced_clear_then_working_cancels_hook_ready_candidate() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert!(!pane.record_progress_state(crate::host_terminal::ProgressState::Clear));
+        assert!(pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate));
+
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![
+                    PaneSignalEvent::Progress(crate::host_terminal::ProgressState::Clear),
+                    PaneSignalEvent::Progress(crate::host_terminal::ProgressState::Indeterminate),
+                ],
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert!(notifications.is_empty());
+        assert!(pane.is_working());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn resolved_attention_watermark_rejects_delayed_hook_notification() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(46, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_lifecycle(LifecycleEvent::InputRequested {
+            tool_call_id: "question-1".into(),
+            kind: InputKind::Question,
+        });
+        pane.apply_lifecycle(LifecycleEvent::InputResolved {
+            tool_call_id: "question-1".into(),
+            kind: InputKind::Question,
+        });
+
+        pane.apply_hook(
+            HookLifecycleEvent::Awaiting {
+                timestamp: 2,
+                attention: HookAttention::Elicitation,
+            },
+            false,
+        );
+
+        assert!(!pane.requires_user_action());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn hook_attention_and_structured_question_events_do_not_duplicate_notifications() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(43, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+
+        let hook = pane.apply_hook(
+            HookLifecycleEvent::Awaiting {
+                timestamp: 2,
+                attention: HookAttention::Elicitation,
+            },
+            false,
+        );
+        assert!(hook.notification.is_none());
+        assert!(pane.requires_user_action());
+        assert_eq!(
+            pane.apply_lifecycle(LifecycleEvent::InputRequested {
+                tool_call_id: "question-1".into(),
+                kind: InputKind::Question,
+            }),
+            Some(PaneNotification::Question)
+        );
+        pane.apply_lifecycle(LifecycleEvent::InputResolved {
+            tool_call_id: "question-1".into(),
+            kind: InputKind::Question,
+        });
+        assert!(!pane.requires_user_action());
+
+        let permission_timestamp = current_timestamp().saturating_add(1);
+        let permission = pane.apply_hook(
+            HookLifecycleEvent::Awaiting {
+                timestamp: permission_timestamp,
+                attention: HookAttention::Permission,
+            },
+            false,
+        );
+        assert_eq!(permission.notification, Some(PaneNotification::Question));
+        assert!(pane.clear_hook_permission_wait());
+        assert!(!pane.requires_user_action());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
+        );
+        let ready = pane.apply_hook(
+            HookLifecycleEvent::Ready {
+                timestamp: permission_timestamp.saturating_add(1),
+            },
+            false,
+        );
+        assert_eq!(
+            ready.ready_confirmation,
+            Some(permission_timestamp.saturating_add(1))
+        );
         pane.shutdown().unwrap();
     }
 
