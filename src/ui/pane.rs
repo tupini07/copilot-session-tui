@@ -172,6 +172,8 @@ fn reference_marker_style(theme: Theme, status: crate::github::ReferenceStatus) 
     let color = match status.kind {
         ReferenceKind::Issue => theme.warning,
         ReferenceKind::PullRequest => theme.accent_alt,
+        ReferenceKind::Discussion => theme.info,
+        ReferenceKind::Ambiguous => theme.warning,
     };
     Style::default()
         .fg(color)
@@ -188,6 +190,8 @@ fn reference_style(theme: Theme, status: crate::github::ReferenceStatus) -> Styl
             // and GitHub itself colours them differently.
             ReferenceKind::Issue => theme.accent,
             ReferenceKind::PullRequest => theme.error,
+            ReferenceKind::Discussion => theme.accent,
+            ReferenceKind::Ambiguous => theme.warning,
         },
         ReferenceState::Merged => theme.accent,
         ReferenceState::Draft if theme.name == ThemeName::Classic => Color::Gray,

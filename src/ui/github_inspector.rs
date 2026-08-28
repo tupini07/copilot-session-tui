@@ -129,9 +129,68 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &inspector.screen {
         GithubInspectorScreen::NumberPrompt => draw_prompt(f, inspector, theme),
         GithubInspectorScreen::Loading => draw_loading(f, inspector, theme),
+        GithubInspectorScreen::Choose {
+            issue_or_pull_request,
+            discussion,
+        } => draw_choice(f, issue_or_pull_request, discussion, theme),
         GithubInspectorScreen::Error(message) => draw_error(f, inspector, message, theme),
         GithubInspectorScreen::Ready(_) => draw_ready(f, app, theme),
     }
+}
+
+fn draw_choice(
+    f: &mut Frame,
+    issue_or_pull_request: &GithubItem,
+    discussion: &GithubItem,
+    theme: Theme,
+) {
+    let number = issue_or_pull_request.common().number;
+    let issue_kind = if issue_or_pull_request.is_pull_request() {
+        "pull request"
+    } else {
+        "issue"
+    };
+    draw_message_screen(
+        f,
+        " GitHub Inspector — Choose Item ",
+        theme.warning,
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  GitHub #{number} identifies more than one item"),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                key("i", theme),
+                Span::styled(
+                    format!(" {issue_kind}: {}", issue_or_pull_request.common().title),
+                    Style::default().fg(theme.text),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                key("d", theme),
+                Span::styled(
+                    format!(" discussion: {}", discussion.common().title),
+                    Style::default().fg(theme.text),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                key("i", theme),
+                Span::raw(format!(" open {issue_kind}   ")),
+                key("d", theme),
+                Span::raw(" open discussion   "),
+                key("q", theme),
+                Span::raw(" close"),
+            ]),
+        ],
+        theme,
+    );
 }
 
 fn draw_prompt(f: &mut Frame, inspector: &GithubInspector, theme: Theme) {
@@ -151,14 +210,14 @@ fn draw_prompt(f: &mut Frame, inspector: &GithubInspector, theme: Theme) {
         .map(|message| Span::styled(message, Style::default().fg(theme.error)))
         .unwrap_or_else(|| {
             Span::styled(
-                "Enter an issue or pull request number",
+                "Number, `d 2291`, or a GitHub item URL",
                 Style::default().fg(theme.muted),
             )
         });
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::raw("  # "),
+            Span::raw("  "),
             Span::styled(
                 inspector.input.clone(),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
@@ -696,6 +755,8 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect, theme: Theme) {
     let common = item.common();
     let kind = if item.is_pull_request() {
         "PR"
+    } else if item.is_discussion() {
+        "Discussion"
     } else {
         "Issue"
     };
@@ -839,6 +900,29 @@ fn overview_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'st
         if let Some(mergeable) = &pull.mergeable_state {
             lines.push(field("Mergeability", mergeable.clone(), theme));
         }
+    } else if let GithubItem::Discussion(discussion) = item {
+        lines.extend([
+            field("Category", discussion.category.clone(), theme),
+            field(
+                "Answer",
+                if !discussion.answerable {
+                    "not available for this category".to_string()
+                } else if discussion.answered {
+                    discussion
+                        .answer_chosen_at
+                        .as_ref()
+                        .map(|date| format!("accepted · {date}"))
+                        .unwrap_or_else(|| "accepted".to_string())
+                } else {
+                    "not answered".to_string()
+                },
+                theme,
+            ),
+            field("Upvotes", discussion.upvote_count.to_string(), theme),
+        ]);
+        if let Some(reactions) = reactions_text(&discussion.reactions) {
+            lines.push(field("Reactions", reactions, theme));
+        }
     }
     lines.push(Line::from(""));
     lines.push(section("Description", theme));
@@ -857,6 +941,9 @@ fn overview_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'st
 }
 
 fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'static>> {
+    if let GithubItem::Discussion(discussion) = item {
+        return discussion_comment_lines(discussion, width, theme);
+    }
     let entries = item.discussion();
     if entries.is_empty() {
         return vec![Line::from(Span::styled(
@@ -864,6 +951,7 @@ fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'sta
             Style::default().fg(theme.muted),
         ))];
     }
+
     let mut lines = Vec::new();
     for entry in entries {
         let kind = match entry.kind {
@@ -901,6 +989,90 @@ fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'sta
         )));
     }
     lines
+}
+
+fn discussion_comment_lines(
+    discussion: &crate::github::RepositoryDiscussion,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    if discussion.comments.is_empty() {
+        return vec![Line::from(Span::styled(
+            " No comments",
+            Style::default().fg(theme.muted),
+        ))];
+    }
+    let mut lines = Vec::new();
+    for comment in &discussion.comments {
+        push_discussion_comment(&mut lines, comment, 0, width, theme);
+        lines.push(Line::from(Span::styled(
+            "─".repeat(width.max(1)),
+            Style::default().fg(theme.inactive),
+        )));
+    }
+    lines
+}
+
+fn push_discussion_comment(
+    lines: &mut Vec<Line<'static>>,
+    comment: &crate::github::DiscussionComment,
+    depth: usize,
+    width: usize,
+    theme: Theme,
+) {
+    let indent = "  ".repeat(depth + 1);
+    let answer = if comment.is_answer {
+        " · ACCEPTED ANSWER"
+    } else {
+        ""
+    };
+    let reactions = reactions_text(&comment.reactions)
+        .map(|value| format!(" · {value}"))
+        .unwrap_or_default();
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{indent}@{} · {} · ▲ {}{reactions}{answer}",
+            comment.author.login, comment.created_at, comment.upvote_count
+        ),
+        Style::default()
+            .fg(if comment.is_answer {
+                theme.success
+            } else if depth > 0 {
+                theme.accent_alt
+            } else {
+                theme.info
+            })
+            .add_modifier(Modifier::BOLD),
+    )));
+    let body = if comment.body.trim().is_empty() {
+        "(no comment body)"
+    } else {
+        comment.body.as_str()
+    };
+    let body_indent = "  ".repeat(depth + 2);
+    lines.extend(
+        text::wrap_text(
+            body,
+            width
+                .saturating_sub(text::display_width(&body_indent))
+                .max(1),
+        )
+        .into_iter()
+        .map(|line| Line::from(format!("{body_indent}{line}"))),
+    );
+    for reply in &comment.replies {
+        push_discussion_comment(lines, reply, depth + 1, width, theme);
+    }
+}
+
+fn reactions_text(reactions: &[crate::github::ReactionCount]) -> Option<String> {
+    (!reactions.is_empty()).then(|| {
+        reactions
+            .iter()
+            .map(|reaction| format!("{} {}", reaction.content, reaction.count))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    })
 }
 
 fn diff_lines(inspector: &GithubInspector, item: &GithubItem, theme: Theme) -> Vec<Line<'static>> {
@@ -1076,7 +1248,8 @@ mod tests {
     use crate::app::GithubInspector;
     use crate::config::UserConfig;
     use crate::github::{
-        Author, ChangedFile, DiscussionEntry, Issue, ItemCommon, Label, PullRequest, RepositoryRef,
+        Author, ChangedFile, DiscussionComment, DiscussionEntry, Issue, ItemCommon, Label,
+        PullRequest, ReactionCount, RepositoryDiscussion, RepositoryRef,
     };
     use crate::theme::ThemeName;
     use ratatui::backend::TestBackend;
@@ -1173,6 +1346,97 @@ mod tests {
                 line: None,
             }],
         })
+    }
+
+    fn discussion() -> GithubItem {
+        let mut common = common(2291);
+        common.title = "Coordinate rendering agents".to_string();
+        common.url = "https://github.com/octo/widgets/discussions/2291".to_string();
+        GithubItem::Discussion(RepositoryDiscussion {
+            common,
+            category: "Agents".to_string(),
+            answerable: true,
+            answered: true,
+            answer_chosen_at: Some("2026-01-04T00:00:00Z".to_string()),
+            upvote_count: 7,
+            reactions: vec![ReactionCount {
+                content: "HEART".to_string(),
+                count: 3,
+            }],
+            comments: vec![DiscussionComment {
+                author: Author {
+                    login: "answer-agent".to_string(),
+                },
+                body: "Use the merged schema.".to_string(),
+                created_at: "2026-01-03T00:00:00Z".to_string(),
+                upvote_count: 4,
+                reactions: Vec::new(),
+                is_answer: true,
+                replies: vec![DiscussionComment {
+                    author: Author {
+                        login: "reply-agent".to_string(),
+                    },
+                    body: "Acknowledged.".to_string(),
+                    created_at: "2026-01-03T01:00:00Z".to_string(),
+                    upvote_count: 1,
+                    reactions: Vec::new(),
+                    is_answer: false,
+                    replies: Vec::new(),
+                }],
+            }],
+        })
+    }
+
+    #[test]
+    fn discussion_overview_and_comments_show_discussion_metadata_and_threads() {
+        let item = discussion();
+        let overview = overview_lines(&item, 100, ThemeName::Nord.theme())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let comments = comment_lines(&item, 100, ThemeName::Nord.theme())
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(overview.contains("Category: Agents"), "got:\n{overview}");
+        assert!(overview.contains("Answer: accepted"), "got:\n{overview}");
+        assert!(overview.contains("Upvotes: 7"), "got:\n{overview}");
+        assert!(overview.contains("HEART 3"), "got:\n{overview}");
+        assert!(comments.contains("ACCEPTED ANSWER"), "got:\n{comments}");
+        assert!(comments.contains("@reply-agent"), "got:\n{comments}");
+        assert!(comments.contains("Acknowledged."), "got:\n{comments}");
+    }
+
+    #[test]
+    fn collision_screen_names_both_items() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        app.github_inspector.as_mut().unwrap().screen = GithubInspectorScreen::Choose {
+            issue_or_pull_request: Box::new(issue()),
+            discussion: Box::new(discussion()),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("identifies more than one item"),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains("discussion: Coordinate rendering agents"),
+            "got:\n{text}"
+        );
     }
 
     fn pull(patch: Option<&str>) -> GithubItem {

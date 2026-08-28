@@ -764,7 +764,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(help_line(
             theme,
             &format!("{prefix} C-g i"),
-            "Inspect a GitHub issue or pull request",
+            "Inspect a GitHub issue, pull request, or discussion",
         ));
         text.push(help_line(
             theme,

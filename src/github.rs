@@ -15,6 +15,99 @@ pub struct RepositoryRef {
     pub name: String,
 }
 
+fn discussion_reference_alias(number: u64) -> String {
+    format!("d{number}")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDiscussion {
+    number: u64,
+    title: String,
+    body: Option<String>,
+    url: String,
+    created_at: String,
+    updated_at: String,
+    closed: bool,
+    is_answered: Option<bool>,
+    answer_chosen_at: Option<String>,
+    upvote_count: u64,
+    #[serde(default)]
+    reaction_groups: Vec<GraphReactionGroup>,
+    author: Option<GraphActor>,
+    category: GraphDiscussionCategory,
+    comments: GraphConnection<GraphDiscussionComment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionCategory {
+    name: String,
+    #[serde(rename = "isAnswerable", default)]
+    is_answerable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDiscussionComment {
+    id: String,
+    body: Option<String>,
+    created_at: String,
+    upvote_count: u64,
+    is_answer: bool,
+    #[serde(default)]
+    reaction_groups: Vec<GraphReactionGroup>,
+    author: Option<GraphActor>,
+    replies: GraphConnection<GraphDiscussionReply>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphDiscussionReply {
+    body: Option<String>,
+    created_at: String,
+    upvote_count: u64,
+    #[serde(default)]
+    reaction_groups: Vec<GraphReactionGroup>,
+    author: Option<GraphActor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphReactionGroup {
+    content: String,
+    reactors: GraphTotalCount,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphTotalCount {
+    total_count: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionCommentsData {
+    repository: Option<GraphDiscussionCommentsRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionCommentsRepository {
+    discussion: Option<GraphDiscussionCommentsPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionCommentsPage {
+    comments: GraphConnection<GraphDiscussionComment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionRepliesData {
+    node: Option<GraphDiscussionRepliesNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphDiscussionRepliesNode {
+    replies: GraphConnection<GraphDiscussionReply>,
+}
+
 impl RepositoryRef {
     pub fn name_with_owner(&self) -> String {
         format!("{}/{}", self.owner, self.name)
@@ -85,6 +178,35 @@ pub struct Issue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionComment {
+    pub author: Author,
+    pub body: String,
+    pub created_at: String,
+    pub upvote_count: u64,
+    pub reactions: Vec<ReactionCount>,
+    pub is_answer: bool,
+    pub replies: Vec<DiscussionComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionCount {
+    pub content: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryDiscussion {
+    pub common: ItemCommon,
+    pub category: String,
+    pub answerable: bool,
+    pub answered: bool,
+    pub answer_chosen_at: Option<String>,
+    pub upvote_count: u64,
+    pub reactions: Vec<ReactionCount>,
+    pub comments: Vec<DiscussionComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub common: ItemCommon,
     pub draft: bool,
@@ -108,6 +230,11 @@ pub struct PullRequest {
 pub enum GithubItem {
     Issue(Issue),
     PullRequest(PullRequest),
+    Discussion(RepositoryDiscussion),
+    Ambiguous {
+        issue_or_pull_request: Box<GithubItem>,
+        discussion: Box<GithubItem>,
+    },
 }
 
 impl GithubItem {
@@ -115,6 +242,11 @@ impl GithubItem {
         match self {
             Self::Issue(issue) => &issue.common,
             Self::PullRequest(pull) => &pull.common,
+            Self::Discussion(discussion) => &discussion.common,
+            Self::Ambiguous {
+                issue_or_pull_request,
+                ..
+            } => issue_or_pull_request.common(),
         }
     }
 
@@ -122,6 +254,8 @@ impl GithubItem {
         match self {
             Self::Issue(issue) => &issue.comments,
             Self::PullRequest(pull) => &pull.discussion,
+            Self::Discussion(_) => &[],
+            Self::Ambiguous { .. } => &[],
         }
     }
 
@@ -129,11 +263,25 @@ impl GithubItem {
         match self {
             Self::Issue(_) => &[],
             Self::PullRequest(pull) => &pull.files,
+            Self::Discussion(_) => &[],
+            Self::Ambiguous { .. } => &[],
         }
     }
 
     pub fn is_pull_request(&self) -> bool {
         matches!(self, Self::PullRequest(_))
+    }
+
+    pub fn is_discussion(&self) -> bool {
+        matches!(self, Self::Discussion(_))
+    }
+
+    pub fn cache_kind(&self) -> GithubLookupKind {
+        match self {
+            Self::Discussion(_) => GithubLookupKind::Discussion,
+            Self::Issue(_) | Self::PullRequest(_) => GithubLookupKind::IssueOrPullRequest,
+            Self::Ambiguous { .. } => GithubLookupKind::Auto,
+        }
     }
 
     pub fn reference_status(&self) -> ReferenceStatus {
@@ -158,7 +306,92 @@ impl GithubItem {
                     ReferenceState::Open
                 },
             },
+            Self::Discussion(discussion) => ReferenceStatus {
+                kind: ReferenceKind::Discussion,
+                state: if discussion.common.state.eq_ignore_ascii_case("closed") {
+                    ReferenceState::Closed
+                } else {
+                    ReferenceState::Open
+                },
+            },
+            Self::Ambiguous { .. } => ReferenceStatus {
+                kind: ReferenceKind::Ambiguous,
+                state: ReferenceState::Open,
+            },
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GithubLookupKind {
+    #[default]
+    Auto,
+    IssueOrPullRequest,
+    Discussion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GithubItemSpec {
+    pub number: u64,
+    pub kind: GithubLookupKind,
+}
+
+impl From<u64> for GithubItemSpec {
+    fn from(number: u64) -> Self {
+        Self {
+            number,
+            kind: GithubLookupKind::Auto,
+        }
+    }
+}
+
+pub fn parse_item_spec(input: &str) -> Result<GithubItemSpec, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("Enter an issue, pull request, or discussion number".to_string());
+    }
+    let lower = input.to_ascii_lowercase();
+    if let Some(number) = number_from_url(&lower, "/discussions/") {
+        return positive_spec(number, GithubLookupKind::Discussion);
+    }
+    if let Some(number) =
+        number_from_url(&lower, "/issues/").or_else(|| number_from_url(&lower, "/pull/"))
+    {
+        return positive_spec(number, GithubLookupKind::IssueOrPullRequest);
+    }
+
+    let parts: Vec<&str> = lower.split_whitespace().collect();
+    let (kind, number) = match parts.as_slice() {
+        [number] => (GithubLookupKind::Auto, *number),
+        ["d" | "discussion" | "discussions", number] => (GithubLookupKind::Discussion, *number),
+        ["i" | "issue" | "issues" | "pr" | "pull", number] => {
+            (GithubLookupKind::IssueOrPullRequest, *number)
+        }
+        _ => {
+            return Err("Use a number, `d NUMBER`, or a GitHub issue/PR/discussion URL".to_string())
+        }
+    };
+    let number = number
+        .trim_start_matches('#')
+        .parse::<u64>()
+        .map_err(|_| "Enter a positive GitHub item number".to_string())?;
+    positive_spec(number, kind)
+}
+
+fn number_from_url(input: &str, marker: &str) -> Option<u64> {
+    let suffix = input.split_once(marker)?.1;
+    suffix
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn positive_spec(number: u64, kind: GithubLookupKind) -> Result<GithubItemSpec, String> {
+    if number == 0 {
+        Err("Item numbers start at 1".to_string())
+    } else {
+        Ok(GithubItemSpec { number, kind })
     }
 }
 
@@ -168,6 +401,7 @@ pub enum GithubErrorKind {
     Repository,
     Authentication,
     NotFound,
+    Incomplete,
     InvalidResponse,
     Cancelled,
     Cli,
@@ -204,6 +438,7 @@ impl GithubError {
             GithubErrorKind::MissingCli
                 | GithubErrorKind::Authentication
                 | GithubErrorKind::NotFound
+                | GithubErrorKind::Incomplete
                 | GithubErrorKind::Repository
         )
     }
@@ -365,7 +600,7 @@ fn cli_error(status: ExitStatus, stderr: &[u8]) -> Result<Vec<u8>, GithubError> 
         )
     } else if lower.contains("http 404")
         || lower.contains("not found")
-        || lower.contains("could not resolve")
+        || lower.contains("could not resolve to a")
     {
         (
             GithubErrorKind::NotFound,
@@ -487,11 +722,12 @@ struct ApiFile {
 pub struct FetchedItem {
     pub repository: RepositoryRef,
     pub item: GithubItem,
+    pub discussion_checked: bool,
 }
 
-pub fn fetch_item(
+pub fn fetch_item_with_kind(
     cwd: PathBuf,
-    number: u64,
+    spec: GithubItemSpec,
     known_repository: Option<RepositoryRef>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<FetchedItem, GithubError> {
@@ -502,8 +738,12 @@ pub fn fetch_item(
         Some(repository) => repository,
         None => resolve_repository(&runner, &cwd)?,
     };
-    let item = fetch_item_from(&runner, &cwd, &repository, number)?;
-    Ok(FetchedItem { repository, item })
+    let outcome = fetch_item_outcome(&runner, &cwd, &repository, spec)?;
+    Ok(FetchedItem {
+        repository,
+        item: outcome.item,
+        discussion_checked: outcome.discussion_checked,
+    })
 }
 
 /// Resolve the repository for a working directory.
@@ -536,25 +776,95 @@ pub fn fetch_patches(
         .collect())
 }
 
+#[cfg(test)]
 fn fetch_item_from(
     runner: &dyn GhRunner,
     cwd: &Path,
     repository: &RepositoryRef,
-    number: u64,
+    spec: impl Into<GithubItemSpec>,
 ) -> Result<GithubItem, GithubError> {
+    fetch_item_outcome(runner, cwd, repository, spec.into()).map(|outcome| outcome.item)
+}
+
+struct FetchOutcome {
+    item: GithubItem,
+    discussion_checked: bool,
+}
+
+fn fetch_item_outcome(
+    runner: &dyn GhRunner,
+    cwd: &Path,
+    repository: &RepositoryRef,
+    spec: GithubItemSpec,
+) -> Result<FetchOutcome, GithubError> {
     // One GraphQL round trip replaces up to six REST ones. It only covers items
     // whose comment, review and file lists fit in a single page, so anything
     // larger falls back to the paginated REST loader rather than truncating.
-    match fetch_item_graphql(runner, cwd, repository, number) {
-        Ok(Some(item)) => return Ok(item),
-        Ok(None) => {}
+    match fetch_item_graphql(runner, cwd, repository, spec) {
+        Ok(GraphFetch::Item(item)) => {
+            return Ok(FetchOutcome {
+                item,
+                discussion_checked: spec.kind != GithubLookupKind::IssueOrPullRequest,
+            })
+        }
+        Ok(GraphFetch::NeedsRest { discussion }) => {
+            let issue_endpoint = repository.endpoint(&format!("issues/{}", spec.number));
+            let issue: ApiIssue = match api_object(runner, cwd, repository, &issue_endpoint, "item")
+            {
+                Ok(issue) => issue,
+                Err(error) if error.kind == GithubErrorKind::NotFound && discussion.is_some() => {
+                    return Ok(FetchOutcome {
+                        item: discussion.expect("checked above"),
+                        discussion_checked: true,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            return match if issue.pull_request.is_some() {
+                load_pull_request(runner, cwd, repository.clone(), spec.number)
+            } else {
+                load_issue(runner, cwd, repository.clone(), issue)
+            } {
+                Ok(issue_or_pull) => Ok(FetchOutcome {
+                    item: match discussion {
+                        Some(discussion) => GithubItem::Ambiguous {
+                            issue_or_pull_request: Box::new(issue_or_pull),
+                            discussion: Box::new(discussion),
+                        },
+                        None => issue_or_pull,
+                    },
+                    discussion_checked: true,
+                }),
+                Err(error) => Err(error),
+            };
+        }
         Err(error) if error.kind == GithubErrorKind::Cancelled => return Err(error),
+        Err(error) if spec.kind == GithubLookupKind::Discussion => return Err(error),
         Err(error) if error.is_fatal() => return Err(error),
         // A GraphQL-specific failure (an unsupported schema on an old
         // Enterprise server, say) must not make the inspector unusable.
         Err(_) => {}
     }
-    fetch_item_rest(runner, cwd, repository, number)
+    if spec.kind == GithubLookupKind::Discussion {
+        Err(GithubError::new(
+            GithubErrorKind::NotFound,
+            format!(
+                "No discussion #{} in {}",
+                spec.number,
+                repository.name_with_owner()
+            ),
+        ))
+    } else {
+        fetch_item_rest(runner, cwd, repository, spec.number).map(|item| FetchOutcome {
+            item,
+            discussion_checked: false,
+        })
+    }
+}
+
+enum GraphFetch {
+    Item(GithubItem),
+    NeedsRest { discussion: Option<GithubItem> },
 }
 
 fn fetch_item_rest(
@@ -823,6 +1133,8 @@ fn api_pages<T: DeserializeOwned>(
 pub enum ReferenceKind {
     Issue,
     PullRequest,
+    Discussion,
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,18 +1195,74 @@ fn resolve_references_with(
     let output = runner.run_partial(cwd, &args)?;
     let response: GraphResponse<GraphReferenceData> = serde_json::from_slice(&output)
         .map_err(|error| GithubError::invalid("references", error))?;
-    let mut nodes = response
-        .data
-        .and_then(|data| data.repository)
-        .ok_or_else(|| GithubError::invalid("references", "missing repository data"))?;
+    let discussions_unsupported = response
+        .errors
+        .iter()
+        .any(|error| graphql_discussions_unsupported(&error.message));
+    let mut alias_errors = response.errors;
+    let (mut nodes, discussions_supported) = match response.data.and_then(|data| data.repository) {
+        Some(nodes) => (nodes, true),
+        None if discussions_unsupported => {
+            let args = graphql_args(
+                &repository.host,
+                &reference_query_legacy(&numbers),
+                &[
+                    ("owner", repository.owner.clone()),
+                    ("name", repository.name.clone()),
+                ],
+            );
+            let output = runner.run_partial(cwd, &args)?;
+            let fallback: GraphResponse<GraphReferenceData> = serde_json::from_slice(&output)
+                .map_err(|error| GithubError::invalid("references", error))?;
+            alias_errors = fallback.errors;
+            let nodes = fallback
+                .data
+                .and_then(|data| data.repository)
+                .ok_or_else(|| GithubError::invalid("references", "missing repository data"))?;
+            (nodes, false)
+        }
+        None => {
+            return Err(GithubError::invalid(
+                "references",
+                "missing repository data",
+            ))
+        }
+    };
+    for number in &numbers {
+        let aliases = if discussions_supported {
+            vec![
+                reference_alias(*number),
+                discussion_reference_alias(*number),
+            ]
+        } else {
+            vec![reference_alias(*number)]
+        };
+        for alias in aliases {
+            if let Some(error) = candidate_graph_error(&alias_errors, &alias) {
+                return Err(error);
+            }
+        }
+    }
 
     Ok(numbers
         .into_iter()
         .map(|number| {
-            let status = nodes
+            let issue_or_pull = nodes
                 .remove(&reference_alias(number))
                 .flatten()
                 .map(|node| node.into_status());
+            let discussion = nodes
+                .remove(&discussion_reference_alias(number))
+                .flatten()
+                .map(|node| node.into_status());
+            let status = match (issue_or_pull, discussion) {
+                (Some(item), Some(_)) => Some(ReferenceStatus {
+                    kind: ReferenceKind::Ambiguous,
+                    state: item.state,
+                }),
+                (Some(item), None) | (None, Some(item)) => Some(item),
+                (None, None) => None,
+            };
             (number, status)
         })
         .collect())
@@ -912,9 +1280,35 @@ fn reference_query(numbers: &[u64]) -> String {
             "{}:issueOrPullRequest(number:{number}){{__typename ... on Issue{{state}} ... on PullRequest{{state isDraft}}}} ",
             reference_alias(*number)
         ));
+        query.push_str(&format!(
+            "{}:discussion(number:{number}){{__typename closed}} ",
+            discussion_reference_alias(*number)
+        ));
     }
     query.push_str("}}");
     query
+}
+
+fn reference_query_legacy(numbers: &[u64]) -> String {
+    let mut query =
+        String::from("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){");
+    for number in numbers {
+        query.push_str(&format!(
+            "{}:issueOrPullRequest(number:{number}){{__typename ... on Issue{{state}} ... on PullRequest{{state isDraft}}}} ",
+            reference_alias(*number)
+        ));
+    }
+    query.push_str("}}");
+    query
+}
+
+fn graphql_discussions_unsupported(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("discussion")
+        && (lower.contains("field")
+            || lower.contains("undefined")
+            || lower.contains("doesn't exist")
+            || lower.contains("does not exist"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -932,6 +1326,9 @@ enum GraphReferenceNode {
         state: String,
         #[serde(rename = "isDraft", default)]
         is_draft: bool,
+    },
+    Discussion {
+        closed: bool,
     },
 }
 
@@ -954,6 +1351,14 @@ impl GraphReferenceNode {
                     ReferenceState::Closed
                 } else if is_draft {
                     ReferenceState::Draft
+                } else {
+                    ReferenceState::Open
+                },
+            },
+            Self::Discussion { closed } => ReferenceStatus {
+                kind: ReferenceKind::Discussion,
+                state: if closed {
+                    ReferenceState::Closed
                 } else {
                     ReferenceState::Open
                 },
@@ -1000,6 +1405,56 @@ query($owner:String!,$name:String!,$number:Int!,$page:Int!){
         files(first:$page){nodes{path additions deletions changeType} pageInfo{hasNextPage}}
       }
     }
+    discussion(number:$number){
+      number title body url createdAt updatedAt closed isAnswered answerChosenAt upvoteCount
+      reactionGroups{content reactors{totalCount}}
+      author{login}
+      category{name isAnswerable}
+      comments(first:$page){
+        nodes{
+          id body createdAt upvoteCount isAnswer author{login}
+          reactionGroups{content reactors{totalCount}}
+          replies(first:$page){
+            nodes{body createdAt upvoteCount author{login} reactionGroups{content reactors{totalCount}}}
+            pageInfo{hasNextPage endCursor}
+          }
+        }
+        pageInfo{hasNextPage endCursor}
+      }
+    }
+  }
+}
+"#;
+
+const DISCUSSION_COMMENTS_QUERY: &str = r#"
+query($owner:String!,$name:String!,$number:Int!,$page:Int!,$after:String!){
+  repository(owner:$owner,name:$name){
+    discussion(number:$number){
+      comments(first:$page,after:$after){
+        nodes{
+          id body createdAt upvoteCount isAnswer author{login}
+          reactionGroups{content reactors{totalCount}}
+          replies(first:$page){
+            nodes{body createdAt upvoteCount author{login} reactionGroups{content reactors{totalCount}}}
+            pageInfo{hasNextPage endCursor}
+          }
+        }
+        pageInfo{hasNextPage endCursor}
+      }
+    }
+  }
+}
+"#;
+
+const DISCUSSION_REPLIES_QUERY: &str = r#"
+query($id:ID!,$page:Int!,$after:String!){
+  node(id:$id){
+    ... on DiscussionComment {
+      replies(first:$page,after:$after){
+        nodes{body createdAt upvoteCount author{login} reactionGroups{content reactors{totalCount}}}
+        pageInfo{hasNextPage endCursor}
+      }
+    }
   }
 }
 "#;
@@ -1017,43 +1472,117 @@ fn graphql_args(host: &str, query: &str, variables: &[(&str, String)]) -> Vec<St
     args
 }
 
-/// Fetch an item in a single round trip.
+/// Fetch issue/PR and discussion candidates in one round trip.
 ///
-/// `Ok(None)` means the item is too large for one page and the caller should
-/// use the paginated REST loader instead.
+/// Oversized issues and pull requests ask the caller for the paginated REST
+/// fallback; discussion connections are paginated here through GraphQL.
 fn fetch_item_graphql(
     runner: &dyn GhRunner,
     cwd: &Path,
     repository: &RepositoryRef,
-    number: u64,
-) -> Result<Option<GithubItem>, GithubError> {
+    spec: GithubItemSpec,
+) -> Result<GraphFetch, GithubError> {
     let args = graphql_args(
         &repository.host,
         ITEM_QUERY,
         &[
             ("owner", repository.owner.clone()),
             ("name", repository.name.clone()),
-            ("number", number.to_string()),
+            ("number", spec.number.to_string()),
             ("page", GRAPH_PAGE.to_string()),
         ],
     );
-    let output = runner.run(cwd, &args)?;
+    let output = runner.run_partial(cwd, &args)?;
     let response: GraphResponse<GraphItemData> =
         serde_json::from_slice(&output).map_err(|error| GithubError::invalid("item", error))?;
-    let item = response
+    let issue_error = candidate_graph_error(&response.errors, "issueOrPullRequest");
+    let discussion_error = candidate_graph_error(&response.errors, "discussion");
+    let mut repository_data = response
         .data
         .and_then(|data| data.repository)
-        .and_then(|repository| repository.item)
-        .ok_or_else(|| {
+        .ok_or_else(|| GithubError::invalid("item", "missing repository data"))?;
+    let item_present = repository_data.item.is_some();
+    let issue_or_pull = repository_data
+        .item
+        .take()
+        .and_then(|item| convert_graph_item(repository, item));
+    let discussion = if spec.kind == GithubLookupKind::IssueOrPullRequest {
+        None
+    } else {
+        if let Some(error) = discussion_error {
+            return Err(error);
+        }
+        repository_data
+            .discussion
+            .map(|discussion| {
+                hydrate_discussion(runner, cwd, repository, spec.number, discussion).map(
+                    |discussion| GithubItem::Discussion(graph_discussion(repository, discussion)),
+                )
+            })
+            .transpose()?
+    };
+    match spec.kind {
+        GithubLookupKind::IssueOrPullRequest if issue_error.is_some() => {
+            Ok(GraphFetch::NeedsRest { discussion: None })
+        }
+        GithubLookupKind::IssueOrPullRequest => issue_or_pull
+            .map(GraphFetch::Item)
+            .or_else(|| item_present.then_some(GraphFetch::NeedsRest { discussion: None }))
+            .ok_or_else(|| {
+                GithubError::new(
+                    GithubErrorKind::NotFound,
+                    format!(
+                        "No issue or pull request #{} in {}",
+                        spec.number,
+                        repository.name_with_owner()
+                    ),
+                )
+            }),
+        GithubLookupKind::Discussion => discussion.map(GraphFetch::Item).ok_or_else(|| {
             GithubError::new(
                 GithubErrorKind::NotFound,
                 format!(
-                    "No issue or pull request #{number} in {}",
+                    "No discussion #{} in {}",
+                    spec.number,
                     repository.name_with_owner()
                 ),
             )
-        })?;
-    Ok(convert_graph_item(repository, item))
+        }),
+        GithubLookupKind::Auto if issue_error.is_some() => Ok(GraphFetch::NeedsRest { discussion }),
+        GithubLookupKind::Auto => match (issue_or_pull, item_present, discussion) {
+            (Some(issue_or_pull), _, Some(discussion)) => {
+                Ok(GraphFetch::Item(GithubItem::Ambiguous {
+                    issue_or_pull_request: Box::new(issue_or_pull),
+                    discussion: Box::new(discussion),
+                }))
+            }
+            (Some(item), _, None) | (None, false, Some(item)) => Ok(GraphFetch::Item(item)),
+            (None, true, discussion) => Ok(GraphFetch::NeedsRest { discussion }),
+            (None, false, None) => Err(GithubError::new(
+                GithubErrorKind::NotFound,
+                format!(
+                    "No issue, pull request, or discussion #{} in {}",
+                    spec.number,
+                    repository.name_with_owner()
+                ),
+            )),
+        },
+    }
+}
+
+fn candidate_graph_error(errors: &[GraphError], field: &str) -> Option<GithubError> {
+    errors
+        .iter()
+        .find(|error| {
+            error.path.iter().any(|part| part.as_str() == Some(field))
+                && error.error_type.as_deref() != Some("NOT_FOUND")
+        })
+        .map(|error| {
+            GithubError::new(
+                GithubErrorKind::Incomplete,
+                format!("GitHub could not fully resolve {field}: {}", error.message),
+            )
+        })
 }
 
 fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<GithubItem> {
@@ -1204,12 +1733,169 @@ fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<Git
     }
 }
 
+fn hydrate_discussion(
+    runner: &dyn GhRunner,
+    cwd: &Path,
+    repository: &RepositoryRef,
+    number: u64,
+    mut discussion: GraphDiscussion,
+) -> Result<GraphDiscussion, GithubError> {
+    hydrate_comment_replies(runner, cwd, repository, &mut discussion.comments.nodes)?;
+    while discussion.comments.page_info.has_next_page {
+        let after = discussion
+            .comments
+            .page_info
+            .end_cursor
+            .clone()
+            .ok_or_else(|| GithubError::invalid("discussion comments", "missing page cursor"))?;
+        let args = graphql_args(
+            &repository.host,
+            DISCUSSION_COMMENTS_QUERY,
+            &[
+                ("owner", repository.owner.clone()),
+                ("name", repository.name.clone()),
+                ("number", number.to_string()),
+                ("page", GRAPH_PAGE.to_string()),
+                ("after", after),
+            ],
+        );
+        let output = runner.run(cwd, &args)?;
+        let response: GraphResponse<GraphDiscussionCommentsData> = serde_json::from_slice(&output)
+            .map_err(|error| GithubError::invalid("discussion comments", error))?;
+        let mut page = response
+            .data
+            .and_then(|data| data.repository)
+            .and_then(|repository| repository.discussion)
+            .map(|discussion| discussion.comments)
+            .ok_or_else(|| {
+                GithubError::invalid("discussion comments", "missing discussion page")
+            })?;
+        hydrate_comment_replies(runner, cwd, repository, &mut page.nodes)?;
+        discussion.comments.nodes.extend(page.nodes);
+        discussion.comments.page_info = page.page_info;
+    }
+    Ok(discussion)
+}
+
+fn hydrate_comment_replies(
+    runner: &dyn GhRunner,
+    cwd: &Path,
+    repository: &RepositoryRef,
+    comments: &mut [GraphDiscussionComment],
+) -> Result<(), GithubError> {
+    for comment in comments {
+        while comment.replies.page_info.has_next_page {
+            let after = comment
+                .replies
+                .page_info
+                .end_cursor
+                .clone()
+                .ok_or_else(|| GithubError::invalid("discussion replies", "missing page cursor"))?;
+            let args = graphql_args(
+                &repository.host,
+                DISCUSSION_REPLIES_QUERY,
+                &[
+                    ("id", comment.id.clone()),
+                    ("page", GRAPH_PAGE.to_string()),
+                    ("after", after),
+                ],
+            );
+            let output = runner.run(cwd, &args)?;
+            let response: GraphResponse<GraphDiscussionRepliesData> =
+                serde_json::from_slice(&output)
+                    .map_err(|error| GithubError::invalid("discussion replies", error))?;
+            let page = response
+                .data
+                .and_then(|data| data.node)
+                .map(|node| node.replies)
+                .ok_or_else(|| {
+                    GithubError::invalid("discussion replies", "missing replies page")
+                })?;
+            comment.replies.nodes.extend(page.nodes);
+            comment.replies.page_info = page.page_info;
+        }
+    }
+    Ok(())
+}
+
+fn graph_discussion(
+    repository: &RepositoryRef,
+    discussion: GraphDiscussion,
+) -> RepositoryDiscussion {
+    RepositoryDiscussion {
+        common: ItemCommon {
+            repository: repository.clone(),
+            number: discussion.number,
+            title: discussion.title,
+            state: if discussion.closed {
+                "closed".to_string()
+            } else {
+                "open".to_string()
+            },
+            author: graph_author(discussion.author),
+            labels: Vec::new(),
+            created_at: discussion.created_at,
+            updated_at: discussion.updated_at,
+            url: discussion.url,
+            body: discussion.body.unwrap_or_default(),
+        },
+        category: discussion.category.name,
+        answerable: discussion.category.is_answerable,
+        answered: discussion.is_answered.unwrap_or(false),
+        answer_chosen_at: discussion.answer_chosen_at,
+        upvote_count: discussion.upvote_count,
+        reactions: graph_reactions(discussion.reaction_groups),
+        comments: discussion
+            .comments
+            .nodes
+            .into_iter()
+            .map(graph_discussion_comment)
+            .collect(),
+    }
+}
+
+fn graph_discussion_comment(comment: GraphDiscussionComment) -> DiscussionComment {
+    DiscussionComment {
+        author: graph_author(comment.author),
+        body: comment.body.unwrap_or_default(),
+        created_at: comment.created_at,
+        upvote_count: comment.upvote_count,
+        reactions: graph_reactions(comment.reaction_groups),
+        is_answer: comment.is_answer,
+        replies: comment
+            .replies
+            .nodes
+            .into_iter()
+            .map(|reply| DiscussionComment {
+                author: graph_author(reply.author),
+                body: reply.body.unwrap_or_default(),
+                created_at: reply.created_at,
+                upvote_count: reply.upvote_count,
+                reactions: graph_reactions(reply.reaction_groups),
+                is_answer: false,
+                replies: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
 fn graph_author(actor: Option<GraphActor>) -> Author {
     Author {
         login: actor
             .map(|actor| actor.login)
             .unwrap_or_else(|| "ghost".to_string()),
     }
+}
+
+fn graph_reactions(groups: Vec<GraphReactionGroup>) -> Vec<ReactionCount> {
+    groups
+        .into_iter()
+        .filter(|group| group.reactors.total_count > 0)
+        .map(|group| ReactionCount {
+            content: group.content,
+            count: group.reactors.total_count,
+        })
+        .collect()
 }
 
 fn graph_labels(nodes: Vec<GraphLabel>) -> Vec<Label> {
@@ -1237,6 +1923,17 @@ fn graph_file_status(change_type: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct GraphResponse<T> {
     data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GraphError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphError {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    #[serde(default)]
+    path: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1248,13 +1945,14 @@ struct GraphItemData {
 struct GraphItemRepository {
     #[serde(rename = "issueOrPullRequest")]
     item: Option<GraphItem>,
+    discussion: Option<GraphDiscussion>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "__typename")]
 enum GraphItem {
-    Issue(GraphIssue),
-    PullRequest(GraphPull),
+    Issue(Box<GraphIssue>),
+    PullRequest(Box<GraphPull>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1275,6 +1973,8 @@ impl<T> GraphConnection<T> {
 struct GraphPageInfo {
     #[serde(rename = "hasNextPage", default)]
     has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1535,6 +2235,371 @@ mod tests {
             owner: "octo".to_string(),
             name: "widgets".to_string(),
         }
+    }
+
+    #[test]
+    fn parses_discussion_selectors_and_github_urls() {
+        assert_eq!(
+            parse_item_spec("2291").unwrap(),
+            GithubItemSpec {
+                number: 2291,
+                kind: GithubLookupKind::Auto,
+            }
+        );
+        assert_eq!(
+            parse_item_spec("d 2291").unwrap().kind,
+            GithubLookupKind::Discussion
+        );
+        assert_eq!(
+            parse_item_spec("discussion #2291").unwrap().kind,
+            GithubLookupKind::Discussion
+        );
+        assert_eq!(
+            parse_item_spec("https://github.com/octo/widgets/discussions/2291?sort=top").unwrap(),
+            GithubItemSpec {
+                number: 2291,
+                kind: GithubLookupKind::Discussion,
+            }
+        );
+        assert_eq!(
+            parse_item_spec("https://github.com/octo/widgets/pull/42")
+                .unwrap()
+                .kind,
+            GithubLookupKind::IssueOrPullRequest
+        );
+        assert!(parse_item_spec("d 0").is_err());
+    }
+
+    fn discussion_response(
+        issue: &str,
+        comments: &str,
+        has_next: bool,
+        cursor: Option<&str>,
+    ) -> String {
+        let cursor = cursor
+            .map(|cursor| format!(r#""{cursor}""#))
+            .unwrap_or_else(|| "null".to_string());
+        format!(
+            r#"{{"data":{{"repository":{{"issueOrPullRequest":{issue},"discussion":{{
+                "number":2291,"title":"Coordinate agents","body":"Top-level context",
+                "url":"https://github.com/octo/widgets/discussions/2291",
+                "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-03T00:00:00Z",
+                "closed":false,"isAnswered":true,"answerChosenAt":"2026-01-03T00:00:00Z",
+                "upvoteCount":7,"author":{{"login":"lead"}},
+                "category":{{"name":"Agents","isAnswerable":true}},
+                "reactionGroups":[{{"content":"THUMBS_UP","reactors":{{"totalCount":3}}}}],
+                "comments":{{"nodes":[{comments}],"pageInfo":{{"hasNextPage":{has_next},"endCursor":{cursor}}}}}
+            }}}}}}}}"#
+        )
+    }
+
+    fn discussion_comment(
+        id: &str,
+        body: &str,
+        is_answer: bool,
+        replies: &str,
+        has_next: bool,
+        cursor: Option<&str>,
+    ) -> String {
+        let cursor = cursor
+            .map(|cursor| format!(r#""{cursor}""#))
+            .unwrap_or_else(|| "null".to_string());
+        format!(
+            r#"{{"id":"{id}","body":"{body}","createdAt":"2026-01-02T00:00:00Z",
+                "upvoteCount":2,"isAnswer":{is_answer},"author":{{"login":"agent"}},
+                "reactionGroups":[],
+                "replies":{{"nodes":[{replies}],"pageInfo":{{"hasNextPage":{has_next},"endCursor":{cursor}}}}}}}"#
+        )
+    }
+
+    fn discussion_reply(body: &str) -> String {
+        format!(
+            r#"{{"body":"{body}","createdAt":"2026-01-02T01:00:00Z","upvoteCount":1,
+                "author":{{"login":"reply-agent"}},"reactionGroups":[]}}"#
+        )
+    }
+
+    #[test]
+    fn loads_a_discussion_when_no_issue_or_pull_request_uses_the_number() {
+        let comment = discussion_comment(
+            "DC_1",
+            "Accepted coordination",
+            true,
+            &discussion_reply("Nested reply"),
+            false,
+            None,
+        );
+        let runner = FakeRunner::ok(&[discussion_response("null", &comment, false, None)]);
+
+        let item = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap();
+
+        let GithubItem::Discussion(discussion) = item else {
+            panic!("expected discussion");
+        };
+        assert_eq!(discussion.category, "Agents");
+        assert!(discussion.answered);
+        assert_eq!(discussion.upvote_count, 7);
+        assert_eq!(discussion.reactions[0].content, "THUMBS_UP");
+        assert!(discussion.comments[0].is_answer);
+        assert_eq!(discussion.comments[0].replies[0].body, "Nested reply");
+    }
+
+    #[test]
+    fn nullable_answer_state_loads_for_non_answerable_categories() {
+        let response = discussion_response("null", "", false, None)
+            .replace(r#""isAnswered":true"#, r#""isAnswered":null"#)
+            .replace(r#""isAnswerable":true"#, r#""isAnswerable":false"#);
+        let runner = FakeRunner::ok(&[response]);
+
+        let item = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap();
+
+        let GithubItem::Discussion(discussion) = item else {
+            panic!("expected discussion");
+        };
+        assert!(!discussion.answerable);
+        assert!(!discussion.answered);
+    }
+
+    #[test]
+    fn bare_number_returns_a_choice_when_discussion_and_issue_collide() {
+        let issue = r#"{"__typename":"Issue","number":2291,"title":"Issue title","state":"OPEN",
+            "body":"issue","url":"https://github.com/octo/widgets/issues/2291",
+            "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z",
+            "author":{"login":"owner"},"labels":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}"#;
+        let runner = FakeRunner::ok(&[discussion_response(issue, "", false, None)]);
+
+        let item = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap();
+
+        let GithubItem::Ambiguous {
+            issue_or_pull_request,
+            discussion,
+        } = item
+        else {
+            panic!("expected collision");
+        };
+        assert!(matches!(*issue_or_pull_request, GithubItem::Issue(_)));
+        assert!(matches!(*discussion, GithubItem::Discussion(_)));
+    }
+
+    #[test]
+    fn operational_issue_alias_error_uses_rest_without_losing_valid_discussion() {
+        let mut response: serde_json::Value =
+            serde_json::from_str(&discussion_response("null", "", false, None)).unwrap();
+        response["errors"] = serde_json::json!([{
+            "type": "INTERNAL",
+            "path": ["repository", "issueOrPullRequest"],
+            "message": "temporary resolver failure"
+        }]);
+        let issue = r#"{"number":2291,"title":"REST issue","state":"open",
+            "user":{"login":"octo"},"labels":[],"created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-02T00:00:00Z",
+            "html_url":"https://github.com/octo/widgets/issues/2291","body":"text"}"#;
+        let runner = FakeRunner::ok(&[response.to_string(), issue.to_string(), "[[]]".to_string()]);
+
+        let item = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap();
+
+        assert!(matches!(item, GithubItem::Ambiguous { .. }));
+        assert_eq!(runner.calls.borrow().len(), 3);
+    }
+
+    #[test]
+    fn rest_not_found_confirms_retained_discussion_is_unique() {
+        let mut response: serde_json::Value =
+            serde_json::from_str(&discussion_response("null", "", false, None)).unwrap();
+        response["errors"] = serde_json::json!([{
+            "type": "INTERNAL",
+            "path": ["repository", "issueOrPullRequest"],
+            "message": "temporary resolver failure"
+        }]);
+        let runner = FakeRunner::new(vec![
+            Ok(response.to_string().into_bytes()),
+            Err(GithubError::new(
+                GithubErrorKind::NotFound,
+                "no issue with that number",
+            )),
+        ]);
+
+        let item = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap();
+
+        assert!(matches!(item, GithubItem::Discussion(_)));
+        assert_eq!(runner.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn not_found_after_rest_item_probe_does_not_discard_collision_uncertainty() {
+        let mut response: serde_json::Value =
+            serde_json::from_str(&discussion_response("null", "", false, None)).unwrap();
+        response["errors"] = serde_json::json!([{
+            "type": "INTERNAL",
+            "path": ["repository", "issueOrPullRequest"],
+            "message": "temporary resolver failure"
+        }]);
+        let issue = r#"{"number":2291,"title":"REST issue","state":"open",
+            "user":{"login":"octo"},"labels":[],"created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-02T00:00:00Z",
+            "html_url":"https://github.com/octo/widgets/issues/2291","body":"text"}"#;
+        let runner = FakeRunner::new(vec![
+            Ok(response.to_string().into_bytes()),
+            Ok(issue.as_bytes().to_vec()),
+            Err(GithubError::new(
+                GithubErrorKind::NotFound,
+                "comments endpoint disappeared",
+            )),
+        ]);
+
+        let error = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::NotFound);
+        assert_eq!(runner.calls.borrow().len(), 3);
+    }
+
+    #[test]
+    fn operational_discussion_alias_error_is_not_cached_as_issue_only() {
+        let issue = r#"{"__typename":"Issue","number":2291,"title":"Issue title","state":"OPEN",
+            "body":"issue","url":"https://github.com/octo/widgets/issues/2291",
+            "createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z",
+            "author":{"login":"owner"},"labels":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}"#;
+        let mut response: serde_json::Value =
+            serde_json::from_str(&discussion_response(issue, "", false, None)).unwrap();
+        response["data"]["repository"]["discussion"] = serde_json::Value::Null;
+        response["errors"] = serde_json::json!([{
+            "type": "INTERNAL",
+            "path": ["repository", "discussion"],
+            "message": "temporary resolver failure"
+        }]);
+        let runner = FakeRunner::ok(&[response.to_string()]);
+
+        let error = fetch_item_from(&runner, Path::new("."), &repository(), 2291).unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::Incomplete);
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn paginates_discussion_comments_and_replies() {
+        let first_comment =
+            discussion_comment("DC_1", "First", false, "", true, Some("reply-next"));
+        let first = discussion_response("null", &first_comment, true, Some("comment-next"));
+        let reply_page = format!(
+            r#"{{"data":{{"node":{{"replies":{{"nodes":[{}],
+                "pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}"#,
+            discussion_reply("Late reply")
+        );
+        let second_comment = discussion_comment("DC_2", "Second", true, "", false, None);
+        let comment_page = format!(
+            r#"{{"data":{{"repository":{{"discussion":{{"comments":{{"nodes":[{second_comment}],
+                "pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}}}"#
+        );
+        let runner = FakeRunner::ok(&[first, reply_page, comment_page]);
+
+        let item = fetch_item_from(
+            &runner,
+            Path::new("."),
+            &repository(),
+            GithubItemSpec {
+                number: 2291,
+                kind: GithubLookupKind::Discussion,
+            },
+        )
+        .unwrap();
+
+        let GithubItem::Discussion(discussion) = item else {
+            panic!("expected discussion");
+        };
+        assert_eq!(discussion.comments.len(), 2);
+        assert_eq!(discussion.comments[0].replies[0].body, "Late reply");
+        assert!(discussion.comments[1].is_answer);
+        assert_eq!(runner.calls.borrow().len(), 3);
+    }
+
+    #[test]
+    fn reference_lookup_marks_discussions_and_number_collisions() {
+        let runner = FakeRunner::ok(&[r#"{"data":{"repository":{
+            "r7":null,"d7":{"__typename":"Discussion","closed":false},
+            "r8":{"__typename":"Issue","state":"OPEN"},
+            "d8":{"__typename":"Discussion","closed":true}
+        }}}"#]);
+
+        let resolved =
+            resolve_references_with(&runner, Path::new("."), &repository(), &[7, 8]).unwrap();
+
+        assert_eq!(
+            resolved,
+            vec![
+                (
+                    7,
+                    Some(ReferenceStatus {
+                        kind: ReferenceKind::Discussion,
+                        state: ReferenceState::Open,
+                    })
+                ),
+                (
+                    8,
+                    Some(ReferenceStatus {
+                        kind: ReferenceKind::Ambiguous,
+                        state: ReferenceState::Open,
+                    })
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn older_enterprise_schema_falls_back_to_issue_only_reference_query() {
+        let runner = FakeRunner::ok(&[
+            r#"{"data":null,"errors":[{"message":"Field 'discussion' doesn't exist on type 'Repository'"}]}"#,
+            r#"{"data":{"repository":{"r7":{"__typename":"Issue","state":"OPEN"}}}}"#,
+        ]);
+
+        let resolved =
+            resolve_references_with(&runner, Path::new("."), &repository(), &[7]).unwrap();
+
+        assert_eq!(
+            resolved,
+            vec![(
+                7,
+                Some(ReferenceStatus {
+                    kind: ReferenceKind::Issue,
+                    state: ReferenceState::Open,
+                })
+            )]
+        );
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].iter().any(|arg| arg.contains(":discussion(")));
+        assert!(!calls[1].iter().any(|arg| arg.contains(":discussion(")));
+    }
+
+    #[test]
+    fn operational_reference_alias_error_is_not_cached_as_absence() {
+        let runner = FakeRunner::ok(&[r#"{"data":{"repository":{
+            "r7":null,"d7":{"__typename":"Discussion","closed":false}
+        }},"errors":[{
+            "type":"INTERNAL","path":["repository","r7"],"message":"temporary resolver failure"
+        }]}"#]);
+
+        let error =
+            resolve_references_with(&runner, Path::new("."), &repository(), &[7]).unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::Incomplete);
+    }
+
+    #[test]
+    fn legacy_reference_fallback_validates_its_own_alias_errors() {
+        let runner = FakeRunner::ok(&[
+            r#"{"data":null,"errors":[{"message":"Field 'discussion' doesn't exist on type 'Repository'"}]}"#,
+            r#"{"data":{"repository":{"r7":null}},"errors":[{
+                "type":"INTERNAL","path":["repository","r7"],"message":"temporary resolver failure"
+            }]}"#,
+        ]);
+
+        let error =
+            resolve_references_with(&runner, Path::new("."), &repository(), &[7]).unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::Incomplete);
+        assert_eq!(runner.calls.borrow().len(), 2);
     }
 
     fn graph_pull(page_info: &str, files: &str) -> String {

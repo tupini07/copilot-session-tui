@@ -230,6 +230,10 @@ pub enum FilesPane {
 pub enum GithubInspectorScreen {
     NumberPrompt,
     Loading,
+    Choose {
+        issue_or_pull_request: Box<GithubItem>,
+        discussion: Box<GithubItem>,
+    },
     Ready(GithubItem),
     Error(String),
 }
@@ -262,6 +266,7 @@ pub struct GithubInspector {
     pub request_id: u64,
     pub request_cwd: Option<PathBuf>,
     pub number: Option<u64>,
+    pub lookup_kind: crate::github::GithubLookupKind,
 }
 
 impl GithubInspector {
@@ -289,6 +294,7 @@ impl GithubInspector {
             request_id: 0,
             request_cwd: None,
             number: None,
+            lookup_kind: crate::github::GithubLookupKind::Auto,
         }
     }
 
@@ -297,6 +303,27 @@ impl GithubInspector {
             GithubInspectorScreen::Ready(item) => Some(item),
             _ => None,
         }
+    }
+
+    pub fn choose_item(&mut self, kind: crate::github::GithubLookupKind) -> Option<GithubItem> {
+        let GithubInspectorScreen::Choose {
+            issue_or_pull_request,
+            discussion,
+        } = &self.screen
+        else {
+            return None;
+        };
+        let item = match kind {
+            crate::github::GithubLookupKind::IssueOrPullRequest => {
+                issue_or_pull_request.as_ref().clone()
+            }
+            crate::github::GithubLookupKind::Discussion => discussion.as_ref().clone(),
+            crate::github::GithubLookupKind::Auto => return None,
+        };
+        self.lookup_kind = kind;
+        self.screen = GithubInspectorScreen::Ready(item.clone());
+        self.reset_navigation();
+        Some(item)
     }
 
     pub fn tab_count(&self) -> usize {
@@ -381,6 +408,7 @@ impl GithubInspector {
 pub struct GithubLoadResult {
     request_id: u64,
     result: std::result::Result<crate::github::FetchedItem, GithubError>,
+    lookup_kind: crate::github::GithubLookupKind,
     /// A background refresh of something already on screen.
     ///
     /// These must never replace the view with a spinner or an error: the user
@@ -406,6 +434,7 @@ pub struct DiffRenderCache {
 struct CachedGithubItem {
     repository: crate::github::RepositoryRef,
     number: u64,
+    lookup_kind: crate::github::GithubLookupKind,
     item: GithubItem,
 }
 
@@ -1347,19 +1376,17 @@ impl App {
     }
 
     pub fn submit_github_number(&mut self) {
-        let number = {
+        let spec = {
             let Some(inspector) = self.github_inspector.as_mut() else {
                 return;
             };
-            let Ok(number) = inspector.input.parse::<u64>() else {
-                inspector.prompt_error = Some("Enter a positive issue or PR number".to_string());
-                return;
-            };
-            if number == 0 {
-                inspector.prompt_error = Some("Item numbers start at 1".to_string());
-                return;
+            match crate::github::parse_item_spec(&inspector.input) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    inspector.prompt_error = Some(error);
+                    return;
+                }
             }
-            number
         };
         let Some(cwd) = self
             .mux
@@ -1373,46 +1400,95 @@ impl App {
             }
             return;
         };
-        self.start_github_request(cwd, number);
+        self.start_github_request_with_kind(cwd, spec.number, spec.kind);
     }
 
     pub fn retry_github_request(&mut self) {
-        let Some((cwd, number)) = self
-            .github_inspector
-            .as_ref()
-            .and_then(|inspector| Some((inspector.request_cwd.clone()?, inspector.number?)))
+        let Some((cwd, number, lookup_kind)) =
+            self.github_inspector.as_ref().and_then(|inspector| {
+                let lookup_kind = if inspector.lookup_kind == crate::github::GithubLookupKind::Auto
+                {
+                    inspector
+                        .ready_item()
+                        .map(GithubItem::cache_kind)
+                        .unwrap_or(inspector.lookup_kind)
+                } else {
+                    inspector.lookup_kind
+                };
+                Some((
+                    inspector.request_cwd.clone()?,
+                    inspector.number?,
+                    lookup_kind,
+                ))
+            })
         else {
             return;
         };
         // An explicit retry should not hand back the copy the user is trying to
         // get away from.
-        self.forget_cached_github_item(&cwd, number);
-        self.start_github_request(cwd, number);
+        self.forget_cached_github_item(&cwd, number, lookup_kind);
+        self.start_github_request_with_kind(cwd, number, lookup_kind);
     }
 
-    fn forget_cached_github_item(&mut self, cwd: &Path, number: u64) {
+    fn forget_cached_github_item(
+        &mut self,
+        cwd: &Path,
+        number: u64,
+        lookup_kind: crate::github::GithubLookupKind,
+    ) {
         let Some(repository) = self.github_repositories.get(cwd).cloned().flatten() else {
             return;
         };
-        self.github_cache
-            .retain(|entry| entry.number != number || entry.repository != repository);
+        self.github_cache.retain(|entry| {
+            entry.number != number
+                || entry.repository != repository
+                || (lookup_kind != crate::github::GithubLookupKind::Auto
+                    && entry.lookup_kind != lookup_kind)
+        });
     }
 
-    fn cached_github_item(&self, cwd: &Path, number: u64) -> Option<&GithubItem> {
+    fn cached_github_item(
+        &self,
+        cwd: &Path,
+        number: u64,
+        lookup_kind: crate::github::GithubLookupKind,
+    ) -> Option<&GithubItem> {
         let repository = self.github_repositories.get(cwd)?.as_ref()?;
         self.github_cache
             .iter()
-            .find(|entry| entry.number == number && &entry.repository == repository)
+            .rev()
+            .find(|entry| {
+                entry.number == number
+                    && &entry.repository == repository
+                    && (entry.lookup_kind == lookup_kind
+                        || (lookup_kind == crate::github::GithubLookupKind::Auto
+                            && entry.lookup_kind
+                                == crate::github::GithubLookupKind::IssueOrPullRequest))
+            })
             .map(|entry| &entry.item)
     }
 
     fn store_github_item(&mut self, repository: crate::github::RepositoryRef, item: GithubItem) {
+        let lookup_kind = item.cache_kind();
+        self.store_github_item_for(repository, item, lookup_kind);
+    }
+
+    fn store_github_item_for(
+        &mut self,
+        repository: crate::github::RepositoryRef,
+        item: GithubItem,
+        lookup_kind: crate::github::GithubLookupKind,
+    ) {
         let number = item.common().number;
-        self.github_cache
-            .retain(|entry| entry.number != number || entry.repository != repository);
+        self.github_cache.retain(|entry| {
+            entry.number != number
+                || entry.repository != repository
+                || entry.lookup_kind != lookup_kind
+        });
         self.github_cache.push(CachedGithubItem {
             repository,
             number,
+            lookup_kind,
             item,
         });
         if self.github_cache.len() > GITHUB_CACHE_LIMIT {
@@ -1424,6 +1500,7 @@ impl App {
         &mut self,
         repository: crate::github::RepositoryRef,
         item: GithubItem,
+        lookup_kind: crate::github::GithubLookupKind,
         request_generation: Option<u64>,
     ) {
         let number = item.common().number;
@@ -1431,12 +1508,35 @@ impl App {
         let generation = request_generation
             .unwrap_or_else(|| self.issue_github_reference_generation(repository.clone(), number));
         if self.github_reference_generations.get(&key) == Some(&generation) {
-            self.github_references
-                .insert(key, Some(item.reference_status()));
-            self.github_reference_refreshed_at
-                .insert((repository.clone(), number), Instant::now());
+            let status = item.reference_status();
+            let authoritative = match lookup_kind {
+                crate::github::GithubLookupKind::Auto => Some(status),
+                crate::github::GithubLookupKind::IssueOrPullRequest
+                | crate::github::GithubLookupKind::Discussion => {
+                    match self.github_references.get(&key).copied().flatten() {
+                        Some(existing)
+                            if existing.kind == crate::github::ReferenceKind::Ambiguous =>
+                        {
+                            Some(existing)
+                        }
+                        Some(existing) if existing.kind != status.kind => {
+                            Some(crate::github::ReferenceStatus {
+                                kind: crate::github::ReferenceKind::Ambiguous,
+                                state: existing.state,
+                            })
+                        }
+                        Some(_) => Some(status),
+                        None => None,
+                    }
+                }
+            };
+            if let Some(status) = authoritative {
+                self.github_references.insert(key, Some(status));
+                self.github_reference_refreshed_at
+                    .insert((repository.clone(), number), Instant::now());
+            }
         }
-        self.store_github_item(repository, item);
+        self.store_github_item_for(repository, item, lookup_kind);
     }
 
     fn issue_github_reference_generation(
@@ -1452,30 +1552,81 @@ impl App {
     }
 
     fn start_github_request(&mut self, cwd: PathBuf, number: u64) {
+        self.start_github_request_with_kind(cwd, number, crate::github::GithubLookupKind::Auto);
+    }
+
+    fn start_github_request_with_kind(
+        &mut self,
+        cwd: PathBuf,
+        number: u64,
+        lookup_kind: crate::github::GithubLookupKind,
+    ) {
+        if lookup_kind == crate::github::GithubLookupKind::Auto {
+            let issue_or_pull_request = self
+                .cached_github_item(
+                    &cwd,
+                    number,
+                    crate::github::GithubLookupKind::IssueOrPullRequest,
+                )
+                .cloned();
+            let discussion = self
+                .cached_github_item(&cwd, number, crate::github::GithubLookupKind::Discussion)
+                .cloned();
+            if let (Some(issue_or_pull_request), Some(discussion)) =
+                (issue_or_pull_request, discussion)
+            {
+                let inspector = self
+                    .github_inspector
+                    .get_or_insert_with(GithubInspector::number_prompt);
+                inspector.request_cwd = Some(cwd.clone());
+                inspector.number = Some(number);
+                inspector.lookup_kind = lookup_kind;
+                inspector.screen = GithubInspectorScreen::Choose {
+                    issue_or_pull_request: Box::new(issue_or_pull_request),
+                    discussion: Box::new(discussion),
+                };
+                inspector.reset_navigation();
+                self.spawn_github_request(cwd, number, lookup_kind, true);
+                return;
+            }
+        }
         // A cached copy goes on screen straight away, and is checked for
         // staleness in the background rather than making the user wait.
-        if let Some(item) = self.cached_github_item(&cwd, number).cloned() {
-            self.show_github_item(cwd, number, item);
+        if let Some(item) = self.cached_github_item(&cwd, number, lookup_kind).cloned() {
+            self.show_github_item(cwd, number, lookup_kind, item);
             return;
         }
-        self.spawn_github_request(cwd, number, false);
+        self.spawn_github_request(cwd, number, lookup_kind, false);
     }
 
     /// Put an already-known item on screen and quietly check it is current.
-    fn show_github_item(&mut self, cwd: PathBuf, number: u64, item: GithubItem) {
+    fn show_github_item(
+        &mut self,
+        cwd: PathBuf,
+        number: u64,
+        lookup_kind: crate::github::GithubLookupKind,
+        item: GithubItem,
+    ) {
         let inspector = self
             .github_inspector
             .get_or_insert_with(GithubInspector::number_prompt);
         inspector.prompt_error = None;
         inspector.request_cwd = Some(cwd.clone());
         inspector.number = Some(number);
+        inspector.lookup_kind = lookup_kind;
         inspector.screen = GithubInspectorScreen::Ready(item);
         inspector.reset_navigation();
         inspector.select_first_tree_file();
-        self.spawn_github_request(cwd, number, true);
+        self.spawn_github_request(cwd, number, lookup_kind, true);
     }
 
-    fn spawn_github_request(&mut self, cwd: PathBuf, number: u64, revalidation: bool) {
+    fn spawn_github_request(
+        &mut self,
+        cwd: PathBuf,
+        number: u64,
+        lookup_kind: crate::github::GithubLookupKind,
+        revalidation: bool,
+    ) {
         self.cancel_github_request();
         let request_id = self.next_github_request_id;
         self.next_github_request_id = self.next_github_request_id.wrapping_add(1).max(1);
@@ -1488,11 +1639,19 @@ impl App {
             .as_ref()
             .map(|repository| self.issue_github_reference_generation(repository.clone(), number));
         std::thread::spawn(move || {
-            let result =
-                crate::github::fetch_item(worker_cwd, number, known_repository, worker_cancelled);
+            let result = crate::github::fetch_item_with_kind(
+                worker_cwd,
+                crate::github::GithubItemSpec {
+                    number,
+                    kind: lookup_kind,
+                },
+                known_repository,
+                worker_cancelled,
+            );
             let _ = sender.send(GithubLoadResult {
                 request_id,
                 result,
+                lookup_kind,
                 revalidation,
                 reference_generation,
             });
@@ -1507,6 +1666,7 @@ impl App {
             inspector.prompt_error = None;
             inspector.request_cwd = Some(cwd);
             inspector.number = Some(number);
+            inspector.lookup_kind = lookup_kind;
             inspector.reset_navigation();
         }
         self.github_request_receiver = Some(receiver);
@@ -1584,6 +1744,87 @@ impl App {
                 .insert(cwd, Some(fetched.repository.clone()));
         }
 
+        if result.revalidation
+            && result.lookup_kind == crate::github::GithubLookupKind::Auto
+            && !fetched.discussion_checked
+        {
+            self.store_fetched_github_item(
+                fetched.repository,
+                fetched.item,
+                crate::github::GithubLookupKind::IssueOrPullRequest,
+                result.reference_generation,
+            );
+            return;
+        }
+
+        if let GithubItem::Ambiguous {
+            issue_or_pull_request,
+            discussion,
+        } = &fetched.item
+        {
+            let number = issue_or_pull_request.common().number;
+            let key = (fetched.repository.clone(), number);
+            let generation = result.reference_generation.unwrap_or_else(|| {
+                self.issue_github_reference_generation(fetched.repository.clone(), number)
+            });
+            if self.github_reference_generations.get(&key) == Some(&generation) {
+                self.github_references.insert(
+                    key,
+                    Some(crate::github::ReferenceStatus {
+                        kind: crate::github::ReferenceKind::Ambiguous,
+                        state: issue_or_pull_request.reference_status().state,
+                    }),
+                );
+            }
+            self.store_github_item_for(
+                fetched.repository.clone(),
+                issue_or_pull_request.as_ref().clone(),
+                crate::github::GithubLookupKind::IssueOrPullRequest,
+            );
+            self.store_github_item_for(
+                fetched.repository,
+                discussion.as_ref().clone(),
+                crate::github::GithubLookupKind::Discussion,
+            );
+            let refreshed_selection = result
+                .revalidation
+                .then(|| {
+                    self.github_inspector.as_ref().and_then(|inspector| {
+                        let shown = inspector.ready_item()?;
+                        let refreshed = match inspector.lookup_kind {
+                            crate::github::GithubLookupKind::IssueOrPullRequest => {
+                                issue_or_pull_request.as_ref()
+                            }
+                            crate::github::GithubLookupKind::Discussion => discussion.as_ref(),
+                            crate::github::GithubLookupKind::Auto => return None,
+                        };
+                        (shown.common().updated_at != refreshed.common().updated_at)
+                            .then(|| (*refreshed).clone())
+                    })
+                })
+                .flatten();
+            if let Some(refreshed) = refreshed_selection {
+                if let Some(inspector) = self.github_inspector.as_mut() {
+                    inspector.screen = GithubInspectorScreen::Ready(refreshed);
+                    inspector.reset_navigation();
+                }
+            } else if !result.revalidation
+                || self.github_inspector.as_ref().is_some_and(|inspector| {
+                    inspector.lookup_kind == crate::github::GithubLookupKind::Auto
+                        || !matches!(inspector.screen, GithubInspectorScreen::Ready(_))
+                })
+            {
+                if let Some(inspector) = self.github_inspector.as_mut() {
+                    inspector.screen = GithubInspectorScreen::Choose {
+                        issue_or_pull_request: issue_or_pull_request.clone(),
+                        discussion: discussion.clone(),
+                    };
+                    inspector.reset_navigation();
+                }
+            }
+            return;
+        }
+
         if result.revalidation {
             let unchanged = self
                 .github_inspector
@@ -1593,6 +1834,7 @@ impl App {
             self.store_fetched_github_item(
                 fetched.repository,
                 fetched.item.clone(),
+                result.lookup_kind,
                 result.reference_generation,
             );
             // Redrawing an identical item would throw away the user's scroll
@@ -1604,6 +1846,7 @@ impl App {
             self.store_fetched_github_item(
                 fetched.repository,
                 fetched.item.clone(),
+                result.lookup_kind,
                 result.reference_generation,
             );
         }
@@ -1614,6 +1857,26 @@ impl App {
         inspector.screen = GithubInspectorScreen::Ready(fetched.item);
         inspector.select_first_tree_file();
         inspector.reset_navigation();
+    }
+
+    pub fn choose_github_item(&mut self, kind: crate::github::GithubLookupKind) {
+        let Some(item) = self
+            .github_inspector
+            .as_mut()
+            .and_then(|inspector| inspector.choose_item(kind))
+        else {
+            return;
+        };
+        if let Some(repository) = self
+            .github_inspector
+            .as_ref()
+            .and_then(|inspector| inspector.request_cwd.as_ref())
+            .and_then(|cwd| self.github_repositories.get(cwd))
+            .cloned()
+            .flatten()
+        {
+            self.store_github_item_for(repository, item, kind);
+        }
     }
 
     /// True while the inspector is showing a pull request's Files tab.
@@ -1644,7 +1907,9 @@ impl App {
         };
         let needed = inspector.ready_item().is_some_and(|item| match item {
             GithubItem::PullRequest(pull) => !pull.patches_loaded && !pull.files.is_empty(),
-            GithubItem::Issue(_) => false,
+            GithubItem::Issue(_) | GithubItem::Discussion(_) | GithubItem::Ambiguous { .. } => {
+                false
+            }
         });
         if !needed || self.github_patch_receiver.is_some() {
             return;
@@ -2948,7 +3213,10 @@ impl App {
             || self.snippet_modal.is_some()
             || self.pending_worktree.is_some()
             || self.github_inspector.as_ref().is_some_and(|inspector| {
-                matches!(&inspector.screen, GithubInspectorScreen::NumberPrompt)
+                matches!(
+                    &inspector.screen,
+                    GithubInspectorScreen::NumberPrompt | GithubInspectorScreen::Choose { .. }
+                )
             })
     }
 
@@ -4346,6 +4614,201 @@ mod tests {
         })
     }
 
+    fn cached_discussion(number: u64, updated_at: &str) -> GithubItem {
+        use crate::github::{Author, ItemCommon, RepositoryDiscussion, RepositoryRef};
+        GithubItem::Discussion(RepositoryDiscussion {
+            common: ItemCommon {
+                repository: RepositoryRef {
+                    host: "github.com".to_string(),
+                    owner: "octo".to_string(),
+                    name: "widgets".to_string(),
+                },
+                number,
+                title: format!("Discussion {number}"),
+                state: "open".to_string(),
+                author: Author {
+                    login: "monalisa".to_string(),
+                },
+                labels: Vec::new(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: updated_at.to_string(),
+                url: String::new(),
+                body: String::new(),
+            },
+            category: "General".to_string(),
+            answerable: false,
+            answered: false,
+            answer_chosen_at: None,
+            upvote_count: 0,
+            reactions: Vec::new(),
+            comments: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn ambiguous_number_is_cached_by_kind_and_can_choose_discussion() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.request_cwd = Some(cwd.clone());
+            inspector.number = Some(7);
+        }
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Ok(crate::github::FetchedItem {
+                repository: repository(),
+                item: GithubItem::Ambiguous {
+                    issue_or_pull_request: Box::new(cached_pull(7, "2026-01-02T00:00:00Z")),
+                    discussion: Box::new(cached_discussion(7, "2026-01-03T00:00:00Z")),
+                },
+                discussion_checked: true,
+            }),
+            lookup_kind: crate::github::GithubLookupKind::Auto,
+            revalidation: false,
+            reference_generation: None,
+        });
+
+        assert!(matches!(
+            app.github_inspector.as_ref().unwrap().screen,
+            GithubInspectorScreen::Choose { .. }
+        ));
+        assert!(app
+            .cached_github_item(&cwd, 7, crate::github::GithubLookupKind::IssueOrPullRequest)
+            .is_some());
+        assert!(app
+            .cached_github_item(&cwd, 7, crate::github::GithubLookupKind::Discussion)
+            .is_some());
+
+        app.choose_github_item(crate::github::GithubLookupKind::Discussion);
+        assert!(matches!(
+            app.github_inspector.as_ref().unwrap().ready_item().unwrap(),
+            GithubItem::Discussion(_)
+        ));
+    }
+
+    #[test]
+    fn ambiguous_revalidation_replaces_an_auto_cached_candidate_with_chooser() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        let pull = cached_pull(7, "2026-01-02T00:00:00Z");
+        app.store_github_item(repository(), pull.clone());
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(7);
+            inspector.lookup_kind = crate::github::GithubLookupKind::Auto;
+            inspector.screen = GithubInspectorScreen::Ready(pull.clone());
+        }
+
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Ok(crate::github::FetchedItem {
+                repository: repository(),
+                item: GithubItem::Ambiguous {
+                    issue_or_pull_request: Box::new(pull),
+                    discussion: Box::new(cached_discussion(7, "2026-01-03T00:00:00Z")),
+                },
+                discussion_checked: true,
+            }),
+            lookup_kind: crate::github::GithubLookupKind::Auto,
+            revalidation: true,
+            reference_generation: None,
+        });
+
+        assert!(matches!(
+            app.github_inspector.as_ref().unwrap().screen,
+            GithubInspectorScreen::Choose { .. }
+        ));
+    }
+
+    #[test]
+    fn issue_only_rest_revalidation_cannot_erase_known_collision() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let cwd = PathBuf::from("C:/Workspace/widgets");
+        app.github_repositories
+            .insert(cwd.clone(), Some(repository()));
+        app.github_inspector = Some(GithubInspector::number_prompt());
+        {
+            let inspector = app.github_inspector.as_mut().unwrap();
+            inspector.request_id = 42;
+            inspector.request_cwd = Some(cwd);
+            inspector.number = Some(7);
+            inspector.lookup_kind = crate::github::GithubLookupKind::Auto;
+            inspector.screen = GithubInspectorScreen::Choose {
+                issue_or_pull_request: Box::new(cached_pull(7, "2026-01-02T00:00:00Z")),
+                discussion: Box::new(cached_discussion(7, "2026-01-03T00:00:00Z")),
+            };
+        }
+
+        app.apply_github_result(GithubLoadResult {
+            request_id: 42,
+            result: Ok(crate::github::FetchedItem {
+                repository: repository(),
+                item: cached_pull(7, "2026-01-04T00:00:00Z"),
+                discussion_checked: false,
+            }),
+            lookup_kind: crate::github::GithubLookupKind::Auto,
+            revalidation: true,
+            reference_generation: None,
+        });
+
+        assert!(matches!(
+            app.github_inspector.as_ref().unwrap().screen,
+            GithubInspectorScreen::Choose { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_discussion_fetch_preserves_known_ambiguous_reference_kind() {
+        use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let repository = repository();
+        app.github_references.insert(
+            (repository.clone(), 7),
+            Some(ReferenceStatus {
+                kind: ReferenceKind::Ambiguous,
+                state: ReferenceState::Open,
+            }),
+        );
+
+        app.store_fetched_github_item(
+            repository.clone(),
+            cached_discussion(7, "2026-01-03T00:00:00Z"),
+            crate::github::GithubLookupKind::Discussion,
+            None,
+        );
+
+        assert_eq!(
+            app.github_references[&(repository, 7)].unwrap().kind,
+            ReferenceKind::Ambiguous
+        );
+    }
+
+    #[test]
+    fn explicit_fetch_without_combined_lookup_does_not_claim_unique_reference_kind() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let repository = repository();
+
+        app.store_fetched_github_item(
+            repository.clone(),
+            cached_discussion(7, "2026-01-03T00:00:00Z"),
+            crate::github::GithubLookupKind::Discussion,
+            None,
+        );
+
+        assert!(!app.github_references.contains_key(&(repository, 7)));
+    }
+
     #[test]
     fn reference_styling_is_scoped_to_the_repository_that_was_asked() {
         use crate::github::{ReferenceKind, ReferenceState, ReferenceStatus};
@@ -4447,7 +4910,12 @@ mod tests {
             pull.merged = true;
         }
 
-        app.store_fetched_github_item(repository(), item, None);
+        app.store_fetched_github_item(
+            repository(),
+            item,
+            crate::github::GithubLookupKind::IssueOrPullRequest,
+            None,
+        );
 
         assert_eq!(
             app.github_reference_status(2175),
@@ -4582,6 +5050,7 @@ mod tests {
         app.store_fetched_github_item(
             repository,
             cached_pull(7, "2026-08-21T20:00:00Z"),
+            crate::github::GithubLookupKind::IssueOrPullRequest,
             Some(inspector_generation),
         );
 
@@ -4635,7 +5104,9 @@ mod tests {
             result: Ok(crate::github::FetchedItem {
                 repository: repository(),
                 item,
+                discussion_checked: true,
             }),
+            lookup_kind: crate::github::GithubLookupKind::IssueOrPullRequest,
             revalidation: true,
             reference_generation: None,
         });
@@ -4669,7 +5140,9 @@ mod tests {
             result: Ok(crate::github::FetchedItem {
                 repository: repository(),
                 item: newer,
+                discussion_checked: true,
             }),
+            lookup_kind: crate::github::GithubLookupKind::IssueOrPullRequest,
             revalidation: true,
             reference_generation: None,
         });
@@ -4694,6 +5167,7 @@ mod tests {
                 kind: crate::github::GithubErrorKind::Cli,
                 message: "network is down".to_string(),
             }),
+            lookup_kind: crate::github::GithubLookupKind::IssueOrPullRequest,
             revalidation: true,
             reference_generation: None,
         });
@@ -4718,6 +5192,7 @@ mod tests {
                 kind: crate::github::GithubErrorKind::NotFound,
                 message: "no such item".to_string(),
             }),
+            lookup_kind: crate::github::GithubLookupKind::IssueOrPullRequest,
             revalidation: false,
             reference_generation: None,
         });
@@ -4770,7 +5245,9 @@ mod tests {
 
         // Handing back the copy the user is trying to get away from would make
         // the retry key do nothing.
-        assert!(app.cached_github_item(&cwd, 7).is_none());
+        assert!(app
+            .cached_github_item(&cwd, 7, crate::github::GithubLookupKind::IssueOrPullRequest)
+            .is_none());
     }
 
     #[test]

@@ -585,7 +585,7 @@ fn handle_github_inspector_event(app: &mut App, event: Event) {
             ) {
                 inspector
                     .input
-                    .extend(text.chars().filter(char::is_ascii_digit));
+                    .extend(text.chars().filter(|character| !character.is_control()));
                 inspector.prompt_error = None;
             }
         }
@@ -617,11 +617,9 @@ fn handle_github_inspector_key(app: &mut App, key: KeyEvent) {
                 }
             }
             KeyCode::Char(character)
-                if character.is_ascii_digit()
-                    && !key.modifiers.intersects(
-                        crossterm::event::KeyModifiers::CONTROL
-                            | crossterm::event::KeyModifiers::ALT,
-                    ) =>
+                if !key.modifiers.intersects(
+                    crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+                ) =>
             {
                 if let Some(inspector) = app.github_inspector.as_mut() {
                     inspector.input.push(character);
@@ -635,6 +633,16 @@ fn handle_github_inspector_key(app: &mut App, key: KeyEvent) {
                 app.close_github_inspector();
             }
         }
+        crate::app::GithubInspectorScreen::Choose { .. } => match key.code {
+            KeyCode::Char('i') => {
+                app.choose_github_item(crate::github::GithubLookupKind::IssueOrPullRequest)
+            }
+            KeyCode::Char('d') => {
+                app.choose_github_item(crate::github::GithubLookupKind::Discussion)
+            }
+            KeyCode::Esc | KeyCode::Char('q') => app.close_github_inspector(),
+            _ => {}
+        },
         crate::app::GithubInspectorScreen::Error(_) => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => app.close_github_inspector(),
             KeyCode::Char('r') => app.retry_github_request(),
@@ -1786,13 +1794,14 @@ mod tests {
     }
 
     #[test]
-    fn github_number_prompt_accepts_only_digits_and_backspace() {
+    fn github_item_prompt_accepts_discussion_selectors_and_backspace() {
         let mut app = attached_mux_app("github-number-test");
         app.open_github_inspector();
 
         for key in [
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         ] {
@@ -1803,7 +1812,7 @@ mod tests {
             app.github_inspector
                 .as_ref()
                 .map(|inspector| inspector.input.as_str()),
-            Some("1")
+            Some("d 1")
         );
         handle_github_inspector_event(
             &mut app,

@@ -17,7 +17,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 
 ![The GitHub inspector showing a pull request's changed files as a tree beside the selected file's diff](docs/img/github-inspector.svg)
 
-**GitHub inspector** — read an issue or pull request, including the diff, without leaving the session.
+**GitHub inspector** — read an issue, pull request, or discussion without leaving the session.
 
 </td>
 </tr>
@@ -277,7 +277,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `s` | Open prompt snippets |
 | `prefix` `u` | Install an update without stopping running sessions |
 | `prefix` `Ctrl+H` `e` | Open scratchpad shortcut help |
-| `prefix` `Ctrl+G` `i` | Inspect a GitHub issue or pull request |
+| `prefix` `Ctrl+G` `i` | Inspect a GitHub issue, pull request, or discussion |
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
@@ -320,17 +320,23 @@ CST through the [shell wrapper](#shell-integration-auto-cd-into-project-director
 from an existing prompt) to be returned to that prompt instead. Installing an update
 does not trigger this exit path or disturb panes.
 
-GitHub inspection is available while attached to a mux session. Enter an issue or pull
-request number and CST resolves the repository from that session's working directory.
-Issues have **Overview** and **Comments** tabs; pull requests add **Files**. Use Tab /
+GitHub inspection is available while attached to a mux session. Enter an issue, pull
+request, or discussion number and CST resolves the repository from that session's working
+directory. Bare numbers check all three item types; use `d 2291`, `discussion 2291`, or a
+discussion URL to request a discussion explicitly. If a discussion and an issue or pull
+request share a number, CST shows both titles and asks which one to open.
+
+Issues and discussions have **Overview** and **Comments** tabs; pull requests add **Files**.
+Discussion comments retain their reply nesting, upvotes, reactions, and accepted-answer
+marker. Use Tab /
 Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the mouse
 wheel to scroll, and `q` to leave. GitHub references such as `#2029` shown in the
 attached chat can also be opened directly with a left click.
 
 Those references are colour-coded once CST has looked them up. The `#` carries the
-kind — yellow for an issue, cyan for a pull request — and the number carries the state:
+kind — yellow for an issue, cyan for a pull request, and blue for a discussion — and the number carries the state:
 green for open, red for a closed pull request, magenta for a merged pull request or a
-closed issue, and grey for a draft. Numbers that are not issues or pull requests are left
+closed issue, and grey for a draft. Numbers that are not GitHub items are left
 alone. Lookups happen in the background, in a single batched query per screenful, and are
 remembered for the rest of the run. Opening an item in the inspector immediately
 backfills its freshly fetched state into the chat decoration. CST also revalidates every

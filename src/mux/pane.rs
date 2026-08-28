@@ -287,7 +287,7 @@ impl Pane {
             .unwrap_or(false)
     }
 
-    /// GitHub issue/PR reference under an outer-terminal coordinate, if any.
+    /// GitHub issue/PR/discussion reference under an outer-terminal coordinate, if any.
     pub fn github_reference_at(&self, column: u16, row: u16) -> Option<u64> {
         let (row, column) = self.viewport.cell_coordinates(column, row)?;
         self.with_screen(|screen| github_reference_at(screen, row, column))
