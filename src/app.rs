@@ -95,6 +95,22 @@ pub struct PendingWorktree {
     pub config: EffectiveWorktreeConfig,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateRestartRequest {
+    pub panes: Vec<UpdateRestartPane>,
+    pub focused_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRestartPane {
+    pub pane_id: Option<crate::mux::PaneId>,
+    pub copilot_running: bool,
+    pub terminal_generation: Option<u64>,
+    pub session_id: String,
+    pub cwd: PathBuf,
+    pub title: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeleteTarget {
     SessionOnly,
@@ -462,6 +478,9 @@ pub struct App {
     pub update_check_requested: bool,
     pub installed_update_version: Option<String>,
     pub update_notice: Option<String>,
+    pub confirm_update_restart: bool,
+    pub restart_after_update: Option<UpdateRestartRequest>,
+    update_restart_requested: bool,
     notification_worker: Option<NotificationWorker>,
     notification_pending: usize,
     notification_drain_started: Option<Instant>,
@@ -603,6 +622,9 @@ impl App {
             update_check_requested: false,
             installed_update_version: None,
             update_notice: None,
+            confirm_update_restart: false,
+            restart_after_update: None,
+            update_restart_requested: false,
             notification_worker: None,
             notification_pending: 0,
             notification_drain_started: None,
@@ -2006,6 +2028,7 @@ impl App {
         self.session_load_receiver.is_some()
             || self.update_receiver.is_some()
             || self.update_install_receiver.is_some()
+            || self.update_restart_ready()
             || self.notification_pending > 0
             || self.github_request_receiver.is_some()
             || self.github_patch_receiver.is_some()
@@ -2721,7 +2744,7 @@ impl App {
                 self.update_info = result;
                 if self.update_check_requested {
                     if self.update_info.is_some() {
-                        self.begin_update_install();
+                        self.prepare_update_restart();
                     } else {
                         self.set_update_notice("No update available");
                     }
@@ -2748,21 +2771,154 @@ impl App {
     }
 
     pub fn request_update(&mut self) {
-        if let Some(version) = self.installed_update_version.as_deref() {
-            self.set_update_notice(format!(
-                "v{version} is installed; this running CST remains on v{} until restarted",
-                env!("CARGO_PKG_VERSION")
-            ));
-        } else if self.update_install_receiver.is_some() {
+        if self.confirm_update_restart {
+            return;
+        }
+        if self.update_install_receiver.is_some() {
             self.set_update_notice("Update installation is already running...");
-        } else if self.update_info.is_some() {
-            self.begin_update_install();
+        } else if self.installed_update_version.is_some() || self.update_info.is_some() {
+            self.prepare_update_restart();
         } else if !self.update_check_requested {
             self.update_receiver = Some(crate::updater::force_check_for_updates_async());
             self.update_check_requested = true;
             self.set_update_notice("Checking for updates...");
         } else {
             self.set_update_notice("Already checking for updates...");
+        }
+    }
+
+    fn prepare_update_restart(&mut self) {
+        let request = self.running_sessions_for_restart();
+        if request.panes.is_empty() {
+            self.begin_confirmed_update_restart(request);
+        } else {
+            let count = request.panes.len();
+            self.confirm_update_restart = true;
+            self.set_update_notice(format!(
+                "Update ready; confirm restart of {count} running session{}",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    fn running_sessions_for_restart(&mut self) -> UpdateRestartRequest {
+        if let Some(mux) = self.mux.as_mut() {
+            mux.reap();
+        }
+        self.restart_resources()
+    }
+
+    fn restart_resources(&self) -> UpdateRestartRequest {
+        let mut terminals: HashMap<String, (String, String, u64)> = self
+            .terminal
+            .running_sessions()
+            .into_iter()
+            .map(|(session_id, cwd, title, generation)| (session_id, (cwd, title, generation)))
+            .collect();
+        let mut panes = Vec::new();
+        if let Some(mux) = self.mux.as_ref() {
+            for pane in &mux.panes {
+                let terminal = terminals.remove(&pane.session_id);
+                if pane.is_running() || terminal.is_some() {
+                    panes.push(UpdateRestartPane {
+                        pane_id: Some(pane.id),
+                        copilot_running: pane.is_running(),
+                        terminal_generation: terminal.as_ref().map(|(_, _, value)| *value),
+                        session_id: pane.session_id.clone(),
+                        cwd: pane.cwd.clone(),
+                        title: pane.title.clone(),
+                    });
+                }
+            }
+        }
+        let mut terminal_only: Vec<_> = terminals.into_iter().collect();
+        terminal_only.sort_by(|left, right| left.0.cmp(&right.0));
+        panes.extend(
+            terminal_only
+                .into_iter()
+                .map(|(session_id, (cwd, title, generation))| UpdateRestartPane {
+                    pane_id: None,
+                    copilot_running: false,
+                    terminal_generation: Some(generation),
+                    session_id,
+                    cwd: PathBuf::from(cwd),
+                    title,
+                }),
+        );
+
+        let focused_session_id = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| pane.session_id.as_str())
+            .filter(|session_id| panes.iter().any(|pane| pane.session_id == *session_id))
+            .or_else(|| {
+                self.terminal
+                    .active_session_id()
+                    .filter(|session_id| panes.iter().any(|pane| pane.session_id == *session_id))
+            })
+            .map(str::to_string);
+        UpdateRestartRequest {
+            panes,
+            focused_session_id,
+        }
+    }
+
+    pub fn update_restart_titles(&self) -> Vec<String> {
+        self.restart_resources()
+            .panes
+            .into_iter()
+            .map(|pane| pane.title)
+            .collect()
+    }
+
+    pub fn confirm_update_and_restart(&mut self) {
+        if !self.confirm_update_restart {
+            return;
+        }
+        self.confirm_update_restart = false;
+        let request = self.running_sessions_for_restart();
+        self.begin_confirmed_update_restart(request);
+    }
+
+    pub fn cancel_update_restart(&mut self) {
+        self.confirm_update_restart = false;
+        self.restart_after_update = None;
+        self.update_restart_requested = false;
+        self.cancel_notification_drain();
+        self.set_update_notice("Update cancelled");
+    }
+
+    pub fn cancel_update_restart_after_failure(&mut self, message: impl Into<String>) {
+        self.confirm_update_restart = false;
+        self.restart_after_update = None;
+        self.update_restart_requested = false;
+        self.cancel_notification_drain();
+        self.set_update_notice(message);
+    }
+
+    pub fn cancel_update_restart_for_user_action(&mut self) {
+        self.confirm_update_restart = false;
+        self.restart_after_update = None;
+        self.update_restart_requested = false;
+        self.cancel_notification_drain();
+    }
+
+    fn begin_confirmed_update_restart(&mut self, request: UpdateRestartRequest) {
+        let session_count = request.panes.len();
+        self.restart_after_update = Some(request);
+        self.update_restart_requested = true;
+        if let Some(version) = self.installed_update_version.clone() {
+            self.should_quit = false;
+            self.set_update_notice(format!("Restarting CST into v{version}..."));
+            return;
+        }
+        self.begin_update_install();
+        if session_count > 0 {
+            self.set_update_notice(format!(
+                "Installing update; {session_count} running session{} will reopen after restart...",
+                if session_count == 1 { "" } else { "s" }
+            ));
         }
     }
 
@@ -2778,6 +2934,143 @@ impl App {
 
     pub fn update_installing(&self) -> bool {
         self.update_install_receiver.is_some()
+    }
+
+    pub fn update_restart_ready(&self) -> bool {
+        self.restart_after_update.is_some()
+            && self.installed_update_version.is_some()
+            && self.update_install_receiver.is_none()
+    }
+
+    pub fn update_restart_deferred_by_editor(&self) -> bool {
+        self.mode != Mode::Normal
+            || self.workspace_focus == WorkspaceFocus::Scratchpad
+            || self.snippet_modal.is_some()
+            || self.pending_worktree.is_some()
+            || self.github_inspector.as_ref().is_some_and(|inspector| {
+                matches!(&inspector.screen, GithubInspectorScreen::NumberPrompt)
+            })
+    }
+
+    pub fn note_deferred_update_restart(&mut self) {
+        self.set_update_notice(
+            "Update installed; close the current editor or prompt to restart CST",
+        );
+    }
+
+    pub fn validate_update_restart_sessions(&mut self) -> bool {
+        if !self.update_restart_ready() {
+            return false;
+        }
+        let current = self.running_sessions_for_restart();
+        let approved_panes = self
+            .restart_after_update
+            .as_ref()
+            .map(|request| request.panes.as_slice())
+            .unwrap_or_default();
+        let same_panes = current.panes.len() == approved_panes.len()
+            && current
+                .panes
+                .iter()
+                .zip(approved_panes)
+                .all(|(current, approved)| {
+                    current.pane_id == approved.pane_id
+                        && current.copilot_running == approved.copilot_running
+                        && current.terminal_generation == approved.terminal_generation
+                        && current.session_id == approved.session_id
+                });
+        if same_panes {
+            self.restart_after_update = Some(current);
+            return true;
+        }
+        if current.panes.is_empty() {
+            self.restart_after_update = Some(current);
+            return true;
+        }
+
+        self.restart_after_update = None;
+        self.update_restart_requested = false;
+        self.confirm_update_restart = true;
+        self.cancel_notification_drain();
+        self.set_update_notice(
+            "Running sessions changed during installation; confirm the updated restart set",
+        );
+        false
+    }
+
+    pub fn recover_update_restart_sessions(&mut self, reason: &str) {
+        let Some(request) = self.restart_after_update.clone() else {
+            self.cancel_update_restart_after_failure(format!(
+                "Update installed, but sessions could not be restarted: {reason}"
+            ));
+            return;
+        };
+        let mut recovery_errors = Vec::new();
+        for pane in &request.panes {
+            if !pane.copilot_running {
+                continue;
+            }
+            let still_running = self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane_for_session(&pane.session_id))
+                .and_then(|pane_id| self.mux.as_ref()?.pane(pane_id))
+                .is_some_and(|existing| existing.is_running());
+            if still_running {
+                continue;
+            }
+            if let Err(error) = self.attach_session(
+                &pane.session_id,
+                &pane.cwd.to_string_lossy(),
+                pane.title.clone(),
+            ) {
+                recovery_errors.push(format!("'{}': {error}", pane.title));
+            }
+        }
+        if let Some(session_id) = request.focused_session_id.as_deref() {
+            if let Some(pane_id) = self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane_for_session(session_id))
+            {
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.focused = Some(pane_id);
+                }
+                self.view = View::Attached(pane_id);
+            }
+        }
+        let message = if recovery_errors.is_empty() {
+            format!(
+                "Update installed, but restart was cancelled: {reason}. Stopped Copilot sessions \
+                 were reopened."
+            )
+        } else {
+            format!(
+                "Update installed, but restart and session recovery were incomplete: \
+                 {reason}; {}",
+                recovery_errors.join("; ")
+            )
+        };
+        self.cancel_update_restart_after_failure(message);
+    }
+
+    pub fn retain_terminated_restart_panes(&mut self, terminated: &[crate::mux::PaneId]) {
+        let Some(request) = self.restart_after_update.as_mut() else {
+            return;
+        };
+        request.panes.retain(|pane| {
+            pane.copilot_running
+                && pane
+                    .pane_id
+                    .is_some_and(|pane_id| terminated.contains(&pane_id))
+        });
+        if request
+            .focused_session_id
+            .as_ref()
+            .is_some_and(|focused| !request.panes.iter().any(|pane| &pane.session_id == focused))
+        {
+            request.focused_session_id = request.panes.last().map(|pane| pane.session_id.clone());
+        }
     }
 
     pub fn wait_for_update_install(&mut self) {
@@ -2806,7 +3099,7 @@ impl App {
             self.update_install_requested_for = Some(version.clone());
         }
         self.set_update_notice(format!(
-            "Installing v{version} in the background; running sessions stay open..."
+            "Installing v{version}; CST will restart automatically..."
         ));
     }
 
@@ -2829,20 +3122,26 @@ impl App {
             Ok(UpdateInstallOutcome::Installed(version)) => {
                 self.update_info = None;
                 self.installed_update_version = Some(version.clone());
-                self.set_update_notice(format!(
-                    "Installed v{version}; running sessions remain on v{} until CST is restarted",
-                    env!("CARGO_PKG_VERSION")
-                ));
+                if self.update_restart_requested {
+                    self.set_update_notice(format!("Installed v{version}; restarting CST..."));
+                } else {
+                    self.set_update_notice(format!(
+                        "Installed v{version}; restart CST to use the update"
+                    ));
+                }
             }
             Ok(UpdateInstallOutcome::AlreadyInstalled(version)) => {
                 self.update_info = None;
                 self.installed_update_version = Some(version.clone());
-                self.set_update_notice(format!(
-                    "v{version} is already installed; running sessions remain on v{}",
-                    env!("CARGO_PKG_VERSION")
-                ));
+                if self.update_restart_requested {
+                    self.set_update_notice(format!("v{version} is installed; restarting CST..."));
+                } else {
+                    self.set_update_notice(format!("v{version} is already installed"));
+                }
             }
             Err(error) => {
+                self.update_restart_requested = false;
+                self.restart_after_update = None;
                 self.set_update_notice(format!("Update installation failed: {error}"));
             }
         }
@@ -3552,7 +3851,7 @@ mod tests {
             crate::terminal_pane::Activation::Restarted
         );
 
-        app.terminal.shutdown();
+        let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -4548,7 +4847,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_update_check_starts_a_non_disruptive_install() {
+    fn requested_update_check_starts_install_and_prepares_restart() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         let (tx, rx) = mpsc::channel();
         app.update_receiver = Some(rx);
@@ -4566,6 +4865,10 @@ mod tests {
         assert!(app.update_info.is_some());
         assert!(!app.update_check_requested);
         assert!(app.update_receiver.is_none());
+        assert_eq!(
+            app.restart_after_update,
+            Some(UpdateRestartRequest::default())
+        );
     }
 
     #[test]
@@ -4584,12 +4887,75 @@ mod tests {
     }
 
     #[test]
-    fn completed_install_keeps_the_current_process_running() {
+    fn running_embedded_terminal_requires_update_restart_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.terminal
+            .activate(
+                "terminal-session".to_string(),
+                "Build shell".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &app.config.terminal,
+            )
+            .unwrap();
+        app.update_info = Some(UpdateInfo {
+            current_version: "0.9.0".to_string(),
+            latest_version: "0.10.0".to_string(),
+        });
+
+        app.request_update();
+
+        assert!(app.confirm_update_restart);
+        assert!(app.update_install_requested_for.is_none());
+        assert_eq!(app.update_restart_titles(), ["Build shell"]);
+        let _ = app.terminal.shutdown();
+    }
+
+    #[test]
+    fn restarted_embedded_terminal_requires_fresh_update_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let activate = |app: &mut App| {
+            app.terminal
+                .activate(
+                    "terminal-session".to_string(),
+                    "Build shell".to_string(),
+                    directory.path().to_string_lossy().to_string(),
+                    &app.config.terminal,
+                )
+                .unwrap();
+        };
+        activate(&mut app);
+        app.update_info = Some(UpdateInfo {
+            current_version: "0.9.0".to_string(),
+            latest_version: "0.10.0".to_string(),
+        });
+        app.request_update();
+        app.confirm_update_and_restart();
+
+        app.terminal.exit_active_for_test().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while app.terminal.stopped_session_ids().is_empty() && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        activate(&mut app);
+        app.installed_update_version = Some("0.10.0".to_string());
+
+        assert!(app.update_restart_ready());
+        assert!(!app.validate_update_restart_sessions());
+        assert!(app.confirm_update_restart);
+        let _ = app.terminal.shutdown();
+    }
+
+    #[test]
+    fn completed_explicit_install_is_ready_to_restart() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         app.update_info = Some(UpdateInfo {
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             latest_version: "99.0.0".to_string(),
         });
+        app.request_update();
         let (sender, receiver) = mpsc::channel();
         app.update_install_receiver = Some(receiver);
         sender
@@ -4602,11 +4968,12 @@ mod tests {
         assert!(app.update_info.is_none());
         assert!(!app.should_quit);
         assert!(app.should_resume.is_none());
+        assert!(app.update_restart_ready());
         assert!(app
             .status_message
             .as_deref()
             .unwrap()
-            .contains("running sessions remain"));
+            .contains("restarting CST"));
     }
 
     #[test]
@@ -4641,6 +5008,78 @@ mod tests {
         assert!(app.exit_waits_for_notifications());
         app.notification_drain_started = Some(Instant::now() - Duration::from_secs(3));
         assert!(!app.exit_waits_for_notifications());
+    }
+
+    #[test]
+    fn abandoned_update_restart_reenables_notifications() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.disable_config_persistence();
+        app.notification_pending = 1;
+        assert!(app.exit_waits_for_notifications());
+        assert!(app.notification_drain_started.is_some());
+
+        app.cancel_update_restart_after_failure("restart postponed");
+
+        assert!(app.notification_drain_started.is_none());
+    }
+
+    #[test]
+    fn finalized_restart_keeps_only_panes_cst_actually_terminated() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.restart_after_update = Some(UpdateRestartRequest {
+            panes: vec![
+                UpdateRestartPane {
+                    pane_id: Some(1),
+                    copilot_running: true,
+                    terminal_generation: None,
+                    session_id: "finished-naturally".to_string(),
+                    cwd: PathBuf::from("one"),
+                    title: "One".to_string(),
+                },
+                UpdateRestartPane {
+                    pane_id: Some(2),
+                    copilot_running: true,
+                    terminal_generation: None,
+                    session_id: "terminated-by-cst".to_string(),
+                    cwd: PathBuf::from("two"),
+                    title: "Two".to_string(),
+                },
+            ],
+            focused_session_id: Some("finished-naturally".to_string()),
+        });
+
+        app.retain_terminated_restart_panes(&[2]);
+
+        let request = app.restart_after_update.unwrap();
+        assert_eq!(request.panes.len(), 1);
+        assert_eq!(request.panes[0].session_id, "terminated-by-cst");
+        assert_eq!(
+            request.focused_session_id.as_deref(),
+            Some("terminated-by-cst")
+        );
+    }
+
+    #[test]
+    fn update_restart_waits_for_open_editing_flows() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.restart_after_update = Some(UpdateRestartRequest::default());
+        app.installed_update_version = Some("99.0.0".to_string());
+        app.mode = Mode::Settings;
+
+        assert!(app.update_restart_ready());
+        assert!(app.update_restart_deferred_by_editor());
+        app.note_deferred_update_restart();
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("close the current editor"));
+
+        app.mode = Mode::Normal;
+        assert!(!app.update_restart_deferred_by_editor());
+
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        assert!(app.update_restart_deferred_by_editor());
     }
 
     #[test]

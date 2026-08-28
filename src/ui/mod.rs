@@ -87,12 +87,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.github_inspector.is_some() && !github_inspector::is_prompt(app) {
         github_inspector::draw(f, app);
+        if app.confirm_update_restart {
+            popups::draw_update_restart_confirm(f, app);
+        }
         return;
     }
 
     if app.mode == Mode::Scratchpad {
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             scratchpad::draw_with_theme(f, scratchpad, theme);
+        }
+        if app.confirm_update_restart {
+            popups::draw_update_restart_confirm(f, app);
         }
         return;
     }
@@ -141,6 +147,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // here too — the list view below is never reached while attached.
         if app.confirm_quit {
             popups::draw_quit_confirm(f, app);
+        }
+        if app.confirm_update_restart {
+            popups::draw_update_restart_confirm(f, app);
         }
         return;
     }
@@ -238,6 +247,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.confirm_quit {
         popups::draw_quit_confirm(f, app);
+    }
+    if app.confirm_update_restart {
+        popups::draw_update_restart_confirm(f, app);
     }
 
     // Drawn last so it covers everything: the next loop iteration blocks on Git, and
@@ -360,6 +372,27 @@ mod tests {
             SPINNER_FRAMES.iter().any(|frame| text.contains(frame)),
             "got:\n{text}"
         );
+    }
+
+    #[test]
+    fn update_confirmation_renders_above_full_screen_github_inspector() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut inspector = crate::app::GithubInspector::number_prompt();
+        inspector.screen = crate::app::GithubInspectorScreen::Loading;
+        app.github_inspector = Some(inspector);
+        app.confirm_update_restart = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Update & Restart"), "got:\n{text}");
     }
 
     #[test]

@@ -115,6 +115,86 @@ pub fn draw_quit_confirm(f: &mut Frame, app: &App) {
     f.render_widget(paragraph, area);
 }
 
+pub fn draw_update_restart_confirm(f: &mut Frame, app: &App) {
+    let theme = app.theme();
+    let running = app.update_restart_titles();
+    let height = (running.len() + 11).min(22) as u16;
+    let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(75.0) as u16;
+    let area = centered_rect(66, percent_y.max(38), f.area());
+    prepare_popup(f, area, theme);
+
+    let mut text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "  Update CST and restart {} running session{}?",
+                running.len(),
+                if running.len() == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    for title in running.iter().take(6) {
+        text.push(Line::from(Span::styled(
+            format!("    • {title}"),
+            Style::default().fg(theme.accent_alt),
+        )));
+    }
+    if running.len() > 6 {
+        text.push(Line::from(Span::styled(
+            format!("    … and {} more", running.len() - 6),
+            Style::default().fg(theme.muted),
+        )));
+    }
+    text.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "  CST installs the update first, then stops only these sessions.",
+            Style::default().fg(theme.warning),
+        )),
+        Line::from(Span::styled(
+            "  Running Copilot chats reopen in the same order and focus.",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(Span::styled(
+            "  Copilot work and embedded shell jobs are interrupted on restart.",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "y/Enter",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" update and restart    "),
+            Span::styled(
+                "n/Esc",
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]),
+    ]);
+
+    let block = Block::default()
+        .title(" Update & Restart ")
+        .borders(Borders::ALL)
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.warning));
+    f.render_widget(
+        Paragraph::new(text)
+            .style(surface_style(theme))
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 /// Switcher over the panes this CST instance owns, opened with `prefix w`.
 /// Last path component of a pane's working directory, to disambiguate same-named
 /// sessions living in different projects.

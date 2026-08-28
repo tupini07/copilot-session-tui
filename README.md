@@ -66,10 +66,16 @@ The binary will be at `target/release/copilot-session-tui` (or `.exe` on Windows
 The TUI checks GitHub Releases for a newer version at startup, using a 12-hour cache.
 When an update is available, the status bar shows the current and latest versions.
 Press `u` from the session list or `prefix` `u` while attached to check GitHub and
-install the matching release asset **without stopping CST or any running sessions**.
-The current process continues on its in-memory version; the installed version takes
-effect the next time CST naturally starts. A cross-process lock prevents multiple CST
-instances from replacing the executable concurrently.
+install the matching release asset. If this CST instance has no running sessions, it
+restarts automatically into the new version. If it owns running sessions, CST first asks
+for confirmation; after installation it stops only those panes, restarts itself, and
+reopens the same sessions in their original order with the previous session focused.
+Running embedded terminal shells also require confirmation and are stopped synchronously;
+an already-finished Copilot chat is not resumed merely because its shell was still open.
+If an editor or input prompt is open when installation finishes, restart waits until that
+flow is closed so unsaved input is not discarded.
+The invoking shell remains attached throughout the handoff. A cross-process lock prevents
+multiple CST instances from replacing the executable concurrently.
 
 ### Usage
 

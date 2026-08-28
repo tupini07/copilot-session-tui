@@ -36,8 +36,12 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use app::{App, NewSessionRequest};
 use session::loader;
@@ -53,7 +57,13 @@ struct Cli {
     copilot_home: Option<PathBuf>,
 
     /// Auto-filter to sessions from the current directory
-    #[arg(long, default_value = "true")]
+    #[arg(
+        long,
+        default_value = "true",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
     auto_filter: bool,
 
     /// Write the session's project directory to this file on exit (for shell cd wrapper)
@@ -75,6 +85,19 @@ struct Cli {
     /// Open each inactive favorite in a Windows Terminal tab
     #[arg(long, conflicts_with = "session")]
     open_favorites: bool,
+
+    /// Readiness gate used by the old CST process during an update handoff
+    #[arg(
+        long,
+        value_name = "PATH",
+        hide = true,
+        requires = "restart_parent_pid"
+    )]
+    restart_gate: Option<PathBuf>,
+
+    /// Parent CST process supervising an update handoff
+    #[arg(long, value_name = "PID", hide = true, requires = "restart_gate")]
+    restart_parent_pid: Option<u32>,
 
     /// Internal helper used to replace the installed executable without stopping panes
     #[arg(long, value_name = "VERSION", hide = true)]
@@ -105,8 +128,30 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RestartManifest {
+    panes: Vec<RestartManifestPane>,
+    focused_session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RestartManifestPane {
+    session_id: String,
+    cwd: PathBuf,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    let restart_manifest = match (cli.restart_gate.as_deref(), cli.restart_parent_pid) {
+        (Some(gate), Some(parent_pid)) => {
+            let Some(manifest) = wait_for_restart_release(gate, parent_pid)? else {
+                return Ok(());
+            };
+            manifest
+        }
+        _ => RestartManifest::default(),
+    };
 
     if let Some(version) = cli.install_update_helper.as_deref() {
         updater::install_update_helper(version)?;
@@ -158,6 +203,15 @@ fn main() -> Result<()> {
         vec![loader::load_session(&copilot_home, session_id)
             .context("Failed to load Copilot session")?
             .with_context(|| format!("Session '{session_id}' was not found"))?]
+    } else if !restart_manifest.panes.is_empty() {
+        session_load_receiver = Some(loader::load_sessions_async(copilot_home.clone()));
+        let session_ids = restart_manifest
+            .panes
+            .iter()
+            .map(|pane| pane.session_id.clone())
+            .collect::<Vec<_>>();
+        loader::load_sessions_by_ids(&copilot_home, &session_ids)
+            .context("Failed to load sessions after updating CST")?
     } else {
         let favorites = match loader::load_sessions_by_ids(&copilot_home, &user_config.favorites) {
             Ok(sessions) => sessions,
@@ -176,6 +230,11 @@ fn main() -> Result<()> {
         .as_deref()
         .map(|id| resolve_startup_session(&sessions, id))
         .transpose()?;
+    let restored_startup_sessions = restart_manifest
+        .panes
+        .iter()
+        .map(|pane| resolve_restored_startup_session(&sessions, &pane.session_id, &pane.cwd))
+        .collect::<Vec<_>>();
 
     if cli.open_favorites {
         let mux_override = if cli.mux {
@@ -226,6 +285,14 @@ fn main() -> Result<()> {
         .as_ref()
         .map(|session| existing_or_current_dir(&session.cwd))
         .or_else(|| {
+            let focused = restart_manifest.focused_session_id.as_deref();
+            restored_startup_sessions
+                .iter()
+                .find(|session| Some(session.id.as_str()) == focused)
+                .or_else(|| restored_startup_sessions.last())
+                .map(|session| existing_or_current_dir(&session.cwd))
+        })
+        .or_else(|| {
             std::env::current_dir()
                 .ok()
                 .map(|cwd| cwd.to_string_lossy().to_string())
@@ -239,45 +306,50 @@ fn main() -> Result<()> {
         app.attach_session(&session.id, &cwd, session.title)?;
         mux_input::sync_workspace_panels(&mut app);
     }
+    if !restored_startup_sessions.is_empty() {
+        for session in &restored_startup_sessions {
+            let cwd = existing_or_current_dir(&session.cwd);
+            app.attach_session(&session.id, &cwd, session.title.clone())?;
+            if restart_startup_aborted(&cli) {
+                return Ok(());
+            }
+        }
+        if let Some(session_id) = restart_manifest.focused_session_id.as_deref() {
+            if let Some(pane_id) = app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane_for_session(session_id))
+            {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.focused = Some(pane_id);
+                }
+                app.view = app::View::Attached(pane_id);
+            }
+        }
+        mux_input::sync_workspace_panels(&mut app);
+    }
+    if restart_startup_aborted(&cli) {
+        return Ok(());
+    }
 
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange
-    )?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Run app
-    let result = run_app(&mut terminal, &mut app);
-    // A helper process performs replacement independently, but waiting here ensures a
-    // normal exit never abandons the user without the final install result.
-    app.wait_for_update_install();
-
-    // Restore terminal
-    disable_raw_mode()?;
-    terminal
-        .backend_mut()
-        .write_all(host_terminal::CLEAR_PROGRESS)?;
-    terminal.backend_mut().flush()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        DisableFocusChange,
-        SetTitle("")
-    )?;
-    terminal.show_cursor()?;
-    app.terminal.shutdown();
-
-    // Handle result
-    result?;
+    loop {
+        let Some(mut restart) = run_tui_cycle(&mut app, &cli)? else {
+            break;
+        };
+        match restart.release_until_started() {
+            Ok(()) => {
+                drop(app);
+                return restart.wait();
+            }
+            Err(error) => {
+                drop(restart);
+                app.recover_update_restart_sessions(&format!(
+                    "the updated CST failed before opening its workspace: {error}"
+                ));
+                mux_input::sync_workspace_panels(&mut app);
+            }
+        }
+    }
 
     // Track the directory to write to --last-dir-file
     let mut last_dir: Option<String> = None;
@@ -343,6 +415,44 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn run_tui_cycle(app: &mut App, cli: &Cli) -> Result<Option<PreparedRestart>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    if let Some(gate) = cli.restart_gate.as_deref() {
+        std::fs::write(restart_gate_path(gate, "started"), b"started")
+            .context("Failed to confirm the updated CST workspace started")?;
+    }
+
+    let result = run_app(&mut terminal, app, cli);
+    app.wait_for_update_install();
+
+    disable_raw_mode()?;
+    terminal
+        .backend_mut()
+        .write_all(host_terminal::CLEAR_PROGRESS)?;
+    terminal.backend_mut().flush()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange,
+        SetTitle("")
+    )?;
+    terminal.show_cursor()?;
+    app.terminal.shutdown()?;
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupSession {
     id: String,
@@ -365,6 +475,26 @@ fn resolve_startup_session(sessions: &[session::Session], id: &str) -> Result<St
     })
 }
 
+fn resolve_restored_startup_session(
+    sessions: &[session::Session],
+    id: &str,
+    fallback_cwd: &Path,
+) -> StartupSession {
+    sessions
+        .iter()
+        .find(|session| session.id == id)
+        .map(|session| StartupSession {
+            id: session.id.clone(),
+            cwd: session.cwd.clone(),
+            title: session.display_name().to_string(),
+        })
+        .unwrap_or_else(|| StartupSession {
+            id: id.to_string(),
+            cwd: fallback_cwd.to_string_lossy().to_string(),
+            title: format!("session {}", short_session_id(id)),
+        })
+}
+
 fn short_session_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
@@ -378,37 +508,314 @@ fn existing_or_current_dir(cwd: &str) -> String {
         .unwrap_or_else(|_| cwd.to_string())
 }
 
-fn spawn_config_watcher(
-    events: std::sync::mpsc::Sender<mux::MuxEvent>,
-    path: PathBuf,
-    applied: std::sync::Arc<std::sync::Mutex<Option<config::ConfigRevision>>>,
-    interval: std::time::Duration,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(interval);
-        let Ok(next) = config::config_revision(&path) else {
-            continue;
-        };
-        if applied
-            .lock()
-            .ok()
-            .is_some_and(|revision| *revision == Some(next))
-        {
-            continue;
-        }
-        if events.send(mux::MuxEvent::ConfigChanged).is_err() {
-            return;
-        }
-    })
+fn restart_startup_aborted(cli: &Cli) -> bool {
+    cli.restart_gate
+        .as_deref()
+        .is_some_and(|gate| restart_gate_path(gate, "abort").is_file())
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+struct PreparedRestart {
+    child: Option<std::process::Child>,
+    gate: tempfile::TempDir,
+    released: bool,
+}
+
+impl PreparedRestart {
+    fn write_manifest(&self, request: &app::UpdateRestartRequest) -> Result<()> {
+        let manifest = RestartManifest {
+            panes: request
+                .panes
+                .iter()
+                .filter(|pane| pane.copilot_running)
+                .map(|pane| RestartManifestPane {
+                    session_id: pane.session_id.clone(),
+                    cwd: pane.cwd.clone(),
+                })
+                .collect(),
+            focused_session_id: request.focused_session_id.clone().filter(|session_id| {
+                request
+                    .panes
+                    .iter()
+                    .any(|pane| pane.copilot_running && &pane.session_id == session_id)
+            }),
+        };
+        let path = restart_gate_path(self.gate.path(), "manifest");
+        let temporary = restart_gate_path(self.gate.path(), "manifest.tmp");
+        std::fs::write(&temporary, serde_json::to_vec(&manifest)?)
+            .context("Failed to write the finalized CST restart manifest")?;
+        std::fs::rename(&temporary, &path)
+            .context("Failed to publish the finalized CST restart manifest")
+    }
+
+    fn release_until_started(&mut self) -> Result<()> {
+        std::fs::write(restart_gate_path(self.gate.path(), "go"), b"go")
+            .context("Failed to release the updated CST process")?;
+        self.released = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            if restart_gate_path(self.gate.path(), "started").is_file() {
+                return Ok(());
+            }
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .context("Updated CST process is unavailable")?
+                .try_wait()
+                .context("Failed to inspect the updated CST process")?
+            {
+                anyhow::bail!("Updated CST exited during startup with status {status}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        anyhow::bail!("Updated CST did not open its workspace within 15 seconds")
+    }
+
+    fn wait(mut self) -> Result<()> {
+        let status = self
+            .child
+            .take()
+            .context("Updated CST process is unavailable")?
+            .wait()
+            .context("Failed to wait for the updated CST process")?;
+        self.cleanup();
+        if !status.success() {
+            anyhow::bail!("Updated CST exited with status {status}");
+        }
+        Ok(())
+    }
+
+    fn cleanup(&self) {
+        for suffix in [
+            "ready",
+            "go",
+            "abort",
+            "started",
+            "manifest",
+            "manifest.tmp",
+        ] {
+            let _ = std::fs::remove_file(restart_gate_path(self.gate.path(), suffix));
+        }
+    }
+}
+
+impl Drop for PreparedRestart {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = std::fs::write(restart_gate_path(self.gate.path(), "abort"), b"abort");
+            if self.released {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if child.try_wait().ok().flatten().is_some() {
+                        self.cleanup();
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.cleanup();
+    }
+}
+
+fn prepare_updated_cst(
+    cli: &Cli,
+    copilot_home: &Path,
+    mux_enabled: bool,
+) -> Result<PreparedRestart> {
+    let executable = updater::invocation_executable()?;
+    let gate = tempfile::Builder::new()
+        .prefix("cst-restart-")
+        .tempdir()
+        .context("Failed to create a private restart handoff directory")?;
+    let mut args = restart_arguments(cli, copilot_home, mux_enabled);
+    args.push(OsString::from("--restart-gate"));
+    args.push(gate.path().as_os_str().to_owned());
+    args.push(OsString::from("--restart-parent-pid"));
+    args.push(OsString::from(std::process::id().to_string()));
+    let child = std::process::Command::new(&executable)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("Failed to restart updated CST {}", executable.display()))?;
+    let mut prepared = PreparedRestart {
+        child: Some(child),
+        gate,
+        released: false,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if restart_gate_path(prepared.gate.path(), "ready").is_file() {
+            return Ok(prepared);
+        }
+        if let Some(status) = prepared
+            .child
+            .as_mut()
+            .expect("prepared child")
+            .try_wait()
+            .context("Failed to inspect the updated CST process")?
+        {
+            anyhow::bail!("Updated CST exited before handoff with status {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    anyhow::bail!("Updated CST did not become ready for restart within 5 seconds")
+}
+
+fn restart_gate_path(gate: &Path, suffix: &str) -> PathBuf {
+    gate.join(suffix)
+}
+
+fn wait_for_restart_release(gate: &Path, parent_pid: u32) -> Result<Option<RestartManifest>> {
+    let manifest_path = restart_gate_path(gate, "manifest");
+    let ready = restart_gate_path(gate, "ready");
+    std::fs::write(&ready, b"ready")
+        .with_context(|| format!("Failed to signal update readiness at {}", ready.display()))?;
+    loop {
+        let go = restart_gate_path(gate, "go");
+        if go.is_file() {
+            let manifest =
+                serde_json::from_slice(&std::fs::read(&manifest_path).with_context(|| {
+                    format!(
+                        "Failed to read restart manifest {}",
+                        manifest_path.display()
+                    )
+                })?)
+                .context("Failed to parse the restart manifest")?;
+            let _ = std::fs::remove_file(go);
+            let _ = std::fs::remove_file(ready);
+            let _ = std::fs::remove_file(&manifest_path);
+            return Ok(Some(manifest));
+        }
+        if restart_gate_path(gate, "abort").is_file()
+            || !session::process::process_is_running(parent_pid)
+        {
+            let _ = std::fs::remove_file(ready);
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn restart_arguments(cli: &Cli, copilot_home: &Path, mux_enabled: bool) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--copilot-home"),
+        copilot_home.as_os_str().to_owned(),
+        OsString::from("--auto-filter"),
+        OsString::from(cli.auto_filter.to_string()),
+        OsString::from(if mux_enabled { "--mux" } else { "--no-mux" }),
+    ];
+    if let Some(path) = cli.last_dir_file.as_ref() {
+        args.push(OsString::from("--last-dir-file"));
+        args.push(path.as_os_str().to_owned());
+    }
+    args
+}
+
+struct ConfigWatcher {
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ConfigWatcher {
+    fn start(
+        events: std::sync::mpsc::Sender<mux::MuxEvent>,
+        path: PathBuf,
+        applied: std::sync::Arc<std::sync::Mutex<Option<config::ConfigRevision>>>,
+        interval: std::time::Duration,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || loop {
+            std::thread::park_timeout(interval);
+            if worker_stop.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(next) = config::config_revision(&path) else {
+                continue;
+            };
+            if applied
+                .lock()
+                .ok()
+                .is_some_and(|revision| *revision == Some(next))
+            {
+                continue;
+            }
+            if events.send(mux::MuxEvent::ConfigChanged).is_err() {
+                return;
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for ConfigWatcher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
+
+struct TerminalEventReader {
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TerminalEventReader {
+    fn start(sender: std::sync::mpsc::Sender<mux::MuxEvent>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                match crossterm::event::poll(std::time::Duration::from_millis(100)) {
+                    Ok(false) => continue,
+                    Ok(true) => match paste::read_events() {
+                        Ok(events) => {
+                            for event in events {
+                                if sender.send(mux::MuxEvent::Term(event)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => return,
+                    },
+                    Err(_) => return,
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for TerminalEventReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    cli: &Cli,
+) -> Result<Option<PreparedRestart>> {
     let config_path = config::config_path();
     // The watcher compares against the revision actually applied by App, so a quick
     // A -> B -> A reversion cannot be hidden by a stale watcher-local baseline.
     app.request_config_reload();
     let _config_watcher = app.mux.as_ref().map(|mux| {
-        spawn_config_watcher(
+        ConfigWatcher::start(
             mux.events.clone(),
             config_path.clone(),
             app.config_revision_handle(),
@@ -420,25 +827,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     // output, so the loop can wait on both at once instead of polling. Reading through
     // `paste` rebuilds the paste events Windows delivers as bare keystrokes; because the
     // thread does nothing but read, a queued burst can only have come from a paste.
-    let terminal_events = app.mux.as_ref().map(|mux| {
-        let sender = mux.events.clone();
-        std::thread::spawn(move || loop {
-            match paste::read_events() {
-                Ok(events) => {
-                    for event in events {
-                        if sender.send(mux::MuxEvent::Term(event)).is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(_) => return,
-            }
-        })
-    });
-    drop(terminal_events);
+    let _terminal_events = app
+        .mux
+        .as_ref()
+        .map(|mux| TerminalEventReader::start(mux.events.clone()));
     let mut terminal_title = String::new();
     let mut repaint = true;
     let mut last_paint = std::time::Instant::now();
+    let mut prepared_restart = None;
 
     loop {
         repaint |= app.poll_config_reload();
@@ -569,10 +965,76 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                 Some("Finishing the update before leaving; running sessions stay open...".into());
             continue;
         }
-        let exit_requested =
-            app.should_quit || app.should_resume.is_some() || app.should_new_session.is_some();
+        let explicit_exit_requested = prioritize_explicit_exit(app);
+        if !explicit_exit_requested
+            && app.update_restart_ready()
+            && app.update_restart_deferred_by_editor()
+        {
+            app.note_deferred_update_restart();
+            continue;
+        }
+        let exit_requested = explicit_exit_requested || app.update_restart_ready();
         if exit_requested && app.exit_waits_for_notifications() {
             continue;
+        }
+
+        if app.update_restart_ready() {
+            if !app.validate_update_restart_sessions() {
+                continue;
+            }
+            if let Some(scratchpad) = app.scratchpad.as_mut() {
+                if let Err(error) = scratchpad.save() {
+                    app.cancel_update_restart_after_failure(format!(
+                        "Update installed, but restart was cancelled because the scratchpad \
+                         could not be saved: {error}"
+                    ));
+                    continue;
+                }
+            }
+            let prepared = match prepare_updated_cst(cli, &app.copilot_home, app.mux.is_some()) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    app.cancel_update_restart_after_failure(format!(
+                        "Update installed, but the new CST could not start: {error}"
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = app.terminal.shutdown() {
+                drop(prepared);
+                app.cancel_update_restart_after_failure(format!(
+                    "Update installed, but restart was cancelled because terminal shells could \
+                     not stop: {error}"
+                ));
+                continue;
+            }
+            let terminated = match app
+                .mux
+                .as_mut()
+                .map(|mux| mux.shutdown_with_report())
+                .transpose()
+            {
+                Ok(terminated) => terminated.unwrap_or_default(),
+                Err(error) => {
+                    drop(prepared);
+                    app.recover_update_restart_sessions(&error.to_string());
+                    mux_input::sync_workspace_panels(app);
+                    continue;
+                }
+            };
+            app.retain_terminated_restart_panes(&terminated);
+            if let Err(error) = prepared.write_manifest(
+                app.restart_after_update
+                    .as_ref()
+                    .expect("ready restart has a finalized request"),
+            ) {
+                drop(prepared);
+                app.recover_update_restart_sessions(&error.to_string());
+                mux_input::sync_workspace_panels(app);
+                continue;
+            }
+            prepared_restart = Some(prepared);
+            break;
         }
 
         if app.should_quit {
@@ -583,11 +1045,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     .and_then(|mux| mux.focused_cwd())
                     .map(|path| path.to_string_lossy().to_string());
             }
-            let shutdown = app
-                .mux
-                .as_mut()
-                .map(|mux| mux.shutdown())
-                .transpose();
+            let shutdown = app.mux.as_mut().map(|mux| mux.shutdown()).transpose();
             if let Err(error) = shutdown {
                 app.should_quit = false;
                 app.cancel_notification_drain();
@@ -603,8 +1061,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
     }
 
-    if let Some(scratchpad) = app.scratchpad.as_mut() {
-        scratchpad.save()?;
+    if app.restart_after_update.is_none() {
+        if let Some(scratchpad) = app.scratchpad.as_mut() {
+            scratchpad.save()?;
+        }
     }
 
     // Without a daemon, panes are children of this process and must be reaped. Capture the
@@ -620,7 +1080,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
         }
     }
 
-    Ok(())
+    Ok(prepared_restart)
 }
 
 fn update_layout_metrics(app: &mut App, height: u16) {
@@ -712,10 +1172,20 @@ fn mux_paint_due(app: &App, repaint: bool, last_paint: std::time::Instant) -> bo
 
 /// Ordinary chat input changes the child, not CST's current frame. Waiting for the
 /// child's output avoids rendering the stale pre-echo screen while holding its parser.
+fn prioritize_explicit_exit(app: &mut App) -> bool {
+    let requested =
+        app.should_quit || app.should_resume.is_some() || app.should_new_session.is_some();
+    if requested && app.update_restart_ready() {
+        app.cancel_update_restart_for_user_action();
+    }
+    requested
+}
+
 fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> bool {
     if !matches!(app.view, app::View::Attached(_))
         || app.workspace_focus != app::WorkspaceFocus::Chat
         || app.confirm_quit
+        || app.confirm_update_restart
         || app.github_inspector.is_some()
         || app.snippet_modal.is_some()
         || app.workspace_help.is_some()
@@ -860,8 +1330,8 @@ fn print_shell_init(shell: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use crate::mux::{Pane, PaneSpec};
+    use chrono::{TimeZone, Utc};
 
     fn session(id: &str, name: &str, active: bool) -> session::Session {
         session::Session {
@@ -894,6 +1364,186 @@ mod tests {
         assert!(
             Cli::try_parse_from(["cst", "--session", "session-1", "--open-favorites"]).is_err()
         );
+
+        let handoff = Cli::try_parse_from([
+            "cst",
+            "--restart-gate",
+            "gate",
+            "--restart-parent-pid",
+            "42",
+        ])
+        .unwrap();
+        assert_eq!(handoff.restart_parent_pid, Some(42));
+        assert_eq!(handoff.restart_gate, Some(PathBuf::from("gate")));
+        assert!(Cli::try_parse_from(["cst", "--restart-gate", "gate"]).is_err());
+    }
+
+    #[test]
+    fn restart_handoff_preserves_runtime_options_session_order_and_focus() {
+        let cli = Cli::try_parse_from([
+            "cst",
+            "--copilot-home",
+            r"C:\copilot-home",
+            "--auto-filter",
+            "false",
+            "--last-dir-file",
+            r"C:\temp\last-dir",
+            "--mux",
+        ])
+        .unwrap();
+        let request = app::UpdateRestartRequest {
+            panes: vec![
+                app::UpdateRestartPane {
+                    pane_id: Some(2),
+                    copilot_running: true,
+                    terminal_generation: None,
+                    session_id: "session-2".to_string(),
+                    cwd: PathBuf::from(r"C:\work\two"),
+                    title: "Second".to_string(),
+                },
+                app::UpdateRestartPane {
+                    pane_id: Some(1),
+                    copilot_running: true,
+                    terminal_generation: None,
+                    session_id: "session-1".to_string(),
+                    cwd: PathBuf::from(r"C:\work\one"),
+                    title: "First".to_string(),
+                },
+            ],
+            focused_session_id: Some("session-2".to_string()),
+        };
+
+        let args = restart_arguments(&cli, Path::new(r"C:\copilot-home"), true);
+        let reparsed =
+            Cli::try_parse_from(std::iter::once(OsString::from("cst")).chain(args.clone()))
+                .unwrap();
+
+        assert_eq!(
+            reparsed.copilot_home,
+            Some(PathBuf::from(r"C:\copilot-home"))
+        );
+        assert!(!reparsed.auto_filter);
+        assert!(reparsed.mux);
+        assert_eq!(
+            reparsed.last_dir_file,
+            Some(PathBuf::from(r"C:\temp\last-dir"))
+        );
+
+        let prepared = PreparedRestart {
+            child: None,
+            gate: tempfile::tempdir().unwrap(),
+            released: false,
+        };
+        prepared.write_manifest(&request).unwrap();
+        let manifest: RestartManifest = serde_json::from_slice(
+            &std::fs::read(restart_gate_path(prepared.gate.path(), "manifest")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest
+                .panes
+                .iter()
+                .map(|pane| pane.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-2", "session-1"]
+        );
+        assert_eq!(manifest.focused_session_id.as_deref(), Some("session-2"));
+    }
+
+    #[test]
+    fn explicit_actions_supersede_automatic_restart_after_installation() {
+        let ready_app = || {
+            let mut app = App::new(Vec::new(), config::UserConfig::default());
+            app.restart_after_update = Some(app::UpdateRestartRequest::default());
+            app.installed_update_version = Some("99.0.0".to_string());
+            app
+        };
+
+        let mut quitting = ready_app();
+        quitting.should_quit = true;
+        assert!(prioritize_explicit_exit(&mut quitting));
+        assert!(quitting.restart_after_update.is_none());
+        assert!(quitting.should_quit);
+
+        let mut resuming = ready_app();
+        resuming.should_resume = Some(("session-1".to_string(), "cwd".to_string()));
+        assert!(prioritize_explicit_exit(&mut resuming));
+        assert!(resuming.restart_after_update.is_none());
+        assert!(resuming.should_resume.is_some());
+
+        let mut creating = ready_app();
+        creating.should_new_session = Some(NewSessionRequest::Normal {
+            cwd: "cwd".to_string(),
+        });
+        assert!(prioritize_explicit_exit(&mut creating));
+        assert!(creating.restart_after_update.is_none());
+        assert!(creating.should_new_session.is_some());
+    }
+
+    #[test]
+    fn restore_handoff_can_resume_a_session_missing_from_the_visible_catalog() {
+        let restored = resolve_restored_startup_session(
+            &[],
+            "fresh-session-id",
+            Path::new(r"C:\work\brand-new"),
+        );
+
+        assert_eq!(restored.id, "fresh-session-id");
+        assert_eq!(restored.cwd, r"C:\work\brand-new");
+        assert_eq!(restored.title, "session fresh-se");
+    }
+
+    #[test]
+    fn terminal_only_resource_does_not_resume_a_stopped_copilot_chat() {
+        let request = app::UpdateRestartRequest {
+            panes: vec![app::UpdateRestartPane {
+                pane_id: Some(7),
+                copilot_running: false,
+                terminal_generation: Some(3),
+                session_id: "stopped-chat".to_string(),
+                cwd: PathBuf::from(r"C:\work\project"),
+                title: "Shell".to_string(),
+            }],
+            focused_session_id: Some("stopped-chat".to_string()),
+        };
+
+        let prepared = PreparedRestart {
+            child: None,
+            gate: tempfile::tempdir().unwrap(),
+            released: false,
+        };
+        prepared.write_manifest(&request).unwrap();
+        let manifest: RestartManifest = serde_json::from_slice(
+            &std::fs::read(restart_gate_path(prepared.gate.path(), "manifest")).unwrap(),
+        )
+        .unwrap();
+        assert!(manifest.panes.is_empty());
+        assert!(manifest.focused_session_id.is_none());
+    }
+
+    #[test]
+    fn restart_gate_waits_for_release_from_the_supervising_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let gate = temp.path().to_path_buf();
+        let manifest_path = restart_gate_path(&gate, "manifest");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&RestartManifest::default()).unwrap(),
+        )
+        .unwrap();
+        let worker_gate = gate.clone();
+        let worker = std::thread::spawn(move || {
+            wait_for_restart_release(&worker_gate, std::process::id()).unwrap()
+        });
+        let ready = restart_gate_path(&gate, "ready");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !ready.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready.is_file());
+
+        std::fs::write(restart_gate_path(&gate, "go"), b"go").unwrap();
+        assert!(worker.join().unwrap().is_some());
     }
 
     #[test]
@@ -928,7 +1578,7 @@ mod tests {
         let initial = config::config_revision(&path).unwrap();
         let applied = std::sync::Arc::new(std::sync::Mutex::new(Some(initial)));
         let (sender, receiver) = std::sync::mpsc::channel();
-        let watcher = spawn_config_watcher(
+        let watcher = ConfigWatcher::start(
             sender,
             path.clone(),
             std::sync::Arc::clone(&applied),
@@ -954,9 +1604,11 @@ mod tests {
             Ok(mux::MuxEvent::ConfigChanged)
         ));
 
-        drop(receiver);
+        drop(watcher);
         std::fs::write(&path, r#"{"model":"third"}"#).unwrap();
-        watcher.join().unwrap();
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_millis(30))
+            .is_err());
     }
 
     #[test]

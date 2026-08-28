@@ -347,10 +347,17 @@ impl MuxState {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_with_report().map(|_| ())
+    }
+
+    pub fn shutdown_with_report(&mut self) -> Result<Vec<PaneId>> {
         let mut failures = Vec::new();
+        let mut terminated = Vec::new();
         for pane in &mut self.panes {
-            if let Err(error) = pane.shutdown() {
-                failures.push(format!("'{}': {error}", pane.title));
+            match pane.shutdown() {
+                Ok(true) => terminated.push(pane.id),
+                Ok(false) => {}
+                Err(error) => failures.push(format!("'{}': {error}", pane.title)),
             }
         }
         if !failures.is_empty() {
@@ -358,7 +365,7 @@ impl MuxState {
         }
         self.panes.clear();
         self.focused = None;
-        Ok(())
+        Ok(terminated)
     }
 }
 

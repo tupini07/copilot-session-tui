@@ -719,20 +719,42 @@ mod tests {
     }
 
     #[test]
-    fn attached_status_shows_non_disruptive_update_progress() {
+    fn attached_status_shows_update_restart_progress() {
         let mut app = mux_app();
         let events = app.mux.as_ref().expect("mux").events.clone();
         let pane = silent_pane(events);
         let id = pane.id;
         app.mux.as_mut().expect("mux").push(pane);
         app.view = crate::app::View::Attached(id);
-        app.update_notice = Some("Installing v0.19.0; running sessions stay open...".to_string());
+        app.update_notice =
+            Some("Installing v0.19.0; 1 running session will reopen after restart...".to_string());
 
         let text = render(&mut app);
 
         assert!(text.contains("Update"), "got:\n{text}");
         assert!(text.contains("Installing v0.19.0"), "got:\n{text}");
-        assert!(text.contains("running sessions stay open"), "got:\n{text}");
+        assert!(text.contains("reopen after resta"), "got:\n{text}");
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn update_restart_prompt_is_visible_without_leaving_the_attached_pane() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.confirm_update_restart = true;
+
+        let text = render(&mut app);
+
+        assert!(text.contains("Update & Restart"), "got:\n{text}");
+        assert!(
+            text.contains("Update CST and restart 1 running session?"),
+            "got:\n{text}"
+        );
+        assert!(text.contains("Copilot chats reopen"), "got:\n{text}");
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 
@@ -808,7 +830,7 @@ mod tests {
         assert!(text.contains("Shift+Tab"), "got:\n{text}");
         assert!(text.contains("Ctrl+Shift+K"), "got:\n{text}");
 
-        app.terminal.shutdown();
+        let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 }

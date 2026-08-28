@@ -198,7 +198,7 @@ fn install_update(latest_version: &str) -> Result<UpdateInstallOutcome> {
     Ok(UpdateInstallOutcome::Installed(version))
 }
 
-fn invocation_executable() -> Result<PathBuf> {
+pub(crate) fn invocation_executable() -> Result<PathBuf> {
     let argument = std::env::args_os()
         .next()
         .context("The CST executable path is unavailable")?;

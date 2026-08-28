@@ -28,6 +28,15 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
 /// Split out from `handle_input` so the multiplexer's event thread — which owns the
 /// only reader of the terminal — can route events here instead of polling separately.
 pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    if app.confirm_update_restart {
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                handle_update_restart_confirm(app, key.code);
+            }
+        }
+        return Ok(());
+    }
+
     if app.workspace_help.is_some() {
         if matches!(
             event,
@@ -155,6 +164,18 @@ pub(crate) fn handle_quit_confirm(app: &mut App, key: KeyCode) {
             app.confirm_quit = false;
             app.status_message = Some("Quit cancelled".to_string());
         }
+    }
+}
+
+pub(crate) fn handle_update_restart_confirm(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.confirm_update_and_restart();
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.cancel_update_restart();
+        }
+        _ => {}
     }
 }
 
@@ -657,10 +678,17 @@ fn perform_delete(app: &mut App, force: bool) {
         .pending_delete
         .clone()
         .unwrap_or(DeleteTarget::SessionOnly);
-    if app.terminal.active_session_id() == Some(session_id.as_str()) {
+    if let Err(error) = app.terminal.remove(&session_id) {
+        app.mode = Mode::Normal;
+        app.pending_delete = None;
+        app.status_message = Some(format!(
+            "Cannot delete: the session terminal could not be stopped: {error}"
+        ));
+        return;
+    }
+    if app.terminal.active_session_id().is_none() {
         app.terminal_owner = None;
     }
-    app.terminal.remove(&session_id);
     let result = match target {
         DeleteTarget::SessionOnly => {
             manager::delete_session(&dir).map(|_| "Session deleted".to_string())
@@ -1496,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn list_update_installs_without_requesting_exit() {
+    fn list_update_without_running_sessions_prepares_an_automatic_restart() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.update_info = Some(crate::updater::UpdateInfo {
             current_version: "0.18.0".to_string(),
@@ -1507,7 +1535,38 @@ mod tests {
 
         assert_eq!(app.update_install_requested_for.as_deref(), Some("0.19.0"));
         assert!(!app.should_quit);
-        assert!(app.status_message.as_deref().unwrap().contains("stay open"));
+        assert_eq!(
+            app.restart_after_update,
+            Some(crate::app::UpdateRestartRequest::default())
+        );
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("restart automatically"));
+    }
+
+    #[test]
+    fn update_restart_confirmation_is_modal_over_full_screen_tools() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Scratchpad;
+        app.confirm_update_restart = true;
+
+        handle_terminal_event(
+            &mut app,
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+            )),
+        )
+        .unwrap();
+
+        assert!(!app.confirm_update_restart);
+        assert_eq!(
+            app.mode,
+            Mode::Scratchpad,
+            "the covered scratchpad must not consume confirmation input"
+        );
     }
 
     #[test]

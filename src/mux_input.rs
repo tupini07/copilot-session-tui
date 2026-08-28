@@ -1,5 +1,5 @@
 use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
-use crate::input::{handle_quit_confirm, request_quit};
+use crate::input::{handle_quit_confirm, handle_update_restart_confirm, request_quit};
 use crate::mux::pane::PaneNotification;
 use crate::mux::{
     resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
@@ -29,6 +29,15 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
     if attended {
         app.terminal_focused = true;
         app.acknowledge_focused_pane();
+    }
+
+    if app.confirm_update_restart {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press {
+                handle_update_restart_confirm(app, key.code);
+            }
+        }
+        return;
     }
 
     if app.confirm_quit {
@@ -2128,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_u_installs_without_detaching_or_ending_the_pane() {
+    fn prefix_u_confirms_before_restarting_an_attached_pane() {
         let mut app = attached_mux_app("update-session");
         app.update_info = Some(crate::updater::UpdateInfo {
             current_version: "0.18.0".to_string(),
@@ -2137,16 +2146,144 @@ mod tests {
 
         send_prefix_command(&mut app, 'u');
 
-        assert_eq!(app.update_install_requested_for.as_deref(), Some("0.19.0"));
+        assert!(app.confirm_update_restart);
+        assert!(app.update_install_requested_for.is_none());
         assert!(matches!(app.view, View::Attached(1)));
         assert!(app.mux.as_ref().unwrap().pane(1).unwrap().is_running());
         assert!(!app.should_quit);
 
         handle_attached_event(
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         );
-        assert!(app.update_notice.is_none());
+        assert!(!app.confirm_update_restart);
+        assert_eq!(app.update_install_requested_for.as_deref(), Some("0.19.0"));
+        let restart = app.restart_after_update.as_ref().unwrap();
+        assert_eq!(
+            restart
+                .panes
+                .iter()
+                .map(|pane| pane.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["update-session"]
+        );
+        assert_eq!(
+            restart.focused_session_id.as_deref(),
+            Some("update-session")
+        );
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().is_running());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn attached_update_confirmation_can_be_cancelled_without_installing() {
+        let mut app = attached_mux_app("update-session");
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+        send_prefix_command(&mut app, 'u');
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert!(!app.confirm_update_restart);
+        assert!(app.update_install_requested_for.is_none());
+        assert!(app.restart_after_update.is_none());
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().is_running());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn update_restart_preserves_pane_order_and_focus() {
+        let mut app = attached_mux_app("session-one");
+        push_test_pane(&mut app, 2, "session-two");
+        push_test_pane(&mut app, 3, "session-three");
+        app.mux.as_mut().unwrap().focused = Some(2);
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+
+        app.request_update();
+        app.confirm_update_and_restart();
+
+        let restart = app.restart_after_update.as_ref().unwrap();
+        assert_eq!(
+            restart
+                .panes
+                .iter()
+                .map(|pane| (pane.pane_id, pane.session_id.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1), "session-one"),
+                (Some(2), "session-two"),
+                (Some(3), "session-three"),
+            ]
+        );
+        assert_eq!(restart.focused_session_id.as_deref(), Some("session-two"));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn sessions_started_during_install_require_fresh_restart_confirmation() {
+        let mut app = attached_mux_app("session-one");
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+        app.request_update();
+        app.confirm_update_and_restart();
+
+        push_test_pane(&mut app, 2, "session-two");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.update_install_receiver = Some(receiver);
+        sender
+            .send(Ok(crate::updater::UpdateInstallOutcome::Installed(
+                "0.19.0".to_string(),
+            )))
+            .unwrap();
+        app.poll_update();
+
+        assert!(app.update_restart_ready());
+        assert!(!app.validate_update_restart_sessions());
+        assert!(app.confirm_update_restart);
+        assert!(app.restart_after_update.is_none());
+
+        app.confirm_update_and_restart();
+        assert!(app.update_restart_ready());
+        assert_eq!(
+            app.restart_after_update
+                .as_ref()
+                .unwrap()
+                .panes
+                .iter()
+                .map(|pane| pane.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-one", "session-two"]
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn replacement_pane_for_the_same_session_requires_fresh_confirmation() {
+        let mut app = attached_mux_app("session-one");
+        app.update_info = Some(crate::updater::UpdateInfo {
+            current_version: "0.18.0".to_string(),
+            latest_version: "0.19.0".to_string(),
+        });
+        app.request_update();
+        app.confirm_update_and_restart();
+        app.installed_update_version = Some("0.19.0".to_string());
+        app.restart_after_update.as_mut().unwrap().panes[0].pane_id = Some(999);
+
+        assert!(app.update_restart_ready());
+        assert!(!app.validate_update_restart_sessions());
+        assert!(app.confirm_update_restart);
+        assert!(app.restart_after_update.is_none());
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]
@@ -2486,7 +2623,7 @@ mod tests {
         send_prefix_command(&mut app, 't');
         assert!(!app.terminal.is_visible());
         assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
-        app.terminal.shutdown();
+        let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -2510,7 +2647,7 @@ mod tests {
         assert!(app.attached_scratchpad_visible());
         assert!(app.attached_terminal_visible());
         app.scratchpad = None;
-        app.terminal.shutdown();
+        let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -2536,7 +2673,7 @@ mod tests {
         assert!(app.attached_scratchpad_visible());
         assert!(app.attached_terminal_visible());
         app.scratchpad = None;
-        app.terminal.shutdown();
+        let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

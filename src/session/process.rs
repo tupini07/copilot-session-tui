@@ -357,7 +357,7 @@ fn terminate_owner(owner: &mut ValidatedOwner) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn process_is_running(pid: u32) -> bool {
+pub(crate) fn process_is_running(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE, STILL_ACTIVE,
     };
@@ -380,12 +380,12 @@ fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(all(not(windows), target_os = "linux"))]
-fn process_is_running(pid: u32) -> bool {
+pub(crate) fn process_is_running(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
-fn process_is_running(pid: u32) -> bool {
+pub(crate) fn process_is_running(pid: u32) -> bool {
     // SAFETY: signal 0 checks existence/permission without delivering a signal.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)

@@ -17,6 +17,11 @@ pub struct PtySession {
     size: PtySize,
 }
 
+pub struct TerminationOutcome {
+    pub code: Option<u32>,
+    pub terminated: bool,
+}
+
 /// Chunks of child output, plus a final exit notification.
 pub enum PtyChunk {
     Output(Vec<u8>),
@@ -139,17 +144,26 @@ impl PtySession {
         Ok(())
     }
 
-    pub fn terminate_and_wait(&self, timeout: Duration) -> Result<Option<u32>> {
+    pub fn terminate_and_wait(&self, timeout: Duration) -> Result<TerminationOutcome> {
         let pid = self.child.lock().ok().and_then(|child| child.process_id());
         if let Some(code) = self.try_wait() {
-            return Ok(Some(code));
+            return Ok(TerminationOutcome {
+                code: Some(code),
+                terminated: false,
+            });
         }
-        if let Err(error) = self.terminate_process() {
-            if let Some(code) = self.try_wait() {
-                return Ok(Some(code));
+        let terminated = match self.terminate_process() {
+            Ok(terminated) => terminated,
+            Err(error) => {
+                if let Some(code) = self.try_wait() {
+                    return Ok(TerminationOutcome {
+                        code: Some(code),
+                        terminated: false,
+                    });
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(mut child) = self.child.lock() {
@@ -157,7 +171,10 @@ impl PtySession {
                     .try_wait()
                     .context("Failed to check the session process after termination")?
                 {
-                    return Ok(Some(status.exit_code()));
+                    return Ok(TerminationOutcome {
+                        code: Some(status.exit_code()),
+                        terminated,
+                    });
                 }
             }
             if Instant::now() >= deadline {
@@ -172,7 +189,7 @@ impl PtySession {
     }
 
     #[cfg(windows)]
-    fn terminate_process(&self) -> Result<()> {
+    fn terminate_process(&self) -> Result<bool> {
         use windows_sys::Win32::System::Threading::TerminateProcess;
 
         let child = self
@@ -189,19 +206,21 @@ impl PtySession {
             return Err(std::io::Error::last_os_error())
                 .context("Failed to terminate the session process");
         }
-        Ok(())
+        Ok(true)
     }
 
     #[cfg(not(windows))]
-    fn terminate_process(&self) -> Result<()> {
+    fn terminate_process(&self) -> Result<bool> {
         if let Ok(mut child) = self.child.lock() {
-            if child.try_wait().ok().flatten().is_none() {
-                child
-                    .kill()
-                    .context("Failed to terminate the session process")?;
+            if child.try_wait().ok().flatten().is_some() {
+                return Ok(false);
             }
+            child
+                .kill()
+                .context("Failed to terminate the session process")?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 }
 

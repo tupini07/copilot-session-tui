@@ -105,6 +105,14 @@ pub struct PaneSpec {
     pub events_path: Option<PathBuf>,
 }
 
+impl Drop for Pane {
+    fn drop(&mut self) {
+        if self.is_running() {
+            let _ = self.shutdown();
+        }
+    }
+}
+
 impl Pane {
     pub fn spawn(spec: PaneSpec, rows: u16, cols: u16, events: Sender<MuxEvent>) -> Result<Self> {
         let PaneSpec {
@@ -589,12 +597,15 @@ impl Pane {
         self.pty.kill()
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
-        let code = self
+    pub fn shutdown(&mut self) -> Result<bool> {
+        if !self.is_running() {
+            return Ok(false);
+        }
+        let outcome = self
             .pty
             .terminate_and_wait(std::time::Duration::from_secs(3))?;
-        self.mark_exited(code);
-        Ok(())
+        self.mark_exited(outcome.code);
+        Ok(outcome.terminated)
     }
 
     /// Pick up an exit that happened without the reader thread noticing yet.
@@ -860,7 +871,7 @@ mod tests {
                 kind: InputKind::Question,
             }
         );
-        pane.shutdown().unwrap();
+        assert!(pane.shutdown().unwrap());
     }
 
     #[test]
@@ -1249,10 +1260,55 @@ mod tests {
         let mut pane = Pane::spawn(test_spec(30, program, args), 24, 80, tx).unwrap();
         assert!(pane.is_running());
 
-        pane.shutdown().unwrap();
+        assert!(pane.shutdown().unwrap());
 
         assert!(!pane.is_running());
         assert!(matches!(pane.status, PaneStatus::Exited(_)));
+    }
+
+    #[test]
+    fn shutdown_report_excludes_a_child_that_finished_naturally() {
+        let (tx, rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) { "exit /b 0" } else { "exit 0" });
+        let mut pane = Pane::spawn(test_spec(40, program, args), 24, 80, tx).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if matches!(
+                rx.recv_timeout(Duration::from_millis(100)),
+                Ok(MuxEvent::Exited(..))
+            ) {
+                break;
+            }
+        }
+
+        assert!(!pane.shutdown().unwrap());
+        assert!(!pane.is_running());
+    }
+
+    #[test]
+    fn dropping_a_live_pane_terminates_and_reaps_its_child() {
+        let (tx, rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let pane = Pane::spawn(test_spec(41, program, args), 24, 80, tx).unwrap();
+
+        drop(pane);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut exited = false;
+        while Instant::now() < deadline {
+            if matches!(
+                rx.recv_timeout(Duration::from_millis(100)),
+                Ok(MuxEvent::Exited(..))
+            ) {
+                exited = true;
+                break;
+            }
+        }
+        assert!(exited);
     }
 
     /// The full loop that makes the multiplexer usable: keystrokes are encoded, written to

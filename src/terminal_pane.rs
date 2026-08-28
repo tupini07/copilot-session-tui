@@ -4,11 +4,12 @@ use anyhow::{Context, Result};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 const INITIAL_ROWS: u16 = 12;
 const INITIAL_COLS: u16 = 80;
@@ -63,7 +64,7 @@ struct TerminalProcess {
     parser: Arc<RwLock<TerminalParser>>,
     master: Option<Box<dyn MasterPty + Send>>,
     input: Option<mpsc::Sender<Vec<u8>>>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     status: Arc<Mutex<TerminalStatus>>,
     host_sequences: mpsc::Receiver<Vec<u8>>,
     size: PtySize,
@@ -127,6 +128,7 @@ impl vt100::Callbacks for TerminalCallbacks {
 pub struct TerminalPane {
     pub session_name: String,
     pub cwd: String,
+    generation: u64,
     process: TerminalProcess,
     viewport: Viewport,
     mouse_captured: bool,
@@ -145,6 +147,7 @@ pub struct TerminalManager {
     active_id: Option<String>,
     visible: bool,
     focused: bool,
+    next_generation: u64,
 }
 
 impl TerminalProcess {
@@ -169,11 +172,11 @@ impl TerminalProcess {
         };
         command.cwd(cwd);
 
-        let mut child = pair
+        let child = pair
             .slave
             .spawn_command(command)
             .context("Failed to start terminal shell")?;
-        let killer = child.clone_killer();
+        let child = Arc::new(Mutex::new(child));
         drop(pair.slave);
 
         let mut reader = pair
@@ -233,24 +236,11 @@ impl TerminalProcess {
             });
         }
 
-        {
-            let status = Arc::clone(&status);
-            std::thread::spawn(move || {
-                let next = match child.wait() {
-                    Ok(exit) => TerminalStatus::Exited(exit.exit_code()),
-                    Err(error) => TerminalStatus::Failed(format!("shell wait failed: {error}")),
-                };
-                if let Ok(mut current) = status.lock() {
-                    *current = next;
-                }
-            });
-        }
-
         Ok(Self {
             parser,
             master: Some(pair.master),
             input: Some(input),
-            killer,
+            child,
             status,
             host_sequences,
             size,
@@ -258,10 +248,33 @@ impl TerminalProcess {
     }
 
     fn status(&self) -> TerminalStatus {
-        self.status.lock().map_or_else(
+        let current = self.status.lock().map_or_else(
             |_| TerminalStatus::Failed("terminal status lock was poisoned".to_string()),
             |status| status.clone(),
-        )
+        );
+        if !matches!(current, TerminalStatus::Running) {
+            return current;
+        }
+        let next = match self.child.lock() {
+            Ok(mut child) => match child.try_wait() {
+                Ok(Some(exit)) => Some(TerminalStatus::Exited(exit.exit_code())),
+                Ok(None) => None,
+                Err(error) => Some(TerminalStatus::Failed(format!(
+                    "shell status check failed: {error}"
+                ))),
+            },
+            Err(_) => Some(TerminalStatus::Failed(
+                "terminal child lock was poisoned".to_string(),
+            )),
+        };
+        if let Some(next) = next {
+            if let Ok(mut status) = self.status.lock() {
+                *status = next.clone();
+            }
+            next
+        } else {
+            current
+        }
     }
 
     fn send(&self, bytes: Vec<u8>) -> Result<()> {
@@ -302,24 +315,123 @@ impl TerminalProcess {
     fn drain_host_sequences(&self, sequences: &mut Vec<Vec<u8>>) {
         sequences.extend(self.host_sequences.try_iter());
     }
+
+    fn shutdown(&mut self, timeout: Duration) -> Result<()> {
+        let terminated = match self.terminate_process() {
+            Ok(terminated) => terminated,
+            Err(error) => {
+                if let Some(code) = self.try_wait_child()? {
+                    self.record_exit(code);
+                    false
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        if !terminated {
+            self.input.take();
+            self.master.take();
+            return Ok(());
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(code) = self.try_wait_child()? {
+                self.record_exit(code);
+                self.input.take();
+                self.master.take();
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "terminal shell did not exit within {:.1}s",
+                    timeout.as_secs_f32()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn try_wait_child(&self) -> Result<Option<u32>> {
+        self.child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Terminal child handle is unavailable"))?
+            .try_wait()
+            .context("Failed to check terminal shell status")
+            .map(|status| status.map(|status| status.exit_code()))
+    }
+
+    fn child_is_running(&self) -> bool {
+        match self.try_wait_child() {
+            Ok(Some(code)) => {
+                self.record_exit(code);
+                false
+            }
+            Ok(None) | Err(_) => true,
+        }
+    }
+
+    fn record_exit(&self, code: u32) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = TerminalStatus::Exited(code);
+        }
+    }
+
+    #[cfg(windows)]
+    fn terminate_process(&self) -> Result<bool> {
+        use windows_sys::Win32::System::Threading::TerminateProcess;
+
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Terminal child handle is unavailable"))?;
+        if let Some(status) = child.try_wait()? {
+            self.record_exit(status.exit_code());
+            return Ok(false);
+        }
+        let handle = child
+            .as_raw_handle()
+            .context("Terminal shell has no Windows handle")?;
+        // SAFETY: `handle` belongs to the child protected by the mutex guard.
+        if unsafe { TerminateProcess(handle.cast(), 1) } == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Failed to terminate terminal shell");
+        }
+        Ok(true)
+    }
+
+    #[cfg(not(windows))]
+    fn terminate_process(&self) -> Result<bool> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Terminal child handle is unavailable"))?;
+        if let Some(status) = child.try_wait()? {
+            self.record_exit(status.exit_code());
+            return Ok(false);
+        }
+        child.kill().context("Failed to terminate terminal shell")?;
+        Ok(true)
+    }
 }
 
 impl Drop for TerminalProcess {
     fn drop(&mut self) {
-        self.input.take();
-        if matches!(self.status(), TerminalStatus::Running) {
-            let _ = self.killer.kill();
-        }
-        self.master.take();
+        let _ = self.shutdown(Duration::from_secs(3));
     }
 }
 
 impl TerminalPane {
-    pub fn open(session_name: String, cwd: String, config: &TerminalConfig) -> Result<Self> {
+    pub fn open(
+        session_name: String,
+        cwd: String,
+        generation: u64,
+        config: &TerminalConfig,
+    ) -> Result<Self> {
         let process = TerminalProcess::spawn(Path::new(&cwd), config)?;
         Ok(Self {
             session_name,
             cwd,
+            generation,
             process,
             viewport: Viewport {
                 x: 0,
@@ -331,19 +443,21 @@ impl TerminalPane {
         })
     }
 
-    pub fn restart(&mut self, config: &TerminalConfig) -> Result<()> {
+    pub fn restart(&mut self, generation: u64, config: &TerminalConfig) -> Result<()> {
         let process = TerminalProcess::spawn(Path::new(&self.cwd), config)?;
         self.process = process;
+        self.generation = generation;
         self.mouse_captured = false;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> TerminalStatus {
         self.process.status()
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.status(), TerminalStatus::Running)
+        self.process.child_is_running()
     }
 
     pub(crate) fn parser(&self) -> &RwLock<TerminalParser> {
@@ -455,6 +569,11 @@ impl TerminalPane {
 }
 
 impl TerminalManager {
+    fn allocate_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.next_generation
+    }
+
     pub fn activate(
         &mut self,
         session_id: String,
@@ -462,17 +581,30 @@ impl TerminalManager {
         cwd: String,
         config: &TerminalConfig,
     ) -> Result<Activation> {
+        let needs_generation = self
+            .panes
+            .get(&session_id)
+            .is_none_or(|pane| !pane.is_running());
+        let generation = needs_generation.then(|| self.allocate_generation());
         let activation = if let Some(pane) = self.panes.get_mut(&session_id) {
             pane.session_name = session_name;
             pane.cwd = cwd;
             if pane.is_running() {
                 Activation::Focused
             } else {
-                pane.restart(config)?;
+                pane.restart(
+                    generation.expect("stopped panes receive a generation"),
+                    config,
+                )?;
                 Activation::Restarted
             }
         } else {
-            let pane = TerminalPane::open(session_name, cwd, config)?;
+            let pane = TerminalPane::open(
+                session_name,
+                cwd,
+                generation.expect("new panes receive a generation"),
+                config,
+            )?;
             self.panes.insert(session_id.clone(), pane);
             Activation::Opened
         };
@@ -503,6 +635,21 @@ impl TerminalManager {
             .iter()
             .filter(|(_, pane)| !pane.is_running())
             .map(|(session_id, _)| session_id.clone())
+            .collect()
+    }
+
+    pub fn running_sessions(&self) -> Vec<(String, String, String, u64)> {
+        self.panes
+            .iter()
+            .filter(|(_, pane)| pane.is_running())
+            .map(|(session_id, pane)| {
+                (
+                    session_id.clone(),
+                    pane.cwd.clone(),
+                    pane.session_name.clone(),
+                    pane.generation,
+                )
+            })
             .collect()
     }
 
@@ -537,20 +684,34 @@ impl TerminalManager {
         }
     }
 
-    pub fn remove(&mut self, session_id: &str) {
+    pub fn remove(&mut self, session_id: &str) -> Result<()> {
+        if let Some(pane) = self.panes.get_mut(session_id) {
+            pane.process.shutdown(Duration::from_secs(3))?;
+        }
         self.panes.remove(session_id);
         if self.active_id.as_deref() == Some(session_id) {
             self.active_id = None;
             self.visible = false;
             self.focused = false;
         }
+        Ok(())
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for (session_id, pane) in &mut self.panes {
+            if let Err(error) = pane.process.shutdown(Duration::from_secs(3)) {
+                failures.push(format!("'{}': {error}", session_id));
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!("Could not end all terminal shells: {}", failures.join("; "));
+        }
         self.panes.clear();
         self.active_id = None;
         self.visible = false;
         self.focused = false;
+        Ok(())
     }
 
     pub fn drain_host_sequences(&self) -> Vec<Vec<u8>> {
@@ -887,7 +1048,7 @@ mod tests {
 
         assert_eq!(manager.panes.len(), 2);
         assert_eq!(manager.active_session_id(), Some("session-b"));
-        manager.shutdown();
+        let _ = manager.shutdown();
         assert!(manager.panes.is_empty());
         assert!(!manager.is_visible());
     }
@@ -940,7 +1101,66 @@ mod tests {
             Activation::Restarted
         );
         assert!(manager.active().unwrap().is_running());
-        manager.shutdown();
+        let _ = manager.shutdown();
+    }
+
+    #[test]
+    fn manager_shutdown_waits_for_shell_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = TerminalManager::default();
+        manager
+            .activate(
+                "session-a".to_string(),
+                "Terminal".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &TerminalConfig::default(),
+            )
+            .unwrap();
+
+        manager.shutdown().unwrap();
+
+        assert!(manager.panes.is_empty());
+        assert!(manager.active_id.is_none());
+    }
+
+    #[test]
+    fn manager_remove_waits_for_shell_exit_before_forgetting_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = TerminalManager::default();
+        manager
+            .activate(
+                "session-a".to_string(),
+                "Terminal".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &TerminalConfig::default(),
+            )
+            .unwrap();
+
+        manager.remove("session-a").unwrap();
+
+        assert!(manager.panes.is_empty());
+        assert!(manager.active_id.is_none());
+    }
+
+    #[test]
+    fn manager_remove_stops_child_even_after_terminal_io_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = TerminalManager::default();
+        manager
+            .activate(
+                "session-a".to_string(),
+                "Terminal".to_string(),
+                directory.path().to_string_lossy().to_string(),
+                &TerminalConfig::default(),
+            )
+            .unwrap();
+        let pane = manager.panes.get("session-a").unwrap();
+        *pane.process.status.lock().unwrap() =
+            TerminalStatus::Failed("simulated parser failure".to_string());
+
+        manager.remove("session-a").unwrap();
+
+        assert!(manager.panes.is_empty());
     }
 
     #[test]
@@ -956,6 +1176,7 @@ mod tests {
         let pane = TerminalPane::open(
             "Test".to_string(),
             directory.path().to_string_lossy().to_string(),
+            1,
             &config,
         )
         .unwrap();
