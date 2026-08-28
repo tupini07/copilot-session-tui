@@ -77,9 +77,19 @@ jobs:
         with:
           path: artifacts
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            hash="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            printf '%s  %s\n' "$hash" "$(basename "$file")"
+          done < <(find artifacts -type f | sort) > SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            SHA256SUMS

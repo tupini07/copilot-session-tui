@@ -43,19 +43,52 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 
 ## Installation
 
-### Prerequisites
+Install the latest release with one command. The installer places CST in a user-owned
+directory, adds it to `PATH`, and configures the `cst` shell function.
 
-- [Rust](https://rustup.rs/) 1.86+
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) (Windows) or GCC (Linux/macOS)
-- [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
-  `--session-id` arrived. CST names each new session itself so that a session's
-  scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
-  Copilot CLI 1.0.82+ is recommended for the optional authoritative lifecycle hooks.
+**PowerShell (Windows x64):**
+
+```powershell
+irm https://raw.githubusercontent.com/tupini07/copilot-session-tui/main/install.ps1 | iex
+```
+
+**Bash (Linux x64):**
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/tupini07/copilot-session-tui/main/install.sh | bash
+```
+
+**Zsh (Linux x64):**
+
+```zsh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/tupini07/copilot-session-tui/main/install.sh | zsh
+```
+
+PowerShell installs to
+`%LOCALAPPDATA%\Programs\copilot-session-tui\bin`; Bash and Zsh install to
+`~/.local/bin`. Profile changes are enclosed in `copilot-session-tui` markers and are
+not duplicated when the installer is run again. Restart the shell after installation,
+then run `cst`. Set `CST_NO_SHELL_INIT=1` before running an installer to install only
+the binary without changing a shell profile.
+
+The prebuilt releases currently support Windows x64 and Linux x64. All installations
+require [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
+`--session-id` arrived. CST names each new session itself so that a session's
+scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
+Copilot CLI 1.0.82+ is recommended for the optional authoritative lifecycle hooks.
+
+To uninstall, remove the managed `copilot-session-tui` block from your shell profile
+and delete the install directory. On Windows, also remove that directory from your user
+`PATH`.
 
 ### Build from source
 
+Building requires [Rust](https://rustup.rs/) 1.86+ and either
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) on Windows
+or GCC on Linux/macOS.
+
 ```bash
-git clone <repo-url>
+git clone https://github.com/tupini07/copilot-session-tui.git
 cd copilot-session-tui
 cargo build --release
 ```
@@ -119,7 +152,8 @@ launcher requires Windows Terminal's `wt.exe` app execution alias.
 
 When you resume or start a session through the TUI, the copilot subprocess runs in the correct project directory. However, after it exits, your shell returns to wherever you originally launched `copilot-session-tui` — this is a limitation of how processes work (a child process cannot change its parent's working directory).
 
-To automatically `cd` into the project directory after exiting, add this to your shell config:
+The one-line installers configure this automatically. If you built CST from source or
+skipped shell integration during installation, add the matching line to your shell config:
 
 **Bash** (`~/.bashrc`):
 ```bash
