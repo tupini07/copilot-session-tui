@@ -760,8 +760,11 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect, theme: Theme) {
     } else {
         "Issue"
     };
-    let state_color = match common.state.to_ascii_lowercase().as_str() {
+    let state = semantic_item_state(item);
+    let state_color = match state.as_str() {
         "open" => theme.success,
+        "closed" if item.is_pull_request() => theme.error,
+        "draft" => theme.muted,
         _ => theme.accent,
     };
     let line1 = Line::from(vec![
@@ -778,7 +781,7 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect, theme: Theme) {
         ),
         Span::raw(" "),
         Span::styled(
-            common.state.to_ascii_uppercase(),
+            state.to_ascii_uppercase(),
             Style::default()
                 .fg(state_color)
                 .add_modifier(Modifier::BOLD),
@@ -793,6 +796,14 @@ fn draw_header(f: &mut Frame, item: &GithubItem, area: Rect, theme: Theme) {
             .style(Style::default().fg(theme.text).bg(theme.background)),
         area,
     );
+}
+
+fn semantic_item_state(item: &GithubItem) -> String {
+    match item {
+        GithubItem::PullRequest(pull) if pull.merged => "merged".to_string(),
+        GithubItem::PullRequest(pull) if pull.draft => "draft".to_string(),
+        _ => item.common().state.to_ascii_lowercase(),
+    }
 }
 
 fn draw_tabs(
@@ -1461,6 +1472,40 @@ mod tests {
             }],
             patches_loaded: true,
         })
+    }
+
+    fn header_text(item: &GithubItem) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 2)).unwrap();
+        terminal
+            .draw(|frame| draw_header(frame, item, frame.area(), ThemeName::Classic.theme()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn pull_request_header_distinguishes_merged_from_closed() {
+        let mut merged = pull(None);
+        let GithubItem::PullRequest(pull) = &mut merged else {
+            unreachable!()
+        };
+        pull.common.state = "closed".to_string();
+        pull.merged = true;
+        assert!(header_text(&merged).contains("MERGED"));
+        assert!(!header_text(&merged).contains("CLOSED"));
+
+        let mut closed = merged.clone();
+        let GithubItem::PullRequest(pull) = &mut closed else {
+            unreachable!()
+        };
+        pull.merged = false;
+        assert!(header_text(&closed).contains("CLOSED"));
+        assert!(!header_text(&closed).contains("MERGED"));
     }
 
     fn app_with(item: GithubItem) -> App {
