@@ -3593,7 +3593,7 @@ mod tests {
         app.mux.as_mut().unwrap().focused = Some(1);
         app.view = View::Attached(1);
         let signals = crate::mux::callbacks::PaneSignals {
-            title: Some("Renamed background pane".to_string()),
+            title: Some("Renamed background pane - GitHub Copilot".to_string()),
             events: Vec::new(),
         };
 

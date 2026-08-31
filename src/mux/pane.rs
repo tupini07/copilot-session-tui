@@ -442,8 +442,7 @@ impl Pane {
         let mut outcome = PaneSignalOutcome::default();
         let mut notifications = Vec::new();
         if let Some(title) = signals.title {
-            let title = title.trim().to_string();
-            if !title.is_empty() {
+            if let Some(title) = normalize_copilot_title(&title) {
                 self.title = title;
             }
         }
@@ -1060,6 +1059,23 @@ fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<
         .filter(|number| *number > 0)
 }
 
+fn normalize_copilot_title(title: &str) -> Option<String> {
+    let title = title.trim();
+    if title == "GitHub Copilot" {
+        return None;
+    }
+    let title = [
+        " - GitHub Copilot",
+        " \u{2013} GitHub Copilot",
+        " \u{2014} GitHub Copilot",
+    ]
+    .into_iter()
+    .find_map(|suffix| title.strip_suffix(suffix))
+    .unwrap_or(title)
+    .trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,6 +1170,19 @@ mod tests {
             events_path: None,
             terminal_light_mode: Some(false),
         }
+    }
+
+    #[test]
+    fn copilot_branding_is_removed_only_from_the_end_of_titles() {
+        assert_eq!(
+            normalize_copilot_title("TRenderer - GitHub Copilot").as_deref(),
+            Some("TRenderer")
+        );
+        assert_eq!(
+            normalize_copilot_title("GitHub Copilot investigation").as_deref(),
+            Some("GitHub Copilot investigation")
+        );
+        assert_eq!(normalize_copilot_title("GitHub Copilot"), None);
     }
 
     fn wait_for_exit(rx: &mpsc::Receiver<MuxEvent>, pane: &mut Pane) -> Option<u32> {
