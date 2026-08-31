@@ -66,6 +66,14 @@ impl ThemeName {
         matches!(self, Self::CatppuccinLatte | Self::SolarizedLight)
     }
 
+    pub const fn terminal_light_mode(self) -> Option<bool> {
+        if matches!(self, Self::Classic) {
+            None
+        } else {
+            Some(self.is_light())
+        }
+    }
+
     pub fn theme(self) -> Theme {
         match self {
             Self::Classic => classic(),
@@ -633,6 +641,14 @@ mod tests {
             };
             assert!(u16::from(r) + u16::from(g) + u16::from(b) < 384);
         }
+    }
+
+    #[test]
+    fn named_themes_report_appearance_but_classic_inherits_the_terminal() {
+        assert_eq!(ThemeName::Classic.terminal_light_mode(), None);
+        assert_eq!(ThemeName::CatppuccinLatte.terminal_light_mode(), Some(true));
+        assert_eq!(ThemeName::SolarizedLight.terminal_light_mode(), Some(true));
+        assert_eq!(ThemeName::Gruvbox.terminal_light_mode(), Some(false));
     }
 
     #[test]

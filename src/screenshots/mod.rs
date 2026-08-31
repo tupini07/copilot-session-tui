@@ -158,6 +158,7 @@ fn workspace(sandbox: &Path) -> Result<String> {
             program,
             args,
             events_path: None,
+            terminal_light_mode: Some(false),
         },
         rows,
         cols,

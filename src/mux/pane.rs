@@ -128,6 +128,7 @@ pub struct PaneSpec {
     pub program: String,
     pub args: Vec<String>,
     pub events_path: Option<PathBuf>,
+    pub terminal_light_mode: Option<bool>,
 }
 
 impl Drop for Pane {
@@ -148,6 +149,7 @@ impl Pane {
             program,
             args,
             events_path,
+            terminal_light_mode,
         } = spec;
         let size = pty_size(rows, cols);
         let lifecycle_baseline = events_path
@@ -171,7 +173,7 @@ impl Pane {
             size.cols,
             // Scrollback keeps output above the viewport reachable once copy-mode lands.
             5000,
-            PaneCallbacks::new(id, pty.writer_handle(), events.clone()),
+            PaneCallbacks::new(id, pty.writer_handle(), events.clone(), terminal_light_mode),
         )));
 
         let pump_parser = Arc::clone(&parser);
@@ -258,6 +260,14 @@ impl Pane {
 
     pub fn is_running(&self) -> bool {
         self.status == PaneStatus::Running
+    }
+
+    pub fn set_terminal_light_mode(&mut self, terminal_light_mode: Option<bool>) {
+        if let Ok(mut parser) = self.parser.lock() {
+            parser
+                .callbacks_mut()
+                .set_terminal_light_mode(terminal_light_mode);
+        }
     }
 
     pub fn is_working(&self) -> bool {
@@ -1142,6 +1152,7 @@ mod tests {
             program,
             args,
             events_path: None,
+            terminal_light_mode: Some(false),
         }
     }
 

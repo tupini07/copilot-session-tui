@@ -25,6 +25,8 @@ pub struct PaneCallbacks {
     events: Sender<MuxEvent>,
     title: Option<String>,
     signals: Vec<PaneSignalEvent>,
+    terminal_light_mode: Option<bool>,
+    theme_updates_requested: bool,
 }
 
 impl PaneCallbacks {
@@ -32,6 +34,7 @@ impl PaneCallbacks {
         pane_id: crate::mux::PaneId,
         replies: Sender<Vec<u8>>,
         events: Sender<MuxEvent>,
+        terminal_light_mode: Option<bool>,
     ) -> Self {
         Self {
             pane_id,
@@ -39,6 +42,8 @@ impl PaneCallbacks {
             events,
             title: None,
             signals: Vec::new(),
+            terminal_light_mode,
+            theme_updates_requested: false,
         }
     }
 
@@ -57,6 +62,22 @@ impl PaneCallbacks {
     fn reply(&self, bytes: Vec<u8>) {
         let _ = self.replies.send(bytes);
     }
+
+    pub fn set_terminal_light_mode(&mut self, terminal_light_mode: Option<bool>) {
+        if self.terminal_light_mode == terminal_light_mode {
+            return;
+        }
+        self.terminal_light_mode = terminal_light_mode;
+        if self.theme_updates_requested {
+            if let Some(light_theme) = terminal_light_mode {
+                self.reply(theme_report(light_theme));
+            }
+        }
+    }
+}
+
+fn theme_report(light_theme: bool) -> Vec<u8> {
+    format!("\x1b[?997;{}n", if light_theme { 2 } else { 1 }).into_bytes()
 }
 
 impl vt100::Callbacks for PaneCallbacks {
@@ -118,6 +139,20 @@ impl vt100::Callbacks for PaneCallbacks {
                 }
                 _ => {}
             },
+            // Report the appearance of CST's nested terminal rather than the host
+            // operating-system theme. Copilot's `github` theme uses this response.
+            ('n', Some(b'?')) if first == Some(996) => {
+                if let Some(light_theme) = self.terminal_light_mode {
+                    self.reply(theme_report(light_theme));
+                }
+            }
+            // Applications may request an unsolicited report when the palette changes.
+            ('h', Some(b'?')) if first == Some(2031) => {
+                self.theme_updates_requested = true;
+            }
+            ('l', Some(b'?')) if first == Some(2031) => {
+                self.theme_updates_requested = false;
+            }
             // DA1 — primary device attributes: claim a VT220 with 132-column and
             // selective-erase support, which is what xterm-compatible apps expect.
             ('c', None) => self.reply(b"\x1b[?62;1;6c".to_vec()),
@@ -138,7 +173,9 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn parser_with_replies() -> (
+    fn parser_with_replies(
+        light_theme: bool,
+    ) -> (
         vt100::Parser<PaneCallbacks>,
         mpsc::Receiver<Vec<u8>>,
         mpsc::Receiver<MuxEvent>,
@@ -146,7 +183,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         (
-            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(7, tx, event_tx)),
+            vt100::Parser::new_with_callbacks(
+                24,
+                80,
+                0,
+                PaneCallbacks::new(7, tx, event_tx, Some(light_theme)),
+            ),
             rx,
             event_rx,
         )
@@ -154,7 +196,7 @@ mod tests {
 
     #[test]
     fn answers_cursor_position_requests() {
-        let (mut parser, rx, _) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies(false);
 
         // Move to row 3, col 5 (1-based), then ask where the cursor is.
         parser.process(b"\x1b[3;5H\x1b[6n");
@@ -165,7 +207,7 @@ mod tests {
 
     #[test]
     fn answers_device_status_and_attribute_queries() {
-        let (mut parser, rx, _) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies(false);
 
         parser.process(b"\x1b[5n");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[0n");
@@ -179,7 +221,7 @@ mod tests {
 
     #[test]
     fn reports_the_text_area_size() {
-        let (mut parser, rx, _) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies(false);
 
         parser.process(b"\x1b[18t");
 
@@ -188,7 +230,7 @@ mod tests {
 
     #[test]
     fn captures_the_window_title() {
-        let (mut parser, _rx, _) = parser_with_replies();
+        let (mut parser, _rx, _) = parser_with_replies(false);
 
         parser.process(b"\x1b]2;my session\x07");
 
@@ -200,7 +242,7 @@ mod tests {
 
     #[test]
     fn unrelated_sequences_produce_no_reply() {
-        let (mut parser, rx, _) = parser_with_replies();
+        let (mut parser, rx, _) = parser_with_replies(false);
 
         parser.process(b"hello\x1b[1;1H");
 
@@ -209,7 +251,7 @@ mod tests {
 
     #[test]
     fn forwards_clipboard_requests_to_the_host() {
-        let (mut parser, _, events) = parser_with_replies();
+        let (mut parser, _, events) = parser_with_replies(false);
 
         parser.process(b"\x1b]52;c;Q29waWVkIHRleHQ=\x07");
 
@@ -222,7 +264,7 @@ mod tests {
 
     #[test]
     fn forwards_progress_state_to_the_host() {
-        let (mut parser, _, events) = parser_with_replies();
+        let (mut parser, _, events) = parser_with_replies(false);
 
         parser.process(b"\x1b]9;4;3;0\x07");
 
@@ -241,7 +283,7 @@ mod tests {
 
     #[test]
     fn progress_signals_are_drained_per_output_chunk() {
-        let (mut parser, _, _) = parser_with_replies();
+        let (mut parser, _, _) = parser_with_replies(false);
 
         parser.process(b"\x1b]9;4;3;0\x07");
         let working = parser.callbacks_mut().take_signals();
@@ -265,10 +307,48 @@ mod tests {
 
     #[test]
     fn does_not_forward_unrelated_osc_commands() {
-        let (mut parser, _, events) = parser_with_replies();
+        let (mut parser, _, events) = parser_with_replies(false);
 
         parser.process(b"\x1b]8;;https://example.com\x07");
 
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn reports_the_nested_cst_theme_to_copilot() {
+        let (mut dark, dark_replies, _) = parser_with_replies(false);
+        dark.process(b"\x1b[?996n");
+        assert_eq!(dark_replies.try_recv().unwrap(), b"\x1b[?997;1n");
+
+        let (mut light, light_replies, _) = parser_with_replies(true);
+        light.process(b"\x1b[?996n");
+        assert_eq!(light_replies.try_recv().unwrap(), b"\x1b[?997;2n");
+    }
+
+    #[test]
+    fn unspecified_classic_theme_leaves_detection_to_the_host_environment() {
+        let (tx, replies) = mpsc::channel();
+        let (events, _) = mpsc::channel();
+        let mut parser =
+            vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(7, tx, events, None));
+
+        parser.process(b"\x1b[?996n");
+
+        assert!(replies.try_recv().is_err());
+    }
+
+    #[test]
+    fn subscribed_children_receive_only_real_appearance_changes() {
+        let (mut parser, replies, _) = parser_with_replies(false);
+        parser.process(b"\x1b[?2031h");
+
+        parser.callbacks_mut().set_terminal_light_mode(Some(true));
+        assert_eq!(replies.try_recv().unwrap(), b"\x1b[?997;2n");
+        parser.callbacks_mut().set_terminal_light_mode(Some(true));
+        assert!(replies.try_recv().is_err());
+
+        parser.process(b"\x1b[?2031l");
+        parser.callbacks_mut().set_terminal_light_mode(Some(false));
+        assert!(replies.try_recv().is_err());
     }
 }

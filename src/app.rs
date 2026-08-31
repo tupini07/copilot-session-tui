@@ -897,7 +897,7 @@ impl App {
         }
         self.config = persisted;
         if theme_changed {
-            self.invalidate_theme_caches();
+            self.refresh_theme_dependents();
         }
         if let Some(settings) = self.project_settings.as_mut() {
             settings.refresh_global(&self.config);
@@ -1014,13 +1014,13 @@ impl App {
         self.theme_picker_hits.clear();
         self.theme_picker_last_click = None;
         self.theme_save_reloaded_external = false;
-        self.invalidate_theme_caches();
+        self.refresh_theme_dependents();
     }
 
     pub fn move_theme_picker(&mut self, amount: isize) {
         if let Some(picker) = self.theme_picker.as_mut() {
             picker.move_by(amount);
-            self.invalidate_theme_caches();
+            self.refresh_theme_dependents();
         }
     }
 
@@ -1028,7 +1028,7 @@ impl App {
         if self.theme_picker.take().is_some() {
             self.theme_picker_hits.clear();
             self.theme_picker_last_click = None;
-            self.invalidate_theme_caches();
+            self.refresh_theme_dependents();
         }
     }
 
@@ -1045,7 +1045,7 @@ impl App {
                 self.theme_picker = None;
                 self.theme_picker_hits.clear();
                 self.theme_picker_last_click = None;
-                self.invalidate_theme_caches();
+                self.refresh_theme_dependents();
                 Ok(())
             }
             Err(error) => {
@@ -1056,15 +1056,21 @@ impl App {
                 } else {
                     self.config.theme = previous;
                 }
-                self.invalidate_theme_caches();
+                self.refresh_theme_dependents();
                 Err(error)
             }
         }
     }
 
-    fn invalidate_theme_caches(&mut self) {
+    fn refresh_theme_dependents(&mut self) {
         if let Some(inspector) = self.github_inspector.as_mut() {
             inspector.diff_render_cache = None;
+        }
+        let terminal_light_mode = self.theme_name().terminal_light_mode();
+        if let Some(mux) = self.mux.as_mut() {
+            for pane in &mut mux.panes {
+                pane.set_terminal_light_mode(terminal_light_mode);
+            }
         }
     }
 
@@ -1082,7 +1088,7 @@ impl App {
             .map(|(_, selected)| *selected);
         if let (Some(picker), Some(selected)) = (self.theme_picker.as_mut(), selected) {
             picker.selected = selected.min(ThemeName::ALL.len() - 1);
-            self.invalidate_theme_caches();
+            self.refresh_theme_dependents();
             let now = Instant::now();
             let confirm = self
                 .theme_picker_last_click
@@ -2920,6 +2926,7 @@ impl App {
     ) -> Result<()> {
         let (rows, cols) = self.pane_size;
         let events_path = self.notification_events_path(&session_id);
+        let terminal_light_mode = self.theme_name().terminal_light_mode();
         let Some(mux) = self.mux.as_mut() else {
             anyhow::bail!("Multiplexing is disabled");
         };
@@ -2940,6 +2947,7 @@ impl App {
                 program,
                 args,
                 events_path: Some(events_path),
+                terminal_light_mode,
             },
             rows,
             cols,
@@ -4089,6 +4097,7 @@ mod tests {
                 program,
                 args,
                 events_path: None,
+                terminal_light_mode: Some(false),
             },
             24,
             80,
@@ -4926,6 +4935,7 @@ mod tests {
                 program,
                 args,
                 events_path: None,
+                terminal_light_mode: Some(false),
             },
             24,
             80,

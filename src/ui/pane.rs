@@ -458,6 +458,7 @@ mod tests {
                 program,
                 args,
                 events_path: None,
+                terminal_light_mode: Some(false),
             },
             24,
             80,

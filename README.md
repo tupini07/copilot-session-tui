@@ -572,9 +572,14 @@ viewer retain its explicit syntax and background colors; when it uses default te
 an explicit code background, CST chooses readable contrasting text instead of washing
 the code out under a light theme.
 
+Named CST themes also report their dark or light appearance through the standard terminal
+theme-query protocol. Copilot's default `github` palette therefore follows CST rather than
+the host operating-system appearance, including live updates when Copilot subscribes to
+palette changes. CST does not modify Copilot's global `theme` setting.
+
 The theme covers cells CST renders inside the terminal. Native terminal chrome remains
-outside that boundary: in particular, the Windows Terminal tab strip keeps the color
-scheme configured in Windows Terminal.
+outside that boundary: in particular, the Windows Terminal tab strip and mouse-selection
+highlight keep the colors configured in Windows Terminal.
 
 ![The Global Settings theme picker previewing Catppuccin Latte over the themed CST interface](docs/img/theme-picker.svg)
 
