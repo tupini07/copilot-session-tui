@@ -169,7 +169,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
     let favorite_selected = app
         .selected_session()
         .is_some_and(|session| app.is_favorite(&session.id));
-    let project = app.active_project().is_some();
+    let project = app.command_project().is_some();
     let session_dir = app.new_session_dir().is_some();
 
     let mut commands = vec![
@@ -269,7 +269,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "New session",
             "Start Copilot in the current directory or active project",
             "n",
-            list && session_dir,
+            session_dir,
             "No session directory is available",
         ),
         entry(
@@ -278,8 +278,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "New worktree session",
             "Create an isolated worktree session",
             "N",
-            list && project,
-            "Select or filter to a project first",
+            project,
+            "No Git project is available",
         ),
         entry(
             Id::OpenSelectedScratchpad,
@@ -314,8 +314,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Open favorite tabs",
             "Open inactive favorites in Windows Terminal",
             "T",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::RenameSelected,
@@ -341,8 +341,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Search sessions",
             "Fuzzy-filter the session catalog",
             "/",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::FilterProject,
@@ -350,8 +350,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Filter by project",
             "Choose a project filter",
             "f / p",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::ClearProjectFilter,
@@ -359,7 +359,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Clear project filter",
             "Show sessions from all projects",
             "c",
-            list && app.project_filter.is_some(),
+            app.project_filter.is_some(),
             "No project filter is active",
         ),
         entry(
@@ -368,8 +368,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Cycle sort order",
             "Change session list ordering",
             "s",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::InspectGithub,
@@ -386,8 +386,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Global settings",
             "Edit CST behavior, theme, terminal, and notifications",
             ",",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::ProjectSettings,
@@ -395,8 +395,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Project settings",
             "Edit worktree settings for the active project",
             ".",
-            list && project,
-            "Select or filter to a project first",
+            project,
+            "No Git project is available",
         ),
         entry(
             Id::CheckForUpdates,
@@ -413,8 +413,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "Keyboard help",
             "Open the complete shortcut reference",
             "?",
-            list,
-            "Available from the session list",
+            true,
+            "",
         ),
         entry(
             Id::SendLiteralPrefix,

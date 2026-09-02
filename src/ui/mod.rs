@@ -88,9 +88,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.github_inspector.is_some() && !github_inspector::is_prompt(app) {
         github_inspector::draw(f, app);
+        draw_context_overlays(f, app, theme);
         command_palette::draw_overlays(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
+        }
+        if app.confirm_quit {
+            popups::draw_quit_confirm(f, app);
         }
         return;
     }
@@ -99,9 +103,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if let Some(scratchpad) = app.scratchpad.as_mut() {
             scratchpad::draw_with_theme(f, scratchpad, theme);
         }
+        draw_portable_mode_popup(f, app);
         command_palette::draw_overlays(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
+        }
+        if app.confirm_quit {
+            popups::draw_quit_confirm(f, app);
         }
         return;
     }
@@ -146,6 +154,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
             scratchpad::draw_help_with_theme(f, size, theme);
         }
+        draw_portable_mode_popup(f, app);
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
         command_palette::draw_overlays(f, app);
@@ -237,14 +246,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::ConfirmForceDelete => popups::draw_force_delete_confirm(f, app),
         Mode::ConfirmTakeover => popups::draw_takeover_confirm(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
-        Mode::Help => popups::draw_help(f, app),
         Mode::Rename => popups::draw_rename(f, app),
-        Mode::Settings => popups::draw_settings(f, app),
-        Mode::ProjectSettings => popups::draw_project_settings(f, app),
-        Mode::BranchName => popups::draw_branch_name(f, app),
-        Mode::PaneList => popups::draw_pane_list(f, app),
         _ => {}
     }
+    draw_portable_mode_popup(f, app);
     if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
         scratchpad::draw_help_with_theme(f, size, theme);
     }
@@ -269,6 +274,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             ),
             theme,
         );
+    }
+}
+
+fn draw_context_overlays(f: &mut Frame, app: &mut App, theme: Theme) {
+    if app.snippet_modal.is_some() {
+        snippets::draw(f, app);
+    }
+    if matches!(app.workspace_help, Some(WorkspaceHelp::Scratchpad)) {
+        scratchpad::draw_help_with_theme(f, f.area(), theme);
+    }
+    draw_portable_mode_popup(f, app);
+}
+
+fn draw_portable_mode_popup(f: &mut Frame, app: &mut App) {
+    match app.mode {
+        Mode::Help => popups::draw_help(f, app),
+        Mode::Settings => popups::draw_settings(f, app),
+        Mode::ProjectSettings => popups::draw_project_settings(f, app),
+        Mode::BranchName => popups::draw_branch_name(f, app),
+        Mode::PaneList => popups::draw_pane_list(f, app),
+        _ => {}
     }
 }
 
@@ -398,6 +424,28 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("Update & Restart"), "got:\n{text}");
+    }
+
+    #[test]
+    fn global_settings_render_above_full_screen_github_inspector() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut inspector = crate::app::GithubInspector::number_prompt();
+        inspector.screen = crate::app::GithubInspectorScreen::Loading;
+        app.github_inspector = Some(inspector);
+        app.mode = Mode::Settings;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Global Settings"), "got:\n{text}");
+        assert!(text.contains("Theme"), "got:\n{text}");
     }
 
     #[test]

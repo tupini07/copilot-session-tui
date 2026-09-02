@@ -2881,9 +2881,31 @@ impl App {
             .or_else(|| self.cwd_project.clone())
     }
 
+    /// Project context for a command invoked from any surface.
+    ///
+    /// While attached, the focused pane is authoritative; the hidden session-list
+    /// filter may still point at a different repository.
+    pub fn command_project(&self) -> Option<String> {
+        match self.view {
+            View::Attached(_) => self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.focused_pane())
+                .map(|pane| pane.cwd.to_string_lossy().to_string()),
+            View::List => self.active_project(),
+        }
+    }
+
     /// Directory to start a plain new session in.
     pub fn new_session_dir(&self) -> Option<String> {
-        self.active_project().or_else(|| self.cwd.clone())
+        match self.view {
+            View::Attached(_) => self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.focused_pane())
+                .map(|pane| pane.cwd.to_string_lossy().to_string()),
+            View::List => self.active_project().or_else(|| self.cwd.clone()),
+        }
     }
 
     /// Attach an existing Copilot session as a pane, or focus it if already attached.

@@ -37,8 +37,22 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    if app.confirm_quit {
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                handle_quit_confirm(app, key.code);
+            }
+        }
+        return Ok(());
+    }
+
     if app.command_palette.is_some() {
         crate::mux_input::handle_command_palette_event(app, event);
+        return Ok(());
+    }
+
+    if portable_modal_active(app) {
+        handle_portable_modal_event(app, event);
         return Ok(());
     }
 
@@ -61,35 +75,11 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
-    if app.mode == Mode::Settings && app.theme_picker.is_some() {
-        if let Event::Mouse(mouse) = event {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => app.move_theme_picker(-1),
-                MouseEventKind::ScrollDown => app.move_theme_picker(1),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if app.select_theme_picker_at(mouse.column, mouse.row) {
-                        if let Err(error) = app.confirm_theme_picker() {
-                            app.status_message = Some(format!("Failed to save theme: {error}"));
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-    }
-
     // Replay a paste as typing, but only into a prompt that is actually collecting
     // text — in Normal mode every character is a command, so pasting must not run one.
     // These prompts are all single-line, so line breaks are dropped rather than sent.
-    if let Event::Paste(text) = event {
-        if app.mode == Mode::Settings && app.settings_editing.is_some() {
-            app.settings_input
-                .extend(text.chars().filter(|character| !character.is_control()));
-        } else if matches!(
-            app.mode,
-            Mode::Search | Mode::Rename | Mode::FilterProject | Mode::BranchName
-        ) {
+    if let Event::Paste(text) = &event {
+        if matches!(app.mode, Mode::Search | Mode::Rename | Mode::FilterProject) {
             for character in text.chars().filter(|character| !character.is_control()) {
                 let key =
                     crossterm::event::KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
@@ -104,11 +94,6 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
     };
 
     if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-
-    if app.confirm_quit {
-        handle_quit_confirm(app, key.code);
         return Ok(());
     }
 
@@ -180,6 +165,85 @@ pub(crate) fn handle_update_restart_confirm(app: &mut App, key: KeyCode) {
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.cancel_update_restart();
         }
+        _ => {}
+    }
+}
+
+pub(crate) fn portable_modal_active(app: &App) -> bool {
+    matches!(
+        app.mode,
+        Mode::Help | Mode::Settings | Mode::ProjectSettings | Mode::BranchName | Mode::PaneList
+    )
+}
+
+/// Route a list-style modal without changing the underlying list, pane, or inspector.
+pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
+    if !portable_modal_active(app) {
+        return;
+    }
+
+    if let Event::Key(key) = &event {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            request_quit(app);
+            return;
+        }
+    }
+
+    if let Event::Mouse(mouse) = event {
+        if app.mode == Mode::Help {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => handle_help(app, KeyCode::Up),
+                MouseEventKind::ScrollDown => handle_help(app, KeyCode::Down),
+                _ => {}
+            }
+        } else if app.mode == Mode::Settings && app.theme_picker.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.move_theme_picker(-1),
+                MouseEventKind::ScrollDown => app.move_theme_picker(1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if app.select_theme_picker_at(mouse.column, mouse.row) {
+                        if let Err(error) = app.confirm_theme_picker() {
+                            app.status_message = Some(format!("Failed to save theme: {error}"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+
+    if let Event::Paste(text) = event {
+        let text = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        match app.mode {
+            Mode::Settings if app.settings_editing.is_some() => app.settings_input.push_str(&text),
+            Mode::ProjectSettings if app.project_settings_editing => {
+                app.project_settings_input.push_str(&text);
+            }
+            Mode::BranchName => app.branch_input.push_str(&text),
+            _ => {}
+        }
+        return;
+    }
+
+    let Event::Key(key) = event else {
+        return;
+    };
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+    match app.mode {
+        Mode::Help => handle_help(app, key.code),
+        Mode::Settings => handle_settings(app, key.code),
+        Mode::ProjectSettings => handle_project_settings(app, key.code),
+        Mode::BranchName => handle_branch_name(app, key.code),
+        Mode::PaneList => handle_pane_list(app, key.code),
         _ => {}
     }
 }
@@ -565,8 +629,8 @@ fn handle_scratchpad(app: &mut App, event: Event) {
     }
 }
 
-fn begin_worktree_session(app: &mut App) {
-    let Some(project) = app.active_project() else {
+pub(crate) fn begin_worktree_session(app: &mut App) {
+    let Some(project) = app.command_project() else {
         app.status_message =
             Some("Filter by a project first (f) to create an isolated session".to_string());
         return;
@@ -592,8 +656,8 @@ fn begin_worktree_session(app: &mut App) {
     app.mode = Mode::BranchName;
 }
 
-fn begin_project_settings(app: &mut App) {
-    let Some(project) = app.active_project() else {
+pub(crate) fn begin_project_settings(app: &mut App) {
+    let Some(project) = app.command_project() else {
         app.status_message =
             Some("Filter by a project first (f) to edit project settings".to_string());
         return;
@@ -1257,9 +1321,9 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
             app.status_message = Some("Isolated session cancelled".to_string());
         }
         KeyCode::Enter => {
-            let Some(project) = app.active_project() else {
+            let Some(project) = app.command_project() else {
                 app.mode = Mode::Normal;
-                app.status_message = Some("Project filter was cleared".to_string());
+                app.status_message = Some("Project context is no longer available".to_string());
                 return;
             };
             if let Err(error) = worktree::validate_branch(Path::new(&project), &app.branch_input) {

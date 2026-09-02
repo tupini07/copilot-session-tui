@@ -513,6 +513,11 @@ to run. The old literal-prefix action remains available through Command Search. 
 and `h` group keys work with every configured prefix; legacy `Ctrl+G` and `Ctrl+H` group
 sequences remain accepted.
 
+Command Search is also available over the GitHub inspector. Global/project settings, theme
+selection, help, snippets, and other context-safe dialogs open over the current surface and
+return to it when closed. Session-catalog searches and filters take you to the list without
+ending any pane. Only commands that operate on a specific selected list row remain list-only.
+
 In the session list, a magenta `▶` marks sessions running as panes in this CST instance,
 distinct from the green `●` that marks sessions held by some other process.
 

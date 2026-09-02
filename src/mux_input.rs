@@ -20,22 +20,6 @@ const HOOK_READY_GRACE: std::time::Duration = std::time::Duration::from_millis(7
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
-    let attended = matches!(
-        &event,
-        Event::Key(KeyEvent {
-            kind: KeyEventKind::Press,
-            ..
-        }) | Event::Paste(_)
-            | Event::Mouse(crossterm::event::MouseEvent {
-                kind: MouseEventKind::Down(_),
-                ..
-            })
-    );
-    if attended {
-        app.terminal_focused = true;
-        app.acknowledge_focused_pane();
-    }
-
     if app.confirm_update_restart {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
@@ -65,14 +49,21 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
-    if app.github_inspector.is_some() {
-        handle_github_inspector_event(app, event);
+    if crate::input::portable_modal_active(app) {
+        crate::input::handle_portable_modal_event(app, event);
         return;
     }
 
-    if app.snippet_modal.is_some() {
-        handle_snippet_event(app, event);
-        return;
+    if let Event::Key(key) = &event {
+        if key.kind == KeyEventKind::Press {
+            let is_prefix = app.mux.as_ref().is_some_and(|mux| {
+                mux.prefix_state != PrefixState::Idle || mux.prefix.matches(key)
+            });
+            if is_prefix {
+                handle_attached_key(app, *key);
+                return;
+            }
+        }
     }
 
     if app.workspace_help.is_some() {
@@ -89,16 +80,34 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    if app.snippet_modal.is_some() {
+        handle_snippet_event(app, event);
+        return;
+    }
+
+    if app.github_inspector.is_some() {
+        handle_github_inspector_event(app, event);
+        return;
+    }
+
+    let attended = matches!(
+        &event,
+        Event::Key(KeyEvent {
+            kind: KeyEventKind::Press,
+            ..
+        }) | Event::Paste(_)
+            | Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(_),
+                ..
+            })
+    );
+    if attended {
+        app.terminal_focused = true;
+        app.acknowledge_focused_pane();
+    }
+
     if let Event::Key(key) = &event {
         if key.kind != KeyEventKind::Press {
-            return;
-        }
-        let is_prefix = app
-            .mux
-            .as_ref()
-            .is_some_and(|mux| mux.prefix_state != PrefixState::Idle || mux.prefix.matches(key));
-        if is_prefix {
-            handle_attached_key(app, *key);
             return;
         }
         app.clear_update_notice();
@@ -472,6 +481,8 @@ fn use_selected_snippet(app: &mut App) {
         }
     }
     app.snippet_modal = None;
+    app.close_github_inspector();
+    app.workspace_help = None;
     focus_chat(app);
 }
 
@@ -598,14 +609,30 @@ fn execute_command_palette_selection(app: &mut App) {
 fn execute_palette_command(app: &mut App, command: CommandId) {
     use CommandId::*;
     match command {
-        FocusChat => focus_chat(app),
-        ToggleScratchpad => toggle_attached_scratchpad(app),
-        ToggleTerminal => toggle_attached_terminal(app),
+        FocusChat => {
+            close_context_overlays(app);
+            focus_chat(app);
+        }
+        ToggleScratchpad => {
+            close_context_overlays(app);
+            toggle_attached_scratchpad(app);
+        }
+        ToggleTerminal => {
+            close_context_overlays(app);
+            toggle_attached_terminal(app);
+        }
         OpenSnippets => app.open_snippets(),
         OpenScratchpadHelp => app.workspace_help = Some(WorkspaceHelp::Scratchpad),
-        BackToSessionList => app.detach(),
-        SwitchSession => app.open_pane_list(),
+        BackToSessionList => {
+            close_context_overlays(app);
+            app.detach();
+        }
+        SwitchSession => {
+            close_context_overlays(app);
+            app.open_pane_list();
+        }
         NextSession => {
+            close_context_overlays(app);
             let from_list = matches!(app.view, View::List);
             if let Some(mux) = app.mux.as_mut() {
                 mux.cycle(true);
@@ -617,6 +644,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             }
         }
         PreviousSession => {
+            close_context_overlays(app);
             let from_list = matches!(app.view, View::List);
             if let Some(mux) = app.mux.as_mut() {
                 mux.cycle(false);
@@ -628,6 +656,12 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             }
         }
         InspectGithub => app.open_github_inspector(),
+        GlobalSettings => app.begin_global_settings(),
+        ProjectSettings => crate::input::begin_project_settings(app),
+        OpenHelp => {
+            app.help_scroll = 0;
+            app.mode = crate::app::Mode::Help;
+        }
         CheckForUpdates => app.request_update(),
         SendLiteralPrefix => {
             let key = app.mux.as_ref().map(|mux| mux.prefix.literal_key_event());
@@ -639,26 +673,37 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
                 }
             }
         }
-        EndSession => kill_focused(app),
+        EndSession => {
+            close_context_overlays(app);
+            kill_focused(app);
+        }
         Quit => request_quit(app),
+        NewSession | NewWorktreeSession => {
+            close_context_overlays(app);
+            crate::input::execute_palette_list_command(app, command);
+        }
+        SearchSessions | FilterProject | ClearProjectFilter | CycleSort => {
+            close_context_overlays(app);
+            if matches!(app.view, View::Attached(_)) {
+                app.detach();
+            }
+            crate::input::execute_palette_list_command(app, command);
+        }
         ResumeSelected
-        | NewSession
-        | NewWorktreeSession
         | OpenSelectedScratchpad
         | ToggleFavorite
         | ReorderFavorite
         | OpenFavoriteTabs
         | RenameSelected
-        | DeleteSelected
-        | SearchSessions
-        | FilterProject
-        | ClearProjectFilter
-        | CycleSort
-        | GlobalSettings
-        | ProjectSettings
-        | OpenHelp => crate::input::execute_palette_list_command(app, command),
+        | DeleteSelected => crate::input::execute_palette_list_command(app, command),
     }
     sync_view(app);
+}
+
+fn close_context_overlays(app: &mut App) {
+    app.close_github_inspector();
+    app.snippet_modal = None;
+    app.workspace_help = None;
 }
 
 fn handle_attached_key(app: &mut App, key: KeyEvent) {
@@ -694,31 +739,49 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         }
         match command {
             Some(PrefixCommand::CommandPalette) => app.open_command_palette(),
-            Some(PrefixCommand::Detach) => app.detach(),
+            Some(PrefixCommand::Detach) => {
+                close_context_overlays(app);
+                app.detach();
+            }
             Some(PrefixCommand::NextPane) => {
+                close_context_overlays(app);
                 if let Some(mux) = app.mux.as_mut() {
                     mux.cycle(true);
                 }
                 sync_workspace_panels(app);
             }
             Some(PrefixCommand::PreviousPane) => {
+                close_context_overlays(app);
                 if let Some(mux) = app.mux.as_mut() {
                     mux.cycle(false);
                 }
                 sync_workspace_panels(app);
             }
-            Some(PrefixCommand::KillPane) => kill_focused(app),
+            Some(PrefixCommand::KillPane) => {
+                close_context_overlays(app);
+                kill_focused(app);
+            }
             Some(PrefixCommand::Quit) => {
                 app.request_quit_from_pane();
                 return;
             }
             Some(PrefixCommand::PaneList) => {
+                close_context_overlays(app);
                 app.open_pane_list();
                 return;
             }
-            Some(PrefixCommand::Chat) => focus_chat(app),
-            Some(PrefixCommand::Scratchpad) => toggle_attached_scratchpad(app),
-            Some(PrefixCommand::Terminal) => toggle_attached_terminal(app),
+            Some(PrefixCommand::Chat) => {
+                close_context_overlays(app);
+                focus_chat(app);
+            }
+            Some(PrefixCommand::Scratchpad) => {
+                close_context_overlays(app);
+                toggle_attached_scratchpad(app);
+            }
+            Some(PrefixCommand::Terminal) => {
+                close_context_overlays(app);
+                toggle_attached_terminal(app);
+            }
             Some(PrefixCommand::Snippets) => app.open_snippets(),
             Some(PrefixCommand::Update) => app.request_update(),
             Some(PrefixCommand::Help) => {
@@ -732,6 +795,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 }
             }
             Some(PrefixCommand::SelectIndex(index)) => {
+                close_context_overlays(app);
                 // Panes are labelled from 1 in the UI.
                 if let Some(mux) = app.mux.as_mut() {
                     mux.select_index(index.saturating_sub(1));
@@ -2426,6 +2490,158 @@ mod tests {
 
         assert!(app.command_palette.is_none());
         assert_eq!(app.mode, crate::app::Mode::Settings);
+    }
+
+    #[test]
+    fn portable_commands_are_enabled_while_attached() {
+        let mut app = attached_mux_app("portable-commands");
+        let commands = crate::command_palette::filtered_commands(&app);
+
+        for id in [
+            CommandId::NewSession,
+            CommandId::NewWorktreeSession,
+            CommandId::OpenFavoriteTabs,
+            CommandId::SearchSessions,
+            CommandId::FilterProject,
+            CommandId::CycleSort,
+            CommandId::GlobalSettings,
+            CommandId::ProjectSettings,
+            CommandId::OpenHelp,
+        ] {
+            assert!(
+                commands
+                    .iter()
+                    .find(|command| command.id == id)
+                    .is_some_and(|command| command.enabled),
+                "{id:?} should be available while attached"
+            );
+        }
+
+        for id in [
+            CommandId::ResumeSelected,
+            CommandId::OpenSelectedScratchpad,
+            CommandId::ToggleFavorite,
+            CommandId::RenameSelected,
+            CommandId::DeleteSelected,
+        ] {
+            assert!(
+                commands
+                    .iter()
+                    .find(|command| command.id == id)
+                    .is_some_and(|command| !command.enabled),
+                "{id:?} requires a visible selected list row"
+            );
+        }
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn command_search_and_theme_settings_work_over_github_inspector() {
+        let mut app = attached_mux_app("github-settings");
+        app.github_inspector = Some(crate::app::GithubInspector::number_prompt());
+        let prefix = Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+        handle_attached_event(&mut app, prefix.clone());
+        handle_attached_event(&mut app, prefix);
+        assert!(app.command_palette.is_some());
+        app.command_palette.as_mut().unwrap().query = "global settings".to_string();
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mode, crate::app::Mode::Settings);
+        assert!(app.github_inspector.is_some());
+
+        app.settings_selected = 3;
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(app.theme_picker.is_some());
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert!(app.github_inspector.is_some());
+        assert_eq!(app.view, View::Attached(1));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn raw_prefix_navigation_closes_the_previous_panes_inspector() {
+        let mut app = attached_mux_app("first-inspector");
+        push_test_pane(&mut app, 2, "second-pane");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.github_inspector = Some(crate::app::GithubInspector::number_prompt());
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        handle_attached_event(&mut app, Event::Key(prefix));
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        assert_eq!(app.view, View::Attached(2));
+        assert!(app.github_inspector.is_none());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn workspace_modals_receive_input_above_github_inspector() {
+        let mut app = attached_mux_app("inspector-overlays");
+        app.github_inspector = Some(crate::app::GithubInspector::number_prompt());
+
+        execute_palette_command(&mut app, CommandId::OpenScratchpadHelp);
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(app.workspace_help.is_none());
+        assert!(app.github_inspector.is_some());
+
+        execute_palette_command(&mut app, CommandId::OpenSnippets);
+        assert!(app.snippet_modal.is_some());
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(app.snippet_modal.is_none());
+        assert!(app.github_inspector.is_some());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn list_navigation_commands_detach_without_stopping_the_pane() {
+        let mut app = attached_mux_app("search-from-chat");
+
+        execute_palette_command(&mut app, CommandId::SearchSessions);
+
+        assert_eq!(app.view, View::List);
+        assert_eq!(app.mode, crate::app::Mode::Search);
+        assert!(app.mux.as_ref().unwrap().pane(1).unwrap().is_running());
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn attached_commands_use_the_focused_pane_project_context() {
+        let mut app = attached_mux_app("first");
+        let focused = std::env::temp_dir().join("focused-command-project");
+        app.mux.as_mut().unwrap().pane_mut(1).unwrap().cwd = focused.clone();
+        app.project_filter = Some("hidden-list-project".to_string());
+
+        assert_eq!(
+            app.command_project(),
+            Some(focused.to_string_lossy().to_string())
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]
