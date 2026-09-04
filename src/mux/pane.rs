@@ -421,18 +421,6 @@ impl Pane {
         self.with_screen(github_references).unwrap_or_default()
     }
 
-    /// Cursor position and visibility, for mirroring into the outer terminal.
-    pub fn cursor(&self) -> Option<(u16, u16)> {
-        self.with_screen(|screen| {
-            if screen.hide_cursor() {
-                None
-            } else {
-                Some(screen.cursor_position())
-            }
-        })
-        .flatten()
-    }
-
     /// Apply title/progress/bell signals captured from one exact PTY output chunk.
     pub fn apply_signals(
         &mut self,

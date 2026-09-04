@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use std::time::Duration;
-use tui_term::widget::PseudoTerminal;
+use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::app::App;
 use crate::mux::{PaneStatus, PrefixState};
@@ -70,29 +70,27 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     fill_area(f.buffer_mut(), area, theme.background);
     f.render_widget(block, area);
 
+    // Copilot needs a few seconds before it draws anything; without this the pane just
+    // looks frozen.
+    let starting = pane.is_running() && pane.is_blank();
+
+    // Paint the cursor into the frame rather than moving the terminal's real one.
+    // The real cursor is drawn by the terminal on its own schedule, so while a frame
+    // was being written it darted between every cell the diff touched; parking it for
+    // the write traded that for a cursor that was hidden more often than not. A painted
+    // cursor is just part of the frame, which is how the terminal and scratchpad panes
+    // have always drawn theirs.
+    let cursor = Cursor::default()
+        .visibility(app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting);
     pane.with_screen(|screen| {
-        let widget = PseudoTerminal::new(screen);
+        let widget = PseudoTerminal::new(screen).cursor(cursor);
         f.render_widget(widget, terminal_area);
         apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
     });
     decorate_references(f, app, terminal_area, theme);
 
-    // Copilot needs a few seconds before it draws anything; without this the pane just
-    // looks frozen.
-    let starting = pane.is_running() && pane.is_blank();
     if starting {
         draw_starting(f, terminal_area, pane.started_at.elapsed(), theme);
-    }
-
-    // Mirror the child's cursor into the outer terminal so typing feels native.
-    if pane.is_running() && !starting {
-        if let Some((row, col)) = pane.cursor() {
-            let x = terminal_area.x.saturating_add(col);
-            let y = terminal_area.y.saturating_add(row);
-            if x < terminal_area.right() && y < terminal_area.bottom() {
-                f.set_cursor_position((x, y));
-            }
-        }
     }
 }
 
@@ -821,6 +819,61 @@ mod tests {
             "the spinner must disappear as soon as the child draws, got:\n{text}"
         );
         assert!(text.contains("hello from copilot"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// Where the chat paints its cursor. Over text it reverses the cell; on the empty
+    /// cell past the end of a line it draws a block, which is the case that matters
+    /// here because that is where a composer's cursor sits.
+    fn painted_cursors(app: &mut App) -> Vec<(u16, u16)> {
+        let buffer = render_buffer(app, 80, 24);
+        let width = buffer.area.width;
+        buffer
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| {
+                cell.modifier.contains(Modifier::REVERSED) || cell.symbol() == "\u{2588}"
+            })
+            .map(|(index, _)| (index as u16 % width, index as u16 / width))
+            .collect()
+    }
+
+    #[test]
+    fn the_chat_paints_its_own_cursor_only_while_it_has_focus() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .focused_pane_mut()
+            .expect("pane")
+            .feed_synthetic(b"hi");
+
+        app.workspace_focus = crate::app::WorkspaceFocus::Chat;
+        let focused = painted_cursors(&mut app);
+        app.workspace_focus = crate::app::WorkspaceFocus::Scratchpad;
+        let unfocused = painted_cursors(&mut app);
+
+        // Exactly one cell carries the cursor, and it sits just past the text the child
+        // drew rather than anywhere the terminal's own cursor happened to be left.
+        assert_eq!(focused.len(), 1, "expected one painted cursor: {focused:?}");
+        let (x, y) = focused[0];
+        let text_start = x - 2;
+        assert_eq!(
+            render_buffer(&mut app, 80, 24)[(text_start, y)].symbol(),
+            "h",
+            "cursor should follow \"hi\""
+        );
+        // A pane that paints a cursor without input focus reads as if it has it.
+        assert!(
+            unfocused.is_empty(),
+            "unfocused chat still painted a cursor: {unfocused:?}"
+        );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

@@ -33,7 +33,8 @@ use crossterm::{
     },
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+        disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+        EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
     },
 };
 use ratatui::backend::CrosstermBackend;
@@ -1038,7 +1039,7 @@ fn run_app(
         }
 
         if mux_paint_due(app, repaint, last_paint) {
-            terminal.draw(|f| ui::draw(f, app))?;
+            draw_frame(terminal, app)?;
             last_paint = std::time::Instant::now();
         }
 
@@ -1250,6 +1251,32 @@ fn pump_mux(app: &mut App) -> Result<bool> {
     Ok(repaint)
 }
 
+/// Paint one frame as a single terminal update.
+///
+/// Copilot redraws its whole composer on every update, so a frame can rewrite most of
+/// the chat pane. Without these markers a terminal is free to present that halfway
+/// through, which is what made Alacritty tear and flicker. Terminals that do not
+/// implement synchronized updates ignore the private mode.
+///
+/// No view asks for the terminal's real cursor — panes paint their own — so ratatui
+/// leaves it hidden for the whole session and nothing drags it across the screen.
+fn draw_frame(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    synchronized_frame(terminal, |frame| ui::draw(frame, app))
+}
+
+fn synchronized_frame<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    render: impl FnOnce(&mut ratatui::Frame),
+) -> Result<()> {
+    execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+    let drawn = terminal.draw(render).map(|_| ());
+    // Closing the update matters even when the draw failed: leaving it open would freeze
+    // the terminal on a half-written frame.
+    execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
+    drawn?;
+    Ok(())
+}
+
 fn mux_animating(app: &App) -> bool {
     app.mux.as_ref().is_some_and(|mux| {
         mux.panes
@@ -1451,6 +1478,56 @@ mod tests {
     use super::*;
     use crate::mux::{Pane, PaneSpec};
     use chrono::{TimeZone, Utc};
+    use std::sync::{Arc, Mutex};
+
+    /// Writer that keeps everything written where a test can read it back.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_frame_is_one_synchronized_update_and_never_shows_the_real_cursor() {
+        let recorder = Recorder::default();
+        let mut terminal = Terminal::with_options(
+            CrosstermBackend::new(recorder.clone()),
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 8, 2)),
+            },
+        )
+        .expect("fixed viewport needs no terminal");
+
+        synchronized_frame(&mut terminal, |frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new("hello"), frame.area());
+        })
+        .expect("recording writer cannot fail");
+
+        let written = String::from_utf8_lossy(&recorder.0.lock().unwrap()).into_owned();
+        let begin = written.find("\x1b[?2026h");
+        let text = written.find("hello");
+        let end = written.rfind("\x1b[?2026l");
+
+        // Cells only ever reach the terminal between the two markers, so it can never
+        // present a half-written frame.
+        assert!(
+            begin < text && text < end && begin.is_some() && end.is_some(),
+            "unexpected frame order in {written:?}"
+        );
+        // Panes paint their own cursor, so the terminal's real one stays off.
+        assert!(
+            !written.contains("\x1b[?25h"),
+            "frame turned the real cursor on: {written:?}"
+        );
+    }
 
     fn session(id: &str, name: &str, active: bool) -> session::Session {
         session::Session {
