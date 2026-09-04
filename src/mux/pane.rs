@@ -603,10 +603,17 @@ impl Pane {
         self.hook_timestamp = timestamp;
         match event {
             HookLifecycleEvent::SessionStarted { .. } => {
-                // Startup alone says nothing about whether this hook process will
-                // remain available, so keep raw OSC as the fallback until a real
-                // working/ready lifecycle transition arrives.
-                self.hook_state = None;
+                // Dropping to `None` here means "no lifecycle authority yet, fall back
+                // to raw OSC 9;4". That was safe when Copilot emitted progress
+                // sequences; it no longer does, so `None` now means no progress signal
+                // at all. Copilot also delivers this event *after* `userPromptSubmitted`
+                // — several seconds into a turn that is already running — so resetting
+                // unconditionally cancelled the working state mid-turn and left nothing
+                // in its place. An in-flight turn keeps its state; anything else still
+                // waits for a real working/ready transition.
+                if self.hook_state != Some(HookActivity::Working) {
+                    self.hook_state = None;
+                }
                 self.hook_waiting = None;
                 self.hook_ready_pending = None;
                 self.raw_completion_pending = false;
