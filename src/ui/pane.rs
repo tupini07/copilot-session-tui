@@ -271,8 +271,14 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
         return "× ".to_string();
     }
     // A waiting question outranks progress: the same rule the outer terminal follows.
-    if pane.needs_attention() {
+    if pane.requires_user_action() {
         return "? ".to_string();
+    }
+    // A turn that finished while the user was elsewhere. This keeps the precedence the
+    // combined attention flag always had, and only splits the glyph: a question is
+    // blocked on the user, whereas this is a result they have not read yet.
+    if pane.is_unread() {
+        return "● ".to_string();
     }
     match pane.effective_progress_state() {
         ProgressState::Normal | ProgressState::Indeterminate => {
@@ -837,6 +843,38 @@ mod tests {
             })
             .map(|(index, _)| (index as u16 % width, index as u16 / width))
             .collect()
+    }
+
+    #[test]
+    fn a_tab_that_finished_unwatched_is_marked_unread_not_as_a_question() {
+        let (tx, _) = mpsc::channel();
+        let mut pane = silent_pane(tx);
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert_eq!(
+            tab_marker(&pane),
+            format!("{} ", crate::ui::spinner_frame()),
+            "a working tab keeps its spinner"
+        );
+
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert_eq!(tab_marker(&pane), "● ", "finished while looking elsewhere");
+
+        pane.acknowledge_attention();
+        assert_eq!(tab_marker(&pane), "  ", "reading it clears the mark");
+
+        // The question glyph stays reserved for a session that is actually blocked.
+        pane.apply_lifecycle(crate::events::lifecycle::LifecycleEvent::InputRequested {
+            tool_call_id: "question-1".into(),
+            kind: crate::events::lifecycle::InputKind::Question,
+        });
+        assert_eq!(tab_marker(&pane), "? ");
+
+        // Every state keeps the cell the same width, so titles never shift sideways.
+        assert_eq!(crate::text::display_width(&tab_marker(&pane)), 2);
+        let _ = pane.shutdown();
     }
 
     #[test]

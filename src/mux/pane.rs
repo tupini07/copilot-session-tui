@@ -772,6 +772,18 @@ impl Pane {
         self.needs_attention || self.requires_user_action()
     }
 
+    /// A turn that finished while the user was looking somewhere else, and that they
+    /// have not been back to since.
+    ///
+    /// `needs_attention` deliberately lumps this in with a live question, because both
+    /// mean "this pane wants you". They do not want the same thing though: a question
+    /// blocks the session until it is answered, while this is only a result waiting to
+    /// be read. The tab strip tells them apart so a glance can say which pane is
+    /// actually stuck.
+    pub fn is_unread(&self) -> bool {
+        self.needs_attention && !self.requires_user_action()
+    }
+
     pub fn requires_user_action(&self) -> bool {
         !self.pending_inputs.is_empty() || self.hook_waiting.is_some()
     }
@@ -1381,6 +1393,40 @@ mod tests {
         pane.acknowledge_attention();
         assert!(!pane.needs_attention());
         assert_eq!(pane.display_title(), pane.title);
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_unwatched_finish_reads_as_unread_but_a_question_does_not() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(41, program, args), 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert!(!pane.is_unread(), "work in flight is not a result to read");
+
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+        assert!(pane.is_unread(), "finished while the user was elsewhere");
+
+        // Going back to the tab is what reads it.
+        pane.acknowledge_attention();
+        assert!(!pane.is_unread());
+
+        // A live question also wants the user, but it is not an unread result: it
+        // blocks the session, and the strip has to be able to say so.
+        pane.apply_lifecycle(LifecycleEvent::InputRequested {
+            tool_call_id: "question-41".into(),
+            kind: InputKind::Question,
+        });
+        assert!(pane.needs_attention());
+        assert!(pane.requires_user_action());
+        assert!(!pane.is_unread());
         pane.shutdown().unwrap();
     }
 

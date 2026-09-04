@@ -420,10 +420,14 @@ states are forwarded through the mux so Copilot retains the outer terminal's scr
 paste, copy, and Windows Terminal tab-spinner behavior.
 
 When a background Copilot pane transitions from working to complete (or rings the terminal
-bell), CST prepends `?` to its internal pane tab and the outer Windows Terminal tab title.
-That ordinary completion marker is acknowledged when the pane is focused or receives input.
+bell), CST marks its tab `●` — a finished turn nobody has read yet — and prepends `?` to
+the outer Windows Terminal tab title. That ordinary completion marker is acknowledged when
+the pane is focused or receives input, so the strip shows at a glance which sessions
+finished while you were working elsewhere.
 
-Questions and plan approvals are authoritative rather than unread markers. CST follows the
+Questions and plan approvals are authoritative rather than unread markers, and the tab
+strip keeps them apart: a blocked session shows `?` rather than `●`, because it cannot
+continue until you answer. CST follows the
 structured `ask_user` and `exit_plan_mode` lifecycle in the session event log, clears the
 outer spinner while Copilot waits, and keeps `?` visible even after the pane is focused.
 Copilot's repeated working-progress signal cannot dismiss the marker or restart the spinner;
