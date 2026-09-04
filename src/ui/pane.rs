@@ -257,49 +257,184 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             )]
         }
     };
-    let hint_width: usize = hint
+    fill_area(f.buffer_mut(), area, theme.chrome_bg);
+    let status = Paragraph::new(Line::from(hint)).style(status_style(theme));
+    f.render_widget(status, area);
+}
+
+/// Two-column activity cell shown at the head of every tab.
+///
+/// The width is fixed whatever the state, so a tab's text never shifts sideways when a
+/// turn starts or finishes — and click hit-testing stays valid between frames even
+/// though the spinner glyph changes underneath it.
+fn tab_marker(pane: &crate::mux::Pane) -> String {
+    use crate::host_terminal::ProgressState;
+    if !pane.is_running() {
+        return "× ".to_string();
+    }
+    // A waiting question outranks progress: the same rule the outer terminal follows.
+    if pane.needs_attention() {
+        return "? ".to_string();
+    }
+    match pane.effective_progress_state() {
+        ProgressState::Normal | ProgressState::Indeterminate => {
+            format!("{} ", crate::ui::spinner_frame())
+        }
+        ProgressState::Error => "! ".to_string(),
+        ProgressState::Warning => "▲ ".to_string(),
+        ProgressState::Clear => "  ".to_string(),
+    }
+}
+
+/// Tab titles exactly as the bar draws them.
+///
+/// Shared with click hit-testing so the two can never disagree about where a tab starts
+/// and ends.
+pub fn tab_sources(mux: &crate::mux::MuxState) -> Vec<tabs::TabSource> {
+    mux.panes
         .iter()
-        .map(|span| text::display_width(&span.content))
-        .sum();
+        .map(|pane| tabs::TabSource {
+            marker: tab_marker(pane),
+            title: pane.title.clone(),
+            running: pane.is_running(),
+        })
+        .collect()
+}
+
+/// The pane whose tab covers `column`, for click-to-switch.
+pub fn tab_at(
+    mux: &crate::mux::MuxState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<crate::mux::PaneId> {
+    if area.height == 0 || row < area.y || row >= area.bottom() {
+        return None;
+    }
+    let focused_index = mux
+        .focused_pane()
+        .and_then(|pane| mux.panes.iter().position(|other| other.id == pane.id))
+        .unwrap_or(0);
+    let sessions = tab_sources(mux);
+    let (tab_list, _) = tabs::layout(&sessions, focused_index, area.width as usize);
+
+    // The strip is windowed around the focused tab when it overflows, so the visible
+    // labels have to be matched back to their panes by that same offset.
+    let start = tabs::window_start_for(sessions.len(), tab_list.len(), focused_index);
+    let mut x = area.x;
+    for (offset, tab) in tab_list.iter().enumerate() {
+        let width = text::display_width(&tab.label) as u16;
+        if column >= x && column < x + width {
+            return mux.panes.get(start + offset).map(|pane| pane.id);
+        }
+        x += width;
+    }
+    None
+}
+
+/// Draw the browser-style tab bar: a row of labels over a rule that runs heavy beneath
+/// the focused tab and light beneath the rest.
+///
+/// The two rows are laid out from the same widths, so the underline can never drift out
+/// of alignment with the label above it.
+pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+    // Collapsed to nothing for a lone session. Without this the rows below would be
+    // forced to height 1 and paint over the chat's first line.
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let theme = app.theme();
+    fill_area(f.buffer_mut(), area, theme.chrome_bg);
+    let Some(mux) = app.mux.as_ref() else {
+        return;
+    };
+    let Some(pane) = mux.focused_pane() else {
+        return;
+    };
 
     let focused_index = mux
         .panes
         .iter()
         .position(|candidate| candidate.id == pane.id)
         .unwrap_or(0);
-    let sessions: Vec<(String, bool)> = mux
-        .panes
-        .iter()
-        .map(|pane| (pane.display_title(), pane.is_running()))
-        .collect();
-    let (tab_list, hidden) = tabs::layout(
-        &sessions,
-        focused_index,
-        (area.width as usize).saturating_sub(hint_width),
-    );
+    let sessions = tab_sources(mux);
+    let (tab_list, hidden) = tabs::layout(&sessions, focused_index, area.width as usize);
 
-    let mut spans: Vec<Span> = Vec::new();
+    let mut labels: Vec<Span> = Vec::new();
+    // Widths are collected alongside the labels so the rule below is built from the same
+    // arithmetic rather than re-measuring the rendered text.
+    let mut rule: Vec<Span> = Vec::new();
     for tab in &tab_list {
-        let style = if tab.active {
-            badge_style(theme, theme.accent_alt)
+        let width = text::display_width(&tab.label);
+        let (label_style, rule_style, glyph) = if tab.active {
+            (
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.accent_alt),
+                "━",
+            )
         } else if tab.running {
-            Style::default().fg(theme.ansi[7])
+            (
+                Style::default().fg(theme.ansi[7]),
+                Style::default().fg(theme.muted),
+                "─",
+            )
         } else {
-            Style::default().fg(theme.error)
+            (
+                Style::default().fg(theme.error),
+                Style::default().fg(theme.muted),
+                "─",
+            )
         };
-        spans.push(Span::styled(tab.label.clone(), style));
+        labels.push(Span::styled(tab.label.clone(), label_style));
+        rule.push(Span::styled(glyph.repeat(width), rule_style));
     }
+
+    let mut used: usize = tab_list
+        .iter()
+        .map(|tab| text::display_width(&tab.label))
+        .sum();
     if hidden > 0 {
-        spans.push(Span::styled(
-            format!(" +{hidden} "),
+        let marker = format!(" +{hidden} ");
+        let width = text::display_width(&marker);
+        used += width;
+        labels.push(Span::styled(marker, Style::default().fg(theme.muted)));
+        rule.push(Span::styled(
+            "─".repeat(width),
             Style::default().fg(theme.muted),
         ));
     }
-    spans.extend(hint);
+    // Carry the rule to the edge so the tab bar reads as one continuous baseline.
+    if let Some(remainder) = (area.width as usize).checked_sub(used) {
+        rule.push(Span::styled(
+            "─".repeat(remainder),
+            Style::default().fg(theme.muted),
+        ));
+    }
 
-    fill_area(f.buffer_mut(), area, theme.chrome_bg);
-    let status = Paragraph::new(Line::from(spans)).style(status_style(theme));
-    f.render_widget(status, area);
+    // Anchored to the bottom of the strip: the rule closes it off against the chat, the
+    // labels sit directly above it, and whatever is left over becomes breathing room at
+    // the top so the tabs are not flush against the edge of the window.
+    let style = status_style(theme);
+    f.render_widget(
+        Paragraph::new(Line::from(labels)).style(style),
+        Rect {
+            y: area.y + area.height.saturating_sub(2),
+            height: 1,
+            ..area
+        },
+    );
+    if area.height > 1 {
+        f.render_widget(
+            Paragraph::new(Line::from(rule)).style(style),
+            Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
 }
 
 fn panel_style(theme: Theme) -> Style {
@@ -521,12 +656,12 @@ mod tests {
 
         let buffer = render_buffer(&mut app, 80, 24);
 
+        // A lone session shows no tab bar, so the chat still starts at the top row.
         assert_eq!(buffer[(0, 0)].fg, theme.accent_alt);
         assert_eq!(buffer[(0, 0)].bg, theme.background);
         assert_eq!(buffer[(6, 2)].symbol(), "S");
         assert_eq!(buffer[(6, 2)].fg, theme.accent_alt);
         assert_eq!(buffer[(6, 2)].bg, theme.background);
-        assert_eq!(buffer[(0, 23)].bg, theme.accent_alt);
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 
@@ -557,6 +692,7 @@ mod tests {
 
             let buffer = render_buffer(&mut app, 80, 24);
             let x = 1;
+            // One pane means no tab bar, so this is just past the chat's own border.
             let y = 1;
             let add_bg = Color::Rgb(18, 52, 31);
             let delete_bg = Color::Rgb(62, 25, 31);
@@ -802,5 +938,360 @@ mod tests {
 
         let _ = app.terminal.shutdown();
         let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    fn row(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The strip is anchored to its bottom edge, leaving a blank padding row above the
+    /// labels so the tabs are not flush against the top of the window.
+    #[test]
+    fn the_tab_strip_leaves_a_blank_padding_row_above_the_labels() {
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "alpha"), (2, "beta")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        app.view = crate::app::View::Attached(1);
+
+        let buffer = render_buffer(&mut app, 80, 24);
+
+        for y in 0..crate::ui::TAB_BAR_HEIGHT - 2 {
+            let padding = row(&buffer, y, 80);
+            assert!(
+                padding.trim().is_empty(),
+                "row {y} must be blank padding, got {padding:?}"
+            );
+        }
+        // The labels still land immediately above the rule.
+        assert!(row(&buffer, crate::ui::TAB_BAR_HEIGHT - 2, 80).contains("alpha"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn the_rule_underlines_exactly_the_focused_tab() {
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "cst-work"), (2, "map-parse"), (3, "api-fix")] {
+            let pane = named_pane(events.clone(), id, title);
+            app.mux.as_mut().expect("mux").push(pane);
+        }
+        app.mux.as_mut().expect("mux").focused = Some(2);
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 80, 24);
+        let labels = row(&buffer, crate::ui::TAB_BAR_HEIGHT - 2, 80);
+        let rule = row(&buffer, crate::ui::TAB_BAR_HEIGHT - 1, 80);
+
+        // Both rows are compared in columns, not bytes: the rule glyphs are 3 bytes each
+        // and would otherwise never line up with the ASCII labels above them.
+        let rule_columns: Vec<char> = rule.chars().collect();
+        let heavy_start = rule_columns
+            .iter()
+            .position(|glyph| *glyph == '━')
+            .expect("focused tab is underlined");
+        let heavy_end = rule_columns
+            .iter()
+            .rposition(|glyph| *glyph == '━')
+            .expect("focused tab is underlined")
+            + 1;
+        let label_start = labels
+            .find("2   map-parse")
+            .map(|byte| labels[..byte].chars().count())
+            .expect("focused label is drawn");
+
+        assert!(
+            heavy_start <= label_start && label_start < heavy_end,
+            "the heavy rule must sit under the focused label\nlabels: {labels}\nrule:   {rule}"
+        );
+        assert!(
+            rule_columns[heavy_start..heavy_end]
+                .iter()
+                .all(|glyph| *glyph == '━'),
+            "the focused tab's underline must be one unbroken run\nrule: {rule}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_lone_session_spends_no_rows_on_a_tab_bar() {
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "only-session"));
+        app.view = crate::app::View::Attached(1);
+        assert!(!app.tab_bar_visible());
+
+        // A second session gives the strip something to switch between.
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "second-session"));
+        assert!(app.tab_bar_visible());
+
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_working_pane_shows_a_spinner_and_a_waiting_one_shows_the_question_marker() {
+        use crate::host_terminal::ProgressState;
+
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "alpha"), (2, "beta")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .pane_mut(1)
+            .expect("pane")
+            .record_progress_state(ProgressState::Indeterminate);
+        app.view = crate::app::View::Attached(1);
+
+        let sources = tab_sources(app.mux.as_ref().expect("mux"));
+
+        assert!(
+            SPINNER.contains(&sources[0].marker.trim()),
+            "a working pane must carry a spinner frame, got {:?}",
+            sources[0].marker
+        );
+        assert_eq!(
+            crate::text::display_width(&sources[0].marker),
+            crate::text::display_width(&sources[1].marker),
+            "every status cell must be the same width so labels never shift"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// Replays the exact hook order Copilot CLI 1.0.83 writes to `.cst-lifecycle.jsonl`,
+    /// with the real timestamps: `working` first, then `session_started` 4.3 seconds
+    /// later, then `ready`.
+    #[test]
+    fn a_turn_stays_lit_through_the_session_started_copilot_sends_after_working() {
+        use crate::events::hooks::HookLifecycleEvent;
+        use crate::host_terminal::ProgressState;
+
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "alpha"), (2, "beta")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        let pane = app.mux.as_mut().expect("mux").pane_mut(1).expect("pane");
+
+        pane.apply_hook(
+            HookLifecycleEvent::Working {
+                timestamp: 1788469434959,
+            },
+            false,
+        );
+        assert_eq!(
+            pane.effective_progress_state(),
+            ProgressState::Indeterminate
+        );
+
+        pane.apply_hook(
+            HookLifecycleEvent::SessionStarted {
+                timestamp: 1788469439241,
+            },
+            false,
+        );
+        assert_eq!(
+            pane.effective_progress_state(),
+            ProgressState::Indeterminate,
+            "an in-flight turn must survive a late session_started"
+        );
+
+        let sources = tab_sources(app.mux.as_ref().expect("mux"));
+        assert!(
+            SPINNER.contains(&sources[0].marker.trim()),
+            "expected a spinner mid-turn, got {:?}",
+            sources[0].marker
+        );
+
+        let pane = app.mux.as_mut().expect("mux").pane_mut(1).expect("pane");
+        pane.apply_hook(
+            HookLifecycleEvent::Ready {
+                timestamp: 1788469452830,
+            },
+            false,
+        );
+        assert_eq!(
+            pane.effective_progress_state(),
+            ProgressState::Clear,
+            "and the turn still ends when the hook says it did"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// A session_started with no turn under way must still yield authority, so a pane
+    /// that has never reported anything does not claim to be busy.
+    #[test]
+    fn session_started_outside_a_turn_still_clears_the_hook_state() {
+        use crate::events::hooks::HookLifecycleEvent;
+        use crate::host_terminal::ProgressState;
+
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 1, "alpha"));
+        let pane = app.mux.as_mut().expect("mux").pane_mut(1).expect("pane");
+
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 10 }, false);
+        pane.apply_hook(HookLifecycleEvent::SessionStarted { timestamp: 20 }, false);
+
+        assert_eq!(pane.effective_progress_state(), ProgressState::Clear);
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// Click hit-testing recomputes the markers, so every variant must occupy exactly
+    /// the same columns the drawn frame did — otherwise a state change between frames
+    /// silently shifts every tab boundary.
+    #[test]
+    fn every_marker_variant_is_exactly_two_columns() {
+        for marker in ["  ", "? ", "! ", "▲ ", "× "] {
+            assert_eq!(
+                crate::text::display_width(marker),
+                2,
+                "marker {marker:?} is not two columns"
+            );
+        }
+        for frame in SPINNER {
+            assert_eq!(
+                crate::text::display_width(&format!("{frame} ")),
+                2,
+                "spinner frame {frame:?} is not two columns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_cell_survives_a_title_too_long_for_the_strip() {
+        let sources = vec![
+            tabs::TabSource {
+                marker: "⠋ ".to_string(),
+                title: "an-extremely-long-session-title-that-cannot-fit".to_string(),
+                running: true,
+            },
+            tabs::TabSource {
+                marker: "? ".to_string(),
+                title: "another-very-long-session-title-here".to_string(),
+                running: true,
+            },
+        ];
+
+        let (tab_list, _) = tabs::layout(&sources, 0, 30);
+
+        assert!(
+            tab_list[0].label.contains('⠋'),
+            "truncation must not eat the spinner: {:?}",
+            tab_list[0].label
+        );
+        assert!(
+            tab_list[1].label.contains('?'),
+            "truncation must not eat the attention marker: {:?}",
+            tab_list[1].label
+        );
+    }
+
+    #[test]
+    fn clicking_a_tab_reports_the_pane_it_covers() {
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "alpha"), (2, "beta"), (3, "gamma")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        app.view = crate::app::View::Attached(1);
+        let area = Rect::new(0, 0, 80, 2);
+
+        let mux = app.mux.as_ref().expect("mux");
+        let sources = tab_sources(mux);
+        let (tab_list, _) = tabs::layout(&sources, 0, area.width as usize);
+        let first_width = text::display_width(&tab_list[0].label) as u16;
+
+        // A column inside the first tab resolves to the first pane, and one inside the
+        // second resolves to the second.
+        assert_eq!(tab_at(mux, area, 1, 0), Some(1));
+        assert_eq!(tab_at(mux, area, first_width + 1, 0), Some(2));
+        // Below the strip is not the strip.
+        assert_eq!(tab_at(mux, area, 1, 5), None);
+        // Past the last tab is empty rule, not a tab.
+        assert_eq!(tab_at(mux, area, 79, 0), None);
+
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn the_rule_spans_the_full_width_so_the_baseline_is_continuous() {
+        let mut app = mux_app_with_theme(ThemeName::Classic);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "first"), (2, "second")] {
+            let pane = named_pane(events.clone(), id, title);
+            app.mux.as_mut().expect("mux").push(pane);
+        }
+        app.view = crate::app::View::Attached(1);
+
+        let buffer = render_buffer(&mut app, 80, 24);
+        let rule = row(&buffer, crate::ui::TAB_BAR_HEIGHT - 1, 80);
+
+        assert_eq!(rule.chars().count(), 80);
+        assert!(
+            rule.chars().all(|c| c == '━' || c == '─'),
+            "the rule row must be drawn edge to edge: {rule}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    fn named_pane(
+        events: std::sync::mpsc::Sender<crate::mux::MuxEvent>,
+        id: u64,
+        title: &str,
+    ) -> Pane {
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        Pane::spawn(
+            PaneSpec {
+                id,
+                title: title.to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: format!("{title}-session"),
+                program,
+                args,
+                events_path: None,
+                terminal_light_mode: Some(false),
+            },
+            24,
+            80,
+            events,
+        )
+        .expect("pane spawns")
     }
 }

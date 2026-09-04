@@ -45,6 +45,7 @@ pub enum WorkspaceHelp {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkspaceAreas {
     pub chat: Rect,
+    pub tabs: Rect,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
 }
@@ -57,6 +58,8 @@ pub enum Mode {
     ConfirmDelete,
     ConfirmForceDelete,
     ConfirmTakeover,
+    /// Asks how the inactive favorites should be opened.
+    FavoriteOpen,
     FilterProject,
     Help,
     Settings,
@@ -2930,6 +2933,63 @@ impl App {
             program,
             args,
         )
+    }
+
+    /// The tab strip only earns its two rows once there is something to switch between.
+    pub fn tab_bar_visible(&self) -> bool {
+        self.mux.as_ref().is_some_and(|mux| mux.panes.len() > 1)
+    }
+
+    /// Open every inactive favorite as a pane, in the user's configured order.
+    ///
+    /// Focus lands on the first favorite opened rather than the last, so the arranged
+    /// order is what the user sees when the panes finish spawning.
+    pub fn open_favorites_as_panes(&mut self) -> String {
+        let plan = crate::windows_terminal::build_launch_plan(&self.sessions, &self.config);
+        let configured = self.config.favorites.len();
+        let mut failed: Vec<String> = Vec::new();
+        let mut launched = 0;
+        let mut first: Option<crate::mux::PaneId> = None;
+
+        for tab in plan.tabs {
+            // The session's own cwd is used rather than the plan's validated directory,
+            // matching how resuming a single session behaves when the path has moved.
+            let cwd = self
+                .sessions
+                .iter()
+                .find(|session| session.id == tab.session_id)
+                .map(|session| session.cwd.clone())
+                .unwrap_or_default();
+            match self.attach_session(&tab.session_id, &cwd, tab.title.clone()) {
+                Ok(()) => {
+                    launched += 1;
+                    if first.is_none() {
+                        first = self.mux.as_ref().and_then(|mux| mux.focused);
+                    }
+                }
+                Err(error) => failed.push(format!("{}: {error}", tab.title)),
+            }
+        }
+
+        if let Some(id) = first {
+            if let Some(mux) = self.mux.as_mut() {
+                mux.focused = Some(id);
+            }
+            self.view = View::Attached(id);
+        }
+
+        let report = crate::windows_terminal::FavoriteLaunchReport::new(
+            configured,
+            launched,
+            plan.active,
+            plan.stale,
+        );
+        let message = report.status_message_for("pane");
+        if failed.is_empty() {
+            message
+        } else {
+            format!("{message}; {} failed to open", failed.len())
+        }
     }
 
     /// Start a brand new Copilot session as a pane.

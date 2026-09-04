@@ -1,4 +1,4 @@
-use crate::app::{App, View, WorkspaceFocus, WorkspaceHelp};
+use crate::app::{App, Mode, View, WorkspaceFocus, WorkspaceHelp};
 use crate::command_palette::CommandId;
 use crate::input::{handle_quit_confirm, handle_update_restart_confirm, request_quit};
 use crate::mux::pane::PaneNotification;
@@ -80,6 +80,17 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Reachable from the command palette while attached, so it has to take keys here
+    // too — otherwise the pane swallows them and the mode can never be left.
+    if app.mode == Mode::FavoriteOpen {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press {
+                crate::input::handle_favorite_open(app, key.code);
+            }
+        }
+        return;
+    }
+
     if app.snippet_modal.is_some() {
         handle_snippet_event(app, event);
         return;
@@ -124,6 +135,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 app.inspect_github_item(number);
                 return;
             }
+        }
+        // The tab strip sits above the workspace, so it claims the click before the
+        // panes below get a chance to take focus.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && focus_clicked_tab(app, mouse.column, mouse.row)
+        {
+            return;
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
             focus_clicked_workspace(app, mouse.column, mouse.row);
@@ -1490,6 +1508,32 @@ fn focused_workspace_context(app: &App) -> Option<(u64, String, String, String)>
     ))
 }
 
+/// Switch to the tab under the pointer. Returns whether the click landed on one.
+fn focus_clicked_tab(app: &mut App, column: u16, row: u16) -> bool {
+    let area = app.workspace_areas.tabs;
+    let Some(id) = app
+        .mux
+        .as_ref()
+        .and_then(|mux| crate::ui::pane::tab_at(mux, area, column, row))
+    else {
+        return false;
+    };
+    if app.mux.as_ref().and_then(|mux| mux.focused) == Some(id) {
+        return true;
+    }
+    close_context_overlays(app);
+    if let Some(mux) = app.mux.as_mut() {
+        mux.focused = Some(id);
+    }
+    app.view = View::Attached(id);
+    // The same bookkeeping the prefix pane-switch does: acknowledges the newly focused
+    // pane's unread marker, moves the scratchpad and terminal panels over to it, and
+    // refreshes the outer terminal's progress. Switching by click must not be a
+    // second-class way of doing it.
+    sync_workspace_panels(app);
+    true
+}
+
 fn focus_clicked_workspace(app: &mut App, column: u16, row: u16) {
     let areas = app.workspace_areas;
     if areas
@@ -1906,7 +1950,9 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 app.host_sequences.push(sequence);
                 true
             } else {
-                false
+                // The sequence is not going to the outer terminal, but the pane's own
+                // tab still shows this state, so the frame is now stale.
+                progress.is_some() && app.tab_bar_visible()
             }
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
@@ -1949,6 +1995,96 @@ mod tests {
         app.disable_workspace_state_persistence();
         app.disable_config_persistence();
         app
+    }
+
+    /// Switching by click must do the same bookkeeping as `prefix n`, or the new pane
+    /// keeps its unread marker and the side panels stay on the old one.
+    #[test]
+    fn clicking_a_tab_switches_focus_and_acknowledges_the_pane() {
+        let mut app = mux_app();
+        push_test_pane(&mut app, 1, "alpha");
+        push_test_pane(&mut app, 2, "beta");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::Attached(1);
+        // Give the target pane an unread marker to prove focusing clears it.
+        app.mux.as_mut().unwrap().pane_mut(2).unwrap().apply_hook(
+            crate::events::hooks::HookLifecycleEvent::Error { timestamp: 1 },
+            false,
+        );
+        assert!(app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention());
+
+        // Column 0 is inside the first tab; a column past it lands in the second.
+        let area = app.workspace_areas.tabs;
+        assert_eq!(area.height, 0, "areas are only set once a frame is drawn");
+
+        // Drive the layout the way a frame would, then click the second tab.
+        let layout = crate::ui::attached_layout(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            false,
+            false,
+            app.tab_bar_visible(),
+        );
+        app.workspace_areas.tabs = layout.tabs;
+        let mux = app.mux.as_ref().unwrap();
+        let sources = crate::ui::pane::tab_sources(mux);
+        let (tab_list, _) = crate::ui::tabs::layout(&sources, 0, layout.tabs.width as usize);
+        let second_tab_column = crate::text::display_width(&tab_list[0].label) as u16 + 1;
+
+        handle_attached_event(
+            &mut app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: second_tab_column,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        assert_eq!(app.view, View::Attached(2));
+        assert!(
+            !app.mux.as_ref().unwrap().pane(2).unwrap().needs_attention(),
+            "focusing a pane by click must acknowledge its unread marker"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// The command palette can raise the favorites modal without leaving the pane, so
+    /// the attached path must answer its keys rather than forwarding them to the child.
+    #[test]
+    fn the_favorites_modal_takes_keys_while_attached_instead_of_the_pane() {
+        let mut app = mux_app();
+        app.view = View::Attached(1);
+        app.mode = Mode::FavoriteOpen;
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "Esc must close the modal from the attached view"
+        );
+    }
+
+    #[test]
+    fn choosing_panes_from_an_attached_pane_reports_a_result() {
+        let mut app = mux_app();
+        app.view = View::Attached(1);
+        app.mode = Mode::FavoriteOpen;
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+        );
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No favorite sessions configured")
+        );
     }
 
     #[test]
@@ -3395,9 +3531,26 @@ mod tests {
         app.mux.as_mut().unwrap().focused = Some(1);
         let sequence = b"\x1b]9;4;0;0\x1b\\".to_vec();
 
-        assert!(!handle_mux_event(
+        // The frame is repainted because the background pane's own tab shows this
+        // state, but the sequence itself must not reach the outer terminal.
+        assert!(handle_mux_event(
             &mut app,
             MuxEvent::HostSequence(2, sequence)
+        ));
+        assert!(app.host_sequences.is_empty());
+    }
+
+    /// Without a tab strip there is nothing on screen showing a background pane's
+    /// progress, so it must not wake the renderer.
+    #[test]
+    fn background_progress_does_not_repaint_when_no_tab_strip_is_showing() {
+        let mut app = attached_mux_app("only");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        assert!(!app.tab_bar_visible());
+
+        assert!(!handle_mux_event(
+            &mut app,
+            MuxEvent::HostSequence(2, b"\x1b]9;4;3;0\x1b\\".to_vec())
         ));
         assert!(app.host_sequences.is_empty());
     }
@@ -3408,10 +3561,12 @@ mod tests {
         push_test_pane(&mut app, 2, "background");
         app.mux.as_mut().unwrap().focused = Some(1);
 
-        assert!(!handle_mux_event(
+        // Repaints for the background pane's tab marker, without forwarding upstream.
+        assert!(handle_mux_event(
             &mut app,
             MuxEvent::HostSequence(2, b"\x1b]9;4;3;0\x1b\\".to_vec())
         ));
+        assert!(app.host_sequences.is_empty());
         handle_mux_event(
             &mut app,
             MuxEvent::Output(
@@ -3424,10 +3579,11 @@ mod tests {
                 },
             ),
         );
-        assert!(!handle_mux_event(
+        assert!(handle_mux_event(
             &mut app,
             MuxEvent::HostSequence(2, b"\x1b]9;4;0;0\x1b\\".to_vec())
         ));
+        assert!(app.host_sequences.is_empty());
 
         app.mux.as_mut().unwrap().focused = Some(2);
         app.view = View::Attached(2);

@@ -1,4 +1,4 @@
-//! Layout for the tmux-style session tab bar.
+//! Layout for the session tab bar.
 //!
 //! Kept separate from rendering so the width arithmetic — the part that actually goes
 //! wrong — can be tested without a terminal.
@@ -11,37 +11,59 @@ pub struct Tab {
     pub running: bool,
 }
 
+/// One pane's contribution to the strip, before any width fitting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabSource {
+    /// Fixed-width activity cell. Counted as chrome rather than title so truncation can
+    /// never eat it — a tab that lost its spinner to a long name would be worse than a
+    /// tab with a shorter name.
+    pub marker: String,
+    pub title: String,
+    pub running: bool,
+}
+
 /// Build tab labels that together fit within `available` columns.
 ///
 /// Titles share the space evenly and are truncated with an ellipsis. The active tab is
 /// never dropped: when there are too many sessions to show, the strip is windowed around
 /// it and the hidden count is reported so the caller can render a `+n` marker.
-pub fn layout(sessions: &[(String, bool)], focused: usize, available: usize) -> (Vec<Tab>, usize) {
+pub fn layout(sessions: &[TabSource], focused: usize, available: usize) -> (Vec<Tab>, usize) {
     if sessions.is_empty() {
         return (Vec::new(), 0);
     }
 
-    // "1:" plus a leading and trailing space.
-    let chrome = |index: usize| index_width(index) + 3;
-    let min_tab = chrome(sessions.len()) + MIN_TITLE;
+    let marker_width = |index: usize| crate::text::display_width(&sessions[index].marker);
+    // Two spaces each side, the index and its separating space, then the status cell.
+    let chrome = |index: usize, marker: usize| index_width(index) + 5 + marker;
+    let widest_marker = (0..sessions.len()).map(marker_width).max().unwrap_or(0);
+    let min_tab = chrome(sessions.len(), widest_marker) + MIN_TITLE;
     let max_visible = (available / min_tab).max(1).min(sessions.len());
 
     let start = window_start(focused, sessions.len(), max_visible);
     let visible = &sessions[start..start + max_visible];
 
-    // Divide the remaining columns between the titles actually shown.
-    let chrome_total: usize = (start..start + max_visible).map(|i| chrome(i + 1)).sum();
-    let title_budget = available.saturating_sub(chrome_total) / max_visible.max(1);
+    // Divide the remaining columns between the titles actually shown, then cap the
+    // share. Without a ceiling, a wide terminal hands every tab an enormous budget and
+    // one rambling session name stretches across most of the strip; Copilot rewrites
+    // those names freely, so the length is not something the user controls.
+    let chrome_total: usize = (start..start + max_visible)
+        .map(|i| chrome(i + 1, marker_width(i)))
+        .sum();
+    let title_budget = (available.saturating_sub(chrome_total) / max_visible.max(1)).min(MAX_TITLE);
 
     let tabs = visible
         .iter()
         .enumerate()
-        .map(|(offset, (title, running))| {
+        .map(|(offset, source)| {
             let index = start + offset + 1;
             Tab {
-                label: format!(" {index}:{} ", truncate(title, title_budget.max(MIN_TITLE))),
+                label: format!(
+                    "  {index} {}{}  ",
+                    source.marker,
+                    truncate(&source.title, title_budget.max(MIN_TITLE))
+                ),
                 active: start + offset == focused,
-                running: *running,
+                running: source.running,
             }
         })
         .collect();
@@ -51,8 +73,25 @@ pub fn layout(sessions: &[(String, bool)], focused: usize, available: usize) -> 
 
 const MIN_TITLE: usize = 6;
 
+/// Longest title a tab will show before it is ellipsised, however much room there is.
+///
+/// Chosen to be generous enough that most session names survive whole, while keeping
+/// every tab reachable at a glance rather than letting one push the others off-screen.
+const MAX_TITLE: usize = 24;
+
 fn index_width(index: usize) -> usize {
     index.to_string().len()
+}
+
+/// Index of the first visible tab, for callers mapping a rendered tab back to its pane.
+///
+/// Takes the already-computed visible count so hit-testing reuses whatever `layout`
+/// decided rather than re-deriving the width arithmetic and risking a mismatch.
+pub fn window_start_for(total: usize, visible: usize, focused: usize) -> usize {
+    if total == 0 || visible == 0 {
+        return 0;
+    }
+    window_start(focused, total, visible)
 }
 
 /// Slide the visible window so the focused tab is always inside it.
@@ -75,8 +114,17 @@ fn truncate(title: &str, budget: usize) -> String {
 mod tests {
     use super::*;
 
-    fn sessions(names: &[&str]) -> Vec<(String, bool)> {
-        names.iter().map(|n| (n.to_string(), true)).collect()
+    /// Idle sessions: a blank two-column status cell, matching what the bar draws when
+    /// nothing is running.
+    fn sessions(names: &[&str]) -> Vec<TabSource> {
+        names
+            .iter()
+            .map(|n| TabSource {
+                marker: "  ".to_string(),
+                title: n.to_string(),
+                running: true,
+            })
+            .collect()
     }
 
     #[test]
@@ -85,7 +133,7 @@ mod tests {
 
         assert_eq!(tabs.len(), 1);
         assert_eq!(hidden, 0);
-        assert_eq!(tabs[0].label, " 1:copilot-session-tui ");
+        assert_eq!(tabs[0].label, "  1   copilot-session-tui  ");
         assert!(tabs[0].active);
     }
 
@@ -93,10 +141,41 @@ mod tests {
     fn every_session_is_numbered_for_the_prefix_jump_keys() {
         let (tabs, _) = layout(&sessions(&["alpha", "beta", "gamma"]), 1, 80);
 
-        assert_eq!(tabs[0].label, " 1:alpha ");
-        assert_eq!(tabs[1].label, " 2:beta ");
-        assert_eq!(tabs[2].label, " 3:gamma ");
+        assert_eq!(tabs[0].label, "  1   alpha  ");
+        assert_eq!(tabs[1].label, "  2   beta  ");
+        assert_eq!(tabs[2].label, "  3   gamma  ");
         assert!(tabs[1].active, "the focused tab must be highlighted");
+    }
+
+    /// A wide terminal used to hand each tab a share big enough to swallow any title,
+    /// so one long Copilot-generated name stretched across the whole strip.
+    #[test]
+    fn a_long_title_is_capped_even_when_the_terminal_is_wide() {
+        let (tabs, hidden) = layout(
+            &sessions(&[
+                "EmbViz",
+                "Textures - Exporting schema7 material render list",
+                "Stat Placemnt",
+            ]),
+            1,
+            200,
+        );
+
+        assert_eq!(hidden, 0);
+        assert!(
+            tabs[1].label.contains('…'),
+            "the long title must be ellipsised: {:?}",
+            tabs[1].label
+        );
+        assert!(
+            crate::text::display_width(&tabs[1].label) <= MAX_TITLE + 10,
+            "a capped tab must not run away with the strip: {:?}",
+            tabs[1].label
+        );
+        // Titles that already fit are left alone.
+        assert!(tabs[0].label.contains("EmbViz"));
+        assert!(!tabs[0].label.contains('…'));
+        assert!(tabs[2].label.contains("Stat Placemnt"));
     }
 
     #[test]
@@ -128,7 +207,14 @@ mod tests {
     #[test]
     fn the_focused_tab_stays_visible_when_the_strip_overflows() {
         let names: Vec<String> = (1..=20).map(|i| format!("session-{i}")).collect();
-        let sessions: Vec<(String, bool)> = names.into_iter().map(|name| (name, true)).collect();
+        let sessions: Vec<TabSource> = names
+            .into_iter()
+            .map(|title| TabSource {
+                marker: "  ".to_string(),
+                title,
+                running: true,
+            })
+            .collect();
 
         let (tabs, hidden) = layout(&sessions, 17, 40);
 
@@ -150,7 +236,7 @@ mod tests {
     #[test]
     fn dead_sessions_are_flagged_so_they_can_be_styled_differently() {
         let mut sessions = sessions(&["alpha", "beta"]);
-        sessions[1].1 = false;
+        sessions[1].running = false;
 
         let (tabs, _) = layout(&sessions, 0, 80);
 

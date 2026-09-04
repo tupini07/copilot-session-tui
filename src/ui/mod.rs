@@ -75,11 +75,18 @@ pub(crate) fn row_selection_style(theme: Theme) -> Style {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachedLayout {
+    pub tabs: Rect,
     pub chat: Rect,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
     pub status: Rect,
 }
+
+/// Padding row, the labels, then the rule that underlines the focused tab.
+///
+/// The leading blank row keeps the tabs off the top edge of the window, matching the
+/// gap the rule leaves below them.
+pub const TAB_BAR_HEIGHT: u16 = 3;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
@@ -119,9 +126,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             size,
             app.attached_scratchpad_visible(),
             app.attached_terminal_visible(),
+            app.tab_bar_visible(),
         );
         app.workspace_areas = WorkspaceAreas {
             chat: layout.chat,
+            tabs: layout.tabs,
             scratchpad: layout.scratchpad,
             terminal: layout.terminal,
         };
@@ -144,6 +153,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 theme,
             );
         }
+        pane::draw_tabs(f, app, layout.tabs);
         pane::draw_status(f, app, layout.status);
         if github_inspector::is_prompt(app) {
             github_inspector::draw(f, app);
@@ -155,6 +165,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             scratchpad::draw_help_with_theme(f, size, theme);
         }
         draw_portable_mode_popup(f, app);
+        if app.mode == Mode::FavoriteOpen {
+            popups::draw_favorite_open(f, app);
+        }
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
         command_palette::draw_overlays(f, app);
@@ -245,6 +258,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::ConfirmDelete => popups::draw_delete_confirm(f, app),
         Mode::ConfirmForceDelete => popups::draw_force_delete_confirm(f, app),
         Mode::ConfirmTakeover => popups::draw_takeover_confirm(f, app),
+        Mode::FavoriteOpen => popups::draw_favorite_open(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
         Mode::Rename => popups::draw_rename(f, app),
         _ => {}
@@ -310,13 +324,22 @@ pub fn attached_layout(
     area: Rect,
     scratchpad_visible: bool,
     terminal_visible: bool,
+    tabs_visible: bool,
 ) -> AttachedLayout {
+    // A lone session has nothing to switch to, so the strip collapses to nothing rather
+    // than spending two rows of Copilot's output on a single tab.
+    let tab_height = if tabs_visible { TAB_BAR_HEIGHT } else { 0 };
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(tab_height),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
-    let content = vertical[0];
-    let status = vertical[1];
+    let tabs = vertical[0];
+    let content = vertical[1];
+    let status = vertical[2];
 
     let (top, terminal) = if terminal_visible {
         let sections = Layout::default()
@@ -342,6 +365,7 @@ pub fn attached_layout(
     };
 
     AttachedLayout {
+        tabs,
         chat,
         scratchpad,
         terminal,
@@ -360,7 +384,7 @@ mod tests {
 
     #[test]
     fn attached_workspace_places_scratchpad_right_and_terminal_below() {
-        let layout = attached_layout(Rect::new(0, 0, 120, 40), true, true);
+        let layout = attached_layout(Rect::new(0, 0, 120, 40), true, true, true);
         let scratchpad = layout.scratchpad.unwrap();
         let terminal = layout.terminal.unwrap();
 
@@ -374,11 +398,26 @@ mod tests {
 
     #[test]
     fn hidden_tools_give_the_chat_the_full_content_area() {
-        let layout = attached_layout(Rect::new(0, 0, 100, 30), false, false);
+        let layout = attached_layout(Rect::new(0, 0, 100, 30), false, false, true);
 
-        assert_eq!(layout.chat, Rect::new(0, 0, 100, 29));
+        assert_eq!(layout.tabs, Rect::new(0, 0, 100, TAB_BAR_HEIGHT));
+        assert_eq!(
+            layout.chat,
+            Rect::new(0, TAB_BAR_HEIGHT, 100, 30 - TAB_BAR_HEIGHT - 1)
+        );
+        assert_eq!(layout.status.y, 29);
         assert!(layout.scratchpad.is_none());
         assert!(layout.terminal.is_none());
+    }
+
+    #[test]
+    fn the_tab_bar_sits_above_the_chat_and_never_overlaps_it() {
+        let layout = attached_layout(Rect::new(0, 0, 120, 40), true, true, true);
+
+        assert_eq!(layout.tabs.y, 0);
+        assert_eq!(layout.tabs.height, TAB_BAR_HEIGHT);
+        assert_eq!(layout.chat.y, layout.tabs.bottom());
+        assert!(layout.tabs.bottom() <= layout.chat.y);
     }
 
     #[test]

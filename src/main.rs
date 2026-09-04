@@ -957,6 +957,7 @@ fn run_app(
                 ratatui::layout::Rect::new(0, 0, size.width, size.height),
                 app.attached_scratchpad_visible(),
                 app.attached_terminal_visible(),
+                app.tab_bar_visible(),
             )
         });
         update_layout_metrics(app, size.height);
@@ -964,6 +965,7 @@ fn run_app(
         if let Some(layout) = attached_layout {
             app.workspace_areas = app::WorkspaceAreas {
                 chat: layout.chat,
+                tabs: layout.tabs,
                 scratchpad: layout.scratchpad,
                 terminal: layout.terminal,
             };
@@ -1253,8 +1255,30 @@ fn mux_animating(app: &App) -> bool {
         mux.panes
             .iter()
             .any(|pane| pane.is_running() && pane.is_blank())
-    }) || app.github_loading()
+    }) || tab_spinner_animating(app)
+        || app.github_loading()
         || app.sessions_loading()
+}
+
+/// Whether a tab spinner is on screen and needs frames.
+///
+/// Deliberately gated on the strip being visible: a lone session has no tab to spin, so
+/// a working pane must not pull the idle cadence down to 100 ms for nothing.
+fn tab_spinner_animating(app: &App) -> bool {
+    if !matches!(app.view, app::View::Attached(_)) || !app.tab_bar_visible() {
+        return false;
+    }
+    app.mux.as_ref().is_some_and(|mux| {
+        mux.panes.iter().any(|pane| {
+            pane.is_running()
+                && !pane.needs_attention()
+                && matches!(
+                    pane.effective_progress_state(),
+                    host_terminal::ProgressState::Normal
+                        | host_terminal::ProgressState::Indeterminate
+                )
+        })
+    })
 }
 
 fn mux_paint_due(app: &App, repaint: bool, last_paint: std::time::Instant) -> bool {
