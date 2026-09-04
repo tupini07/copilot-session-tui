@@ -28,6 +28,12 @@ pub fn encode(key: &KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
             }
             return Some(bytes);
         }
+        // Conhost folds a bare LF into VK_RETURN with Ctrl set, so any terminal that
+        // sends 0x0A for Ctrl+J — that is, anything without win32-input-mode, Alacritty
+        // included — arrives here as Ctrl+Enter rather than Ctrl+J. Copilot reads LF as
+        // "insert a newline" and CR as "submit", so collapsing this to CR turns Ctrl+J
+        // into an accidental send.
+        KeyCode::Enter if ctrl => vec![b'\n'],
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => {
             if shift {
@@ -326,6 +332,23 @@ mod tests {
         assert_eq!(encode(&key(KeyCode::PageUp), false).unwrap(), b"\x1b[5~");
         let ctrl_delete = key_with(KeyCode::Delete, KeyModifiers::CONTROL);
         assert_eq!(encode(&ctrl_delete, false).unwrap(), b"\x1b[3;5~");
+    }
+
+    /// Both routes a terminal can take to Ctrl+J have to reach the child as LF.
+    ///
+    /// A terminal with win32-input-mode reports the real key; everything else sends the
+    /// 0x0A byte, which conhost hands us as Ctrl+Enter. Either way Copilot must see a
+    /// newline rather than the carriage return that submits the prompt.
+    #[test]
+    fn ctrl_j_inserts_a_newline_however_the_terminal_reports_it() {
+        let as_char = key_with(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(encode(&as_char, false).unwrap(), b"\n");
+
+        let as_ctrl_enter = key_with(KeyCode::Enter, KeyModifiers::CONTROL);
+        assert_eq!(encode(&as_ctrl_enter, false).unwrap(), b"\n");
+
+        // A plain Enter must still submit.
+        assert_eq!(encode(&key(KeyCode::Enter), false).unwrap(), b"\r");
     }
 
     #[test]
