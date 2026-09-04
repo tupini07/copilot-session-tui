@@ -1,5 +1,4 @@
 use crate::config::UserConfig;
-#[cfg(any(windows, test))]
 use crate::session::loader;
 use crate::session::Session;
 #[cfg(windows)]
@@ -8,23 +7,27 @@ use anyhow::Result;
 #[cfg(any(windows, test))]
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-#[cfg(any(windows, test))]
 use std::path::PathBuf;
 
-#[cfg(any(windows, test))]
+/// One favorite queued to open, in the order the user arranged them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FavoriteTab {
-    session_id: String,
-    title: String,
-    cwd: Option<PathBuf>,
+pub struct FavoriteTab {
+    pub session_id: String,
+    pub title: String,
+    /// Only set when the directory still exists: Windows Terminal rejects a missing
+    /// `--startingDirectory`, and a pane cannot spawn into one either.
+    pub cwd: Option<PathBuf>,
 }
 
-#[cfg(any(windows, test))]
+/// Favorites partitioned into what can be opened and what must be skipped.
+///
+/// Shared by both launch paths so panes and terminal tabs skip the same already-active
+/// and missing sessions, in the same order.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct FavoriteLaunchPlan {
-    tabs: Vec<FavoriteTab>,
-    active: Vec<String>,
-    stale: Vec<String>,
+pub struct FavoriteLaunchPlan {
+    pub tabs: Vec<FavoriteTab>,
+    pub active: Vec<String>,
+    pub stale: Vec<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -36,7 +39,27 @@ pub struct FavoriteLaunchReport {
 }
 
 impl FavoriteLaunchReport {
+    pub fn new(
+        configured: usize,
+        launched: usize,
+        active: Vec<String>,
+        stale: Vec<String>,
+    ) -> Self {
+        Self {
+            configured,
+            launched,
+            active,
+            stale,
+        }
+    }
+
     pub fn status_message(&self) -> String {
+        self.status_message_for("tab")
+    }
+
+    /// Same summary in terms of whatever the favorites were opened as, so the pane path
+    /// does not report having opened tabs.
+    pub fn status_message_for(&self, unit: &str) -> String {
         if self.configured == 0 {
             return "No favorite sessions configured".to_string();
         }
@@ -46,10 +69,10 @@ impl FavoriteLaunchReport {
 
         let skipped = self.active.len() + self.stale.len();
         if skipped == 0 {
-            format!("Opened {} favorite session tab(s)", self.launched)
+            format!("Opened {} favorite session {unit}(s)", self.launched)
         } else {
             format!(
-                "Opened {} favorite tab(s); skipped {} active/missing",
+                "Opened {} favorite {unit}(s); skipped {} active/missing",
                 self.launched, skipped
             )
         }
@@ -135,8 +158,7 @@ fn launch_favorites_windows(
     }
 }
 
-#[cfg(any(windows, test))]
-fn build_launch_plan(sessions: &[Session], config: &UserConfig) -> FavoriteLaunchPlan {
+pub fn build_launch_plan(sessions: &[Session], config: &UserConfig) -> FavoriteLaunchPlan {
     let mut plan = FavoriteLaunchPlan::default();
 
     // Driven by the favorite order rather than the loader's, so tabs open in the

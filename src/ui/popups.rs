@@ -704,7 +704,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         help_line(theme, "N", "New isolated worktree session"),
         help_line(theme, "Space", "Toggle selected session favorite"),
         help_line(theme, "g", "Grab a favorite, then ↑/↓ to reorder"),
-        help_line(theme, "T", "Open favorites in Windows Terminal tabs"),
+        help_line(theme, "T", "Open favorites as panes or terminal tabs"),
         help_line(theme, "e", "Open selected session scratchpad"),
         help_line(theme, "r", "Rename selected session"),
         help_line(theme, "d", "Delete selected session"),
@@ -1717,6 +1717,80 @@ fn project_settings_row<'a>(
         Span::styled(format!("[{state:<9}] "), row_style(state_color)),
         Span::styled(value.to_string(), row_style(value_color)),
     ])
+}
+
+/// Ask how the inactive favorites should be opened.
+///
+/// Both destinations are always offered rather than inferred from the host terminal, so
+/// the same keystroke means the same thing on every machine.
+pub fn draw_favorite_open(f: &mut Frame, app: &App) {
+    let theme = app.theme();
+    let plan = crate::windows_terminal::build_launch_plan(&app.sessions, &app.config);
+    let ready = plan.tabs.len();
+    let skipped = plan.active.len() + plan.stale.len();
+
+    let area = centered_rect(58, 42, f.area());
+    prepare_popup(f, area, theme);
+    let block = Block::default()
+        .title(" Open Favorite Sessions ")
+        .borders(Borders::ALL)
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let summary = match (ready, skipped) {
+        (0, 0) => "  No favorite sessions configured.".to_string(),
+        (0, _) => format!("  No inactive favorites to open ({skipped} active or missing)."),
+        (_, 0) => format!("  {ready} inactive favorite(s) ready."),
+        _ => format!("  {ready} ready, {skipped} skipped as active or missing."),
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(summary, Style::default().fg(theme.text))),
+        Line::from(""),
+    ];
+    if ready > 0 {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "p",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  as panes in this CST window"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "t",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  as Windows Terminal tabs"),
+        ]));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" cancel"),
+    ]));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(surface_style(theme))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 #[cfg(test)]

@@ -115,6 +115,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::ConfirmDelete => handle_confirm_delete(app, key.code),
         Mode::ConfirmForceDelete => handle_confirm_force_delete(app, key.code),
         Mode::ConfirmTakeover => handle_confirm_takeover(app, key.code),
+        Mode::FavoriteOpen => handle_favorite_open(app, key.code),
         Mode::FilterProject => handle_filter_project(app, key.code),
         Mode::Help => handle_help(app, key.code),
         Mode::Settings => handle_settings(app, key.code),
@@ -456,17 +457,46 @@ pub(crate) fn execute_palette_list_command(
 }
 
 fn open_favorite_tabs(app: &mut App) {
-    app.status_message = Some(
-        match crate::windows_terminal::launch_favorites(
-            &app.sessions,
-            &app.config,
-            &app.copilot_home,
-            None,
-        ) {
-            Ok(report) => report.status_message(),
-            Err(error) => format!("Cannot open favorite tabs: {error}"),
-        },
-    );
+    app.mode = Mode::FavoriteOpen;
+}
+
+/// Choose where the favorites open. Both destinations are always offered so the key
+/// behaves the same regardless of which terminal CST was launched from.
+pub(crate) fn handle_favorite_open(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            app.mode = Mode::Normal;
+            if app.mux.is_none() {
+                app.status_message =
+                    Some("Panes need mux mode; restart CST with --mux".to_string());
+                return;
+            }
+            app.status_message = Some(app.open_favorites_as_panes());
+            // The same follow-up resuming a single session does: move the scratchpad
+            // and terminal panels onto the newly focused pane and acknowledge it.
+            if matches!(app.view, crate::app::View::Attached(_)) {
+                crate::mux_input::sync_workspace_panels(app);
+            }
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            app.mode = Mode::Normal;
+            app.status_message = Some(
+                match crate::windows_terminal::launch_favorites(
+                    &app.sessions,
+                    &app.config,
+                    &app.copilot_home,
+                    None,
+                ) {
+                    Ok(report) => report.status_message(),
+                    Err(error) => format!("Cannot open favorite tabs: {error}"),
+                },
+            );
+        }
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
 }
 
 fn resume_selected(app: &mut App) {
@@ -1666,17 +1696,54 @@ mod tests {
     }
 
     #[test]
-    fn favorite_tabs_shortcut_reports_its_result_in_the_status_bar() {
+    fn favorite_shortcut_asks_where_to_open_before_launching_anything() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
 
         handle_normal(&mut app, KeyCode::Char('T'));
 
+        assert_eq!(app.mode, Mode::FavoriteOpen);
+        assert!(
+            app.status_message.is_none(),
+            "nothing should be launched until a destination is chosen"
+        );
+    }
+
+    #[test]
+    fn choosing_terminal_tabs_reports_its_result_in_the_status_bar() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('T'));
+        handle_favorite_open(&mut app, KeyCode::Char('t'));
+
+        assert_eq!(app.mode, Mode::Normal);
         let message = app.status_message.unwrap();
         if cfg!(windows) {
             assert_eq!(message, "No favorite sessions configured");
         } else {
             assert!(message.contains("supported only on Windows"));
         }
+    }
+
+    #[test]
+    fn choosing_panes_without_mux_says_so_instead_of_failing_silently() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('T'));
+        handle_favorite_open(&mut app, KeyCode::Char('p'));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status_message.unwrap().contains("mux mode"));
+    }
+
+    #[test]
+    fn cancelling_the_favorite_modal_launches_nothing() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('T'));
+        handle_favorite_open(&mut app, KeyCode::Esc);
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.status_message.is_none());
     }
 
     #[test]

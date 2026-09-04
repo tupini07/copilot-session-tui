@@ -136,13 +136,25 @@ copilot-session-tui --session <session-id>
 copilot-session-tui --open-favorites
 ```
 
-### Favorite tabs in Windows Terminal
+### Opening favorites
 
-On Windows, `cst --open-favorites` adds one tab to the current (most recently
-used) Windows Terminal window for each inactive favorite. Tabs open in their
-session directories, use the CST session names as stable titles, and start CST
-directly in those sessions. Favorites already active in another process are
-skipped and reported, preventing duplicate resumes.
+Pressing `T` asks where the inactive favorites should open:
+
+- **`p` — as panes in this CST window.** Requires mux mode. Every favorite becomes a
+  pane in the running CST process, so one terminal tab hosts all of them and the host
+  terminal only ever renders a single application. Focus lands on the first favorite
+  opened, not the last.
+- **`t` — as Windows Terminal tabs.** One `wt.exe` tab per favorite, the original
+  behavior.
+
+The choice is always offered rather than inferred from the host terminal, so the key
+means the same thing on every machine.
+
+On Windows, `cst --open-favorites` does the tab version non-interactively: it adds one
+tab to the current (most recently used) Windows Terminal window for each inactive
+favorite. Tabs open in their session directories, use the CST session names as stable
+titles, and start CST directly in those sessions. Favorites already active in another
+process are skipped and reported by both paths, preventing duplicate resumes.
 
 Each tab follows the saved `mux` setting. Pass `--mux` or `--no-mux` alongside
 `--open-favorites` to override it for all tabs opened by that invocation. The
@@ -181,7 +193,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `Enter` | Resume selected session |
 | `Space` | Toggle selected session favorite |
 | `g` | Grab the selected favorite, then `↑`/`↓` to move it |
-| `T` | Open inactive favorites in Windows Terminal tabs |
+| `T` | Open inactive favorites as panes or Windows Terminal tabs |
 | `e` | Open selected session scratchpad |
 | `n` | New session in the filtered project (or the current directory's project) |
 | `N` | New isolated worktree session with an editable branch name |
@@ -212,9 +224,9 @@ end, so starring one never rearranges what you already set. Press `g` to grab th
 selected favorite, `↑`/`↓` to move it, and `Enter` or `Esc` to drop it. Each move is
 saved immediately.
 
-That order is also the order `T` opens Windows Terminal tabs in, so favorite tabs come
-up in the same arrangement on every machine and after every restart. CST sends all
-`new-tab` actions in one atomic Windows Terminal command, so changing the focused tab
+That order is also the order `T` opens favorites in — as panes or as tabs — so they come
+up in the same arrangement on every machine and after every restart. For tabs, CST sends
+all `new-tab` actions in one atomic Windows Terminal command, so changing the focused tab
 while they open cannot reverse the remaining order. Favorites keep their arrangement
 regardless of the active sort; the sort applies to everything below them. Grouping is a
 property of the unfiltered list, so searching or filtering by project temporarily shows

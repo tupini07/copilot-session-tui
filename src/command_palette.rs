@@ -311,8 +311,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
         entry(
             Id::OpenFavoriteTabs,
             Group::Sessions,
-            "Open favorite tabs",
-            "Open inactive favorites in Windows Terminal",
+            "Open favorites",
+            "Open inactive favorites as panes or terminal tabs",
             "T",
             true,
             "",
