@@ -5,35 +5,35 @@
       {
         "type": "command",
         "command": "copilot-session-tui hook-event session-start",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ],
     "userPromptSubmitted": [
       {
         "type": "command",
         "command": "copilot-session-tui hook-event working",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ],
     "agentStop": [
       {
         "type": "command",
         "command": "copilot-session-tui hook-event ready",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ],
     "errorOccurred": [
       {
         "type": "command",
         "command": "copilot-session-tui hook-event error",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ],
     "sessionEnd": [
       {
         "type": "command",
         "command": "copilot-session-tui hook-event session-end",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ],
     "notification": [
@@ -41,7 +41,7 @@
         "type": "command",
         "matcher": "permission_prompt|elicitation_dialog",
         "command": "copilot-session-tui hook-event notification",
-        "timeoutSec": 2
+        "timeoutSec": 8
       }
     ]
   }
