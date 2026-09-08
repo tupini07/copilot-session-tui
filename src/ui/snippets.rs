@@ -48,7 +48,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    let preview_width = chunks[0].width.saturating_sub(20) as usize;
+    let preview_width = chunks[0].width.saturating_sub(23) as usize;
     let visible_rows = chunks[0].height.max(1) as usize;
     let start = modal
         .selected
@@ -89,7 +89,25 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
             let preview = safe_terminal_text(&snippet.prompt).replace(['\r', '\n'], " ↵ ");
+            let shortcut = crate::snippets::quick_use_label(index)
+                .map(|digit| format!(" {digit} "))
+                .unwrap_or_else(|| "   ".to_string());
             ListItem::new(Line::from(vec![
+                Span::styled(
+                    shortcut,
+                    if selected {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(super::semantic_foreground_on(
+                                theme,
+                                theme.accent_alt,
+                                theme.surface,
+                            ))
+                            .bg(theme.surface)
+                            .add_modifier(Modifier::BOLD)
+                    },
+                ),
                 Span::styled(
                     format!(" {:<7} ", scope.label()),
                     scope_style.add_modifier(Modifier::BOLD),
@@ -159,7 +177,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 key("↑↓", theme, theme.surface),
                 Span::raw(" select  "),
-                key("Enter", theme, theme.surface),
+                key("Enter or 1-0", theme, theme.surface),
                 Span::raw(" use  "),
                 key("a", theme, theme.surface),
                 Span::raw(" add  "),
@@ -510,8 +528,46 @@ mod tests {
         assert!(text.contains("Prompt Snippets"), "got:\n{text}");
         assert!(text.contains("global"), "got:\n{text}");
         assert!(text.contains("project"), "got:\n{text}");
-        assert!(text.contains("Enter use"), "got:\n{text}");
+        assert!(text.contains("Enter or 1-0 use"), "got:\n{text}");
         assert!(text.contains("d delete"), "got:\n{text}");
+    }
+
+    #[test]
+    fn list_numbers_the_first_ten_snippets_and_leaves_the_rest_blank() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let snippets: Vec<PromptSnippet> = (0..12)
+            .map(|index| PromptSnippet {
+                name: format!("Snippet {index}"),
+                prompt: format!("Prompt {index}"),
+            })
+            .collect();
+        app.snippet_modal = Some(SnippetModal::new(snippets, Vec::new(), None));
+
+        let buffer = render_buffer(&app);
+        let row_of = |name: &str| find_text(&buffer, name).1;
+        let gutter = |y: u16| {
+            (buffer.area.left()..buffer.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+
+        assert!(
+            gutter(row_of("Snippet 0")).contains(" 1  global"),
+            "1 = first"
+        );
+        assert!(
+            gutter(row_of("Snippet 8")).contains(" 9  global"),
+            "9 = ninth"
+        );
+        assert!(
+            gutter(row_of("Snippet 9")).contains(" 0  global"),
+            "0 = tenth"
+        );
+        assert!(
+            gutter(row_of("Snippet 10")).contains("    global"),
+            "the eleventh snippet has no digit: {}",
+            gutter(row_of("Snippet 10"))
+        );
     }
 
     #[test]

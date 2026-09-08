@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::text::{next_word_end, previous_word_start};
 use crate::workspace_state::{self, CursorPosition};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(500);
@@ -712,41 +713,6 @@ fn checkbox_marker(line: &[char], start: usize) -> Option<bool> {
         Some('x' | 'X') => Some(true),
         _ => None,
     }
-}
-
-fn previous_word_start(line: &[char], cursor: usize) -> usize {
-    let mut start = cursor.min(line.len());
-    while start > 0 && line[start - 1].is_whitespace() {
-        start -= 1;
-    }
-    let Some(class) = start.checked_sub(1).map(|index| word_class(line[index])) else {
-        return start;
-    };
-    while start > 0 && word_class(line[start - 1]) == class {
-        start -= 1;
-    }
-    start
-}
-
-fn next_word_end(line: &[char], cursor: usize) -> usize {
-    let mut end = cursor.min(line.len());
-    while end < line.len() && line[end].is_whitespace() {
-        end += 1;
-    }
-    let Some(class) = line.get(end).copied().map(word_class) else {
-        return end;
-    };
-    while end < line.len() && word_class(line[end]) == class {
-        end += 1;
-    }
-    while end < line.len() && line[end].is_whitespace() {
-        end += 1;
-    }
-    end
-}
-
-fn word_class(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
 }
 
 fn indentation_to_remove(line: &[char]) -> usize {

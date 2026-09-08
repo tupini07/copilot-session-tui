@@ -346,10 +346,16 @@ breaks remain text instead of becoming accidental submissions. If Copilot is sti
 starting and has not enabled bracketed paste yet, CST keeps the modal open and asks you
 to wait rather than risk turning a line break into Enter.
 
+The first ten snippets are numbered `1`–`9` and `0` in the list, and pressing that digit
+uses the snippet directly — the same as selecting it and pressing Enter, in one keystroke.
+The numbers follow a snippet's position in the list rather than what is currently on
+screen, so a given snippet keeps its digit even once the list scrolls.
+
 The snippet list supports `a` add, `e` edit, and `d` delete (with confirmation). In the
 editor, Tab / Shift+Tab moves through name, scope, and prompt in visual order; arrows, Home/End,
-Backspace, and Delete edit at the cursor; Enter adds a line break in the prompt; Ctrl+G
-or Space on the scope field toggles scope; Ctrl+S saves.
+Backspace, and Delete edit at the cursor; Ctrl+W or Ctrl+Backspace deletes the previous
+word and Ctrl+Delete the next one, as in the scratchpad; Enter adds a line break in the
+prompt; Ctrl+G or Space on the scope field toggles scope; Ctrl+S saves.
 
 New snippets default to **global**, stored in CST's global `snippets.json` sidecar and
 available in every session. Keeping prompts separate from `config.json` means an older

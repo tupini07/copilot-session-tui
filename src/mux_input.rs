@@ -244,6 +244,11 @@ fn handle_snippet_list_key(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Enter => use_selected_snippet(app),
+        KeyCode::Char(digit) if digit.is_ascii_digit() => {
+            if let Some(index) = crate::snippets::quick_use_index(digit) {
+                use_snippet_at(app, index);
+            }
+        }
         KeyCode::Char('q') | KeyCode::Esc => app.snippet_modal = None,
         _ => {}
     }
@@ -261,6 +266,12 @@ fn handle_snippet_editor_key(app: &mut App, key: KeyEvent) {
         toggle_snippet_scope(app);
         return;
     }
+    if control && matches!(key.code, KeyCode::Char('w' | 'W')) {
+        if let Some(modal) = app.snippet_modal.as_mut() {
+            modal.delete_previous_word_editor();
+        }
+        return;
+    }
 
     let Some(modal) = app.snippet_modal.as_mut() else {
         return;
@@ -269,6 +280,8 @@ fn handle_snippet_editor_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => modal.cancel_subscreen(),
         KeyCode::Tab => modal.editor_field = modal.editor_field.next(true),
         KeyCode::BackTab => modal.editor_field = modal.editor_field.next(false),
+        KeyCode::Backspace if control => modal.delete_previous_word_editor(),
+        KeyCode::Delete if control => modal.delete_next_word_editor(),
         KeyCode::Backspace => modal.backspace_editor(),
         KeyCode::Delete => modal.delete_editor(),
         KeyCode::Left => modal.move_editor_cursor(-1),
@@ -482,10 +495,17 @@ fn delete_selected_snippet(app: &mut App) {
 }
 
 fn use_selected_snippet(app: &mut App) {
+    let selected = app.snippet_modal.as_ref().map(|modal| modal.selected);
+    if let Some(selected) = selected {
+        use_snippet_at(app, selected);
+    }
+}
+
+fn use_snippet_at(app: &mut App, index: usize) {
     let prompt = app
         .snippet_modal
         .as_ref()
-        .and_then(|modal| modal.selected_entry())
+        .and_then(|modal| modal.entry(index))
         .map(|(_, _, snippet)| snippet.prompt.clone());
     let Some(prompt) = prompt else {
         return;
@@ -3165,6 +3185,68 @@ mod tests {
         assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
         // Pane::send_prompt_snippet owns paste-safety checks; the next test covers
         // multiline text before Copilot has enabled bracketed paste.
+    }
+
+    #[test]
+    fn a_digit_uses_that_numbered_snippet_without_selecting_it_first() {
+        let mut app = attached_mux_app("snippet-quick-use-session");
+        app.config.snippets = (0..3)
+            .map(|index| crate::config::PromptSnippet {
+                name: format!("Snippet {index}"),
+                prompt: format!("prompt {index}"),
+            })
+            .collect();
+        app.open_snippets();
+        assert_eq!(app.snippet_modal.as_ref().unwrap().selected, 0);
+
+        snippet_key(&mut app, KeyCode::Char('3'));
+
+        assert!(
+            app.snippet_modal.is_none(),
+            "the third snippet was pasted and the modal closed"
+        );
+    }
+
+    #[test]
+    fn a_digit_past_the_end_of_the_list_is_ignored() {
+        let mut app = attached_mux_app("snippet-quick-use-empty-slot-session");
+        app.config.snippets = vec![crate::config::PromptSnippet {
+            name: "Only".to_string(),
+            prompt: "only prompt".to_string(),
+        }];
+        app.open_snippets();
+
+        snippet_key(&mut app, KeyCode::Char('7'));
+        snippet_key(&mut app, KeyCode::Char('0'));
+
+        assert!(
+            app.snippet_modal.is_some(),
+            "an unassigned digit must not close the modal"
+        );
+    }
+
+    #[test]
+    fn ctrl_w_deletes_a_word_in_the_snippet_editor() {
+        let mut app = attached_mux_app("snippet-ctrl-w-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        for character in "review this".chars() {
+            snippet_key(&mut app, KeyCode::Char(character));
+        }
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(app.snippet_modal.as_ref().unwrap().editor_name, "review ");
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+        );
+
+        assert_eq!(app.snippet_modal.as_ref().unwrap().editor_name, "");
     }
 
     #[test]

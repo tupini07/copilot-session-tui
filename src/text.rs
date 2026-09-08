@@ -125,6 +125,50 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+/// Start of the word before `cursor`, for `Ctrl+W`-style deletion.
+///
+/// Skips the whitespace immediately behind the cursor, then consumes the run of
+/// characters sharing the class (word vs. punctuation) of the first non-space it
+/// finds. `line` must not span a line break; callers decide how to join lines.
+pub fn previous_word_start(line: &[char], cursor: usize) -> usize {
+    let mut start = cursor.min(line.len());
+    while start > 0 && line[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let Some(class) = start.checked_sub(1).map(|index| word_class(line[index])) else {
+        return start;
+    };
+    while start > 0 && word_class(line[start - 1]) == class {
+        start -= 1;
+    }
+    start
+}
+
+/// End of the word after `cursor`, for `Ctrl+Delete`-style deletion.
+///
+/// Mirrors [`previous_word_start`] but also swallows the whitespace trailing the
+/// word, so deleting forward closes the gap instead of leaving a double space.
+pub fn next_word_end(line: &[char], cursor: usize) -> usize {
+    let mut end = cursor.min(line.len());
+    while end < line.len() && line[end].is_whitespace() {
+        end += 1;
+    }
+    let Some(class) = line.get(end).copied().map(word_class) else {
+        return end;
+    };
+    while end < line.len() && word_class(line[end]) == class {
+        end += 1;
+    }
+    while end < line.len() && line[end].is_whitespace() {
+        end += 1;
+    }
+    end
+}
+
+fn word_class(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

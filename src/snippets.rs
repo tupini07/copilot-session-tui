@@ -1,4 +1,5 @@
 use crate::config::PromptSnippet;
+use crate::text;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +209,61 @@ impl SnippetModal {
         self.error = None;
     }
 
+    /// Ctrl+W / Ctrl+Backspace, matching the scratchpad: at the start of a prompt
+    /// line this only joins it onto the previous one instead of eating a whole word.
+    pub fn delete_previous_word_editor(&mut self) {
+        let (value, cursor) = match self.editor_field {
+            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
+            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
+            SnippetEditorField::Scope => return,
+        };
+        let chars: Vec<char> = value.chars().collect();
+        let end = (*cursor).min(chars.len());
+        if end == 0 {
+            return;
+        }
+        let line_start = chars[..end]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let start = if end == line_start {
+            end - 1
+        } else {
+            line_start + text::previous_word_start(&chars[line_start..end], end - line_start)
+        };
+        value.replace_range(byte_at_char(value, start)..byte_at_char(value, end), "");
+        *cursor = start;
+        self.error = None;
+    }
+
+    /// Ctrl+Delete, the forward mirror of [`Self::delete_previous_word_editor`].
+    pub fn delete_next_word_editor(&mut self) {
+        let (value, cursor) = match self.editor_field {
+            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
+            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
+            SnippetEditorField::Scope => return,
+        };
+        let chars: Vec<char> = value.chars().collect();
+        let start = (*cursor).min(chars.len());
+        if start == chars.len() {
+            return;
+        }
+        let line_end = chars[start..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map(|offset| start + offset)
+            .unwrap_or(chars.len());
+        let end = if start == line_end {
+            start + 1
+        } else {
+            start + text::next_word_end(&chars[start..line_end], 0)
+        };
+        value.replace_range(byte_at_char(value, start)..byte_at_char(value, end), "");
+        *cursor = start;
+        self.error = None;
+    }
+
     pub fn move_editor_cursor(&mut self, amount: isize) {
         let (value, cursor) = match self.editor_field {
             SnippetEditorField::Name => (&self.editor_name, &mut self.editor_name_cursor),
@@ -281,6 +337,27 @@ impl SnippetModal {
                 .unwrap_or(0);
             self.editor_prompt_cursor = previous_start + column.min(previous_end - previous_start);
         }
+    }
+}
+
+/// The digit labelling `index` in the list, or `None` past the tenth snippet.
+///
+/// Numbering is absolute rather than per-screen so a snippet keeps the same digit
+/// once the list scrolls.
+pub fn quick_use_label(index: usize) -> Option<char> {
+    match index {
+        0..=8 => char::from_digit(index as u32 + 1, 10),
+        9 => Some('0'),
+        _ => None,
+    }
+}
+
+/// Inverse of [`quick_use_label`]: the snippet a pressed digit refers to.
+pub fn quick_use_index(digit: char) -> Option<usize> {
+    match digit {
+        '0' => Some(9),
+        '1'..='9' => digit.to_digit(10).map(|value| value as usize - 1),
+        _ => None,
     }
 }
 
@@ -375,6 +452,94 @@ mod tests {
         modal.move_editor_cursor(-1);
         modal.delete_editor();
         assert_eq!(modal.editor_name, "ac");
+    }
+
+    #[test]
+    fn quick_use_digits_round_trip_and_stop_after_ten_snippets() {
+        assert_eq!(quick_use_label(0), Some('1'));
+        assert_eq!(quick_use_label(8), Some('9'));
+        assert_eq!(quick_use_label(9), Some('0'));
+        assert_eq!(quick_use_label(10), None);
+
+        for index in 0..10 {
+            let digit = quick_use_label(index).expect("slot has a digit");
+            assert_eq!(quick_use_index(digit), Some(index));
+        }
+        assert_eq!(quick_use_index('a'), None);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_the_previous_word_in_both_editor_fields() {
+        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
+        modal.begin_add();
+        modal.editor_name = "first second   ".to_string();
+        modal.editor_name_cursor = 15;
+        modal.delete_previous_word_editor();
+        assert_eq!(modal.editor_name, "first ");
+        assert_eq!(modal.editor_name_cursor, 6);
+
+        modal.editor_field = SnippetEditorField::Prompt;
+        modal.editor_prompt = "review the diff".to_string();
+        modal.editor_prompt_cursor = 15;
+        modal.delete_previous_word_editor();
+        assert_eq!(modal.editor_prompt, "review the ");
+        assert_eq!(modal.editor_prompt_cursor, 11);
+    }
+
+    #[test]
+    fn ctrl_delete_removes_the_next_word_and_its_trailing_space() {
+        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
+        modal.begin_add();
+        modal.editor_field = SnippetEditorField::Prompt;
+        modal.editor_prompt = "first second third".to_string();
+        modal.editor_prompt_cursor = 6;
+
+        modal.delete_next_word_editor();
+
+        assert_eq!(modal.editor_prompt, "first third");
+        assert_eq!(modal.editor_prompt_cursor, 6);
+    }
+
+    #[test]
+    fn word_deletion_only_joins_lines_at_a_prompt_line_boundary() {
+        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
+        modal.begin_add();
+        modal.editor_field = SnippetEditorField::Prompt;
+        modal.editor_prompt = "first\nsecond".to_string();
+        modal.editor_prompt_cursor = 6;
+
+        modal.delete_previous_word_editor();
+        assert_eq!(modal.editor_prompt, "firstsecond");
+        assert_eq!(modal.editor_prompt_cursor, 5);
+
+        modal.editor_prompt = "first\nsecond".to_string();
+        modal.editor_prompt_cursor = 5;
+        modal.delete_next_word_editor();
+        assert_eq!(modal.editor_prompt, "firstsecond");
+        assert_eq!(modal.editor_prompt_cursor, 5);
+    }
+
+    #[test]
+    fn word_deletion_respects_unicode_boundaries_and_field_edges() {
+        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
+        modal.begin_add();
+        modal.editor_name = "🚀 launch".to_string();
+        modal.editor_name_cursor = 9;
+        modal.delete_previous_word_editor();
+        assert_eq!(modal.editor_name, "🚀 ");
+
+        modal.editor_name_cursor = 0;
+        modal.delete_previous_word_editor();
+        assert_eq!(modal.editor_name, "🚀 ", "no-op at the start of the field");
+
+        modal.editor_name_cursor = modal.editor_name.chars().count();
+        modal.delete_next_word_editor();
+        assert_eq!(modal.editor_name, "🚀 ", "no-op at the end of the field");
+
+        modal.editor_field = SnippetEditorField::Scope;
+        modal.delete_previous_word_editor();
+        modal.delete_next_word_editor();
+        assert_eq!(modal.editor_name, "🚀 ", "scope field has no text to edit");
     }
 
     #[test]
