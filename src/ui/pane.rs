@@ -415,14 +415,31 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, hidden) = tabs::layout(&sessions, focused_index, area.width as usize);
+    let start = tabs::window_start_for(sessions.len(), tab_list.len(), focused_index);
 
     let mut labels: Vec<Span> = Vec::new();
     // Widths are collected alongside the labels so the rule below is built from the same
     // arithmetic rather than re-measuring the rendered text.
     let mut rule: Vec<Span> = Vec::new();
-    for tab in &tab_list {
+    for (offset, tab) in tab_list.iter().enumerate() {
         let width = text::display_width(&tab.label);
-        let (label_style, rule_style, glyph) = if tab.active {
+        // A drag reorders as the pointer moves, so without this the strip would
+        // rearrange itself under a pointer with nothing to show it is the cause.
+        let held = app.dragging_tab.is_some()
+            && mux.panes.get(start + offset).map(|pane| pane.id) == app.dragging_tab;
+        let (label_style, rule_style, glyph) = if held {
+            (
+                // Filled rather than merely recoloured: the tab should read as picked
+                // up off the strip, not as a third kind of session state.
+                Style::default()
+                    .fg(theme.contrast_text(theme.selection_bg))
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.accent_alt),
+                // Broken rather than solid: this tab has not landed anywhere yet.
+                "╍",
+            )
+        } else if tab.active {
             (
                 Style::default()
                     .fg(theme.accent_alt)
@@ -1455,6 +1472,54 @@ mod tests {
         assert!(
             text.contains("move") && text.contains("Esc done"),
             "the arrows stop reaching Copilot, so the way out has to be on screen, got:\n{text}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_held_tab_is_drawn_lifted_so_the_strip_is_not_rearranging_itself() {
+        let mut app = mux_app_with_theme(ThemeName::CatppuccinLatte);
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1u64, "cst-work"), (2, "map-parse"), (3, "api-fix")] {
+            let pane = named_pane(events.clone(), id, title);
+            app.mux.as_mut().expect("mux").push(pane);
+        }
+        app.mux.as_mut().expect("mux").focused = Some(2);
+        app.view = crate::app::View::Attached(2);
+        let theme = app.theme();
+
+        let settled = render_buffer(&mut app, 80, 24);
+        app.dragging_tab = Some(2);
+        let held = render_buffer(&mut app, 80, 24);
+
+        let label_row = crate::ui::TAB_BAR_HEIGHT - 2;
+        let rule_row = crate::ui::TAB_BAR_HEIGHT - 1;
+        let labels = row(&held, label_row, 80);
+        let column = labels
+            .find("map-parse")
+            .map(|byte| labels[..byte].chars().count())
+            .expect("held label is drawn") as u16;
+
+        assert_ne!(
+            settled[(column, label_row)].bg,
+            theme.selection_bg,
+            "a tab nobody is holding stays flat"
+        );
+        assert_eq!(
+            held[(column, label_row)].bg,
+            theme.selection_bg,
+            "the held tab is filled\nlabels: {labels}"
+        );
+        assert_eq!(
+            held[(column, rule_row)].symbol(),
+            "╍",
+            "and its baseline is broken, because it has not landed yet\nrule: {}",
+            row(&held, rule_row, 80)
+        );
+        assert_eq!(
+            settled[(column, rule_row)].symbol(),
+            "━",
+            "which is a different glyph from merely being focused"
         );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }

@@ -348,8 +348,9 @@ focused tab, `Esc` or `Enter` leaves. The status bar shows the mode while it is 
 and the arrows go to Copilot again as soon as it closes.
 
 Dragging a tab along the strip does the same thing, and reorders as the pointer crosses
-each neighbour rather than waiting for the release. Dropping past the last tab parks it
-at the end.
+each neighbour rather than waiting for the release. The tab you are holding is filled in
+and its baseline goes dashed, so a strip rearranging itself always has something on
+screen saying why. Dropping past the last tab parks it at the end.
 
 When there are more sessions than fit, the strip only draws a window around the tab you
 are holding, so the pointer runs out of strip before the tab runs out of places to go.
