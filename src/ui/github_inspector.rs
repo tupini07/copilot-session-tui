@@ -359,6 +359,7 @@ fn draw_ready(f: &mut Frame, app: &mut App, theme: Theme) {
 
     if let Some(inspector) = app.github_inspector.as_mut() {
         inspector.max_scroll = max_scroll;
+        inspector.body_area = content;
         let tab = inspector.tab.index();
         inspector.scroll_offsets[tab] = inspector.scroll_offsets[tab].min(max_scroll);
     }
@@ -1865,5 +1866,168 @@ mod tests {
             let text = render(&mut app, width, height);
             assert!(!text.is_empty());
         }
+    }
+    /// An issue with far more comments than any viewport, so its scrollbar is drawn.
+    fn long_issue() -> GithubItem {
+        let mut item = issue();
+        if let GithubItem::Issue(issue) = &mut item {
+            issue.comments = (0..60)
+                .map(|n| DiscussionEntry {
+                    kind: DiscussionKind::Comment,
+                    author: Author {
+                        login: format!("person{n}"),
+                    },
+                    body: format!("Comment number {n}."),
+                    created_at: "2026-01-03T00:00:00Z".to_string(),
+                    review_state: None,
+                    path: None,
+                    line: None,
+                })
+                .collect();
+        }
+        item
+    }
+
+    fn mouse_at(
+        kind: crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> crossterm::event::Event {
+        crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn the_scrollbar_can_be_grabbed_and_dragged_to_either_end() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut app = app_with(long_issue());
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Comments;
+        // The bar's position comes from the last draw, so there has to be one.
+        render(&mut app, 80, 24);
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        let area = inspector.body_area;
+        let max = inspector.max_scroll;
+        let track = area.right() - 1;
+        assert!(max > 0, "the fixture must overflow for a bar to exist");
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), track, area.y),
+        );
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().scrollbar_drag,
+            Some(crate::app::GithubScrollbar::Body)
+        );
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(
+                MouseEventKind::Drag(MouseButton::Left),
+                track,
+                area.bottom() - 1,
+            ),
+        );
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().active_scroll(),
+            max,
+            "the last row of the track is the last line of the text"
+        );
+
+        // Dragging past the end of the track holds at the end rather than letting go.
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(MouseEventKind::Drag(MouseButton::Left), track, 200),
+        );
+        assert_eq!(app.github_inspector.as_ref().unwrap().active_scroll(), max);
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(MouseEventKind::Drag(MouseButton::Left), track, area.y),
+        );
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().active_scroll(),
+            0,
+            "and back to the top"
+        );
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(MouseEventKind::Up(MouseButton::Left), track, area.y),
+        );
+        assert_eq!(app.github_inspector.as_ref().unwrap().scrollbar_drag, None);
+    }
+
+    #[test]
+    fn a_drag_that_never_grabbed_a_scrollbar_scrolls_nothing() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut app = app_with(long_issue());
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Comments;
+        render(&mut app, 80, 24);
+        let area = app.github_inspector.as_ref().unwrap().body_area;
+
+        // Press in the middle of the text, well clear of the track, then drag.
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), area.x + 2, area.y),
+        );
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(
+                MouseEventKind::Drag(MouseButton::Left),
+                area.x + 2,
+                area.bottom() - 1,
+            ),
+        );
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.scrollbar_drag, None);
+        assert_eq!(
+            inspector.active_scroll(),
+            0,
+            "selecting text is not scrolling"
+        );
+    }
+
+    #[test]
+    fn grabbing_the_diff_scrollbar_also_hands_it_the_keys() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let patch = (0..200)
+            .map(|n| format!("+line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = app_with(pull(Some(&format!("@@ -1 +1 @@\n{patch}"))));
+        app.github_inspector.as_mut().unwrap().tab = GithubTab::Files;
+        app.github_inspector.as_mut().unwrap().files_pane = FilesPane::Tree;
+        render(&mut app, 120, 30);
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        let area = inspector.diff_area;
+        let max = inspector.max_diff_scroll;
+        assert!(max > 0, "the fixture must overflow for a bar to exist");
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            mouse_at(
+                MouseEventKind::Down(MouseButton::Left),
+                area.right() - 1,
+                area.bottom() - 1,
+            ),
+        );
+
+        let inspector = app.github_inspector.as_ref().unwrap();
+        assert_eq!(inspector.diff_scroll, max, "the press itself jumps there");
+        assert_eq!(
+            inspector.files_pane,
+            FilesPane::Diff,
+            "reaching for a pane's bar is a claim on that pane"
+        );
     }
 }

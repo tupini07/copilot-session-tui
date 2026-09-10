@@ -229,6 +229,19 @@ pub enum FilesPane {
     Diff,
 }
 
+/// One of the inspector's scrollbars, named so a drag stays attached to the bar it
+/// grabbed instead of re-deciding on every pointer move — which would hand the
+/// gesture to a neighbour the moment the pointer strayed off the track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubScrollbar {
+    /// The Overview and Comments text.
+    Body,
+    /// The changed-file tree on the Files tab.
+    Tree,
+    /// The diff beside it.
+    Diff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GithubInspectorScreen {
     NumberPrompt,
@@ -261,6 +274,11 @@ pub struct GithubInspector {
     /// Pane rectangles from the last draw, so the mouse can target them.
     pub tree_area: Rect,
     pub diff_area: Rect,
+    /// Area the Overview and Comments text scrolls in, so its scrollbar can be found.
+    pub body_area: Rect,
+    /// Scrollbar the pointer grabbed, held until the button is released so the
+    /// gesture survives the pointer wandering off the track.
+    pub scrollbar_drag: Option<GithubScrollbar>,
     pub diff_scroll: usize,
     pub diff_horizontal: usize,
     pub max_diff_scroll: usize,
@@ -289,6 +307,8 @@ impl GithubInspector {
             collapsed_dirs: std::collections::BTreeSet::new(),
             tree_area: Rect::default(),
             diff_area: Rect::default(),
+            body_area: Rect::default(),
+            scrollbar_drag: None,
             diff_scroll: 0,
             diff_horizontal: 0,
             max_diff_scroll: 0,
@@ -400,6 +420,8 @@ impl GithubInspector {
         self.collapsed_dirs.clear();
         self.tree_area = Rect::default();
         self.diff_area = Rect::default();
+        self.body_area = Rect::default();
+        self.scrollbar_drag = None;
         self.diff_scroll = 0;
         self.diff_horizontal = 0;
         self.max_diff_scroll = 0;

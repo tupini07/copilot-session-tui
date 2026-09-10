@@ -413,7 +413,10 @@ Issues and discussions have **Overview** and **Comments** tabs; pull requests ad
 Discussion comments retain their reply nesting, upvotes, reactions, and accepted-answer
 marker. Use Tab /
 Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the mouse
-wheel to scroll, and `q` to leave. GitHub references such as `#2029` shown in the
+wheel to scroll, and `q` to leave. Scrollbars can also be grabbed and dragged: the
+pointer keeps hold of the bar it took even once it wanders off the track, and the bottom
+of the track is the end of the content, so a long comment thread or diff is one drag away
+from its end. Grabbing the tree's or the diff's bar also moves the keys to that pane. GitHub references such as `#2029` shown in the
 attached chat can also be opened directly with a left click.
 
 Those references are colour-coded once CST has looked them up. The `#` carries the

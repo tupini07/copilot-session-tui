@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, View, WorkspaceFocus, WorkspaceHelp};
+use crate::app::{App, GithubScrollbar, Mode, View, WorkspaceFocus, WorkspaceHelp};
 use crate::command_palette::CommandId;
 use crate::input::{handle_quit_confirm, handle_update_restart_confirm, request_quit};
 use crate::mux::pane::PaneNotification;
@@ -952,7 +952,20 @@ fn handle_github_inspector_event(app: &mut App, event: Event) {
             MouseEventKind::ScrollUp => scroll_github_at(app, mouse.column, mouse.row, -3),
             MouseEventKind::ScrollDown => scroll_github_at(app, mouse.column, mouse.row, 3),
             MouseEventKind::Down(MouseButton::Left) => {
+                // A press on a scrollbar owns the gesture; without this it would fall
+                // through and be read as a click on the pane behind the track.
+                if grab_github_scrollbar(app, mouse.column, mouse.row) {
+                    return;
+                }
                 click_github_inspector(app, mouse.column, mouse.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                drag_github_scrollbar(app, mouse.row);
+            }
+            MouseEventKind::Up(_) => {
+                if let Some(inspector) = app.github_inspector.as_mut() {
+                    inspector.scrollbar_drag = None;
+                }
             }
             _ => {}
         },
@@ -1108,6 +1121,116 @@ fn scroll_github_tree_view(app: &mut App, amount: isize) {
 }
 
 /// Clicking a pane focuses it, and clicking a tree row selects that row.
+/// Takes hold of the scrollbar under the pointer, if there is one, and jumps to the
+/// grabbed position. Returns whether the press was claimed.
+fn grab_github_scrollbar(app: &mut App, column: u16, row: u16) -> bool {
+    let Some(bar) = github_scrollbar_at(app, column, row) else {
+        return false;
+    };
+    if let Some(inspector) = app.github_inspector.as_mut() {
+        inspector.scrollbar_drag = Some(bar);
+        // Grabbing a pane's bar is also a claim on that pane, the same as clicking
+        // into it, so the keys follow the scrollbar the user just reached for.
+        match bar {
+            GithubScrollbar::Tree => inspector.files_pane = crate::app::FilesPane::Tree,
+            GithubScrollbar::Diff => inspector.files_pane = crate::app::FilesPane::Diff,
+            GithubScrollbar::Body => {}
+        }
+    }
+    drag_github_scrollbar(app, row);
+    true
+}
+
+/// The scrollbar covering `column`/`row`, if one is drawn there.
+///
+/// A bar only exists while its content overflows, which is exactly when its maximum
+/// offset is non-zero, so that doubles as the "is it on screen" test.
+fn github_scrollbar_at(app: &App, column: u16, row: u16) -> Option<GithubScrollbar> {
+    let inspector = app.github_inspector.as_ref()?;
+    let files = inspector.tab == crate::app::GithubTab::Files;
+    let candidates = [
+        (GithubScrollbar::Body, inspector.body_area, !files),
+        (GithubScrollbar::Tree, inspector.tree_area, files),
+        (GithubScrollbar::Diff, inspector.diff_area, files),
+    ];
+    candidates
+        .into_iter()
+        .find(|(bar, area, on_this_tab)| {
+            *on_this_tab
+                && github_scroll_range(app, *bar) > 0
+                && area.height > 0
+                && area.width > 0
+                // Ratatui draws a vertical-right scrollbar in the last column.
+                && column == area.right() - 1
+                && row >= area.y
+                && row < area.bottom()
+        })
+        .map(|(bar, _, _)| bar)
+}
+
+/// Scroll the held bar to `row`, clamped to its track.
+///
+/// The row maps linearly across the whole track rather than tracking the thumb's own
+/// travel, which is what makes the two ends reachable: the last row of the track is
+/// the last line of the content, however tall the thumb happens to be.
+fn drag_github_scrollbar(app: &mut App, row: u16) {
+    let Some(bar) = app
+        .github_inspector
+        .as_ref()
+        .and_then(|inspector| inspector.scrollbar_drag)
+    else {
+        return;
+    };
+    let max = github_scroll_range(app, bar);
+    let Some(area) = github_scrollbar_area(app, bar) else {
+        return;
+    };
+    let travel = area.height.saturating_sub(1);
+    let offset = if travel == 0 {
+        // A one-row track has nowhere to aim, so either end is the whole range.
+        max
+    } else {
+        let position = row.clamp(area.y, area.bottom() - 1) - area.y;
+        // Round to the nearest line rather than truncating, so the thumb follows the
+        // pointer instead of lagging half a line behind it all the way down.
+        (position as usize * max + travel as usize / 2) / travel as usize
+    };
+    set_github_scroll(app, bar, offset.min(max));
+}
+
+fn github_scrollbar_area(app: &App, bar: GithubScrollbar) -> Option<Rect> {
+    let inspector = app.github_inspector.as_ref()?;
+    Some(match bar {
+        GithubScrollbar::Body => inspector.body_area,
+        GithubScrollbar::Tree => inspector.tree_area,
+        GithubScrollbar::Diff => inspector.diff_area,
+    })
+}
+
+fn github_scroll_range(app: &App, bar: GithubScrollbar) -> usize {
+    let Some(inspector) = app.github_inspector.as_ref() else {
+        return 0;
+    };
+    match bar {
+        GithubScrollbar::Body => inspector.max_scroll,
+        GithubScrollbar::Tree => github_tree_rows(app)
+            .len()
+            .saturating_sub(inspector.visible_tree_rows.max(1)),
+        GithubScrollbar::Diff => inspector.max_diff_scroll,
+    }
+}
+
+fn set_github_scroll(app: &mut App, bar: GithubScrollbar, offset: usize) {
+    let Some(inspector) = app.github_inspector.as_mut() else {
+        return;
+    };
+    match bar {
+        GithubScrollbar::Body => inspector.set_active_scroll(offset),
+        GithubScrollbar::Tree => inspector.tree_offset = offset,
+        GithubScrollbar::Diff => inspector.diff_scroll = offset,
+    }
+}
+
 fn click_github_inspector(app: &mut App, column: u16, row: u16) {
     let Some(inspector) = app.github_inspector.as_ref() else {
         return;
