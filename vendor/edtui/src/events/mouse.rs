@@ -3,7 +3,7 @@ use jagged::Index2;
 
 use crate::{
     actions::{Execute, SwitchMode},
-    helper::char_width,
+    helper::{char_width, max_col_insert, max_col_normal},
     state::selection::set_selection,
     view::line_wrapper::LineWrapper,
     EditorMode, EditorState,
@@ -65,20 +65,26 @@ impl MouseEventHandler {
         match event {
             MouseEvent::Down(mouse) | MouseEvent::Up(mouse) | MouseEvent::Drag(mouse) => {
                 let lines = &state.lines;
-                let cursor = mouse_position_to_cursor_position(state, &mouse, state.view.tab_width);
-                let last_row = lines.last_row_index();
-                let last_col = lines.last_col_index(cursor.row);
+                let clicked = mouse_position_to_cursor_position(state, &mouse, state.view.tab_width);
 
-                // row is out of bounds
-                if last_row < cursor.row {
-                    let last_col = lines.last_col_index(last_row);
-                    state.cursor = Index2::new(last_row, last_col);
-                // col is out of bounds
-                } else if last_col < cursor.col {
-                    state.cursor = Index2::new(cursor.row, last_col);
+                // A click below the last line lands at the end of that line.
+                let (row, col) = if clicked.row > lines.last_row_index() {
+                    (lines.last_row_index(), usize::MAX)
                 } else {
-                    state.cursor = cursor;
-                }
+                    (clicked.row, clicked.col)
+                };
+
+                // Insert mode places the cursor between characters, so it may sit one column
+                // past the end of a line; normal and visual mode keep it on a character.
+                // Clamping to the last character in insert mode would land a click past the
+                // end of a line in front of that character instead of after it.
+                let index = Index2::new(row, col);
+                let max_col = if state.mode == EditorMode::Insert {
+                    max_col_insert(lines, &index)
+                } else {
+                    max_col_normal(lines, &index)
+                };
+                state.cursor = Index2::new(row, col.min(max_col));
 
                 if let MouseEvent::Drag(_) = event {
                     set_selection(&mut state.selection, state.cursor);

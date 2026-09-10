@@ -398,4 +398,33 @@ mod tests {
         assert_eq!(selection.end, Index2::new(0, 8));
         assert_eq!(scratchpad.state.mode, EditorMode::Insert);
     }
+
+    #[test]
+    fn clicking_past_the_end_of_a_line_puts_the_cursor_after_the_last_character() {
+        let mut scratchpad = Scratchpad::open("click-past-end-test").unwrap();
+        scratchpad.state.lines = Lines::from("abcdefghij\nsecond");
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal
+            .draw(|frame| draw_with_theme(frame, &mut scratchpad, ThemeName::Classic.theme()))
+            .unwrap();
+
+        let mut click = |column, row| {
+            scratchpad
+                .handle_event(Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }))
+                .unwrap();
+            scratchpad.state.cursor
+        };
+
+        // Past the end of the first line: after the 'j', not in front of it.
+        assert_eq!(click(15, 1), Index2::new(0, 10));
+        // On a character: still that character.
+        assert_eq!(click(3, 1), Index2::new(0, 2));
+        // Below the last line: end of the last line.
+        assert_eq!(click(15, 5), Index2::new(1, 6));
+    }
 }
