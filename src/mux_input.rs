@@ -3,8 +3,9 @@ use crate::command_palette::CommandId;
 use crate::input::{handle_quit_confirm, handle_update_restart_confirm, request_quit};
 use crate::mux::pane::PaneNotification;
 use crate::mux::{
-    resolve_github_command, resolve_help_command, resolve_prefix_command, GithubCommand,
-    HelpCommand, MuxEvent, PrefixCommand, PrefixState,
+    resolve_github_command, resolve_help_command, resolve_prefix_command,
+    resolve_transient_command, GithubCommand, HelpCommand, MuxEvent, PrefixCommand, PrefixState,
+    TransientCommand, TransientMode,
 };
 use crate::notifications::NotificationKind;
 use crate::snippets::{SnippetEditorField, SnippetModal, SnippetScope, SnippetScreen};
@@ -142,6 +143,22 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
             && focus_clicked_tab(app, mouse.column, mouse.row)
         {
             return;
+        }
+        // A press that landed on a tab owns the rest of the gesture. Nothing below
+        // may see it, or the drag would double as a selection in whatever pane the
+        // pointer happens to be over.
+        if app.dragging_tab.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    drag_tab_to(app, mouse.column, mouse.row);
+                    return;
+                }
+                MouseEventKind::Up(_) => {
+                    app.dragging_tab = None;
+                    return;
+                }
+                _ => {}
+            }
         }
         if matches!(mouse.kind, MouseEventKind::Down(_)) {
             focus_clicked_workspace(app, mouse.column, mouse.row);
@@ -648,6 +665,10 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             toggle_attached_terminal(app);
         }
         OpenSnippets => app.open_snippets(),
+        MoveTab => {
+            close_context_overlays(app);
+            enter_transient_mode(app, TransientMode::MoveTab);
+        }
         OpenScratchpadHelp => app.workspace_help = Some(WorkspaceHelp::Scratchpad),
         BackToSessionList => {
             close_context_overlays(app);
@@ -758,6 +779,24 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // A transient mode keeps acting until it is dismissed, so it is checked before
+    // the one-shot menus and only leaves on its own terms.
+    if let PrefixState::Transient(mode) = prefix_state {
+        match resolve_transient_command(mode, &key) {
+            TransientCommand::Step(forward) => {
+                step_transient_mode(app, mode, forward);
+                return;
+            }
+            TransientCommand::Leave => {
+                leave_transient_mode(app);
+                return;
+            }
+            TransientCommand::Passthrough => {
+                leave_transient_mode(app);
+            }
+        }
+    }
+
     if prefix_state == PrefixState::Root {
         let command = resolve_prefix_command(&key, &prefix);
         if let Some(mux) = app.mux.as_mut() {
@@ -819,6 +858,11 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 if let Some(mux) = app.mux.as_mut() {
                     mux.prefix_state = PrefixState::Github;
                 }
+            }
+            Some(PrefixCommand::MoveTab) => {
+                close_context_overlays(app);
+                enter_transient_mode(app, TransientMode::MoveTab);
+                return;
             }
             Some(PrefixCommand::SelectIndex(index)) => {
                 close_context_overlays(app);
@@ -1506,6 +1550,60 @@ fn close_scratchpad(app: &mut App) -> bool {
     true
 }
 
+fn enter_transient_mode(app: &mut App, mode: TransientMode) {
+    // A mode whose every key would be a no-op is worse than a message saying so:
+    // the arrows would silently stop reaching Copilot for no benefit.
+    if let Some(reason) = transient_mode_unavailable(app, mode) {
+        app.status_message = Some(reason.to_string());
+        return;
+    }
+    if let Some(mux) = app.mux.as_mut() {
+        mux.prefix_state = PrefixState::Transient(mode);
+    }
+    app.status_message = None;
+    sync_view(app);
+}
+
+fn transient_mode_unavailable(app: &App, mode: TransientMode) -> Option<&'static str> {
+    match mode {
+        TransientMode::MoveTab => {
+            // A lone session has no tab strip to move anything along.
+            let panes = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
+            (panes < 2).then_some("Only one session is open — nothing to reorder")
+        }
+    }
+}
+
+fn leave_transient_mode(app: &mut App) {
+    if let Some(mux) = app.mux.as_mut() {
+        mux.prefix_state = PrefixState::Idle;
+    }
+}
+
+/// Applies one step of `mode`. The mode stays open so the next step is one key away.
+fn step_transient_mode(app: &mut App, mode: TransientMode, forward: bool) {
+    match mode {
+        TransientMode::MoveTab => {
+            let moved = app
+                .mux
+                .as_mut()
+                .is_some_and(|mux| mux.move_focused_pane(forward));
+            if !moved {
+                app.status_message = Some(
+                    if forward {
+                        "Already the last tab"
+                    } else {
+                        "Already the first tab"
+                    }
+                    .to_string(),
+                );
+            } else {
+                app.status_message = None;
+            }
+        }
+    }
+}
+
 fn focused_workspace_context(app: &App) -> Option<(u64, String, String, String)> {
     let pane = app.mux.as_ref()?.focused_pane()?;
     Some((
@@ -1526,6 +1624,9 @@ fn focus_clicked_tab(app: &mut App, column: u16, row: u16) -> bool {
     else {
         return false;
     };
+    // Every press on a tab arms a drag; it only reorders once the pointer actually
+    // moves to another tab, so a plain click still just switches.
+    app.dragging_tab = Some(id);
     if app.mux.as_ref().and_then(|mux| mux.focused) == Some(id) {
         return true;
     }
@@ -1540,6 +1641,50 @@ fn focus_clicked_tab(app: &mut App, column: u16, row: u16) -> bool {
     // second-class way of doing it.
     sync_workspace_panels(app);
     true
+}
+
+/// Carry the dragged tab to the slot under the pointer.
+///
+/// Reordering as the pointer crosses each tab rather than only on release means the
+/// strip shows the outcome while the button is still down.
+///
+/// When there are more sessions than fit, the pointer runs out of strip long before
+/// the tab runs out of places to go: the strip is windowed around the focused tab,
+/// which is the one being dragged, so it is pinned to the edge and the column under
+/// the pointer stops changing. Holding against that edge therefore means "one more
+/// step that way" rather than "stay put" — each step slides the window, bringing the
+/// next hidden tab into reach.
+fn drag_tab_to(app: &mut App, column: u16, row: u16) {
+    let Some(id) = app.dragging_tab else {
+        return;
+    };
+    let area = app.workspace_areas.tabs;
+    let Some(mux) = app.mux.as_mut() else {
+        return;
+    };
+    // Off the strip vertically means the gesture has wandered into a pane; hold the
+    // tab where it is rather than snapping it to whatever column is underneath.
+    if area.height == 0 || row < area.y || row >= area.bottom() {
+        return;
+    }
+    let Some(from) = mux.panes.iter().position(|pane| pane.id == id) else {
+        return;
+    };
+    let last = mux.panes.len().saturating_sub(1);
+    let under = crate::ui::pane::tab_index_at(mux, area, column, row);
+    let (first_shown, last_shown) =
+        crate::ui::pane::visible_tab_bounds(mux, area).unwrap_or((0, 0));
+
+    let target = match under {
+        // Pinned against an edge of the window with more order beyond it.
+        Some(index) if index == from && index == last_shown => (from + 1).min(last),
+        Some(index) if index == from && index == first_shown => from.saturating_sub(1),
+        Some(index) => index,
+        // Past the last tab's right edge, in the strip's empty tail.
+        None if column >= area.x => last,
+        None => 0,
+    };
+    mux.move_pane_to(id, target);
 }
 
 fn focus_clicked_workspace(app: &mut App, column: u16, row: u16) {
@@ -1664,6 +1809,12 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         Some(PrefixCommand::Snippets) => {
             attach_focused(app);
             app.open_snippets();
+        }
+        // The strip only exists once attached, so reordering from the list means
+        // going there first — the same thing `prefix c` and `prefix e` do.
+        Some(PrefixCommand::MoveTab) => {
+            attach_focused(app);
+            enter_transient_mode(app, TransientMode::MoveTab);
         }
         Some(PrefixCommand::Update) => unreachable!("handled before pane availability"),
         Some(PrefixCommand::Help) => unreachable!("handled before pane availability"),
@@ -4333,5 +4484,206 @@ mod tests {
 
         assert!(handle_mux_event(&mut app, MuxEvent::Exited(2, Some(0))));
         assert!(app.host_sequences.is_empty());
+    }
+    fn tab_order(app: &App) -> Vec<String> {
+        app.mux
+            .as_ref()
+            .unwrap()
+            .panes
+            .iter()
+            .map(|pane| pane.session_id.clone())
+            .collect()
+    }
+
+    fn three_tab_app() -> App {
+        let mut app = attached_mux_app("one");
+        push_test_pane(&mut app, 2, "two");
+        push_test_pane(&mut app, 3, "three");
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::Attached(1);
+        app
+    }
+
+    #[test]
+    fn move_tab_mode_stays_open_so_repeated_steps_cost_one_key() {
+        let mut app = three_tab_app();
+        assert_eq!(tab_order(&app), ["one", "two", "three"]);
+
+        send_prefix_command(&mut app, 'm');
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix_state,
+            PrefixState::Transient(TransientMode::MoveTab)
+        );
+
+        // Two steps, no second prefix — the point of the mode.
+        handle_attached_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(tab_order(&app), ["two", "one", "three"]);
+        handle_attached_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(tab_order(&app), ["two", "three", "one"]);
+
+        handle_attached_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(tab_order(&app), ["two", "one", "three"]);
+
+        handle_attached_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+    }
+
+    #[test]
+    fn the_moved_tab_keeps_focus_and_stops_at_the_ends() {
+        let mut app = three_tab_app();
+        send_prefix_command(&mut app, 'm');
+
+        handle_attached_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(
+            tab_order(&app),
+            ["one", "two", "three"],
+            "the first tab does not wrap around to the end"
+        );
+        assert!(app.status_message.as_deref().unwrap().contains("first"));
+
+        for _ in 0..5 {
+            handle_attached_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        assert_eq!(tab_order(&app), ["two", "three", "one"]);
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(1),
+            "the tab that moved is still the focused one"
+        );
+    }
+
+    #[test]
+    fn a_key_the_mode_does_not_claim_closes_it_rather_than_being_eaten() {
+        let mut app = three_tab_app();
+        send_prefix_command(&mut app, 'm');
+
+        handle_attached_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        assert_eq!(tab_order(&app), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn dragging_a_tab_reorders_it_as_the_pointer_crosses_its_neighbours() {
+        let mut app = three_tab_app();
+        app.workspace_areas.tabs = Rect::new(0, 0, 80, 1);
+        let column_of = |app: &App, index: usize| {
+            let mux = app.mux.as_ref().unwrap();
+            (0..80u16)
+                .find(|column| {
+                    crate::ui::pane::tab_index_at(mux, app.workspace_areas.tabs, *column, 0)
+                        == Some(index)
+                })
+                .expect("tab is on the strip")
+        };
+
+        let first = column_of(&app, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), first, 0);
+        assert_eq!(app.dragging_tab, Some(1));
+
+        let third = column_of(&app, 2);
+        handle_attached_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), third, 0);
+        assert_eq!(tab_order(&app), ["two", "three", "one"]);
+
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), third, 0);
+        assert_eq!(app.dragging_tab, None);
+    }
+
+    #[test]
+    fn a_click_on_a_tab_switches_without_reordering_anything() {
+        let mut app = three_tab_app();
+        app.workspace_areas.tabs = Rect::new(0, 0, 80, 1);
+        let mux = app.mux.as_ref().unwrap();
+        let second = (0..80u16)
+            .find(|column| {
+                crate::ui::pane::tab_index_at(mux, app.workspace_areas.tabs, *column, 0) == Some(1)
+            })
+            .expect("second tab is on the strip");
+
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), second, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), second, 0);
+
+        assert_eq!(tab_order(&app), ["one", "two", "three"]);
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+    }
+
+    fn handle_attached_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        handle_attached_event(
+            app,
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+    }
+    #[test]
+    fn dragging_against_the_edge_scrolls_a_strip_too_narrow_to_show_every_tab() {
+        let mut app = attached_mux_app("s1");
+        for id in 2..=10u64 {
+            push_test_pane(&mut app, id, &format!("s{id}"));
+        }
+        app.mux.as_mut().unwrap().focused = Some(1);
+        // Narrow enough that the strip windows: only two tabs are ever drawn, so the
+        // pointer runs out of room long before the tab runs out of places to go.
+        app.workspace_areas.tabs = Rect::new(0, 0, 40, 1);
+        let right_edge = app.workspace_areas.tabs.right() - 1;
+
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 0, 0);
+        for _ in 0..12 {
+            handle_attached_mouse(
+                &mut app,
+                MouseEventKind::Drag(MouseButton::Left),
+                right_edge,
+                0,
+            );
+        }
+
+        assert_eq!(
+            tab_order(&app),
+            ["s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s1"],
+            "holding at the edge walks the tab past the tabs it could never see"
+        );
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(1),
+            "and it is still the tab the user grabbed"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+    #[test]
+    fn move_mode_refuses_to_open_when_there_is_only_one_session() {
+        let mut app = attached_mux_app("alone");
+
+        send_prefix_command(&mut app, 'm');
+
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix_state,
+            PrefixState::Idle,
+            "the arrows must keep reaching Copilot when the mode could do nothing"
+        );
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("one session"));
+    }
+
+    #[test]
+    fn the_prefix_chord_still_reaches_the_command_menu_from_inside_move_mode() {
+        let mut app = three_tab_app();
+        send_prefix_command(&mut app, 'm');
+
+        handle_attached_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Root);
+        assert_eq!(tab_order(&app), ["one", "two", "three"]);
     }
 }

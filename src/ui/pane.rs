@@ -213,6 +213,18 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     // The hint is fixed-width and reserved first; tabs take whatever is left, so a long
     // session name can never push the prefix reminder off screen.
     let hint: Vec<Span> = match pane.status {
+        // A transient mode stays open across keystrokes, so unlike the one-shot menus
+        // its reminder is the only thing telling the user why arrows have stopped
+        // reaching Copilot.
+        PaneStatus::Running if matches!(mux.prefix_state, PrefixState::Transient(_)) => {
+            let PrefixState::Transient(mode) = mux.prefix_state else {
+                unreachable!("guarded by the arm above")
+            };
+            vec![
+                Span::styled(mode.badge(), badge_style(theme, theme.accent_alt)),
+                Span::raw(mode.hint()),
+            ]
+        }
         PaneStatus::Running if mux.prefix_state == PrefixState::Help => vec![
             Span::styled(" Help ", badge_style(theme, theme.warning)),
             Span::raw(" e scratchpad  Esc cancel "),
@@ -312,28 +324,68 @@ pub fn tab_at(
     column: u16,
     row: u16,
 ) -> Option<crate::mux::PaneId> {
+    tab_index_at(mux, area, column, row).map(|index| mux.panes[index].id)
+}
+
+/// Position in `mux.panes` of the tab covering `column`, for a drag that has to know
+/// where it is going rather than only which pane it is over.
+///
+/// Strict about the strip's empty tail: a click out there is not a click on the last
+/// tab. A drag that wants to treat an overshoot as "park it at the end" applies that
+/// itself, because click-to-focus must not.
+pub fn tab_index_at(
+    mux: &crate::mux::MuxState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
     if area.height == 0 || row < area.y || row >= area.bottom() {
         return None;
     }
+    let (start, widths) = strip(mux, area);
+    let mut x = area.x;
+    for (offset, width) in widths.iter().enumerate() {
+        if column >= x && column < x + width {
+            let index = start + offset;
+            return (index < mux.panes.len()).then_some(index);
+        }
+        x += width;
+    }
+    None
+}
+
+/// Indices of the first and last tabs currently drawn, or `None` when none are.
+///
+/// A drag needs this to tell "the pointer is over the tab it is already dragging"
+/// apart from "the pointer has run out of strip", which are the same column but
+/// mean opposite things.
+pub fn visible_tab_bounds(mux: &crate::mux::MuxState, area: Rect) -> Option<(usize, usize)> {
+    if area.height == 0 {
+        return None;
+    }
+    let (start, widths) = strip(mux, area);
+    let last = start + widths.len().checked_sub(1)?;
+    Some((start, last.min(mux.panes.len().saturating_sub(1))))
+}
+
+/// The rendered strip as `(index of the first tab, width of each tab)`.
+///
+/// The strip is windowed around the focused tab when it overflows, so every caller
+/// mapping a column back to a pane has to apply that same offset. Sharing one
+/// computation keeps hit-testing from drifting away from what was drawn.
+fn strip(mux: &crate::mux::MuxState, area: Rect) -> (usize, Vec<u16>) {
     let focused_index = mux
         .focused_pane()
         .and_then(|pane| mux.panes.iter().position(|other| other.id == pane.id))
         .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, _) = tabs::layout(&sessions, focused_index, area.width as usize);
-
-    // The strip is windowed around the focused tab when it overflows, so the visible
-    // labels have to be matched back to their panes by that same offset.
     let start = tabs::window_start_for(sessions.len(), tab_list.len(), focused_index);
-    let mut x = area.x;
-    for (offset, tab) in tab_list.iter().enumerate() {
-        let width = text::display_width(&tab.label) as u16;
-        if column >= x && column < x + width {
-            return mux.panes.get(start + offset).map(|pane| pane.id);
-        }
-        x += width;
-    }
-    None
+    let widths = tab_list
+        .iter()
+        .map(|tab| text::display_width(&tab.label) as u16)
+        .collect();
+    (start, widths)
 }
 
 /// Draw the browser-style tab bar: a row of labels over a rule that runs heavy beneath
@@ -1384,5 +1436,26 @@ mod tests {
             events,
         )
         .expect("pane spawns")
+    }
+
+    #[test]
+    fn move_tab_mode_says_so_in_the_status_bar_for_as_long_as_it_is_open() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.mux.as_mut().expect("mux").prefix_state =
+            PrefixState::Transient(crate::mux::TransientMode::MoveTab);
+
+        let text = render(&mut app);
+
+        assert!(text.contains("Move tab"), "got:\n{text}");
+        assert!(
+            text.contains("move") && text.contains("Esc done"),
+            "the arrows stop reaching Copilot, so the way out has to be on screen, got:\n{text}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 }

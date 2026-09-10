@@ -332,10 +332,33 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `h` `e` | Open scratchpad shortcut help |
 | `prefix` `g` `i` | Inspect a GitHub issue, pull request, or discussion |
 | `prefix` `n` / `p` | Next / previous session |
+| `prefix` `m` | Move this tab: `←`/`→` slide it, `Esc` when done |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `x` | End the focused session for good |
 | `prefix` `q` | End the focused session and quit CST together |
 | `prefix` `prefix` | Search every CST command |
+
+### Reordering tabs
+
+Tabs open in the order their sessions started; either input moves them.
+
+`prefix` `m` enters a move mode that stays open, so a tab travelling several places
+costs one keypress per step rather than a fresh prefix each time: `←` and `→` slide the
+focused tab, `Esc` or `Enter` leaves. The status bar shows the mode while it is active,
+and the arrows go to Copilot again as soon as it closes.
+
+Dragging a tab along the strip does the same thing, and reorders as the pointer crosses
+each neighbour rather than waiting for the release. Dropping past the last tab parks it
+at the end.
+
+When there are more sessions than fit, the strip only draws a window around the tab you
+are holding, so the pointer runs out of strip before the tab runs out of places to go.
+Keep dragging against the edge and it carries on one slot at a time, sliding the window
+so the next hidden tab comes into reach — each step needs a little pointer movement, so
+this is a nudge against the edge rather than a hold. For a long trip the keyboard mode
+is the calmer option.
+
+Tabs live as long as CST does, so the order is not written to disk.
 
 ### Prompt snippets
 

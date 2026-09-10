@@ -177,6 +177,8 @@ pub enum PrefixCommand {
     Github,
     /// `prefix q` — end the focused session and CST together.
     Quit,
+    /// `prefix m` — enter the sticky mode that slides the focused tab.
+    MoveTab,
     SelectIndex(usize),
     /// `prefix prefix` — search every CST command.
     CommandPalette,
@@ -199,6 +201,7 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
         KeyCode::Char('s') => Some(PrefixCommand::Snippets),
         KeyCode::Char('u') => Some(PrefixCommand::Update),
         KeyCode::Char('q') => Some(PrefixCommand::Quit),
+        KeyCode::Char('m') => Some(PrefixCommand::MoveTab),
         KeyCode::Char('h') => Some(PrefixCommand::Help),
         KeyCode::Char('g') => Some(PrefixCommand::Github),
         KeyCode::Char(character)
@@ -250,12 +253,71 @@ pub fn resolve_github_command(key: &KeyEvent) -> Option<GithubCommand> {
     }
 }
 
+/// A sticky sub-mode entered from the prefix menu.
+///
+/// Unlike the one-shot `Help` and `Github` menus, a transient mode survives the key
+/// that acts on it, so a repeated adjustment costs one keystroke instead of three.
+/// Every key goes to CST while one is active, because the capture gate already
+/// claims everything when `PrefixState` is not `Idle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransientMode {
+    /// Left/Right slide the focused tab along the strip.
+    MoveTab,
+}
+
+impl TransientMode {
+    /// Badge shown in the status bar while the mode is active.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::MoveTab => " Move tab ",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::MoveTab => " ←/→ move  Esc done ",
+        }
+    }
+}
+
+/// What a key means inside a transient mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransientCommand {
+    /// Act in the mode's own direction; `true` is rightwards/forwards.
+    Step(bool),
+    Leave,
+    /// Not ours — leave the mode and let the key be handled normally.
+    Passthrough,
+}
+
+pub fn resolve_transient_command(mode: TransientMode, key: &KeyEvent) -> TransientCommand {
+    // The vim-style letters are a convenience for the bare keys only. Ctrl+L clears a
+    // screen and Ctrl+H is a backspace; a mode that swallowed those to nudge a tab
+    // sideways would be surprising, and the prefix chord has to stay reachable so
+    // there is always a way back to the command menu.
+    let plain = !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match mode {
+        TransientMode::MoveTab => match key.code {
+            KeyCode::Left => TransientCommand::Step(false),
+            KeyCode::Right => TransientCommand::Step(true),
+            KeyCode::Char('h') if plain => TransientCommand::Step(false),
+            KeyCode::Char('l') if plain => TransientCommand::Step(true),
+            KeyCode::Esc | KeyCode::Enter => TransientCommand::Leave,
+            _ => TransientCommand::Passthrough,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixState {
     Idle,
     Root,
     Help,
     Github,
+    /// A sticky mode; see [`TransientMode`].
+    Transient(TransientMode),
 }
 
 /// All panes owned by this CST instance.
@@ -359,6 +421,48 @@ impl MuxState {
         if let Some(pane) = self.panes.get(index) {
             self.focused = Some(pane.id);
         }
+    }
+
+    /// Moves `id` to `index`, keeping every other pane in its relative order.
+    ///
+    /// Returns whether anything moved, so a caller can tell a no-op at the end of
+    /// the strip apart from a real reorder and leave the user a hint either way.
+    pub fn move_pane_to(&mut self, id: PaneId, index: usize) -> bool {
+        let Some(from) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        let to = index.min(self.panes.len().saturating_sub(1));
+        if from == to {
+            return false;
+        }
+        let pane = self.panes.remove(from);
+        self.panes.insert(to, pane);
+        true
+    }
+
+    /// Moves the focused pane one slot along the strip. Deliberately stops at the
+    /// ends rather than wrapping: dragging a tab off one edge and having it appear
+    /// at the other is disorienting, and `cycle` already exists for going around.
+    pub fn move_focused_pane(&mut self, forward: bool) -> bool {
+        let Some(id) = self.focused else {
+            return false;
+        };
+        let Some(from) = self.panes.iter().position(|pane| pane.id == id) else {
+            return false;
+        };
+        let to = if forward {
+            from + 1
+        } else {
+            match from.checked_sub(1) {
+                Some(to) => to,
+                None => return false,
+            }
+        };
+        if to >= self.panes.len() {
+            return false;
+        }
+        self.panes.swap(from, to);
+        true
     }
 
     pub fn running_count(&self) -> usize {
