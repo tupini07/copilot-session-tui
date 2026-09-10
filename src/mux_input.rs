@@ -7,7 +7,7 @@ use crate::mux::{
     HelpCommand, MuxEvent, PrefixCommand, PrefixState,
 };
 use crate::notifications::NotificationKind;
-use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
+use crate::snippets::{SnippetEditorField, SnippetModal, SnippetScope, SnippetScreen};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -190,15 +190,12 @@ fn handle_snippet_event(app: &mut App, event: Event) {
             handle_snippet_editor_key(app, key);
         }
         (SnippetScreen::Editor, Event::Paste(text)) => {
-            let Some(modal) = app.snippet_modal.as_mut() else {
-                return;
-            };
-            match modal.editor_field {
-                SnippetEditorField::Name => {
-                    modal.insert_editor_text(&text.replace(['\r', '\n'], " "));
-                }
-                SnippetEditorField::Prompt => modal.insert_editor_text(&text),
-                SnippetEditorField::Scope => {}
+            if let Some(editor) = app
+                .snippet_modal
+                .as_mut()
+                .and_then(SnippetModal::focused_editor)
+            {
+                editor.handle_event(Event::Paste(text));
             }
         }
         (SnippetScreen::ConfirmDelete, Event::Key(key)) if key.kind == KeyEventKind::Press => {
@@ -266,51 +263,41 @@ fn handle_snippet_editor_key(app: &mut App, key: KeyEvent) {
         toggle_snippet_scope(app);
         return;
     }
-    if control && matches!(key.code, KeyCode::Char('w' | 'W')) {
-        if let Some(modal) = app.snippet_modal.as_mut() {
-            modal.delete_previous_word_editor();
-        }
-        return;
-    }
-
     let Some(modal) = app.snippet_modal.as_mut() else {
         return;
     };
+    // The form claims the keys that move between fields; everything else is the
+    // editor's, so a chord that works in the scratchpad works here too.
     match key.code {
-        KeyCode::Esc => modal.cancel_subscreen(),
-        KeyCode::Tab => modal.editor_field = modal.editor_field.next(true),
-        KeyCode::BackTab => modal.editor_field = modal.editor_field.next(false),
-        KeyCode::Backspace if control => modal.delete_previous_word_editor(),
-        KeyCode::Delete if control => modal.delete_next_word_editor(),
-        KeyCode::Backspace => modal.backspace_editor(),
-        KeyCode::Delete => modal.delete_editor(),
-        KeyCode::Left => modal.move_editor_cursor(-1),
-        KeyCode::Right => modal.move_editor_cursor(1),
-        KeyCode::Up => modal.move_prompt_cursor_vertical(false),
-        KeyCode::Down => modal.move_prompt_cursor_vertical(true),
-        KeyCode::Home => modal.move_editor_line_boundary(false),
-        KeyCode::End => modal.move_editor_line_boundary(true),
-        KeyCode::Enter => match modal.editor_field {
-            SnippetEditorField::Name => modal.editor_field = SnippetEditorField::Scope,
-            SnippetEditorField::Prompt => modal.insert_editor_text("\n"),
-            SnippetEditorField::Scope => toggle_snippet_scope(app),
-        },
-        KeyCode::Char(' ') if modal.editor_field == SnippetEditorField::Scope => {
-            toggle_snippet_scope(app);
+        KeyCode::Esc => {
+            modal.cancel_subscreen();
+            return;
         }
-        KeyCode::Char(character)
-            if !key.modifiers.intersects(
-                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
-            ) =>
-        {
-            match modal.editor_field {
-                SnippetEditorField::Name | SnippetEditorField::Prompt => {
-                    modal.insert_editor_text(&character.to_string());
-                }
-                SnippetEditorField::Scope => {}
-            }
+        // Terminals disagree on whether Shift+Tab arrives as BackTab or as Tab
+        // carrying the modifier; both mean "the field before this one".
+        KeyCode::Tab | KeyCode::BackTab => {
+            let forward = key.code == KeyCode::Tab
+                && !key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::SHIFT);
+            modal.editor_field = modal.editor_field.next(forward);
+            return;
+        }
+        KeyCode::Enter if modal.editor_field == SnippetEditorField::Name => {
+            modal.editor_field = SnippetEditorField::Scope;
+            return;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') if modal.editor_field == SnippetEditorField::Scope => {
+            toggle_snippet_scope(app);
+            return;
         }
         _ => {}
+    }
+
+    if let Some(editor) = modal.focused_editor() {
+        if editor.handle_event(Event::Key(key)) {
+            modal.error = None;
+        }
     }
 }
 
@@ -333,9 +320,10 @@ fn save_snippet_editor(app: &mut App) {
     let Some(modal) = app.snippet_modal.as_ref() else {
         return;
     };
-    let name = modal.editor_name.trim().to_string();
+    let name = modal.editor_name.text().trim().to_string();
     let prompt = modal
         .editor_prompt
+        .text()
         .replace("\r\n", "\n")
         .replace('\r', "\n");
     if name.is_empty() || prompt.trim().is_empty() {
@@ -2935,8 +2923,8 @@ mod tests {
         {
             let modal = app.snippet_modal.as_mut().unwrap();
             assert_eq!(modal.editor_scope, SnippetScope::Global);
-            modal.editor_name = "Review".to_string();
-            modal.editor_prompt = "Review this carefully.".to_string();
+            modal.editor_name.set_text("Review");
+            modal.editor_prompt.set_text("Review this carefully.");
         }
 
         handle_snippet_event(
@@ -3226,6 +3214,78 @@ mod tests {
     }
 
     #[test]
+    fn the_snippet_editor_answers_the_scratchpad_shortcuts() {
+        let mut app = attached_mux_app("snippet-shared-editor-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        snippet_key(&mut app, KeyCode::Tab);
+        snippet_key(&mut app, KeyCode::Tab);
+        for character in "review the diff".chars() {
+            snippet_key(&mut app, KeyCode::Char(character));
+        }
+        let prompt = |app: &App| {
+            app.snippet_modal
+                .as_ref()
+                .unwrap()
+                .editor_prompt
+                .text()
+                .clone()
+        };
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_field,
+            SnippetEditorField::Prompt
+        );
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(prompt(&app), "review the ", "Ctrl+W deletes a word");
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(prompt(&app), "review the diff", "Ctrl+Z undoes it");
+    }
+
+    #[test]
+    fn shift_tab_walks_back_a_field_however_the_terminal_spells_it() {
+        let mut app = attached_mux_app("snippet-shift-tab-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        let field = |app: &App| app.snippet_modal.as_ref().unwrap().editor_field;
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)),
+        );
+        assert_eq!(field(&app), SnippetEditorField::Prompt);
+
+        handle_snippet_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+        );
+        assert_eq!(field(&app), SnippetEditorField::Scope, "not a dedent");
+    }
+
+    #[test]
+    fn a_pasted_escape_sequence_never_reaches_the_snippet_buffer() {
+        let mut app = attached_mux_app("snippet-paste-control-session");
+        app.open_snippets();
+        snippet_key(&mut app, KeyCode::Char('a'));
+        snippet_key(&mut app, KeyCode::Tab);
+        snippet_key(&mut app, KeyCode::Tab);
+
+        handle_snippet_event(&mut app, Event::Paste("safe\u{1b}[2Jtext".to_string()));
+
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_prompt.text(),
+            "safe[2Jtext"
+        );
+    }
+
+    #[test]
     fn ctrl_w_deletes_a_word_in_the_snippet_editor() {
         let mut app = attached_mux_app("snippet-ctrl-w-session");
         app.open_snippets();
@@ -3239,14 +3299,17 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
         );
 
-        assert_eq!(app.snippet_modal.as_ref().unwrap().editor_name, "review ");
+        assert_eq!(
+            app.snippet_modal.as_ref().unwrap().editor_name.text(),
+            "review "
+        );
 
         handle_snippet_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
         );
 
-        assert_eq!(app.snippet_modal.as_ref().unwrap().editor_name, "");
+        assert_eq!(app.snippet_modal.as_ref().unwrap().editor_name.text(), "");
     }
 
     #[test]
@@ -3315,7 +3378,7 @@ mod tests {
         snippet_key(&mut app, KeyCode::Enter);
         handle_snippet_event(&mut app, Event::Paste("two\nthree".to_string()));
         assert_eq!(
-            app.snippet_modal.as_ref().unwrap().editor_prompt,
+            app.snippet_modal.as_ref().unwrap().editor_prompt.text(),
             "one\ntwo\nthree"
         );
 
@@ -3335,8 +3398,8 @@ mod tests {
         snippet_key(&mut app, KeyCode::Char('a'));
         {
             let modal = app.snippet_modal.as_mut().unwrap();
-            modal.editor_name = "Unsafe".to_string();
-            modal.editor_prompt = "text\u{1b}[201~".to_string();
+            modal.editor_name.set_text("Unsafe");
+            modal.editor_prompt.set_text("text\u{1b}[201~");
         }
 
         handle_snippet_event(
@@ -3400,7 +3463,11 @@ mod tests {
         ];
         app.open_snippets();
         snippet_key(&mut app, KeyCode::Char('e'));
-        app.snippet_modal.as_mut().unwrap().editor_prompt = "updated".to_string();
+        app.snippet_modal
+            .as_mut()
+            .unwrap()
+            .editor_prompt
+            .set_text("updated");
         handle_snippet_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),

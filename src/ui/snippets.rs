@@ -2,24 +2,25 @@ use crate::app::App;
 use crate::snippets::{SnippetEditorField, SnippetScope, SnippetScreen};
 use crate::text;
 use crate::theme::{fill_area, Theme};
+use edtui::{EditorTheme, EditorView, LineNumbers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-pub fn draw(f: &mut Frame, app: &App) {
-    let Some(modal) = app.snippet_modal.as_ref() else {
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let Some(screen) = app.snippet_modal.as_ref().map(|modal| modal.screen) else {
         return;
     };
     let area = super::popups::centered_rect(72, 76, f.area());
     f.render_widget(Clear, area);
     fill_area(f.buffer_mut(), area, app.theme().surface);
-    match modal.screen {
+    match screen {
         SnippetScreen::List | SnippetScreen::ConfirmDelete => draw_list(f, app, area),
         SnippetScreen::Editor => draw_editor(f, app, area),
     }
-    if modal.screen == SnippetScreen::ConfirmDelete {
+    if screen == SnippetScreen::ConfirmDelete {
         draw_delete_confirm(f, app, area);
     }
 }
@@ -202,10 +203,10 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
-    let modal = app.snippet_modal.as_ref().expect("snippet modal");
+fn draw_editor(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme();
     let surface_text = super::foreground_on(theme, theme.surface);
+    let modal = app.snippet_modal.as_mut().expect("snippet modal");
     let title = if modal.editing.is_some() {
         " Edit Prompt Snippet "
     } else {
@@ -233,25 +234,7 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner);
 
-    let name = if modal.editor_field == SnippetEditorField::Name {
-        with_cursor(
-            &safe_single_line_text(&modal.editor_name),
-            modal.editor_name_cursor,
-        )
-    } else {
-        safe_single_line_text(&modal.editor_name)
-    };
-    f.render_widget(
-        Paragraph::new(name)
-            .style(Style::default().fg(theme.text).bg(theme.background))
-            .block(field_block(
-                " Name ",
-                modal.editor_field == SnippetEditorField::Name,
-                theme,
-            )),
-        chunks[0],
-    );
-
+    let field = modal.editor_field;
     let scope = match modal.editor_scope {
         SnippetScope::Global => " Global — available in every project ",
         SnippetScope::Project => " Project — only this repository ",
@@ -261,38 +244,36 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().fg(theme.text).bg(theme.background))
             .block(field_block(
                 " Scope (Space or Ctrl+G toggles) ",
-                modal.editor_field == SnippetEditorField::Scope,
+                field == SnippetEditorField::Scope,
                 theme,
             )),
         chunks[1],
     );
 
-    let prompt = if modal.editor_field == SnippetEditorField::Prompt {
-        with_cursor(
-            &safe_terminal_text(&modal.editor_prompt),
-            modal.editor_prompt_cursor,
-        )
-    } else {
-        safe_terminal_text(&modal.editor_prompt)
-    };
-    let prompt_width = chunks[2].width.saturating_sub(2).max(1) as usize;
-    let prompt_height = chunks[2].height.saturating_sub(2).max(1) as usize;
-    let cursor_row = prompt_cursor_row(
-        &modal.editor_prompt,
-        modal.editor_prompt_cursor,
-        prompt_width,
-    );
-    let prompt_scroll = cursor_row.saturating_sub(prompt_height.saturating_sub(1));
+    // The same widget the scratchpad renders, so the cursor sits on a character
+    // instead of displacing it and the arrows follow the wrapped rows on screen.
     f.render_widget(
-        Paragraph::new(prompt)
-            .style(Style::default().fg(theme.text).bg(theme.background))
-            .wrap(Wrap { trim: false })
-            .scroll((u16::try_from(prompt_scroll).unwrap_or(u16::MAX), 0))
-            .block(field_block(
-                " Prompt ",
-                modal.editor_field == SnippetEditorField::Prompt,
+        EditorView::new(&mut modal.editor_name.state)
+            .theme(field_editor_theme(
+                " Name ",
+                field == SnippetEditorField::Name,
                 theme,
-            )),
+            ))
+            .line_numbers(LineNumbers::None)
+            .wrap(false)
+            .tab_width(2),
+        chunks[0],
+    );
+    f.render_widget(
+        EditorView::new(&mut modal.editor_prompt.state)
+            .theme(field_editor_theme(
+                " Prompt ",
+                field == SnippetEditorField::Prompt,
+                theme,
+            ))
+            .line_numbers(LineNumbers::None)
+            .wrap(true)
+            .tab_width(2),
         chunks[2],
     );
 
@@ -323,7 +304,7 @@ fn draw_editor(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw(" cancel"),
             ]),
             Line::from(Span::styled(
-                "Using a snippet pastes it into chat without sending.",
+                "Fields edit like the scratchpad. Using a snippet pastes it into chat without sending.",
                 Style::default().fg(super::semantic_foreground_on(
                     theme,
                     theme.muted,
@@ -396,6 +377,31 @@ fn field_block(title: &str, active: bool, theme: Theme) -> Block<'_> {
         }))
 }
 
+/// Dresses the shared editor as a form field: our border, no line numbers, and
+/// a cursor only while the field has focus, since a second one reads as focus.
+fn field_editor_theme(title: &str, active: bool, theme: Theme) -> EditorTheme<'_> {
+    let selection_foreground = theme.contrast_text(theme.selection_bg);
+    let editor_theme = EditorTheme::default()
+        .base(Style::default().fg(theme.text).bg(theme.background))
+        .cursor_style(
+            Style::default()
+                .fg(selection_foreground)
+                .bg(theme.selection_bg),
+        )
+        .selection_style(
+            Style::default()
+                .fg(selection_foreground)
+                .bg(theme.selection_bg),
+        )
+        .block(field_block(title, active, theme))
+        .hide_status_line();
+    if active {
+        editor_theme
+    } else {
+        editor_theme.hide_cursor()
+    }
+}
+
 fn key(text: &str, theme: Theme, background: ratatui::style::Color) -> Span<'_> {
     Span::styled(
         text,
@@ -407,17 +413,6 @@ fn key(text: &str, theme: Theme, background: ratatui::style::Color) -> Span<'_> 
             ))
             .add_modifier(Modifier::BOLD),
     )
-}
-
-fn with_cursor(text: &str, cursor: usize) -> String {
-    let byte = text
-        .char_indices()
-        .nth(cursor)
-        .map(|(byte, _)| byte)
-        .unwrap_or(text.len());
-    let mut rendered = text.to_string();
-    rendered.insert(byte, '█');
-    rendered
 }
 
 fn safe_terminal_text(text: &str) -> String {
@@ -444,48 +439,27 @@ fn safe_single_line_text(text: &str) -> String {
         .collect()
 }
 
-fn prompt_cursor_row(text: &str, cursor: usize, width: usize) -> usize {
-    let mut row = 0;
-    let mut column = 0;
-    for character in text.chars().take(cursor) {
-        if character == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-        let character_width = text::display_width(&character.to_string());
-        if column + character_width > width {
-            row += 1;
-            column = 0;
-        }
-        column += character_width;
-        if column >= width {
-            row += column / width;
-            column %= width;
-        }
-    }
-    row
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{PromptSnippet, UserConfig};
-    use crate::snippets::SnippetModal;
+    use crate::snippets::{SnippetEditorField, SnippetModal};
     use crate::theme::ThemeName;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use edtui::Index2;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
     use ratatui::Terminal;
     use std::path::PathBuf;
 
-    fn render_buffer(app: &App) -> Buffer {
+    fn render_buffer(app: &mut App) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         terminal.backend().buffer().clone()
     }
 
-    fn render(app: &App) -> String {
+    fn render(app: &mut App) -> String {
         render_buffer(app)
             .content()
             .iter()
@@ -523,7 +497,7 @@ mod tests {
             Some(PathBuf::from("project")),
         ));
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(text.contains("Prompt Snippets"), "got:\n{text}");
         assert!(text.contains("global"), "got:\n{text}");
@@ -543,7 +517,7 @@ mod tests {
             .collect();
         app.snippet_modal = Some(SnippetModal::new(snippets, Vec::new(), None));
 
-        let buffer = render_buffer(&app);
+        let buffer = render_buffer(&mut app);
         let row_of = |name: &str| find_text(&buffer, name).1;
         let gutter = |y: u16| {
             (buffer.area.left()..buffer.area.right())
@@ -577,19 +551,12 @@ mod tests {
         modal.begin_add();
         app.snippet_modal = Some(modal);
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(text.contains("Add Prompt Snippet"), "got:\n{text}");
         assert!(text.contains("available in every project"), "got:\n{text}");
         assert!(text.contains("without sending"), "got:\n{text}");
         assert!(text.contains("Ctrl+S save"), "got:\n{text}");
-    }
-
-    #[test]
-    fn prompt_cursor_row_counts_explicit_lines_and_wrapping() {
-        assert_eq!(prompt_cursor_row("abcd", 4, 4), 1);
-        assert_eq!(prompt_cursor_row("ab\ncd", 5, 20), 1);
-        assert_eq!(prompt_cursor_row("🚀🚀", 2, 3), 1);
     }
 
     #[test]
@@ -605,7 +572,7 @@ mod tests {
         modal.selected = 39;
         app.snippet_modal = Some(modal);
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(text.contains("Snippet 39"), "got:\n{text}");
         assert!(
@@ -626,7 +593,7 @@ mod tests {
             Some(PathBuf::from("project")),
         ));
 
-        let text = render(&app);
+        let text = render(&mut app);
 
         assert!(!text.contains('\u{1b}'));
         assert!(!text.contains('\u{7}'));
@@ -651,7 +618,7 @@ mod tests {
             None,
         ));
 
-        let buffer = render_buffer(&app);
+        let buffer = render_buffer(&mut app);
         let (x, y) = find_text(&buffer, "Review");
         let theme = app.theme();
 
@@ -675,7 +642,7 @@ mod tests {
         modal.begin_add();
         app.snippet_modal = Some(modal);
 
-        let buffer = render_buffer(&app);
+        let buffer = render_buffer(&mut app);
         let modal_area = super::super::popups::centered_rect(72, 76, buffer.area);
         for y in modal_area.top()..modal_area.bottom() {
             for x in modal_area.left()..modal_area.right() {
@@ -694,5 +661,70 @@ mod tests {
             crate::ui::foreground_on(theme, theme.surface)
         );
         assert_eq!(buffer[(x, y)].bg, theme.surface);
+    }
+    fn editing_app(prompt: &str) -> App {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut modal = SnippetModal::new(
+            vec![PromptSnippet {
+                name: "Review".to_string(),
+                prompt: prompt.to_string(),
+            }],
+            Vec::new(),
+            None,
+        );
+        modal.begin_edit();
+        modal.editor_field = SnippetEditorField::Prompt;
+        app.snippet_modal = Some(modal);
+        app
+    }
+
+    #[test]
+    fn the_prompt_cursor_is_drawn_over_a_character_instead_of_displacing_it() {
+        let mut app = editing_app("the quick brown fox");
+        app.snippet_modal
+            .as_mut()
+            .unwrap()
+            .editor_prompt
+            .set_cursor(Index2::new(0, 4));
+
+        let buffer = render_buffer(&mut app);
+        let (x, y) = find_text(&buffer, "the quick brown fox");
+
+        assert_eq!(
+            buffer[(x + 4, y)].symbol(),
+            "q",
+            "the cursor cell still holds its own character"
+        );
+        assert_eq!(buffer[(x + 4, y)].bg, app.theme().selection_bg);
+        assert_eq!(buffer[(x + 5, y)].symbol(), "u", "nothing was pushed right");
+    }
+
+    #[test]
+    fn arrows_walk_the_prompt_across_a_soft_wrapped_line() {
+        let mut app = editing_app("the quick brown fox jumps over the lazy dog");
+        app.snippet_modal
+            .as_mut()
+            .unwrap()
+            .editor_prompt
+            .set_cursor(Index2::new(0, 4));
+        // Wrapping is decided while rendering, and only a pane too narrow for the
+        // whole prompt gives the arrows a second row to reach.
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let prompt = &mut app.snippet_modal.as_mut().unwrap().editor_prompt;
+        prompt.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        let after_down = prompt.cursor();
+        prompt.handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+
+        assert!(
+            after_down.col > 4,
+            "Down reaches the next row on screen, got {after_down:?}"
+        );
+        assert_eq!(
+            prompt.cursor(),
+            Index2::new(0, 4),
+            "Up returns to the same column"
+        );
     }
 }

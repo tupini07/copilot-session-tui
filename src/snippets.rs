@@ -1,5 +1,5 @@
 use crate::config::PromptSnippet;
-use crate::text;
+use crate::editor::TextEditor;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,6 @@ impl SnippetEditorField {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct SnippetModal {
     pub screen: SnippetScreen,
     pub selected: usize,
@@ -50,10 +49,8 @@ pub struct SnippetModal {
     pub original_global: Vec<PromptSnippet>,
     pub original_project: Vec<PromptSnippet>,
     pub project_root: Option<PathBuf>,
-    pub editor_name: String,
-    pub editor_name_cursor: usize,
-    pub editor_prompt: String,
-    pub editor_prompt_cursor: usize,
+    pub editor_name: TextEditor,
+    pub editor_prompt: TextEditor,
     pub editor_scope: SnippetScope,
     pub editor_field: SnippetEditorField,
     pub editing: Option<(SnippetScope, usize)>,
@@ -84,10 +81,8 @@ impl SnippetModal {
             global,
             project,
             project_root,
-            editor_name: String::new(),
-            editor_name_cursor: 0,
-            editor_prompt: String::new(),
-            editor_prompt_cursor: 0,
+            editor_name: name_editor(""),
+            editor_prompt: prompt_editor(""),
             editor_scope: SnippetScope::Global,
             editor_field: SnippetEditorField::Name,
             editing: None,
@@ -127,10 +122,8 @@ impl SnippetModal {
 
     pub fn begin_add(&mut self) {
         self.screen = SnippetScreen::Editor;
-        self.editor_name.clear();
-        self.editor_name_cursor = 0;
-        self.editor_prompt.clear();
-        self.editor_prompt_cursor = 0;
+        self.editor_name = name_editor("");
+        self.editor_prompt = prompt_editor("");
         self.editor_scope = SnippetScope::Global;
         self.editor_field = SnippetEditorField::Name;
         self.editing = None;
@@ -144,10 +137,8 @@ impl SnippetModal {
         let name = snippet.name.clone();
         let prompt = snippet.prompt.clone();
         self.screen = SnippetScreen::Editor;
-        self.editor_name = name;
-        self.editor_name_cursor = self.editor_name.chars().count();
-        self.editor_prompt = prompt;
-        self.editor_prompt_cursor = self.editor_prompt.chars().count();
+        self.editor_name = name_editor(&name);
+        self.editor_prompt = prompt_editor(&prompt);
         self.editor_scope = scope;
         self.editor_field = SnippetEditorField::Name;
         self.editing = Some((scope, index));
@@ -166,178 +157,29 @@ impl SnippetModal {
         self.error = None;
     }
 
-    pub fn insert_editor_text(&mut self, text: &str) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        let byte = byte_at_char(value, *cursor);
-        value.insert_str(byte, text);
-        *cursor += text.chars().count();
-        self.error = None;
-    }
-
-    pub fn backspace_editor(&mut self) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        if *cursor == 0 {
-            return;
-        }
-        let start = byte_at_char(value, *cursor - 1);
-        let end = byte_at_char(value, *cursor);
-        value.replace_range(start..end, "");
-        *cursor -= 1;
-        self.error = None;
-    }
-
-    pub fn delete_editor(&mut self) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        if *cursor >= value.chars().count() {
-            return;
-        }
-        let start = byte_at_char(value, *cursor);
-        let end = byte_at_char(value, *cursor + 1);
-        value.replace_range(start..end, "");
-        self.error = None;
-    }
-
-    /// Ctrl+W / Ctrl+Backspace, matching the scratchpad: at the start of a prompt
-    /// line this only joins it onto the previous one instead of eating a whole word.
-    pub fn delete_previous_word_editor(&mut self) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        let chars: Vec<char> = value.chars().collect();
-        let end = (*cursor).min(chars.len());
-        if end == 0 {
-            return;
-        }
-        let line_start = chars[..end]
-            .iter()
-            .rposition(|character| *character == '\n')
-            .map(|position| position + 1)
-            .unwrap_or(0);
-        let start = if end == line_start {
-            end - 1
-        } else {
-            line_start + text::previous_word_start(&chars[line_start..end], end - line_start)
-        };
-        value.replace_range(byte_at_char(value, start)..byte_at_char(value, end), "");
-        *cursor = start;
-        self.error = None;
-    }
-
-    /// Ctrl+Delete, the forward mirror of [`Self::delete_previous_word_editor`].
-    pub fn delete_next_word_editor(&mut self) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&mut self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&mut self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        let chars: Vec<char> = value.chars().collect();
-        let start = (*cursor).min(chars.len());
-        if start == chars.len() {
-            return;
-        }
-        let line_end = chars[start..]
-            .iter()
-            .position(|character| *character == '\n')
-            .map(|offset| start + offset)
-            .unwrap_or(chars.len());
-        let end = if start == line_end {
-            start + 1
-        } else {
-            start + text::next_word_end(&chars[start..line_end], 0)
-        };
-        value.replace_range(byte_at_char(value, start)..byte_at_char(value, end), "");
-        *cursor = start;
-        self.error = None;
-    }
-
-    pub fn move_editor_cursor(&mut self, amount: isize) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        *cursor = if amount < 0 {
-            cursor.saturating_sub(amount.unsigned_abs())
-        } else {
-            (*cursor + amount as usize).min(value.chars().count())
-        };
-    }
-
-    pub fn move_editor_line_boundary(&mut self, end: bool) {
-        let (value, cursor) = match self.editor_field {
-            SnippetEditorField::Name => (&self.editor_name, &mut self.editor_name_cursor),
-            SnippetEditorField::Prompt => (&self.editor_prompt, &mut self.editor_prompt_cursor),
-            SnippetEditorField::Scope => return,
-        };
-        let chars: Vec<char> = value.chars().collect();
-        *cursor = if end {
-            chars[*cursor..]
-                .iter()
-                .position(|character| *character == '\n')
-                .map(|offset| *cursor + offset)
-                .unwrap_or(chars.len())
-        } else {
-            chars[..*cursor]
-                .iter()
-                .rposition(|character| *character == '\n')
-                .map(|position| position + 1)
-                .unwrap_or(0)
-        };
-    }
-
-    pub fn move_prompt_cursor_vertical(&mut self, down: bool) {
-        if self.editor_field != SnippetEditorField::Prompt {
-            return;
-        }
-        let chars: Vec<char> = self.editor_prompt.chars().collect();
-        let cursor = self.editor_prompt_cursor.min(chars.len());
-        let line_start = chars[..cursor]
-            .iter()
-            .rposition(|character| *character == '\n')
-            .map(|position| position + 1)
-            .unwrap_or(0);
-        let column = cursor - line_start;
-        if down {
-            let Some(line_end_offset) = chars[cursor..]
-                .iter()
-                .position(|character| *character == '\n')
-            else {
-                return;
-            };
-            let next_start = cursor + line_end_offset + 1;
-            let next_end = chars[next_start..]
-                .iter()
-                .position(|character| *character == '\n')
-                .map(|offset| next_start + offset)
-                .unwrap_or(chars.len());
-            self.editor_prompt_cursor = next_start + column.min(next_end - next_start);
-        } else {
-            if line_start == 0 {
-                return;
-            }
-            let previous_end = line_start - 1;
-            let previous_start = chars[..previous_end]
-                .iter()
-                .rposition(|character| *character == '\n')
-                .map(|position| position + 1)
-                .unwrap_or(0);
-            self.editor_prompt_cursor = previous_start + column.min(previous_end - previous_start);
+    /// The editor behind the focused field, or `None` while the focus is on
+    /// the scope toggle, which is not text.
+    pub fn focused_editor(&mut self) -> Option<&mut TextEditor> {
+        match self.editor_field {
+            SnippetEditorField::Name => Some(&mut self.editor_name),
+            SnippetEditorField::Prompt => Some(&mut self.editor_prompt),
+            SnippetEditorField::Scope => None,
         }
     }
+}
+
+/// The name is one line: Enter belongs to the form, and a pasted newline would
+/// produce a snippet the list cannot show.
+fn name_editor(content: &str) -> TextEditor {
+    let mut editor = TextEditor::new(content).single_line();
+    editor.move_cursor_to_end();
+    editor
+}
+
+fn prompt_editor(content: &str) -> TextEditor {
+    let mut editor = TextEditor::new(content);
+    editor.move_cursor_to_end();
+    editor
 }
 
 /// The digit labelling `index` in the list, or `None` past the tenth snippet.
@@ -359,13 +201,6 @@ pub fn quick_use_index(digit: char) -> Option<usize> {
         '1'..='9' => digit.to_digit(10).map(|value| value as usize - 1),
         _ => None,
     }
-}
-
-fn byte_at_char(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map(|(byte, _)| byte)
-        .unwrap_or(text.len())
 }
 
 #[cfg(test)]
@@ -406,7 +241,7 @@ mod tests {
         modal.cancel_subscreen();
         modal.begin_edit();
         assert_eq!(modal.editor_scope, SnippetScope::Project);
-        assert_eq!(modal.editor_name, "project");
+        assert_eq!(modal.editor_name.text(), "project");
     }
 
     #[test]
@@ -439,22 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn editor_inserts_and_deletes_at_unicode_character_boundaries() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_name = "a🚀c".to_string();
-        modal.editor_name_cursor = 2;
-
-        modal.insert_editor_text("b");
-        assert_eq!(modal.editor_name, "a🚀bc");
-        modal.backspace_editor();
-        assert_eq!(modal.editor_name, "a🚀c");
-        modal.move_editor_cursor(-1);
-        modal.delete_editor();
-        assert_eq!(modal.editor_name, "ac");
-    }
-
-    #[test]
     fn quick_use_digits_round_trip_and_stop_after_ten_snippets() {
         assert_eq!(quick_use_label(0), Some('1'));
         assert_eq!(quick_use_label(8), Some('9'));
@@ -466,98 +285,5 @@ mod tests {
             assert_eq!(quick_use_index(digit), Some(index));
         }
         assert_eq!(quick_use_index('a'), None);
-    }
-
-    #[test]
-    fn ctrl_w_deletes_the_previous_word_in_both_editor_fields() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_name = "first second   ".to_string();
-        modal.editor_name_cursor = 15;
-        modal.delete_previous_word_editor();
-        assert_eq!(modal.editor_name, "first ");
-        assert_eq!(modal.editor_name_cursor, 6);
-
-        modal.editor_field = SnippetEditorField::Prompt;
-        modal.editor_prompt = "review the diff".to_string();
-        modal.editor_prompt_cursor = 15;
-        modal.delete_previous_word_editor();
-        assert_eq!(modal.editor_prompt, "review the ");
-        assert_eq!(modal.editor_prompt_cursor, 11);
-    }
-
-    #[test]
-    fn ctrl_delete_removes_the_next_word_and_its_trailing_space() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_field = SnippetEditorField::Prompt;
-        modal.editor_prompt = "first second third".to_string();
-        modal.editor_prompt_cursor = 6;
-
-        modal.delete_next_word_editor();
-
-        assert_eq!(modal.editor_prompt, "first third");
-        assert_eq!(modal.editor_prompt_cursor, 6);
-    }
-
-    #[test]
-    fn word_deletion_only_joins_lines_at_a_prompt_line_boundary() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_field = SnippetEditorField::Prompt;
-        modal.editor_prompt = "first\nsecond".to_string();
-        modal.editor_prompt_cursor = 6;
-
-        modal.delete_previous_word_editor();
-        assert_eq!(modal.editor_prompt, "firstsecond");
-        assert_eq!(modal.editor_prompt_cursor, 5);
-
-        modal.editor_prompt = "first\nsecond".to_string();
-        modal.editor_prompt_cursor = 5;
-        modal.delete_next_word_editor();
-        assert_eq!(modal.editor_prompt, "firstsecond");
-        assert_eq!(modal.editor_prompt_cursor, 5);
-    }
-
-    #[test]
-    fn word_deletion_respects_unicode_boundaries_and_field_edges() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_name = "🚀 launch".to_string();
-        modal.editor_name_cursor = 9;
-        modal.delete_previous_word_editor();
-        assert_eq!(modal.editor_name, "🚀 ");
-
-        modal.editor_name_cursor = 0;
-        modal.delete_previous_word_editor();
-        assert_eq!(modal.editor_name, "🚀 ", "no-op at the start of the field");
-
-        modal.editor_name_cursor = modal.editor_name.chars().count();
-        modal.delete_next_word_editor();
-        assert_eq!(modal.editor_name, "🚀 ", "no-op at the end of the field");
-
-        modal.editor_field = SnippetEditorField::Scope;
-        modal.delete_previous_word_editor();
-        modal.delete_next_word_editor();
-        assert_eq!(modal.editor_name, "🚀 ", "scope field has no text to edit");
-    }
-
-    #[test]
-    fn prompt_cursor_moves_vertically_while_retaining_its_column() {
-        let mut modal = SnippetModal::new(Vec::new(), Vec::new(), None);
-        modal.begin_add();
-        modal.editor_field = SnippetEditorField::Prompt;
-        modal.editor_prompt = "abcd\nxy\n12345".to_string();
-        modal.editor_prompt_cursor = 3;
-
-        modal.move_prompt_cursor_vertical(true);
-        assert_eq!(
-            modal.editor_prompt_cursor, 7,
-            "clamped to short second line"
-        );
-        modal.move_prompt_cursor_vertical(true);
-        assert_eq!(modal.editor_prompt_cursor, 10, "same column on third line");
-        modal.move_prompt_cursor_vertical(false);
-        assert_eq!(modal.editor_prompt_cursor, 7);
     }
 }

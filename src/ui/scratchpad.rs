@@ -34,7 +34,7 @@ pub fn draw_in_with_theme(
         app_theme.inactive
     };
     let editor_theme = scratchpad_editor_theme(app_theme, status, focused);
-    let editor = EditorView::new(&mut scratchpad.state)
+    let editor = EditorView::new(&mut scratchpad.editor.state)
         .theme(editor_theme)
         .line_numbers(LineNumbers::None)
         .wrap(true)
@@ -43,7 +43,7 @@ pub fn draw_in_with_theme(
     f.render_widget(editor, area);
 
     let viewport_lines = area.height.saturating_sub(2) as usize;
-    let content_lines = scratchpad.state.lines.len();
+    let content_lines = scratchpad.editor.state.lines.len();
     if viewport_lines > 0 && content_lines > viewport_lines {
         let scrollbar_area = Rect {
             y: area.y.saturating_add(1),
@@ -58,7 +58,7 @@ pub fn draw_in_with_theme(
             .thumb_symbol("█")
             .thumb_style(Style::default().fg(accent).bg(background));
         let mut scrollbar_state = ScrollbarState::new(content_lines)
-            .position(scratchpad.state.cursor.row)
+            .position(scratchpad.editor.state.cursor.row)
             .viewport_content_length(viewport_lines);
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
@@ -220,8 +220,8 @@ mod tests {
 
     fn render_buffer(content: &str, cursor: Index2, focused: bool, theme: Theme) -> Buffer {
         let mut scratchpad = Scratchpad::open("scrollbar-render-test").unwrap();
-        scratchpad.state.lines = Lines::from(content);
-        scratchpad.state.cursor = cursor;
+        scratchpad.editor.state.lines = Lines::from(content);
+        scratchpad.editor.state.cursor = cursor;
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -321,8 +321,8 @@ mod tests {
     #[test]
     fn arrows_navigate_visual_rows_inside_a_wrapped_line() {
         let mut scratchpad = Scratchpad::open("soft-wrap-navigation-test").unwrap();
-        scratchpad.state.lines = Lines::from("currently trying to get");
-        scratchpad.state.cursor = Index2::new(0, 5);
+        scratchpad.editor.state.lines = Lines::from("currently trying to get");
+        scratchpad.editor.state.cursor = Index2::new(0, 5);
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -332,12 +332,12 @@ mod tests {
         scratchpad
             .handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)))
             .unwrap();
-        assert_eq!(scratchpad.state.cursor, Index2::new(0, 22));
+        assert_eq!(scratchpad.editor.state.cursor, Index2::new(0, 22));
 
         scratchpad
             .handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
             .unwrap();
-        assert_eq!(scratchpad.state.cursor, Index2::new(0, 5));
+        assert_eq!(scratchpad.editor.state.cursor, Index2::new(0, 5));
 
         scratchpad
             .handle_event(Event::Key(KeyEvent::new(
@@ -345,19 +345,19 @@ mod tests {
                 KeyModifiers::SHIFT,
             )))
             .unwrap();
-        assert_eq!(scratchpad.state.cursor, Index2::new(0, 22));
-        assert!(scratchpad.state.selection.is_some());
+        assert_eq!(scratchpad.editor.state.cursor, Index2::new(0, 22));
+        assert!(scratchpad.editor.state.selection.is_some());
 
         scratchpad
             .handle_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)))
             .unwrap();
-        assert_eq!(scratchpad.state.cursor, Index2::new(0, 5));
+        assert_eq!(scratchpad.editor.state.cursor, Index2::new(0, 5));
     }
 
     #[test]
     fn mouse_drag_preserves_selection_anchor_until_release() {
         let mut scratchpad = Scratchpad::open("mouse-selection-test").unwrap();
-        scratchpad.state.lines = Lines::from("abcdefghij");
+        scratchpad.editor.state.lines = Lines::from("abcdefghij");
         let backend = TestBackend::new(20, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -379,10 +379,10 @@ mod tests {
                 .unwrap();
         }
 
-        let selection = scratchpad.state.selection.as_ref().unwrap();
+        let selection = scratchpad.editor.state.selection.as_ref().unwrap();
         assert_eq!(selection.start, Index2::new(0, 1));
         assert_eq!(selection.end, Index2::new(0, 8));
-        assert_eq!(scratchpad.state.mode, EditorMode::Visual);
+        assert_eq!(scratchpad.editor.state.mode, EditorMode::Visual);
 
         scratchpad
             .handle_event(Event::Mouse(MouseEvent {
@@ -393,16 +393,16 @@ mod tests {
             }))
             .unwrap();
 
-        let selection = scratchpad.state.selection.as_ref().unwrap();
+        let selection = scratchpad.editor.state.selection.as_ref().unwrap();
         assert_eq!(selection.start, Index2::new(0, 1));
         assert_eq!(selection.end, Index2::new(0, 8));
-        assert_eq!(scratchpad.state.mode, EditorMode::Insert);
+        assert_eq!(scratchpad.editor.state.mode, EditorMode::Insert);
     }
 
     #[test]
     fn clicking_past_the_end_of_a_line_puts_the_cursor_after_the_last_character() {
         let mut scratchpad = Scratchpad::open("click-past-end-test").unwrap();
-        scratchpad.state.lines = Lines::from("abcdefghij\nsecond");
+        scratchpad.editor.state.lines = Lines::from("abcdefghij\nsecond");
         let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
         terminal
             .draw(|frame| draw_with_theme(frame, &mut scratchpad, ThemeName::Classic.theme()))
@@ -417,7 +417,7 @@ mod tests {
                     modifiers: KeyModifiers::NONE,
                 }))
                 .unwrap();
-            scratchpad.state.cursor
+            scratchpad.editor.state.cursor
         };
 
         // Past the end of the first line: after the 'j', not in front of it.

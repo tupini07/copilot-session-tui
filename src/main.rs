@@ -2,6 +2,7 @@ mod app;
 mod command_palette;
 mod config;
 mod debug_keys;
+mod editor;
 mod events;
 mod github;
 mod hook_plugin;
