@@ -1210,7 +1210,7 @@ fn handle_project_settings(app: &mut App, key: KeyCode) {
             app.project_settings_selected = app.project_settings_selected.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.project_settings_selected < 1 {
+            if app.project_settings_selected < 2 {
                 app.project_settings_selected += 1;
             }
         }
@@ -1240,6 +1240,17 @@ fn toggle_project_override(app: &mut App) {
             } else {
                 settings.set_root_override(Some(settings.effective_root()));
             }
+        }
+        // Three states rather than the other rows' two: a repository needs to be able
+        // to force the prompts back on for someone whose global setting is yolo, not
+        // only to opt itself in.
+        2 => {
+            let next = match settings.yolo_override() {
+                None => Some(true),
+                Some(true) => Some(false),
+                Some(false) => None,
+            };
+            settings.set_yolo_override(next);
         }
         _ => {}
     }
@@ -1907,5 +1918,50 @@ mod tests {
         assert!(app.grabbed_favorite.is_none());
         assert_eq!(app.mode, Mode::Search);
         assert_eq!(app.config.favorites, vec!["id-0", "id-1"]);
+    }
+    #[test]
+    fn space_cycles_the_project_yolo_setting_through_all_three_states() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = config::UserConfig {
+            yolo: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), global.clone());
+        app.project_settings = Some(config::ProjectSettings::load(temp.path(), &global).unwrap());
+        app.mode = Mode::ProjectSettings;
+        app.project_settings_selected = 2;
+
+        let state = |app: &App| app.project_settings.as_ref().unwrap().yolo_override();
+        assert_eq!(state(&app), None, "starts inherited");
+
+        handle_project_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(state(&app), Some(true));
+        handle_project_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            state(&app),
+            Some(false),
+            "a repository must be able to say no to a global yes"
+        );
+        handle_project_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(state(&app), None, "and back to inheriting");
+    }
+
+    #[test]
+    fn the_yolo_row_is_reachable_and_has_nothing_to_type_into() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = config::UserConfig::default();
+        let mut app = App::new(Vec::new(), global.clone());
+        app.project_settings = Some(config::ProjectSettings::load(temp.path(), &global).unwrap());
+        app.mode = Mode::ProjectSettings;
+
+        handle_project_settings(&mut app, KeyCode::Down);
+        handle_project_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.project_settings_selected, 2);
+        handle_project_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.project_settings_selected, 2, "stops at the last row");
+
+        // Enter opens a text editor on the other rows; a tri-state has no text.
+        handle_project_settings(&mut app, KeyCode::Enter);
+        assert!(!app.project_settings_editing);
     }
 }

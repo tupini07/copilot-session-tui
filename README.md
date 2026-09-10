@@ -640,7 +640,8 @@ highlight keep the colors configured in Windows Terminal.
 `model` and `reasoning_effort` are **new-session defaults**. CST does not pass them when
 resuming an existing session, so a model or effort selected inside that conversation
 survives reopening it. `yolo` remains a launch policy and is applied on both new and
-resumed sessions.
+resumed sessions; a repository can override it for work inside it, described under
+project settings below.
 
 Running CST instances watch the global `config.json` and adopt changes made by another
 instance or an external editor without restarting. Notification routing and credentials
@@ -675,12 +676,20 @@ built-in defaults:
 
 ```json
 {
+  "yolo": false,
   "worktree": {
     "branch_prefix": "feature/",
     "root": ".worktrees"
   }
 }
 ```
+
+`yolo` here is three-state rather than two: leave it out to follow whatever the global
+setting says, or set it to decide for this repository. `Space` cycles the row through
+inherit, ON and OFF. Setting it to `false` is the useful direction — a repository can
+hold the permission prompts on for everyone working in it, whichever way their own
+global default is set. The project's answer applies to new and resumed sessions alike,
+and to isolated worktree sessions, which carry the repository's own `.cst.json`.
 
 A relative global root is resolved from the global config directory. A relative
 project root override is resolved from the repository root. Invalid project JSON is

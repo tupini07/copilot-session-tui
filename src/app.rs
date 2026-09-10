@@ -2950,7 +2950,7 @@ impl App {
                 mux.remove(existing);
             }
         }
-        let (program, args) = manager::resume_command(session_id, &self.config)?;
+        let (program, args) = manager::resume_command(session_id, &self.config, Path::new(cwd))?;
         self.spawn_pane(
             title,
             PathBuf::from(cwd),
@@ -3019,7 +3019,8 @@ impl App {
 
     /// Start a brand new Copilot session as a pane.
     pub fn attach_new_session(&mut self, cwd: &str, title: String) -> Result<()> {
-        let (program, args, session_id) = manager::new_session_command(&self.config)?;
+        let (program, args, session_id) =
+            manager::new_session_command(&self.config, Path::new(cwd))?;
         self.spawn_pane(title, PathBuf::from(cwd), session_id, program, args)
     }
 

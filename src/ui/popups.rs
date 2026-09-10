@@ -1581,6 +1581,23 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
             Style::default().fg(theme.muted),
         )),
         Line::from(""),
+        project_settings_row(
+            theme,
+            "Yolo Mode",
+            if settings.effective_yolo() {
+                "ON"
+            } else {
+                "OFF"
+            },
+            settings.yolo_override().is_some(),
+            app.project_settings_selected == 2,
+            false,
+        ),
+        Line::from(Span::styled(
+            "    Space cycles inherit / ON / OFF for sessions in this repository",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(""),
         Line::from(vec![
             Span::raw("  "),
             Span::styled("Space", Style::default().fg(theme.directory)),

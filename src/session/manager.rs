@@ -14,10 +14,26 @@ fn apply_args(cmd: &mut Command, args: Vec<String>) {
     }
 }
 
+/// Whether Copilot should start with `--yolo` for work in `cwd`.
+///
+/// A repository's `.cst.json` wins over the global setting when it says anything, so a
+/// project can opt itself in or — more usefully — force the permission prompts back on
+/// for everyone working in it, whatever their own default is.
+///
+/// A directory outside a Git project has no project file to consult. A project file
+/// that cannot be read falls back to the global setting too: it is reported where it is
+/// edited, and refusing to start a session over an unparseable preference would be a
+/// worse failure than starting with the user's own default.
+pub fn effective_yolo(config: &UserConfig, cwd: &Path) -> bool {
+    crate::session::loader::detect_project_root(&cwd.to_string_lossy())
+        .and_then(|root| crate::config::ProjectSettings::load(Path::new(&root), config).ok())
+        .map_or(config.yolo, |settings| settings.effective_yolo())
+}
+
 /// Launch policy that applies every time Copilot starts.
-fn runtime_args(config: &UserConfig) -> Vec<String> {
+fn runtime_args(yolo: bool) -> Vec<String> {
     let mut args = Vec::new();
-    if config.yolo {
+    if yolo {
         args.push("--yolo".to_string());
     }
     args
@@ -28,8 +44,8 @@ fn runtime_args(config: &UserConfig) -> Vec<String> {
 /// Copilot persists model and effort in the session. Passing them again on resume would
 /// overwrite a model the user selected inside that conversation with CST's current
 /// defaults.
-fn new_session_config_args(config: &UserConfig) -> Vec<String> {
-    let mut args = runtime_args(config);
+fn new_session_config_args(config: &UserConfig, yolo: bool) -> Vec<String> {
+    let mut args = runtime_args(yolo);
     if let Some(ref model) = config.model {
         args.push(format!("--model={}", model));
     }
@@ -40,14 +56,24 @@ fn new_session_config_args(config: &UserConfig) -> Vec<String> {
 }
 
 /// Program plus arguments for resuming an existing session inside a pane.
-pub fn resume_command(session_id: &str, config: &UserConfig) -> Result<(String, Vec<String>)> {
+///
+/// `cwd` is where the session will run, which is what decides whether the project it
+/// belongs to has an opinion about `--yolo`.
+pub fn resume_command(
+    session_id: &str,
+    config: &UserConfig,
+    cwd: &Path,
+) -> Result<(String, Vec<String>)> {
     let copilot = find_copilot()?;
-    Ok((copilot, resume_args(session_id, config)))
+    Ok((
+        copilot,
+        resume_args(session_id, effective_yolo(config, cwd)),
+    ))
 }
 
-fn resume_args(session_id: &str, config: &UserConfig) -> Vec<String> {
+fn resume_args(session_id: &str, yolo: bool) -> Vec<String> {
     let mut args = vec![format!("--resume={}", session_id)];
-    args.extend(runtime_args(config));
+    args.extend(runtime_args(yolo));
     args
 }
 
@@ -58,18 +84,21 @@ fn resume_args(session_id: &str, config: &UserConfig) -> Vec<String> {
 /// Deciding it up front is what lets a pane bind its scratchpad and terminal to the real
 /// session from the moment it spawns, instead of waiting for Copilot to invent an id and
 /// having nothing stable to key on in the meantime.
-pub fn new_session_command(config: &UserConfig) -> Result<(String, Vec<String>, String)> {
+pub fn new_session_command(
+    config: &UserConfig,
+    cwd: &Path,
+) -> Result<(String, Vec<String>, String)> {
     let copilot = find_copilot()?;
-    let (args, session_id) = new_session_args(config);
+    let (args, session_id) = new_session_args(config, effective_yolo(config, cwd));
     Ok((copilot, args, session_id))
 }
 
 /// The argument half of [`new_session_command`], split out so it can be tested without
 /// a Copilot binary on PATH.
-fn new_session_args(config: &UserConfig) -> (Vec<String>, String) {
+fn new_session_args(config: &UserConfig, yolo: bool) -> (Vec<String>, String) {
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut args = vec![format!("--session-id={session_id}")];
-    args.extend(new_session_config_args(config));
+    args.extend(new_session_config_args(config, yolo));
     (args, session_id)
 }
 
@@ -154,7 +183,10 @@ pub fn resume_session(session_id: &str, cwd: &str, config: &UserConfig) -> Resul
 
     let mut cmd = Command::new(copilot);
     cmd.arg(format!("--resume={}", session_id));
-    apply_args(&mut cmd, runtime_args(config));
+    apply_args(
+        &mut cmd,
+        runtime_args(effective_yolo(config, Path::new(cwd))),
+    );
 
     // Set the working directory to the session's original cwd
     if !cwd.is_empty() {
@@ -174,8 +206,11 @@ pub fn start_new_session(cwd: &str, config: &UserConfig) -> Result<()> {
     let copilot = find_copilot()?;
 
     let mut cmd = Command::new(copilot);
-    apply_args(&mut cmd, new_session_config_args(config));
     let cwd_path = Path::new(cwd);
+    apply_args(
+        &mut cmd,
+        new_session_config_args(config, effective_yolo(config, cwd_path)),
+    );
     if cwd_path.exists() {
         cmd.current_dir(cwd_path);
     }
@@ -204,7 +239,10 @@ pub fn start_worktree_session(
     );
 
     let mut cmd = Command::new(copilot);
-    apply_args(&mut cmd, new_session_config_args(config));
+    // The worktree carries the repository's own `.cst.json`, so it answers for the
+    // project setting exactly as the main checkout would.
+    let yolo = effective_yolo(config, &created.entry.path);
+    apply_args(&mut cmd, new_session_config_args(config, yolo));
     cmd.current_dir(&created.entry.path);
 
     if let Err(error) = cmd.status() {
@@ -272,7 +310,7 @@ mod tests {
     fn a_new_session_is_told_the_id_it_will_have() {
         let config = UserConfig::default();
 
-        let (args, session_id) = new_session_args(&config);
+        let (args, session_id) = new_session_args(&config, config.yolo);
 
         assert!(
             uuid::Uuid::parse_str(&session_id).is_ok(),
@@ -289,8 +327,8 @@ mod tests {
     fn every_new_session_gets_its_own_id() {
         let config = UserConfig::default();
 
-        let (_, first) = new_session_args(&config);
-        let (_, second) = new_session_args(&config);
+        let (_, first) = new_session_args(&config, config.yolo);
+        let (_, second) = new_session_args(&config, config.yolo);
 
         // Two new sessions sharing an id would share a scratchpad.
         assert_ne!(first, second);
@@ -305,7 +343,7 @@ mod tests {
             ..UserConfig::default()
         };
 
-        let (args, _) = new_session_args(&config);
+        let (args, _) = new_session_args(&config, config.yolo);
 
         assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
         assert!(
@@ -327,7 +365,7 @@ mod tests {
             ..UserConfig::default()
         };
 
-        let args = resume_args("existing-session", &config);
+        let args = resume_args("existing-session", config.yolo);
 
         assert_eq!(args[0], "--resume=existing-session");
         assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
@@ -353,8 +391,9 @@ mod tests {
     #[test]
     #[ignore = "requires a real, authenticated Copilot CLI and spends AI credits"]
     fn a_new_session_really_is_created_under_the_id_we_chose() {
-        let (program, args, session_id) = new_session_command(&UserConfig::default())
-            .expect("Copilot CLI must be installed for this probe");
+        let (program, args, session_id) =
+            new_session_command(&UserConfig::default(), &std::env::temp_dir())
+                .expect("Copilot CLI must be installed for this probe");
 
         let workdir = tempfile::tempdir().unwrap();
         let status = Command::new(&program)
@@ -413,5 +452,85 @@ mod tests {
         let content = fs::read_to_string(workspace).unwrap();
         assert!(content.contains("summary: My title\n"));
         assert!(content.contains("summary_count: 1\n"));
+    }
+    /// A directory that looks like a Git repository with the given project settings.
+    fn repo_with(project_json: Option<&str>) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        if let Some(json) = project_json {
+            fs::write(temp.path().join(".cst.json"), json).unwrap();
+        }
+        temp
+    }
+
+    #[test]
+    fn a_project_decides_yolo_for_sessions_started_in_it() {
+        let careful = UserConfig::default();
+        let reckless = UserConfig {
+            yolo: true,
+            ..UserConfig::default()
+        };
+
+        let opted_in = repo_with(Some(r#"{"yolo":true}"#));
+        assert!(effective_yolo(&careful, opted_in.path()));
+
+        // The direction that matters most: a repository can hold the prompts on for
+        // someone whose own default is yolo.
+        let opted_out = repo_with(Some(r#"{"yolo":false}"#));
+        assert!(!effective_yolo(&reckless, opted_out.path()));
+
+        // Silent project, and a project with other settings but no opinion here.
+        let silent = repo_with(None);
+        assert!(effective_yolo(&reckless, silent.path()));
+        assert!(!effective_yolo(&careful, silent.path()));
+        let unrelated = repo_with(Some(r#"{"worktree":{"branch_prefix":"x/"}}"#));
+        assert!(effective_yolo(&reckless, unrelated.path()));
+    }
+
+    #[test]
+    fn a_directory_with_no_project_falls_back_to_the_global_setting() {
+        let reckless = UserConfig {
+            yolo: true,
+            ..UserConfig::default()
+        };
+        let loose = tempfile::tempdir().unwrap();
+
+        assert!(effective_yolo(&reckless, loose.path()));
+        assert!(!effective_yolo(&UserConfig::default(), loose.path()));
+    }
+
+    #[test]
+    fn an_unreadable_project_file_starts_the_session_rather_than_failing_it() {
+        let broken = repo_with(Some("{not json"));
+        let reckless = UserConfig {
+            yolo: true,
+            ..UserConfig::default()
+        };
+
+        // Reported where it is edited; a launch is the wrong place to refuse over it.
+        assert!(effective_yolo(&reckless, broken.path()));
+        assert!(!effective_yolo(&UserConfig::default(), broken.path()));
+    }
+
+    #[test]
+    fn the_project_answer_is_what_reaches_copilots_arguments() {
+        let reckless = UserConfig {
+            yolo: true,
+            ..UserConfig::default()
+        };
+        let opted_out = repo_with(Some(r#"{"yolo":false}"#));
+        let yolo = effective_yolo(&reckless, opted_out.path());
+
+        let (new_args, _) = new_session_args(&reckless, yolo);
+        let resumed = resume_args("existing", yolo);
+
+        assert!(
+            !new_args.iter().any(|arg| arg == "--yolo"),
+            "a global yolo must not leak past the project's no, got {new_args:?}"
+        );
+        assert!(
+            !resumed.iter().any(|arg| arg == "--yolo"),
+            "and resuming into that project is the same session, got {resumed:?}"
+        );
     }
 }

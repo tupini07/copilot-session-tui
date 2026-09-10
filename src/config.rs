@@ -179,6 +179,14 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<ProjectWorktreeConfig>,
 
+    /// Whether sessions in this repository start with `--yolo`.
+    ///
+    /// Tri-state on purpose: absent means "whatever the user's global setting says",
+    /// so a repository that wants to force the permission prompts back on can say
+    /// `false` rather than only being able to opt in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo: Option<bool>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<PromptSnippet>,
 
@@ -203,6 +211,7 @@ pub struct ProjectSettings {
     pub repository_root: PathBuf,
     config: ProjectConfig,
     global: EffectiveWorktreeConfig,
+    global_yolo: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -229,7 +238,20 @@ impl ProjectSettings {
             repository_root,
             config,
             global: global_worktree(global),
+            global_yolo: global.yolo,
         })
+    }
+
+    pub fn yolo_override(&self) -> Option<bool> {
+        self.config.yolo
+    }
+
+    pub fn effective_yolo(&self) -> bool {
+        self.config.yolo.unwrap_or(self.global_yolo)
+    }
+
+    pub fn set_yolo_override(&mut self, value: Option<bool>) {
+        self.config.yolo = value;
     }
 
     pub fn branch_prefix_override(&self) -> Option<&str> {
@@ -289,6 +311,7 @@ impl ProjectSettings {
 
     pub fn refresh_global(&mut self, global: &UserConfig) {
         self.global = global_worktree(global);
+        self.global_yolo = global.yolo;
     }
 
     fn worktree_mut(&mut self) -> &mut ProjectWorktreeConfig {
@@ -310,8 +333,15 @@ impl ProjectSettings {
 }
 
 impl ProjectConfig {
+    /// Whether there is nothing left worth keeping a `.cst.json` for.
+    ///
+    /// Every field has to be listed: a config that looks empty is deleted from disk,
+    /// so forgetting one here silently throws that setting away on the next save.
     fn is_empty(&self) -> bool {
-        self.worktree.is_none() && self.snippets.is_empty() && self.extra.is_empty()
+        self.worktree.is_none()
+            && self.yolo.is_none()
+            && self.snippets.is_empty()
+            && self.extra.is_empty()
     }
 }
 
@@ -1258,5 +1288,66 @@ mod tests {
             .to_string();
         assert!(error.contains("Invalid project settings"));
         assert_eq!(fs::read_to_string(path).unwrap(), "{invalid");
+    }
+    #[test]
+    fn a_project_can_override_yolo_in_either_direction_or_stay_out_of_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let yolo_global = UserConfig {
+            yolo: true,
+            ..UserConfig::default()
+        };
+        let careful_global = UserConfig::default();
+
+        // Nothing said: whatever the user's own setting is.
+        let inherited = ProjectSettings::load(temp.path(), &yolo_global).unwrap();
+        assert_eq!(inherited.yolo_override(), None);
+        assert!(inherited.effective_yolo());
+        assert!(!ProjectSettings::load(temp.path(), &careful_global)
+            .unwrap()
+            .effective_yolo());
+
+        // A repository that wants the prompts back on can say so, and it wins over a
+        // global yolo — the direction a two-state opt-in could not express.
+        let mut settings = ProjectSettings::load(temp.path(), &yolo_global).unwrap();
+        settings.set_yolo_override(Some(false));
+        settings.save().unwrap();
+        let reloaded = ProjectSettings::load(temp.path(), &yolo_global).unwrap();
+        assert_eq!(reloaded.yolo_override(), Some(false));
+        assert!(!reloaded.effective_yolo());
+
+        // And the other way round.
+        let mut settings = ProjectSettings::load(temp.path(), &careful_global).unwrap();
+        settings.set_yolo_override(Some(true));
+        settings.save().unwrap();
+        assert!(ProjectSettings::load(temp.path(), &careful_global)
+            .unwrap()
+            .effective_yolo());
+    }
+
+    #[test]
+    fn clearing_the_yolo_override_leaves_the_key_out_of_the_file_entirely() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = UserConfig::default();
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+
+        settings.set_yolo_override(Some(true));
+        settings.save().unwrap();
+        assert!(fs::read_to_string(temp.path().join(".cst.json"))
+            .unwrap()
+            .contains("yolo"));
+
+        settings.set_yolo_override(None);
+        settings.save().unwrap();
+        // Absent rather than `false`: the two mean different things, and writing one
+        // for the other would pin the repository to a setting nobody chose. With
+        // nothing else in it the file goes altogether, which says the same thing.
+        let left_behind = fs::read_to_string(temp.path().join(".cst.json")).unwrap_or_default();
+        assert!(!left_behind.contains("yolo"), "got: {left_behind}");
+        assert_eq!(
+            ProjectSettings::load(temp.path(), &global)
+                .unwrap()
+                .yolo_override(),
+            None
+        );
     }
 }
