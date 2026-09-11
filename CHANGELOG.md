@@ -3,6 +3,17 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.29.0 - 2026-09-11
+
+- Run cst doctor to see whether Copilot CLI, gh and Git are set up, and what each one you are missing would give you.
+- Hide sessions you never want to see by title or folder, and press H to bring them back temporarily.
+- Move a session tab: drag it along the strip, or press prefix m and use the arrows.
+- Drag the scrollbars in the issue and pull request viewer instead of only scrolling.
+- Edit snippets with the same editor as the scratchpad, arrow keys and all.
+- Decide per repository whether its sessions start in yolo mode, whatever your global setting says.
+- After updating, CST now shows what changed since the version you were last on.
+- Session exclusion filters contributed by Jake Smith.
+
 ## v0.28.0 - 2026-09-04
 
 - Tell an unread tab apart from one waiting on your answer at a glance.
