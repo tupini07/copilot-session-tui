@@ -302,13 +302,25 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf) -> anyhow::Result<()> {
         Ok(()) => {
             let screen = cst.screen();
             println!("--- What's New on first launch after an update ---\n{screen}\n");
-            for expected in ["v0.28.0", "v0.27.0", "v0.26.0", "You were on v0.25.0"] {
+            // Only what is above the fold. The span grows with every release, so
+            // asserting that an older one is visible without scrolling is a test that
+            // breaks on its own schedule rather than on a real regression.
+            for expected in ["You were on v0.25.0", "v0.28.0"] {
                 if !screen.contains(expected) {
                     failures.push(format!("the span is missing {expected}"));
                 }
             }
             if screen.contains("v0.25.0 —") {
                 failures.push("the version already seen was shown again".to_string());
+            }
+
+            // End reaches the bottom, which is also how the rest of the span is
+            // checked: the oldest release above the marker has to be in there.
+            cst.send(b"\x1b[F")?;
+            if let Err(error) = cst.wait_for("v0.26.0") {
+                failures.push(format!(
+                    "scrolling did not reach the oldest release: {error}"
+                ));
             }
 
             // 2. Esc closes it and reveals the session list underneath.

@@ -151,6 +151,7 @@ pub struct TakeoverTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsEditField {
     Model,
+    MaxAutopilotContinues,
     HiddenTitlePrefixes,
     HiddenPathPrefixes,
     BranchPrefix,
@@ -192,7 +193,7 @@ impl SettingsSection {
 
     pub const fn rows(self) -> &'static [usize] {
         match self {
-            Self::General => &[0, 1, 2, 3],
+            Self::General => &[0, 1, 2, 18, 3],
             Self::Filters => &[16, 17],
             Self::Worktrees => &[4, 5],
             Self::Terminal => &[6, 7, 8],

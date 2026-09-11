@@ -662,6 +662,13 @@ survives reopening it. `yolo` remains a launch policy and is applied on both new
 resumed sessions; a repository can override it for work inside it, described under
 project settings below.
 
+`max_autopilot_continues` caps how many times autopilot may carry on by itself. Leave it
+unset and CST passes nothing, so Copilot applies its own limit — currently five — rather
+than CST pinning whatever that number happens to be. Like `yolo` it is a launch policy
+applied to new *and* resumed sessions, because Copilot does not remember it between runs:
+a cap passed only at creation would silently do nothing on every resume. Zero is a real
+value and means autopilot never continues on its own.
+
 Running CST instances watch the global `config.json` and adopt changes made by another
 instance or an external editor without restarting. Notification routing and credentials
 are refreshed again immediately before each notification is queued. The current mux/non-mux mode remains
@@ -708,6 +715,7 @@ built-in defaults:
 ```json
 {
   "yolo": false,
+  "max_autopilot_continues": 2,
   "worktree": {
     "branch_prefix": "feature/",
     "root": ".worktrees"
@@ -721,6 +729,12 @@ inherit, ON and OFF. Setting it to `false` is the useful direction — a reposit
 hold the permission prompts on for everyone working in it, whichever way their own
 global default is set. The project's answer applies to new and resumed sessions alike,
 and to isolated worktree sessions, which carry the repository's own `.cst.json`.
+
+`max_autopilot_continues` inherits the same way — absent follows the global setting, a
+number decides for this repository. It is the setting for a codebase where autopilot
+should be kept on a short leash however far its users let it run elsewhere. `Space`
+takes the setting over starting from whatever is already in effect, so pressing it never
+silently changes the number; press it again to go back to inheriting.
 
 A relative global root is resolved from the global config directory. A relative
 project root override is resolved from the repository root. Invalid project JSON is

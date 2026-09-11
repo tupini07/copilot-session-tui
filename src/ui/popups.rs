@@ -1014,6 +1014,38 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
 
     lines.push(Line::from(""));
 
+    // Row 18: Max autopilot continues. Numbered after the Filters rows rather than
+    // renumbering everything below it — the indices are keys, not positions.
+    let continues_editing = app.settings_editing == Some(SettingsEditField::MaxAutopilotContinues);
+    let continues_display = if continues_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        match app.config.max_autopilot_continues {
+            Some(limit) => limit.to_string(),
+            None => "(Copilot default)".to_string(),
+        }
+    };
+    let continues_color = if app.config.max_autopilot_continues.is_some() {
+        theme.accent_alt
+    } else {
+        theme.muted
+    };
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Max Autopilot Continues",
+        &continues_display,
+        continues_color,
+        app.settings_selected == 18,
+        continues_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Blank leaves Copilot to apply its own limit",
+        Style::default().fg(theme.muted),
+    )));
+
+    lines.push(Line::from(""));
+
     // Row 3: Theme
     setting_lines.push(lines.len());
     lines.push(settings_row(
@@ -1604,6 +1636,14 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
     } else {
         settings.effective_root().to_string_lossy().to_string()
     };
+    let continues_value = if app.project_settings_editing && app.project_settings_selected == 3 {
+        format!("{}█", app.project_settings_input)
+    } else {
+        match settings.effective_max_autopilot_continues() {
+            Some(limit) => limit.to_string(),
+            None => "(Copilot default)".to_string(),
+        }
+    };
 
     let lines = vec![
         Line::from(""),
@@ -1652,6 +1692,19 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
         ),
         Line::from(Span::styled(
             "    Space cycles inherit / ON / OFF for sessions in this repository",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(""),
+        project_settings_row(
+            theme,
+            "Max Autopilot Continues",
+            &continues_value,
+            settings.max_autopilot_continues_override().is_some(),
+            app.project_settings_selected == 3,
+            app.project_settings_editing && app.project_settings_selected == 3,
+        ),
+        Line::from(Span::styled(
+            "    Blank inherits; Space overrides from whatever is in effect",
             Style::default().fg(theme.muted),
         )),
         Line::from(""),
@@ -2075,6 +2128,7 @@ mod help_tests {
             (SettingsSection::General, 1, "Model"),
             (SettingsSection::General, 2, "Reasoning Effort"),
             (SettingsSection::General, 3, "Theme"),
+            (SettingsSection::General, 18, "Max Autopilot Continues"),
             (SettingsSection::Filters, 16, "Hidden Title Prefixes"),
             (SettingsSection::Filters, 17, "Hidden Path Prefixes"),
             (SettingsSection::Worktrees, 4, "Branch Prefix"),

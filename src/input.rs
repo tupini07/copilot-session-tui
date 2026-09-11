@@ -1120,6 +1120,14 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 app.config.model.clone().unwrap_or_default(),
             ),
             2 => cycle_reasoning_effort(app),
+            18 => begin_global_edit(
+                app,
+                SettingsEditField::MaxAutopilotContinues,
+                app.config
+                    .max_autopilot_continues
+                    .map(|limit| limit.to_string())
+                    .unwrap_or_default(),
+            ),
             3 => app.open_theme_picker(),
             16 => begin_global_edit(
                 app,
@@ -1265,6 +1273,27 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
             }
             app.config.ntfy_access_token = value;
         }
+        SettingsEditField::MaxAutopilotContinues => {
+            // Blank clears the override rather than meaning zero, which would pin
+            // autopilot to never continuing at all.
+            if value.is_empty() {
+                app.config.max_autopilot_continues = None;
+            } else {
+                match value.parse::<u32>() {
+                    Ok(limit) => app.config.max_autopilot_continues = Some(limit),
+                    // Copilot rejects anything that is not a non-negative integer, so
+                    // catching it here keeps a typo from breaking every launch until
+                    // the user works out why sessions stopped starting.
+                    Err(_) => {
+                        app.status_message = Some(
+                            "Max autopilot continues must be a whole number, or blank for Copilot's default"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
     }
     app.settings_editing = None;
     app.settings_input.clear();
@@ -1307,7 +1336,7 @@ fn handle_project_settings(app: &mut App, key: KeyCode) {
             app.project_settings_selected = app.project_settings_selected.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.project_settings_selected < 2 {
+            if app.project_settings_selected < 3 {
                 app.project_settings_selected += 1;
             }
         }
@@ -1349,9 +1378,29 @@ fn toggle_project_override(app: &mut App) {
             };
             settings.set_yolo_override(next);
         }
+        // Two states here, unlike yolo: a number has no third meaning, so Space is
+        // "stop inheriting, starting from whatever is currently in effect" and back.
+        3 => {
+            if settings.max_autopilot_continues_override().is_some() {
+                settings.set_max_autopilot_continues_override(None);
+            } else {
+                settings.set_max_autopilot_continues_override(
+                    settings
+                        .effective_max_autopilot_continues()
+                        .or(Some(DEFAULT_MAX_AUTOPILOT_CONTINUES)),
+                );
+            }
+        }
         _ => {}
     }
 }
+
+/// What Copilot uses when nothing overrides it, as of CLI 1.0.84.
+///
+/// Only ever used as the starting point when a project first takes the setting over,
+/// so drifting out of date makes an override start from a stale number rather than
+/// changing what an inheriting project does.
+const DEFAULT_MAX_AUTOPILOT_CONTINUES: u32 = 5;
 
 fn begin_project_edit(app: &mut App) {
     let Some(settings) = app.project_settings.as_ref() else {
@@ -1360,6 +1409,10 @@ fn begin_project_edit(app: &mut App) {
     app.project_settings_input = match app.project_settings_selected {
         0 => settings.effective_branch_prefix().to_string(),
         1 => settings.effective_root().to_string_lossy().to_string(),
+        3 => settings
+            .max_autopilot_continues_override()
+            .map(|limit| limit.to_string())
+            .unwrap_or_default(),
         _ => return,
     };
     app.project_settings_editing = true;
@@ -1384,6 +1437,24 @@ fn commit_project_setting(app: &mut App) {
                 return;
             }
             settings.set_root_override(Some(PathBuf::from(value)));
+        }
+        3 => {
+            // Blank clears the override rather than meaning zero, which would stop
+            // autopilot continuing at all.
+            if value.is_empty() {
+                settings.set_max_autopilot_continues_override(None);
+            } else {
+                match value.parse::<u32>() {
+                    Ok(limit) => settings.set_max_autopilot_continues_override(Some(limit)),
+                    Err(_) => {
+                        app.status_message = Some(
+                            "Max autopilot continues must be a whole number, or blank to inherit"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                }
+            }
         }
         _ => return,
     }
@@ -1654,13 +1725,26 @@ mod tests {
     fn global_settings_tabs_keep_selection_inside_the_active_section() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.mode = Mode::Settings;
+        // Row indices are keys, not positions: a section may carry an index that does
+        // not sit numerically between its neighbours' — appending a row to an early
+        // section is otherwise a renumbering of everything below it. What has to hold
+        // is that every index belongs to exactly one section and none is skipped.
+        let mut rows: Vec<usize> = SettingsSection::ALL
+            .into_iter()
+            .flat_map(|section| section.rows().iter().copied())
+            .collect();
+        let listed = rows.len();
+        rows.sort_unstable();
+        rows.dedup();
         assert_eq!(
-            SettingsSection::ALL
-                .into_iter()
-                .flat_map(|section| section.rows().iter().copied())
-                .collect::<Vec<_>>(),
-            (0..18).collect::<Vec<_>>(),
-            "each settings row must belong to exactly one section"
+            rows.len(),
+            listed,
+            "a settings row is claimed by more than one section"
+        );
+        assert_eq!(
+            rows,
+            (0..=18).collect::<Vec<_>>(),
+            "every settings row must belong to exactly one section, with no gaps"
         );
 
         handle_settings(&mut app, KeyCode::Tab);
@@ -2054,12 +2138,15 @@ mod tests {
         handle_project_settings(&mut app, KeyCode::Down);
         handle_project_settings(&mut app, KeyCode::Down);
         assert_eq!(app.project_settings_selected, 2);
-        handle_project_settings(&mut app, KeyCode::Down);
-        assert_eq!(app.project_settings_selected, 2, "stops at the last row");
 
         // Enter opens a text editor on the other rows; a tri-state has no text.
         handle_project_settings(&mut app, KeyCode::Enter);
         assert!(!app.project_settings_editing);
+
+        handle_project_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.project_settings_selected, 3);
+        handle_project_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.project_settings_selected, 3, "stops at the last row");
     }
     fn key_event(code: KeyCode) -> Event {
         Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
@@ -2134,5 +2221,103 @@ mod tests {
         );
 
         assert!(app.should_quit || app.confirm_quit);
+    }
+    #[test]
+    fn a_typo_in_the_autopilot_cap_is_refused_rather_than_breaking_every_launch() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::General;
+        app.settings_selected = 18;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.settings_editing,
+            Some(SettingsEditField::MaxAutopilotContinues)
+        );
+        app.settings_input = "lots".to_string();
+        handle_settings(&mut app, KeyCode::Enter);
+
+        // Copilot rejects a non-numeric value, so letting it through would stop every
+        // session starting until the user worked out why.
+        assert_eq!(app.config.max_autopilot_continues, None);
+        assert!(app
+            .status_message
+            .as_deref()
+            .unwrap()
+            .contains("whole number"));
+        assert!(app.settings_editing.is_some(), "the editor stays open");
+    }
+
+    #[test]
+    fn clearing_the_autopilot_cap_hands_the_limit_back_to_copilot() {
+        let mut app = App::new(
+            Vec::new(),
+            config::UserConfig {
+                max_autopilot_continues: Some(9),
+                ..config::UserConfig::default()
+            },
+        );
+        app.disable_config_persistence();
+        app.mode = Mode::Settings;
+        app.settings_selected = 18;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.settings_input, "9",
+            "editing starts from the current value"
+        );
+        app.settings_input.clear();
+        handle_settings(&mut app, KeyCode::Enter);
+
+        // Blank means "no opinion", not zero -- zero would stop autopilot entirely.
+        assert_eq!(app.config.max_autopilot_continues, None);
+        assert!(app.settings_editing.is_none());
+    }
+
+    #[test]
+    fn the_autopilot_row_is_reachable_from_the_general_section() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::General;
+        app.settings_selected = SettingsSection::General.rows()[0];
+
+        let mut seen = vec![app.settings_selected];
+        for _ in 0..6 {
+            handle_settings(&mut app, KeyCode::Down);
+            seen.push(app.settings_selected);
+        }
+        assert!(
+            seen.contains(&18),
+            "arrowing through General reaches it: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_project_takes_the_autopilot_cap_over_from_whatever_is_in_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = config::UserConfig {
+            max_autopilot_continues: Some(12),
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), global.clone());
+        app.project_settings = Some(config::ProjectSettings::load(temp.path(), &global).unwrap());
+        app.mode = Mode::ProjectSettings;
+        app.project_settings_selected = 3;
+
+        let state = |app: &App| {
+            app.project_settings
+                .as_ref()
+                .unwrap()
+                .max_autopilot_continues_override()
+        };
+        assert_eq!(state(&app), None, "starts inherited");
+
+        // Taking it over starts from what was already in effect, so Space alone never
+        // silently changes the number.
+        handle_project_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(state(&app), Some(12));
+        handle_project_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(state(&app), None, "and back to inheriting");
     }
 }

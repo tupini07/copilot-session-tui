@@ -14,27 +14,56 @@ fn apply_args(cmd: &mut Command, args: Vec<String>) {
     }
 }
 
-/// Whether Copilot should start with `--yolo` for work in `cwd`.
+/// The settings that apply to one launch, after the repository has had its say.
 ///
-/// A repository's `.cst.json` wins over the global setting when it says anything, so a
-/// project can opt itself in or — more usefully — force the permission prompts back on
-/// for everyone working in it, whatever their own default is.
-///
-/// A directory outside a Git project has no project file to consult. A project file
-/// that cannot be read falls back to the global setting too: it is reported where it is
-/// edited, and refusing to start a session over an unparseable preference would be a
-/// worse failure than starting with the user's own default.
-pub fn effective_yolo(config: &UserConfig, cwd: &Path) -> bool {
-    crate::session::loader::detect_project_root(&cwd.to_string_lossy())
-        .and_then(|root| crate::config::ProjectSettings::load(Path::new(&root), config).ok())
-        .map_or(config.yolo, |settings| settings.effective_yolo())
+/// Resolved once and passed around, so adding the next per-launch setting does not mean
+/// threading another parameter through every command builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchPolicy {
+    pub yolo: bool,
+    /// `None` leaves Copilot's own default alone rather than pinning a number.
+    pub max_autopilot_continues: Option<u32>,
+}
+
+impl LaunchPolicy {
+    /// Work out what applies for work in `cwd`.
+    ///
+    /// A repository's `.cst.json` wins over the global setting when it says anything, so
+    /// a project can opt itself in or — more usefully — force the permission prompts
+    /// back on for everyone working in it, whatever their own default is.
+    ///
+    /// A directory outside a Git project has no project file to consult. A project file
+    /// that cannot be read falls back to the global settings too: it is reported where
+    /// it is edited, and refusing to start a session over an unparseable preference
+    /// would be a worse failure than starting with the user's own defaults.
+    pub fn resolve(config: &UserConfig, cwd: &Path) -> Self {
+        let project = crate::session::loader::detect_project_root(&cwd.to_string_lossy())
+            .and_then(|root| crate::config::ProjectSettings::load(Path::new(&root), config).ok());
+        match project {
+            Some(project) => Self {
+                yolo: project.effective_yolo(),
+                max_autopilot_continues: project.effective_max_autopilot_continues(),
+            },
+            None => Self {
+                yolo: config.yolo,
+                max_autopilot_continues: config.max_autopilot_continues,
+            },
+        }
+    }
 }
 
 /// Launch policy that applies every time Copilot starts.
-fn runtime_args(yolo: bool) -> Vec<String> {
+///
+/// `--max-autopilot-continues` belongs here rather than with the new-session defaults
+/// below: Copilot does not persist it in the session, so passing it only on creation
+/// would silently do nothing for every resumed session, which is most of them.
+fn runtime_args(policy: &LaunchPolicy) -> Vec<String> {
     let mut args = Vec::new();
-    if yolo {
+    if policy.yolo {
         args.push("--yolo".to_string());
+    }
+    if let Some(limit) = policy.max_autopilot_continues {
+        args.push(format!("--max-autopilot-continues={limit}"));
     }
     args
 }
@@ -44,8 +73,8 @@ fn runtime_args(yolo: bool) -> Vec<String> {
 /// Copilot persists model and effort in the session. Passing them again on resume would
 /// overwrite a model the user selected inside that conversation with CST's current
 /// defaults.
-fn new_session_config_args(config: &UserConfig, yolo: bool) -> Vec<String> {
-    let mut args = runtime_args(yolo);
+fn new_session_config_args(config: &UserConfig, policy: &LaunchPolicy) -> Vec<String> {
+    let mut args = runtime_args(policy);
     if let Some(ref model) = config.model {
         args.push(format!("--model={}", model));
     }
@@ -67,13 +96,13 @@ pub fn resume_command(
     let copilot = find_copilot()?;
     Ok((
         copilot,
-        resume_args(session_id, effective_yolo(config, cwd)),
+        resume_args(session_id, &LaunchPolicy::resolve(config, cwd)),
     ))
 }
 
-fn resume_args(session_id: &str, yolo: bool) -> Vec<String> {
+fn resume_args(session_id: &str, policy: &LaunchPolicy) -> Vec<String> {
     let mut args = vec![format!("--resume={}", session_id)];
-    args.extend(runtime_args(yolo));
+    args.extend(runtime_args(policy));
     args
 }
 
@@ -89,16 +118,16 @@ pub fn new_session_command(
     cwd: &Path,
 ) -> Result<(String, Vec<String>, String)> {
     let copilot = find_copilot()?;
-    let (args, session_id) = new_session_args(config, effective_yolo(config, cwd));
+    let (args, session_id) = new_session_args(config, &LaunchPolicy::resolve(config, cwd));
     Ok((copilot, args, session_id))
 }
 
 /// The argument half of [`new_session_command`], split out so it can be tested without
 /// a Copilot binary on PATH.
-fn new_session_args(config: &UserConfig, yolo: bool) -> (Vec<String>, String) {
+fn new_session_args(config: &UserConfig, policy: &LaunchPolicy) -> (Vec<String>, String) {
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut args = vec![format!("--session-id={session_id}")];
-    args.extend(new_session_config_args(config, yolo));
+    args.extend(new_session_config_args(config, policy));
     (args, session_id)
 }
 
@@ -185,7 +214,7 @@ pub fn resume_session(session_id: &str, cwd: &str, config: &UserConfig) -> Resul
     cmd.arg(format!("--resume={}", session_id));
     apply_args(
         &mut cmd,
-        runtime_args(effective_yolo(config, Path::new(cwd))),
+        runtime_args(&LaunchPolicy::resolve(config, Path::new(cwd))),
     );
 
     // Set the working directory to the session's original cwd
@@ -209,7 +238,7 @@ pub fn start_new_session(cwd: &str, config: &UserConfig) -> Result<()> {
     let cwd_path = Path::new(cwd);
     apply_args(
         &mut cmd,
-        new_session_config_args(config, effective_yolo(config, cwd_path)),
+        new_session_config_args(config, &LaunchPolicy::resolve(config, cwd_path)),
     );
     if cwd_path.exists() {
         cmd.current_dir(cwd_path);
@@ -241,8 +270,8 @@ pub fn start_worktree_session(
     let mut cmd = Command::new(copilot);
     // The worktree carries the repository's own `.cst.json`, so it answers for the
     // project setting exactly as the main checkout would.
-    let yolo = effective_yolo(config, &created.entry.path);
-    apply_args(&mut cmd, new_session_config_args(config, yolo));
+    let policy = LaunchPolicy::resolve(config, &created.entry.path);
+    apply_args(&mut cmd, new_session_config_args(config, &policy));
     cmd.current_dir(&created.entry.path);
 
     if let Err(error) = cmd.status() {
@@ -355,11 +384,20 @@ fn version_line(stdout: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The policy for a directory with no project, so the test is about arguments
+    /// rather than about where they came from.
+    fn policy_of(config: &UserConfig) -> LaunchPolicy {
+        LaunchPolicy {
+            yolo: config.yolo,
+            max_autopilot_continues: config.max_autopilot_continues,
+        }
+    }
+
     #[test]
     fn a_new_session_is_told_the_id_it_will_have() {
         let config = UserConfig::default();
 
-        let (args, session_id) = new_session_args(&config, config.yolo);
+        let (args, session_id) = new_session_args(&config, &policy_of(&config));
 
         assert!(
             uuid::Uuid::parse_str(&session_id).is_ok(),
@@ -376,8 +414,8 @@ mod tests {
     fn every_new_session_gets_its_own_id() {
         let config = UserConfig::default();
 
-        let (_, first) = new_session_args(&config, config.yolo);
-        let (_, second) = new_session_args(&config, config.yolo);
+        let (_, first) = new_session_args(&config, &policy_of(&config));
+        let (_, second) = new_session_args(&config, &policy_of(&config));
 
         // Two new sessions sharing an id would share a scratchpad.
         assert_ne!(first, second);
@@ -392,7 +430,7 @@ mod tests {
             ..UserConfig::default()
         };
 
-        let (args, _) = new_session_args(&config, config.yolo);
+        let (args, _) = new_session_args(&config, &policy_of(&config));
 
         assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
         assert!(
@@ -414,7 +452,7 @@ mod tests {
             ..UserConfig::default()
         };
 
-        let args = resume_args("existing-session", config.yolo);
+        let args = resume_args("existing-session", &policy_of(&config));
 
         assert_eq!(args[0], "--resume=existing-session");
         assert!(args.iter().any(|arg| arg == "--yolo"), "got {args:?}");
@@ -521,19 +559,19 @@ mod tests {
         };
 
         let opted_in = repo_with(Some(r#"{"yolo":true}"#));
-        assert!(effective_yolo(&careful, opted_in.path()));
+        assert!(LaunchPolicy::resolve(&careful, opted_in.path()).yolo);
 
         // The direction that matters most: a repository can hold the prompts on for
         // someone whose own default is yolo.
         let opted_out = repo_with(Some(r#"{"yolo":false}"#));
-        assert!(!effective_yolo(&reckless, opted_out.path()));
+        assert!(!LaunchPolicy::resolve(&reckless, opted_out.path()).yolo);
 
         // Silent project, and a project with other settings but no opinion here.
         let silent = repo_with(None);
-        assert!(effective_yolo(&reckless, silent.path()));
-        assert!(!effective_yolo(&careful, silent.path()));
+        assert!(LaunchPolicy::resolve(&reckless, silent.path()).yolo);
+        assert!(!LaunchPolicy::resolve(&careful, silent.path()).yolo);
         let unrelated = repo_with(Some(r#"{"worktree":{"branch_prefix":"x/"}}"#));
-        assert!(effective_yolo(&reckless, unrelated.path()));
+        assert!(LaunchPolicy::resolve(&reckless, unrelated.path()).yolo);
     }
 
     #[test]
@@ -544,8 +582,8 @@ mod tests {
         };
         let loose = tempfile::tempdir().unwrap();
 
-        assert!(effective_yolo(&reckless, loose.path()));
-        assert!(!effective_yolo(&UserConfig::default(), loose.path()));
+        assert!(LaunchPolicy::resolve(&reckless, loose.path()).yolo);
+        assert!(!LaunchPolicy::resolve(&UserConfig::default(), loose.path()).yolo);
     }
 
     #[test]
@@ -557,8 +595,8 @@ mod tests {
         };
 
         // Reported where it is edited; a launch is the wrong place to refuse over it.
-        assert!(effective_yolo(&reckless, broken.path()));
-        assert!(!effective_yolo(&UserConfig::default(), broken.path()));
+        assert!(LaunchPolicy::resolve(&reckless, broken.path()).yolo);
+        assert!(!LaunchPolicy::resolve(&UserConfig::default(), broken.path()).yolo);
     }
 
     #[test]
@@ -568,10 +606,10 @@ mod tests {
             ..UserConfig::default()
         };
         let opted_out = repo_with(Some(r#"{"yolo":false}"#));
-        let yolo = effective_yolo(&reckless, opted_out.path());
+        let policy = LaunchPolicy::resolve(&reckless, opted_out.path());
 
-        let (new_args, _) = new_session_args(&reckless, yolo);
-        let resumed = resume_args("existing", yolo);
+        let (new_args, _) = new_session_args(&reckless, &policy);
+        let resumed = resume_args("existing", &policy);
 
         assert!(
             !new_args.iter().any(|arg| arg == "--yolo"),
@@ -605,5 +643,88 @@ mod tests {
     fn a_copilot_that_printed_nothing_yields_no_version_text() {
         assert_eq!(version_line(""), None);
         assert_eq!(version_line("\n  \n"), None);
+    }
+    #[test]
+    fn the_autopilot_cap_reaches_copilot_on_new_and_resumed_sessions_alike() {
+        // Copilot does not persist this one, so a cap passed only at creation would
+        // quietly do nothing for every resume -- which is most launches.
+        let capped = UserConfig {
+            max_autopilot_continues: Some(25),
+            ..UserConfig::default()
+        };
+        let policy = policy_of(&capped);
+
+        let (new_args, _) = new_session_args(&capped, &policy);
+        let resumed = resume_args("existing", &policy);
+
+        assert!(
+            new_args
+                .iter()
+                .any(|arg| arg == "--max-autopilot-continues=25"),
+            "got {new_args:?}"
+        );
+        assert!(
+            resumed
+                .iter()
+                .any(|arg| arg == "--max-autopilot-continues=25"),
+            "got {resumed:?}"
+        );
+    }
+
+    #[test]
+    fn no_configured_cap_leaves_copilots_own_default_alone() {
+        // Passing a number CST invented would pin the limit to whatever Copilot's
+        // default happened to be when this was written.
+        let (args, _) =
+            new_session_args(&UserConfig::default(), &policy_of(&UserConfig::default()));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--max-autopilot-continues")),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_cap_of_zero_is_passed_rather_than_treated_as_unset() {
+        // Copilot accepts 0, and it means something: never continue on its own.
+        let never = UserConfig {
+            max_autopilot_continues: Some(0),
+            ..UserConfig::default()
+        };
+        let (args, _) = new_session_args(&never, &policy_of(&never));
+        assert!(
+            args.iter().any(|arg| arg == "--max-autopilot-continues=0"),
+            "got {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_project_can_set_its_own_autopilot_cap_over_the_global_one() {
+        let global = UserConfig {
+            max_autopilot_continues: Some(50),
+            ..UserConfig::default()
+        };
+
+        let restrained = repo_with(Some(r#"{"max_autopilot_continues":2}"#));
+        assert_eq!(
+            LaunchPolicy::resolve(&global, restrained.path()).max_autopilot_continues,
+            Some(2),
+            "a repository that wants autopilot on a short leash must be able to say so"
+        );
+
+        let silent = repo_with(None);
+        assert_eq!(
+            LaunchPolicy::resolve(&global, silent.path()).max_autopilot_continues,
+            Some(50),
+            "a project with no opinion inherits"
+        );
+
+        let loose = tempfile::tempdir().unwrap();
+        assert_eq!(
+            LaunchPolicy::resolve(&global, loose.path()).max_autopilot_continues,
+            Some(50),
+            "and so does a directory that is not a project at all"
+        );
     }
 }

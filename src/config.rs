@@ -64,6 +64,14 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
+    /// Cap on how many times autopilot may continue on its own.
+    ///
+    /// `None` means CST passes nothing and Copilot applies its own default, which is
+    /// currently 5. Storing the number here instead would pin the value to whatever
+    /// that default happened to be on the day this was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_autopilot_continues: Option<u32>,
+
     #[serde(
         default,
         deserialize_with = "normalized_title_prefixes",
@@ -220,6 +228,7 @@ impl Default for UserConfig {
             snippets: Vec::new(),
             model: None,
             reasoning_effort: None,
+            max_autopilot_continues: None,
             hidden_title_prefixes: Vec::new(),
             hidden_path_prefixes: Vec::new(),
             mux: false,
@@ -262,6 +271,11 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo: Option<bool>,
 
+    /// Cap on autopilot continuations for sessions in this repository. Absent means
+    /// "whatever the global setting says".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_autopilot_continues: Option<u32>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<PromptSnippet>,
 
@@ -287,6 +301,7 @@ pub struct ProjectSettings {
     config: ProjectConfig,
     global: EffectiveWorktreeConfig,
     global_yolo: bool,
+    global_max_autopilot_continues: Option<u32>,
 }
 
 impl Default for WorktreeConfig {
@@ -314,6 +329,7 @@ impl ProjectSettings {
             config,
             global: global_worktree(global),
             global_yolo: global.yolo,
+            global_max_autopilot_continues: global.max_autopilot_continues,
         })
     }
 
@@ -327,6 +343,21 @@ impl ProjectSettings {
 
     pub fn set_yolo_override(&mut self, value: Option<bool>) {
         self.config.yolo = value;
+    }
+
+    pub fn max_autopilot_continues_override(&self) -> Option<u32> {
+        self.config.max_autopilot_continues
+    }
+
+    /// The cap to use here, or `None` to leave Copilot's own default alone.
+    pub fn effective_max_autopilot_continues(&self) -> Option<u32> {
+        self.config
+            .max_autopilot_continues
+            .or(self.global_max_autopilot_continues)
+    }
+
+    pub fn set_max_autopilot_continues_override(&mut self, value: Option<u32>) {
+        self.config.max_autopilot_continues = value;
     }
 
     pub fn branch_prefix_override(&self) -> Option<&str> {
@@ -387,6 +418,7 @@ impl ProjectSettings {
     pub fn refresh_global(&mut self, global: &UserConfig) {
         self.global = global_worktree(global);
         self.global_yolo = global.yolo;
+        self.global_max_autopilot_continues = global.max_autopilot_continues;
     }
 
     fn worktree_mut(&mut self) -> &mut ProjectWorktreeConfig {
@@ -415,6 +447,7 @@ impl ProjectConfig {
     fn is_empty(&self) -> bool {
         self.worktree.is_none()
             && self.yolo.is_none()
+            && self.max_autopilot_continues.is_none()
             && self.snippets.is_empty()
             && self.extra.is_empty()
     }
@@ -1456,5 +1489,69 @@ mod tests {
                 .yolo_override(),
             None
         );
+    }
+    #[test]
+    fn a_project_autopilot_cap_round_trips_and_clears_back_to_inheriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = UserConfig {
+            max_autopilot_continues: Some(10),
+            ..UserConfig::default()
+        };
+
+        let inherited = ProjectSettings::load(temp.path(), &global).unwrap();
+        assert_eq!(inherited.max_autopilot_continues_override(), None);
+        assert_eq!(inherited.effective_max_autopilot_continues(), Some(10));
+
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+        settings.set_max_autopilot_continues_override(Some(2));
+        settings.save().unwrap();
+        let reloaded = ProjectSettings::load(temp.path(), &global).unwrap();
+        assert_eq!(reloaded.max_autopilot_continues_override(), Some(2));
+        assert_eq!(reloaded.effective_max_autopilot_continues(), Some(2));
+
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+        settings.set_max_autopilot_continues_override(None);
+        settings.save().unwrap();
+        assert_eq!(
+            ProjectSettings::load(temp.path(), &global)
+                .unwrap()
+                .effective_max_autopilot_continues(),
+            Some(10),
+            "clearing the override goes back to inheriting, not to nothing"
+        );
+    }
+
+    #[test]
+    fn a_project_whose_only_setting_is_the_autopilot_cap_still_gets_a_file() {
+        // `is_empty` decides whether the file is written or deleted, so a field missing
+        // from it is thrown away on the next save.
+        let temp = tempfile::tempdir().unwrap();
+        let global = UserConfig::default();
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+
+        settings.set_max_autopilot_continues_override(Some(3));
+        settings.save().unwrap();
+
+        assert!(temp.path().join(".cst.json").exists());
+        assert_eq!(
+            ProjectSettings::load(temp.path(), &global)
+                .unwrap()
+                .max_autopilot_continues_override(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn an_unknown_global_setting_survives_a_save_alongside_the_autopilot_cap() {
+        let config: UserConfig =
+            serde_json::from_str(r#"{"max_autopilot_continues":7,"future_setting":true}"#).unwrap();
+        assert_eq!(config.max_autopilot_continues, Some(7));
+
+        let written = serde_json::to_string(&config).unwrap();
+        assert!(
+            written.contains("\"max_autopilot_continues\":7"),
+            "{written}"
+        );
+        assert!(written.contains("future_setting"), "{written}");
     }
 }
