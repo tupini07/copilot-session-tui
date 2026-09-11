@@ -64,6 +64,20 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 
+    #[serde(
+        default,
+        deserialize_with = "normalized_title_prefixes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub hidden_title_prefixes: Vec<String>,
+
+    #[serde(
+        default,
+        deserialize_with = "normalized_path_prefixes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub hidden_path_prefixes: Vec<String>,
+
     /// Run sessions inside CST as multiplexed panes instead of launching and exiting.
     #[serde(default)]
     pub mux: bool,
@@ -138,6 +152,65 @@ where
         .collect())
 }
 
+fn normalized_title_prefixes<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(normalize_title_prefixes(Vec::<String>::deserialize(
+        deserializer,
+    )?))
+}
+
+fn normalized_path_prefixes<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(normalize_path_prefixes(Vec::<String>::deserialize(
+        deserializer,
+    )?))
+}
+
+pub fn parse_title_prefixes(input: &str) -> Vec<String> {
+    normalize_title_prefixes(input.split(',').map(str::to_string))
+}
+
+pub fn parse_path_prefixes(input: &str) -> Vec<String> {
+    normalize_path_prefixes(input.split(',').map(str::to_string))
+}
+
+fn normalize_title_prefixes(prefixes: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    prefixes
+        .into_iter()
+        .filter_map(|prefix| {
+            let prefix = prefix.trim().to_string();
+            (!prefix.is_empty() && seen.insert(prefix.to_lowercase())).then_some(prefix)
+        })
+        .collect()
+}
+
+fn normalize_path_prefixes(prefixes: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    prefixes
+        .into_iter()
+        .filter_map(|prefix| {
+            let prefix = prefix.trim().to_string();
+            (!prefix.is_empty() && seen.insert(path_prefix_key(&prefix))).then_some(prefix)
+        })
+        .collect()
+}
+
+fn path_prefix_key(prefix: &str) -> String {
+    #[cfg(windows)]
+    {
+        prefix.replace('/', "\\").to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        prefix.to_string()
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
@@ -147,6 +220,8 @@ impl Default for UserConfig {
             snippets: Vec::new(),
             model: None,
             reasoning_effort: None,
+            hidden_title_prefixes: Vec::new(),
+            hidden_path_prefixes: Vec::new(),
             mux: false,
             mux_prefix: default_mux_prefix(),
             worktree: WorktreeConfig::default(),
@@ -792,6 +867,8 @@ mod tests {
 
         assert!(config.yolo);
         assert!(config.favorites.is_empty());
+        assert!(config.hidden_title_prefixes.is_empty());
+        assert!(config.hidden_path_prefixes.is_empty());
         assert_eq!(config.worktree.branch_prefix, DEFAULT_BRANCH_PREFIX);
         assert_eq!(config.worktree.root, default_worktree_root());
         assert!(config.terminal.shell.is_none());
@@ -825,6 +902,36 @@ mod tests {
             serde_json::from_str(r#"{"favorites":["a","b","a","b","c"]}"#).unwrap();
 
         assert_eq!(loaded.favorites, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn hidden_title_prefixes_are_trimmed_and_deduplicated_case_insensitively() {
+        let loaded: UserConfig = serde_json::from_str(
+            r#"{"hidden_title_prefixes":[" Your objective: ","","your OBJECTIVE:","CLIO:"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.hidden_title_prefixes,
+            vec!["Your objective:", "CLIO:"]
+        );
+        assert_eq!(
+            parse_title_prefixes(" Your objective: , CLIO: , clio: "),
+            vec!["Your objective:", "CLIO:"]
+        );
+    }
+
+    #[test]
+    fn hidden_path_prefixes_are_trimmed_and_deduplicated() {
+        let loaded: UserConfig =
+            serde_json::from_str(r#"{"hidden_path_prefixes":[" /tmp ","","/tmp","/var/tmp"]}"#)
+                .unwrap();
+
+        assert_eq!(loaded.hidden_path_prefixes, vec!["/tmp", "/var/tmp"]);
+        assert_eq!(
+            parse_path_prefixes(" /tmp, /tmp, /var/tmp "),
+            vec!["/tmp", "/var/tmp"]
+        );
     }
 
     #[test]

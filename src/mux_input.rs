@@ -720,7 +720,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             close_context_overlays(app);
             crate::input::execute_palette_list_command(app, command);
         }
-        SearchSessions | FilterProject | ClearProjectFilter | CycleSort => {
+        SearchSessions | FilterProject | ClearProjectFilter | CycleSort | ToggleHiddenSessions => {
             close_context_overlays(app);
             if matches!(app.view, View::Attached(_)) {
                 app.detach();
@@ -2651,6 +2651,7 @@ mod tests {
     #[test]
     fn portable_commands_are_enabled_while_attached() {
         let mut app = attached_mux_app("portable-commands");
+        app.config.hidden_title_prefixes = vec!["Your objective:".to_string()];
         let commands = crate::command_palette::filtered_commands(&app);
 
         for id in [
@@ -2660,6 +2661,7 @@ mod tests {
             CommandId::SearchSessions,
             CommandId::FilterProject,
             CommandId::CycleSort,
+            CommandId::ToggleHiddenSessions,
             CommandId::GlobalSettings,
             CommandId::ProjectSettings,
             CommandId::OpenHelp,

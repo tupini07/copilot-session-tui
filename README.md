@@ -203,6 +203,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `f` / `p` | Filter by project |
 | `c` | Clear project filter |
 | `s` | Cycle sort order |
+| `H` | Temporarily show or re-hide sessions excluded by saved filters |
 | `,` | Edit global settings |
 | `.` | Edit filtered-project `.cst.json` settings |
 | `u` | Install an available update without stopping sessions |
@@ -627,6 +628,8 @@ missing file is also ignored instead of resetting a running instance to defaults
 {
   "yolo": false,
   "theme": "catppuccin-mocha",
+  "hidden_title_prefixes": ["Your objective:"],
+  "hidden_path_prefixes": ["/tmp"],
   "terminal": {
     "shell": "pwsh"
   },
@@ -636,6 +639,16 @@ missing file is also ignored instead of resetting a running instance to defaults
   }
 }
 ```
+
+`hidden_title_prefixes` removes matching sessions from the picker before project and
+search filters are applied. Matching is case-insensitive. Configure the list in the
+**Filters** tab of Global Settings or edit `config.json` directly. Press `H` in the
+session list to temporarily show hidden sessions for the current CST process; press it
+again to reapply the saved filters.
+
+`hidden_path_prefixes` applies the same behavior to session working directories. Paths
+match on component boundaries, so `/tmp` hides `/tmp/project` but not `/tmp2/project`.
+Path matching follows the platform's filesystem case sensitivity.
 
 Leave `terminal.shell` unset or blank to use the platform's default shell. Set it
 to an executable name on `PATH` (such as `pwsh`, `powershell`, or `bash`) or to

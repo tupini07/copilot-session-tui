@@ -28,6 +28,7 @@ pub enum CommandId {
     FilterProject,
     ClearProjectFilter,
     CycleSort,
+    ToggleHiddenSessions,
     InspectGithub,
     GlobalSettings,
     ProjectSettings,
@@ -372,6 +373,20 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "",
         ),
         entry(
+            Id::ToggleHiddenSessions,
+            Group::View,
+            if app.show_hidden_sessions {
+                "Hide configured sessions"
+            } else {
+                "Show hidden sessions"
+            },
+            "Temporarily toggle configured hidden-session filters",
+            "H",
+            !app.config.hidden_title_prefixes.is_empty()
+                || !app.config.hidden_path_prefixes.is_empty(),
+            "No hidden session filters are configured",
+        ),
+        entry(
             Id::InspectGithub,
             Group::GitHub,
             "Inspect GitHub item",
@@ -493,6 +508,7 @@ fn command_keywords(id: CommandId) -> &'static str {
         SearchSessions => "find filter fuzzy",
         FilterProject | ClearProjectFilter => "repository scope",
         CycleSort => "order",
+        ToggleHiddenSessions => "exclude hidden title path prefix visibility",
         InspectGithub => "issue pr pull request discussion",
         GlobalSettings | ProjectSettings => "config preferences theme",
         CheckForUpdates => "upgrade version release restart",

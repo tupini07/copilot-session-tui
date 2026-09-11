@@ -393,6 +393,18 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.cycle_sort();
             app.status_message = Some(format!("Sorted by: {}", app.sort_label()));
         }
+        KeyCode::Char('H') => {
+            if app.config.hidden_title_prefixes.is_empty()
+                && app.config.hidden_path_prefixes.is_empty()
+            {
+                app.status_message =
+                    Some("Configure hidden session filters in Global Settings".to_string());
+            } else if app.toggle_hidden_sessions() {
+                app.status_message = Some("Showing hidden sessions for this run".to_string());
+            } else {
+                app.status_message = Some("Hidden session filters reapplied".to_string());
+            }
+        }
         KeyCode::Char('c') => {
             app.set_project_filter(None);
             app.status_message = Some("Filter cleared".to_string());
@@ -448,6 +460,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::FilterProject => KeyCode::Char('f'),
         CommandId::ClearProjectFilter => KeyCode::Char('c'),
         CommandId::CycleSort => KeyCode::Char('s'),
+        CommandId::ToggleHiddenSessions => KeyCode::Char('H'),
         CommandId::GlobalSettings => KeyCode::Char(','),
         CommandId::ProjectSettings => KeyCode::Char('.'),
         CommandId::OpenHelp => KeyCode::Char('?'),
@@ -1044,6 +1057,16 @@ fn handle_settings(app: &mut App, key: KeyCode) {
             ),
             2 => cycle_reasoning_effort(app),
             3 => app.open_theme_picker(),
+            16 => begin_global_edit(
+                app,
+                SettingsEditField::HiddenTitlePrefixes,
+                app.config.hidden_title_prefixes.join(", "),
+            ),
+            17 => begin_global_edit(
+                app,
+                SettingsEditField::HiddenPathPrefixes,
+                app.config.hidden_path_prefixes.join(", "),
+            ),
             4 => begin_global_edit(
                 app,
                 SettingsEditField::BranchPrefix,
@@ -1114,6 +1137,16 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
     match field {
         SettingsEditField::Model => {
             app.config.model = (!value.is_empty()).then_some(value);
+        }
+        SettingsEditField::HiddenTitlePrefixes => {
+            app.config.hidden_title_prefixes = config::parse_title_prefixes(&value);
+            app.show_hidden_sessions = false;
+            app.apply_filter();
+        }
+        SettingsEditField::HiddenPathPrefixes => {
+            app.config.hidden_path_prefixes = config::parse_path_prefixes(&value);
+            app.show_hidden_sessions = false;
+            app.apply_filter();
         }
         SettingsEditField::BranchPrefix => {
             if let Err(error) = worktree::validate_branch_prefix(&value) {
@@ -1551,7 +1584,7 @@ mod tests {
                 .into_iter()
                 .flat_map(|section| section.rows().iter().copied())
                 .collect::<Vec<_>>(),
-            (0..16).collect::<Vec<_>>(),
+            (0..18).collect::<Vec<_>>(),
             "each settings row must belong to exactly one section"
         );
 
