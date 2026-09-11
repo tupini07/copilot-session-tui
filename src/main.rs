@@ -1,4 +1,6 @@
 mod app;
+mod app_state;
+mod changelog;
 mod command_palette;
 mod config;
 mod debug_keys;
@@ -378,6 +380,14 @@ fn main() -> Result<()> {
     }
 
     let mut app = App::new(sessions, user_config);
+    // Deliberately here rather than earlier. Every subcommand and the direct
+    // `--session` resume return before this point, and none of them shows a UI, so
+    // none of them may burn the notes by advancing the marker without displaying
+    // anything. A `--restart-gate` child does reach this line, which is the case that
+    // matters most: it is the process that came up after an update.
+    if let Some(whats_new) = changelog::whats_new_on_startup() {
+        app.whats_new = Some(ui::whats_new::WhatsNewScreen::new(whats_new));
+    }
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;
     if let Some(receiver) = session_load_receiver {

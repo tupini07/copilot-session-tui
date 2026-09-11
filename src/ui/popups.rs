@@ -11,7 +11,7 @@ fn surface_style(theme: Theme) -> Style {
     Style::default().fg(theme.text).bg(theme.surface)
 }
 
-fn prepare_popup(f: &mut Frame, area: Rect, theme: Theme) {
+pub(crate) fn prepare_popup(f: &mut Frame, area: Rect, theme: Theme) {
     f.render_widget(Clear, area);
     fill_area(f.buffer_mut(), area, theme.surface);
 }

@@ -11,6 +11,7 @@ pub mod snippets;
 pub mod status_bar;
 pub mod tabs;
 pub mod terminal_pane;
+pub mod whats_new;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -97,6 +98,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         github_inspector::draw(f, app);
         draw_context_overlays(f, app, theme);
         command_palette::draw_overlays(f, app);
+        whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }
@@ -112,6 +114,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         draw_portable_mode_popup(f, app);
         command_palette::draw_overlays(f, app);
+        whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }
@@ -171,6 +174,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
         command_palette::draw_overlays(f, app);
+        whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }
@@ -269,6 +273,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     command_palette::draw_overlays(f, app);
+    whats_new::draw(f, app);
     if app.confirm_update_restart {
         popups::draw_update_restart_confirm(f, app);
     }
@@ -371,6 +376,41 @@ pub fn attached_layout(
         terminal,
         status,
     }
+}
+
+/// A vertical scrollbar down the right edge of `area`, drawn only when the content
+/// actually overflows.
+///
+/// Shared rather than per-panel: the GitHub inspector and the What's New screen scroll
+/// the same way, and a second copy would be the first step to them drifting apart.
+pub(crate) fn draw_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    line_count: usize,
+    viewport_height: usize,
+    offset: usize,
+    theme: Theme,
+) {
+    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+    if viewport_height == 0 || line_count <= viewport_height {
+        return;
+    }
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .track_style(Style::default().fg(theme.inactive))
+        .thumb_symbol("█")
+        .thumb_style(Style::default().fg(theme.accent));
+    // With an explicit viewport length Ratatui expects the number of possible
+    // positions, not the total line count. Passing `line_count` makes the thumb stop
+    // early even after the text has reached its real maximum offset.
+    let positions = line_count.saturating_sub(viewport_height).saturating_add(1);
+    let mut state = ScrollbarState::new(positions)
+        .position(offset)
+        .viewport_content_length(viewport_height);
+    f.render_stateful_widget(scrollbar, area, &mut state);
 }
 
 #[cfg(test)]

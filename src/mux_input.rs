@@ -45,6 +45,14 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // First, and before the prefix gate below: this is most likely to be on screen
+    // right after a restart reopened these panes, and a keystroke aimed at dismissing
+    // it must not land in a Copilot chat.
+    if crate::input::whats_new_active(app) {
+        crate::input::handle_whats_new_event(app, event);
+        return;
+    }
+
     if app.command_palette.is_some() {
         handle_command_palette_event(app, event);
         return;
@@ -710,6 +718,11 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             app.mode = crate::app::Mode::Help;
         }
         CheckForUpdates => app.request_update(),
+        WhatsNew => {
+            app.whats_new = Some(crate::ui::whats_new::WhatsNewScreen::new(
+                crate::changelog::whats_new_for_current_version(),
+            ));
+        }
         SendLiteralPrefix => {
             let key = app.mux.as_ref().map(|mux| mux.prefix.literal_key_event());
             if let (Some(key), Some(pane)) =

@@ -118,6 +118,13 @@ flow is closed so unsaved input is not discarded.
 The invoking shell remains attached throughout the handoff. A cross-process lock prevents
 multiple CST instances from replacing the executable concurrently.
 
+The first time CST starts on a version newer than the last one that ran, it shows what
+changed since then — every release you skipped, newest first, not only the latest one.
+The notes are compiled into the binary from `CHANGELOG.md`, so there is no network call
+and nothing to wait for, and it works however you updated: through the TUI, through
+`cst update`, or by re-running the installer. A brand-new install is shown nothing rather
+than the entire history. Run **What's new** from the command palette to read it again.
+
 For scripts or a shell without CST integration, run `copilot-session-tui update`. If the
 generated shell wrapper is loaded, the shorter `cst update` works too. It performs the
 same forced release check and locked self-update without opening the TUI. The command owns

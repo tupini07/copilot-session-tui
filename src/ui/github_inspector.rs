@@ -8,9 +8,7 @@ use crate::ui::file_tree;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub fn is_prompt(app: &App) -> bool {
@@ -373,7 +371,7 @@ fn draw_ready(f: &mut Frame, app: &mut App, theme: Theme) {
         .style(Style::default().fg(theme.text).bg(theme.background))
         .scroll((actual_offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(paragraph, content);
-    draw_scrollbar(
+    super::draw_scrollbar(
         f,
         content,
         line_count,
@@ -475,7 +473,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect, theme: Theme) {
                 .scroll((inspector.tree_offset.min(u16::MAX as usize) as u16, 0)),
             tree_body,
         );
-        draw_scrollbar(
+        super::draw_scrollbar(
             f,
             tree_body,
             rows.len(),
@@ -512,7 +510,7 @@ fn draw_files_tab(f: &mut Frame, app: &mut App, area: Rect, theme: Theme) {
                 .style(Style::default().fg(theme.text).bg(theme.diff_context_bg)),
             diff_body,
         );
-        draw_scrollbar(
+        super::draw_scrollbar(
             f,
             diff_area,
             max_diff_scroll + diff_height,
@@ -1178,34 +1176,6 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect, theme: Th
     );
 }
 
-fn draw_scrollbar(
-    f: &mut Frame,
-    area: Rect,
-    line_count: usize,
-    viewport_height: usize,
-    offset: usize,
-    theme: Theme,
-) {
-    if viewport_height == 0 || line_count <= viewport_height {
-        return;
-    }
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None)
-        .track_symbol(Some("│"))
-        .track_style(Style::default().fg(theme.inactive))
-        .thumb_symbol("█")
-        .thumb_style(Style::default().fg(theme.accent));
-    // With an explicit viewport length Ratatui expects the number of possible
-    // positions, not the total line count. Passing `line_count` makes the thumb stop
-    // early even after the text has reached its real maximum offset.
-    let positions = line_count.saturating_sub(viewport_height).saturating_add(1);
-    let mut state = ScrollbarState::new(positions)
-        .position(offset)
-        .viewport_content_length(viewport_height);
-    f.render_stateful_widget(scrollbar, area, &mut state);
-}
-
 fn field(label: &str, value: String, theme: Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -1302,7 +1272,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                draw_scrollbar(
+                crate::ui::draw_scrollbar(
                     frame,
                     Rect::new(0, 0, 2, viewport as u16),
                     line_count,

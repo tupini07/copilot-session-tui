@@ -46,6 +46,13 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    // Ahead of everything else it can cover, so a keystroke meant to dismiss it
+    // cannot reach the view underneath.
+    if whats_new_active(app) {
+        handle_whats_new_event(app, event);
+        return Ok(());
+    }
+
     if app.command_palette.is_some() {
         crate::mux_input::handle_command_palette_event(app, event);
         return Ok(());
@@ -167,6 +174,63 @@ pub(crate) fn handle_update_restart_confirm(app: &mut App, key: KeyCode) {
             app.cancel_update_restart();
         }
         _ => {}
+    }
+}
+
+pub(crate) fn whats_new_active(app: &App) -> bool {
+    app.whats_new.is_some()
+}
+
+/// Route the What's New screen.
+///
+/// Every key it does not use is swallowed rather than passed along. This can be on
+/// screen over a workspace that a post-update restart has just reopened, and a stray
+/// keystroke reaching a Copilot pane would be worse than one that does nothing. The
+/// footer says how to close it.
+pub(crate) fn handle_whats_new_event(app: &mut App, event: Event) {
+    let page = app
+        .whats_new
+        .as_ref()
+        // A page is the whole remaining scroll, capped so a very long changelog still
+        // pages rather than jumping to the end.
+        .map(|screen| screen.max_scroll.clamp(1, 10) as isize)
+        .unwrap_or(1);
+
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                request_quit(app);
+                return;
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char(' ') => {
+                    app.whats_new = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => scroll_whats_new(app, -1),
+                KeyCode::Down | KeyCode::Char('j') => scroll_whats_new(app, 1),
+                KeyCode::PageUp => scroll_whats_new(app, -page),
+                KeyCode::PageDown => scroll_whats_new(app, page),
+                KeyCode::Home => scroll_whats_new(app, isize::MIN / 2),
+                KeyCode::End => {
+                    if let Some(screen) = app.whats_new.as_mut() {
+                        screen.scroll_to_end();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => scroll_whats_new(app, -3),
+            crossterm::event::MouseEventKind::ScrollDown => scroll_whats_new(app, 3),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn scroll_whats_new(app: &mut App, amount: isize) {
+    if let Some(screen) = app.whats_new.as_mut() {
+        screen.scroll_by(amount);
     }
 }
 
@@ -1963,5 +2027,79 @@ mod tests {
         // Enter opens a text editor on the other rows; a tri-state has no text.
         handle_project_settings(&mut app, KeyCode::Enter);
         assert!(!app.project_settings_editing);
+    }
+    fn key_event(code: KeyCode) -> Event {
+        Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn whats_new_app() -> App {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.whats_new = Some(crate::ui::whats_new::WhatsNewScreen::new(
+            crate::changelog::whats_new_for_current_version(),
+        ));
+        if let Some(screen) = app.whats_new.as_mut() {
+            screen.max_scroll = 20;
+        }
+        app
+    }
+
+    #[test]
+    fn the_whats_new_screen_swallows_a_stray_keystroke_instead_of_sending_it_to_copilot() {
+        // It is most likely on screen right after a restart reopened panes, so a key
+        // that reached the chat underneath would be typed into someone's conversation.
+        let mut app = whats_new_app();
+
+        for code in [KeyCode::Char('a'), KeyCode::Tab, KeyCode::Backspace] {
+            handle_whats_new_event(&mut app, key_event(code));
+            assert!(
+                app.whats_new.is_some(),
+                "{code:?} must neither close it nor fall through"
+            );
+        }
+    }
+
+    #[test]
+    fn whats_new_closes_on_the_keys_its_footer_advertises() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('q'),
+            KeyCode::Char(' '),
+        ] {
+            let mut app = whats_new_app();
+            handle_whats_new_event(&mut app, key_event(code));
+            assert!(app.whats_new.is_none(), "{code:?} should close it");
+        }
+    }
+
+    #[test]
+    fn whats_new_scrolls_with_the_same_keys_as_the_help_popup() {
+        let mut app = whats_new_app();
+        let scroll = |app: &App| app.whats_new.as_ref().unwrap().scroll;
+
+        handle_whats_new_event(&mut app, key_event(KeyCode::Down));
+        assert_eq!(scroll(&app), 1);
+        handle_whats_new_event(&mut app, key_event(KeyCode::End));
+        assert_eq!(scroll(&app), 20, "End reaches the bottom");
+        handle_whats_new_event(&mut app, key_event(KeyCode::Home));
+        assert_eq!(scroll(&app), 0, "and Home comes back");
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_from_the_whats_new_screen() {
+        // Every other key is swallowed, so without this the screen would be a trap for
+        // anyone whose reflex is Ctrl+C.
+        let mut app = whats_new_app();
+        app.disable_config_persistence();
+
+        handle_whats_new_event(
+            &mut app,
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+
+        assert!(app.should_quit || app.confirm_quit);
     }
 }

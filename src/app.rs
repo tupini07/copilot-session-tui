@@ -533,6 +533,8 @@ pub struct App {
     pub installed_update_version: Option<String>,
     pub update_notice: Option<String>,
     pub confirm_update_restart: bool,
+    /// Release notes to show once after an update, or on demand from the palette.
+    pub whats_new: Option<crate::ui::whats_new::WhatsNewScreen>,
     pub restart_after_update: Option<UpdateRestartRequest>,
     update_restart_requested: bool,
     notification_worker: Option<NotificationWorker>,
@@ -680,6 +682,7 @@ impl App {
             installed_update_version: None,
             update_notice: None,
             confirm_update_restart: false,
+            whats_new: None,
             restart_after_update: None,
             update_restart_requested: false,
             notification_worker: None,
