@@ -15,6 +15,19 @@ permissions:
   contents: write
 
 jobs:
+  # Deliberately has no `needs:`, so a missing changelog section fails in seconds
+  # rather than after the whole build matrix.
+  notes:
+    name: Validate release notes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check CHANGELOG.md has a section for this version
+        run: sh .github/scripts/changelog-section.sh "${{ inputs.tag || github.ref_name }}" > /dev/null
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -65,12 +78,15 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build, notes]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # Tags are needed to work out which release this one follows, for the
+          # compare link; the default shallow checkout has none.
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -85,11 +101,27 @@ jobs:
             printf '%s  %s\n' "$hash" "$(basename "$file")"
           done < <(find artifacts -type f | sort) > SHA256SUMS
 
+      # Re-run the extractor here rather than passing the body between jobs: a
+      # multiline value through $GITHUB_OUTPUT needs heredoc delimiters that corrupt
+      # silently if any line happens to match them.
+      - name: Build release body
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          sh .github/scripts/changelog-section.sh "$TAG" > RELEASE_NOTES.md
+          previous="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)"
+          if [ -n "$previous" ]; then
+            printf '\nFull changelog: %s/%s/compare/%s...%s\n' \
+              "${{ github.server_url }}" "${{ github.repository }}" "$previous" "$TAG" \
+              >> RELEASE_NOTES.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: |
             artifacts/**/*
             SHA256SUMS
