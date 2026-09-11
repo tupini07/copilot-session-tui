@@ -713,6 +713,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         help_line(theme, "f/p", "Filter by project (type to search)"),
         help_line(theme, "c", "Clear project filter"),
         help_line(theme, "s", "Cycle sort order"),
+        help_line(theme, "H", "Temporarily show/hide filtered sessions"),
         Line::from(""),
         help_line(theme, ",", "Global settings"),
         help_line(theme, ".", "Filtered-project settings"),
@@ -1326,9 +1327,65 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
     let notifications_end = lines.len();
+    let filters_start = lines.len();
+    lines.push(Line::from(""));
+    let prefixes_editing = app.settings_editing == Some(SettingsEditField::HiddenTitlePrefixes);
+    let prefixes_display = if prefixes_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.hidden_title_prefixes.is_empty() {
+        "(none)".to_string()
+    } else {
+        app.config.hidden_title_prefixes.join(", ")
+    };
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Hidden Title Prefixes",
+        &prefixes_display,
+        if app.config.hidden_title_prefixes.is_empty() {
+            theme.muted
+        } else {
+            theme.accent_alt
+        },
+        app.settings_selected == 16,
+        prefixes_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Comma-separated, case-insensitive; press H to show temporarily",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+    let paths_editing = app.settings_editing == Some(SettingsEditField::HiddenPathPrefixes);
+    let paths_display = if paths_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.hidden_path_prefixes.is_empty() {
+        "(none)".to_string()
+    } else {
+        app.config.hidden_path_prefixes.join(", ")
+    };
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Hidden Path Prefixes",
+        &paths_display,
+        if app.config.hidden_path_prefixes.is_empty() {
+            theme.muted
+        } else {
+            theme.accent_alt
+        },
+        app.settings_selected == 17,
+        paths_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Comma-separated working-directory roots; path boundaries are respected",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+    let filters_end = lines.len();
 
     let (section_start, section_end) = match app.settings_section {
         SettingsSection::General => (general_start, general_end),
+        SettingsSection::Filters => (filters_start, filters_end),
         SettingsSection::Worktrees => (worktrees_start, worktrees_end),
         SettingsSection::Terminal => (terminal_start, terminal_end),
         SettingsSection::Notifications => (notifications_start, notifications_end),
@@ -1679,7 +1736,7 @@ fn settings_row<'a>(
 
     Line::from(vec![
         Span::styled(pointer.to_string(), pointer_style),
-        Span::styled(format!("{:<20}", label), label_style),
+        Span::styled(format!("{:<24}", label), label_style),
         Span::styled(value.to_string(), value_style),
     ])
 }
@@ -2001,6 +2058,8 @@ mod help_tests {
             (SettingsSection::General, 1, "Model"),
             (SettingsSection::General, 2, "Reasoning Effort"),
             (SettingsSection::General, 3, "Theme"),
+            (SettingsSection::Filters, 16, "Hidden Title Prefixes"),
+            (SettingsSection::Filters, 17, "Hidden Path Prefixes"),
             (SettingsSection::Worktrees, 4, "Branch Prefix"),
             (SettingsSection::Worktrees, 5, "Worktree Root"),
             (SettingsSection::Terminal, 6, "Multiplexer"),
@@ -2027,6 +2086,16 @@ mod help_tests {
                 rows.join("\n")
             );
         }
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_section = SettingsSection::Filters;
+        let rows = buffer_rows(&rendered_settings(&mut app, 120, 40));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Hidden Title Prefixes   (none)")),
+            "filter label and value columns are not separated:\n{}",
+            rows.join("\n")
+        );
     }
 
     #[test]
@@ -2193,7 +2262,7 @@ mod help_tests {
         let restored = buffer_text(&rendered_settings(&mut app, 120, 44));
         assert!(!restored.contains("Theme Picker"), "{restored}");
         assert!(
-            restored.contains("Theme               Gruvbox"),
+            restored.contains("Theme                   Gruvbox"),
             "{restored}"
         );
         assert_eq!(app.theme_name(), ThemeName::Gruvbox);
