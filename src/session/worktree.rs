@@ -1402,6 +1402,27 @@ fn registry_version() -> u32 {
     REGISTRY_VERSION
 }
 
+/// The installed Git version, or `None` when Git cannot be run at all.
+///
+/// Deliberately not routed through [`git_output`], which needs a repository for
+/// `git -C`; the point here is whether the binary exists before any repository is in
+/// play. It lives in this module so the program name stays where Git is actually used.
+pub fn git_version() -> Option<String> {
+    let output = Command::new("git").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect::<String>();
+    (!line.is_empty()).then_some(line)
+}
+
 fn git_stdout<I, S>(repository: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,

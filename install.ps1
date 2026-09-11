@@ -121,6 +121,31 @@ $endMarker
     } else {
         Write-Host "PowerShell integration is configured. Restart PowerShell, then run: cst"
     }
+
+    Write-Host ""
+    # PowerShell 7.4+ defaults $PSNativeCommandUseErrorActionPreference to $true, so a
+    # native non-zero exit is a terminating error under the "Stop" preference set at the
+    # top of this script. Without these guards, `cst doctor` reporting a missing
+    # dependency would abort an install that worked. Assigning that variable is safe on
+    # 5.1 under Set-StrictMode -- only *reading* an undefined variable is rejected.
+    $doctorFailed = $false
+    try {
+        $ErrorActionPreference = "Continue"
+        $PSNativeCommandUseErrorActionPreference = $false
+        & $destination doctor
+        $doctorFailed = $LASTEXITCODE -ne 0
+        # The install succeeded whatever doctor found, so do not leave a failure code
+        # behind in the caller's session -- this script is usually run via `irm | iex`.
+        $global:LASTEXITCODE = 0
+    } catch {
+        Write-Warning "Could not run cst doctor: $($_.Exception.Message)"
+    } finally {
+        # The outer finally below still needs Stop semantics.
+        $ErrorActionPreference = "Stop"
+    }
+    if ($doctorFailed) {
+        Write-Warning "CST itself installed correctly. Fix the item above, then re-run: cst doctor"
+    }
 } finally {
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }

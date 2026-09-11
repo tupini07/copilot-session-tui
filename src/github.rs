@@ -757,6 +757,175 @@ pub fn resolve_repository_for(
     resolve_repository(&ProcessGhRunner { cancelled }, cwd)
 }
 
+/// Which GitHub hosts `gh` is authenticated to, or why that could not be answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GhAuth {
+    NotInstalled,
+    /// `gh` runs but no host is logged in.
+    NoHosts,
+    LoggedIn(Vec<GhAuthHost>),
+    /// `gh` answered with something neither parser understood, or not at all.
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhAuthHost {
+    pub host: String,
+    pub account: Option<String>,
+    pub healthy: bool,
+}
+
+#[derive(Deserialize)]
+struct GhAuthStatusJson {
+    #[serde(default)]
+    hosts: std::collections::BTreeMap<String, Vec<GhAuthAccountJson>>,
+}
+
+/// Only `state` and `login` are relied on. The shape of a *failed* account was not
+/// observable while writing this, so every field is optional and anything that is not
+/// literally `"success"` counts as unhealthy.
+#[derive(Deserialize)]
+struct GhAuthAccountJson {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// Ask `gh` which hosts it is logged in to.
+///
+/// This lives beside the fetch paths rather than in `doctor` so it can reuse the
+/// private runner — the only place that returns exit status, stdout and stderr
+/// together — along with its cancellation loop, which is what gives us a timeout.
+///
+/// A timeout is not optional: `gh auth status` validates tokens over the network and
+/// hangs behind a VPN or captive portal, and `cst doctor` runs at the end of the
+/// installer, where a hang reads as a broken install.
+pub fn probe_auth(cwd: &Path, timeout: Duration) -> GhAuth {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let watchdog = Arc::clone(&cancelled);
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        watchdog.store(true, Ordering::Release);
+    });
+    let runner = ProcessGhRunner { cancelled };
+
+    // `--json` always exits zero, so the payload is the only source of truth. Absence
+    // of the flag on older `gh` is detected by the output failing to parse rather than
+    // by sniffing stderr for "unknown flag", which is the brittleness `cli_error`
+    // already suffers from and should not be extended.
+    let json = runner.execute(cwd, &to_args(&["auth", "status", "--json", "hosts"]));
+    match &json {
+        Err(error) if error.kind == GithubErrorKind::MissingCli => return GhAuth::NotInstalled,
+        Err(error) if error.kind == GithubErrorKind::Cancelled => {
+            return GhAuth::Unknown(format!(
+                "`gh auth status` did not answer within {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        _ => {}
+    }
+    if let Ok((_, stdout, _)) = &json {
+        if let Some(hosts) = parse_auth_status_json(stdout) {
+            return classify_hosts(hosts);
+        }
+    }
+
+    let text = runner.execute(cwd, &to_args(&["auth", "status"]));
+    match text {
+        Err(error) if error.kind == GithubErrorKind::MissingCli => GhAuth::NotInstalled,
+        Err(error) => GhAuth::Unknown(error.message),
+        Ok((_, stdout, stderr)) => {
+            // Older `gh` printed this to stderr and newer prints to stdout; reading
+            // both makes the parser version-independent.
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+            match parse_auth_status_text(&combined) {
+                Some(hosts) => classify_hosts(hosts),
+                None => GhAuth::Unknown(first_line(&combined)),
+            }
+        }
+    }
+}
+
+fn classify_hosts(hosts: Vec<GhAuthHost>) -> GhAuth {
+    if hosts.is_empty() {
+        GhAuth::NoHosts
+    } else {
+        GhAuth::LoggedIn(hosts)
+    }
+}
+
+fn to_args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| (*arg).to_string()).collect()
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("`gh` produced no output")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect()
+}
+
+fn parse_auth_status_json(stdout: &[u8]) -> Option<Vec<GhAuthHost>> {
+    let parsed: GhAuthStatusJson = serde_json::from_slice(stdout).ok()?;
+    Some(
+        parsed
+            .hosts
+            .into_iter()
+            .flat_map(|(host, accounts)| {
+                accounts.into_iter().map(move |account| GhAuthHost {
+                    host: host.clone(),
+                    account: account.login,
+                    healthy: account.state == "success",
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Fallback for `gh` too old to know `--json`.
+///
+/// Keyed on the English literals rather than on the check and cross glyphs, which
+/// `gh` substitutes in its accessibility mode and Windows consoles mangle.
+fn parse_auth_status_text(text: &str) -> Option<Vec<GhAuthHost>> {
+    let mut hosts = Vec::new();
+    let mut understood = false;
+    for line in text.lines() {
+        let line = line.trim();
+        let (rest, healthy) = if let Some(rest) = line.split_once("Logged in to ") {
+            (rest.1, true)
+        } else if let Some(rest) = line.split_once("Failed to log in to ") {
+            (rest.1, false)
+        } else {
+            continue;
+        };
+        understood = true;
+        let mut words = rest.split_whitespace();
+        let Some(host) = words.next() else { continue };
+        let host = host.trim_end_matches([',', '.']).to_string();
+        // `account <login>` on gh 2.40+, `as <login>` before it.
+        let account = rest
+            .split_once(" account ")
+            .or_else(|| rest.split_once(" as "))
+            .and_then(|(_, tail)| tail.split_whitespace().next())
+            .map(|login| login.trim_end_matches([',', '.']).to_string());
+        hosts.push(GhAuthHost {
+            host,
+            account,
+            healthy,
+        });
+    }
+    understood.then_some(hosts)
+}
+
 /// Fetch a pull request's diffs, which the fast path deliberately skips.
 ///
 /// Returns patches keyed by path, for merging into an already-listed set of
@@ -2821,5 +2990,78 @@ mod tests {
         .unwrap();
 
         assert!(issue.pull_request.is_some());
+    }
+    #[test]
+    fn gh_auth_status_json_lists_every_host_the_user_is_logged_into() {
+        // The single-host payload is the exact shape gh 2.89 produced; the two-host
+        // one extends it, because an enterprise host is the case that matters.
+        let single = br#"{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com","login":"tupini07","tokenSource":"keyring","scopes":"repo","gitProtocol":"https"}]}}"#;
+        let hosts = parse_auth_status_json(single).expect("payload parses");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].host, "github.com");
+        assert_eq!(hosts[0].account.as_deref(), Some("tupini07"));
+        assert!(hosts[0].healthy);
+
+        let two = br#"{"hosts":{"github.com":[{"state":"success","login":"a"}],"github.corp.example":[{"state":"success","login":"b"}]}}"#;
+        let hosts = parse_auth_status_json(two).expect("payload parses");
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.iter().any(|host| host.host == "github.corp.example"));
+    }
+
+    #[test]
+    fn an_account_whose_state_is_not_success_is_reported_as_unhealthy() {
+        // The failure payload could not be observed, so anything that is not literally
+        // "success" has to count as broken rather than being guessed at.
+        let payload = br#"{"hosts":{"github.com":[{"state":"error","login":"a"}]}}"#;
+        let hosts = parse_auth_status_json(payload).expect("payload parses");
+        assert!(!hosts[0].healthy);
+    }
+
+    #[test]
+    fn a_json_payload_without_the_hosts_key_is_not_mistaken_for_being_logged_out() {
+        // An older gh rejecting --json prints an error, not JSON. Returning None sends
+        // the caller to the text parser instead of reporting "no hosts".
+        assert!(parse_auth_status_json(b"unknown flag: --json").is_none());
+    }
+
+    #[test]
+    fn gh_versions_without_json_support_fall_back_to_the_human_readable_hosts() {
+        let text = "github.com\n  \u{2713} Logged in to github.com account tupini07 (keyring)\n  - Active account: true\n";
+        let hosts = parse_auth_status_text(text).expect("text parses");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].host, "github.com");
+        assert_eq!(hosts[0].account.as_deref(), Some("tupini07"));
+        assert!(hosts[0].healthy);
+    }
+
+    #[test]
+    fn the_modern_account_wording_and_the_older_as_wording_both_yield_the_host() {
+        let modern =
+            parse_auth_status_text("Logged in to github.com account me (keyring)").unwrap();
+        let legacy = parse_auth_status_text("Logged in to github.com as me (oauth_token)").unwrap();
+        assert_eq!(modern[0].account.as_deref(), Some("me"));
+        assert_eq!(legacy[0].account.as_deref(), Some("me"));
+        assert_eq!(modern[0].host, legacy[0].host);
+    }
+
+    #[test]
+    fn a_host_gh_could_not_log_into_is_parsed_as_unhealthy_rather_than_skipped() {
+        let hosts =
+            parse_auth_status_text("X Failed to log in to github.corp.example account me").unwrap();
+        assert_eq!(hosts[0].host, "github.corp.example");
+        assert!(!hosts[0].healthy);
+    }
+
+    #[test]
+    fn output_that_neither_parser_understands_is_reported_as_unknown_instead_of_guessing() {
+        // Claiming "not logged in" for output we simply failed to read would send the
+        // user off to run `gh auth login` for no reason.
+        assert!(parse_auth_status_text("something entirely unexpected").is_none());
+    }
+
+    #[test]
+    fn no_logged_in_hosts_is_reported_as_unauthenticated_rather_than_an_error() {
+        let hosts = parse_auth_status_json(br#"{"hosts":{}}"#).expect("payload parses");
+        assert_eq!(classify_hosts(hosts), GhAuth::NoHosts);
     }
 }

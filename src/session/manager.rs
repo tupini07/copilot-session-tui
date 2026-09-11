@@ -266,12 +266,29 @@ pub fn start_worktree_session(
 /// TUI before the pane could even show its startup spinner. The location cannot
 /// meaningfully change while CST is running, so resolve it once.
 fn find_copilot() -> Result<String> {
-    static RESOLVED: OnceLock<Option<String>> = OnceLock::new();
-
-    RESOLVED.get_or_init(locate_copilot).clone().ok_or_else(|| {
+    copilot_probe().map(|probe| probe.program).ok_or_else(|| {
         anyhow::anyhow!("Could not find copilot CLI. Make sure it's installed and in PATH.")
     })
 }
+
+/// What the Copilot lookup found, for reporting rather than launching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopilotProbe {
+    /// The program CST will actually spawn.
+    pub program: String,
+    /// First line of `copilot --version`, absent when it could not be read.
+    pub version: Option<String>,
+    /// Whether `--version` exited successfully. A binary that spawns but fails this
+    /// is still the one sessions launch with, so `cst doctor` can say so.
+    pub version_ok: bool,
+}
+
+/// The resolved Copilot CLI, sharing the cache [`find_copilot`] uses.
+pub fn copilot_probe() -> Option<CopilotProbe> {
+    RESOLVED.get_or_init(locate_copilot).clone()
+}
+
+static RESOLVED: OnceLock<Option<CopilotProbe>> = OnceLock::new();
 
 /// Populate the Copilot lookup cache off the UI thread at startup.
 pub fn warm_copilot_lookup() {
@@ -280,13 +297,20 @@ pub fn warm_copilot_lookup() {
     });
 }
 
-fn locate_copilot() -> Option<String> {
+fn locate_copilot() -> Option<CopilotProbe> {
     // Check common locations
     let candidates = ["copilot", "copilot.exe"];
 
     for candidate in &candidates {
-        if Command::new(candidate).arg("--version").output().is_ok() {
-            return Some(candidate.to_string());
+        // Deliberately still keyed on the process starting rather than on its exit
+        // status: tightening that would change which binary sessions launch with, on
+        // machines this cannot be tested against. The status is reported instead.
+        if let Ok(output) = Command::new(candidate).arg("--version").output() {
+            return Some(CopilotProbe {
+                program: candidate.to_string(),
+                version: version_line(&String::from_utf8_lossy(&output.stdout)),
+                version_ok: output.status.success(),
+            });
         }
     }
 
@@ -295,11 +319,36 @@ fn locate_copilot() -> Option<String> {
         let npm_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let copilot_path = format!("{}/@github/copilot/bin/copilot", npm_root);
         if Path::new(&copilot_path).exists() {
-            return Some(copilot_path);
+            let probe = Command::new(&copilot_path).arg("--version").output().ok();
+            return Some(CopilotProbe {
+                version: probe
+                    .as_ref()
+                    .and_then(|out| version_line(&String::from_utf8_lossy(&out.stdout))),
+                version_ok: probe.is_some_and(|out| out.status.success()),
+                program: copilot_path,
+            });
         }
     }
 
     None
+}
+
+/// First meaningful line of a `--version` banner.
+///
+/// Copilot prints two lines — the version, then an update hint — so anything past the
+/// first is noise. Control bytes are dropped because the banner reaches a plain
+/// `println!` in `cst doctor`, where an escape sequence would be executed.
+fn version_line(stdout: &str) -> Option<String> {
+    let line: String = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect();
+    let line = line.trim_end_matches('.').trim();
+    (!line.is_empty()).then(|| line.to_string())
 }
 
 #[cfg(test)]
@@ -532,5 +581,29 @@ mod tests {
             !resumed.iter().any(|arg| arg == "--yolo"),
             "and resuming into that project is the same session, got {resumed:?}"
         );
+    }
+    #[test]
+    fn a_copilot_version_banner_is_reduced_to_its_first_line() {
+        // Real output on a working install: the version, then an upsell line.
+        let banner = "GitHub Copilot CLI 1.0.84-3.\nRun 'copilot update' to check for updates.\n";
+        assert_eq!(
+            version_line(banner).as_deref(),
+            Some("GitHub Copilot CLI 1.0.84-3")
+        );
+    }
+
+    #[test]
+    fn a_version_banner_cannot_smuggle_an_escape_sequence_into_the_doctor_report() {
+        // The banner is printed raw by `cst doctor`, so a control byte would be
+        // executed by the terminal rather than shown.
+        let banner = "\u{1b}[2JGitHub Copilot CLI 1.0.84";
+        let line = version_line(banner).expect("a version remains");
+        assert!(!line.contains('\u{1b}'), "got {line:?}");
+    }
+
+    #[test]
+    fn a_copilot_that_printed_nothing_yields_no_version_text() {
+        assert_eq!(version_line(""), None);
+        assert_eq!(version_line("\n  \n"), None);
     }
 }

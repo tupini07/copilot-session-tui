@@ -2,6 +2,7 @@ mod app;
 mod command_palette;
 mod config;
 mod debug_keys;
+mod doctor;
 mod editor;
 mod events;
 mod github;
@@ -119,6 +120,8 @@ enum Commands {
         #[arg(value_parser = ["bash", "zsh", "powershell"])]
         shell: String,
     },
+    /// Check that everything CST needs is installed and configured
+    Doctor,
     /// Report how this terminal delivers key presses (used to pick a mux prefix key)
     #[command(hide = true)]
     DebugKeys,
@@ -219,6 +222,22 @@ fn main() -> Result<()> {
                 updater::UpdateCommandOutcome::AlreadyInstalled(version) => {
                     println!("CST v{version} is already installed.");
                 }
+            }
+            return Ok(());
+        }
+        Some(Commands::Doctor) => {
+            let report = doctor::gather(&copilot_home);
+            let mut stdout = io::stdout();
+            doctor::render(&report, &mut stdout)?;
+            // `process::exit` skips the flush that dropping stdout would do, and the
+            // whole point of this command is the text.
+            stdout.flush()?;
+            if report.has_required_failure() {
+                // Deliberately an exit code rather than an `Err`: the report is already
+                // a complete explanation, and returning an error would print `Error: …`
+                // underneath it. Safe here because this runs before raw mode, the
+                // alternate screen, and any PTY or lock.
+                std::process::exit(1);
             }
             return Ok(());
         }
@@ -1596,6 +1615,14 @@ mod tests {
     fn update_subcommand_parses_without_starting_the_tui() {
         let cli = Cli::try_parse_from(["cst", "update"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Update)));
+    }
+
+    #[test]
+    fn doctor_parses_even_though_the_shell_wrapper_prepends_last_dir_file() {
+        // `cst` is a shell function that always passes --last-dir-file, so the
+        // subcommand never arrives as the first argument in real use.
+        let cli = Cli::try_parse_from(["cst", "--last-dir-file", "tmp", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Doctor)));
     }
 
     #[test]

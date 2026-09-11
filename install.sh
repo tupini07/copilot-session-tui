@@ -106,3 +106,10 @@ if [ "$skip_shell_init" = "1" ]; then
 else
     echo "$shell_name integration is configured. Restart $shell_name, then run: cst"
 fi
+
+echo
+# `if ! cmd` is exempt from `set -e`, so a missing dependency cannot abort an install
+# that actually succeeded. Unlike `|| true` it still lets us say what just happened.
+if ! "$install_dir/copilot-session-tui" doctor; then
+    echo "CST itself installed correctly. Fix the item above, then re-run: cst doctor" >&2
+fi

@@ -77,6 +77,13 @@ require [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, whi
 scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
 Copilot CLI 1.0.82+ is recommended for the optional authoritative lifecycle hooks.
 
+Both installers finish by running `cst doctor`, and you can run it yourself at any time.
+It reports what CST found — the Copilot CLI, `gh`, Git, the lifecycle hooks, and your
+settings file — and each optional item names the one feature you lose without it, so a
+gap you do not care about reads as a gap you do not care about. **Only a missing Copilot
+CLI is fatal**; `cst doctor` exits non-zero for that and zero for everything else, which
+is why a missing optional never fails an install that otherwise worked.
+
 To uninstall, remove the managed `copilot-session-tui` block from your shell profile
 and delete the install directory. On Windows, also remove that directory from your user
 `PATH`.
@@ -447,6 +454,8 @@ instead.
 The inspector requires the [`gh` CLI](https://cli.github.com/) to be installed and
 authenticated. It uses the host from the repository remote, including GitHub Enterprise
 hosts; run `gh auth login --hostname HOST` if CST reports an authentication error.
+Run `cst doctor` to see which hosts `gh` is currently authenticated to — being logged
+into github.com is not the same as being logged into the host your code lives on.
 
 Mouse tracking, image-paste triggers, OSC 52 clipboard-copy requests, and OSC 9;4 progress
 states are forwarded through the mux so Copilot retains the outer terminal's scrolling,
@@ -479,6 +488,8 @@ cst hooks install
 cst hooks status
 # cst hooks uninstall
 ```
+
+`cst doctor` reports the plugin status too, alongside everything else CST depends on.
 
 Restart already-running Copilot sessions after installing or uninstalling the plugin; hook
 configuration is loaded when Copilot starts. The installer generates a plugin bound to the

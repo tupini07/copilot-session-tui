@@ -246,7 +246,11 @@ pub(crate) fn invocation_executable() -> Result<PathBuf> {
     }
 }
 
-fn find_on_path(name: &std::path::Path) -> Option<PathBuf> {
+/// Which file on `PATH` a program name resolves to.
+///
+/// `cst doctor` reports this so a user can tell a real install from a shim or, on
+/// Windows, an App Execution Alias pointing somewhere they did not expect.
+pub(crate) fn find_on_path(name: &std::path::Path) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
         let candidate = directory.join(name);
