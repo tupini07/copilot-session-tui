@@ -23,6 +23,25 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let path = path.replace('/', "\\").to_lowercase();
+        let prefix = prefix.replace('/', "\\").to_lowercase();
+        path == prefix
+            || if prefix.ends_with('\\') {
+                path.starts_with(&prefix)
+            } else {
+                path.strip_prefix(&prefix)
+                    .is_some_and(|remainder| remainder.starts_with('\\'))
+            }
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(path).starts_with(Path::new(prefix))
+    }
+}
+
 /// Which surface the user is looking at: the session list, or a live session pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -132,6 +151,8 @@ pub struct TakeoverTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsEditField {
     Model,
+    HiddenTitlePrefixes,
+    HiddenPathPrefixes,
     BranchPrefix,
     WorktreeRoot,
     MuxPrefix,
@@ -144,22 +165,25 @@ pub enum SettingsEditField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     General,
+    Filters,
     Worktrees,
     Terminal,
     Notifications,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::General,
         Self::Worktrees,
         Self::Terminal,
         Self::Notifications,
+        Self::Filters,
     ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Filters => "Filters",
             Self::Worktrees => "Worktrees",
             Self::Terminal => "Terminal",
             Self::Notifications => "Notifications",
@@ -169,6 +193,7 @@ impl SettingsSection {
     pub const fn rows(self) -> &'static [usize] {
         match self {
             Self::General => &[0, 1, 2, 3],
+            Self::Filters => &[16, 17],
             Self::Worktrees => &[4, 5],
             Self::Terminal => &[6, 7, 8],
             Self::Notifications => &[9, 10, 11, 12, 13, 14, 15],
@@ -502,6 +527,7 @@ pub struct App {
     pub grabbed_favorite: Option<String>,
     pub mode: Mode,
     pub search_query: String,
+    pub show_hidden_sessions: bool,
     pub rename_input: String,
     pub project_filter: Option<String>,
     /// Project root of the directory `cst` was launched from (git-aware).
@@ -656,6 +682,7 @@ impl App {
             grabbed_favorite: None,
             mode: Mode::Normal,
             search_query: String::new(),
+            show_hidden_sessions: false,
             rename_input: String::new(),
             project_filter: None,
             cwd_project: None,
@@ -908,6 +935,10 @@ impl App {
         // Remember the refreshed disk value for future saves but keep the live mode.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let favorites_changed = self.config.favorites != persisted.favorites;
+        let hidden_title_prefixes_changed =
+            self.config.hidden_title_prefixes != persisted.hidden_title_prefixes;
+        let hidden_path_prefixes_changed =
+            self.config.hidden_path_prefixes != persisted.hidden_path_prefixes;
         let theme_changed = self.config.theme != persisted.theme;
         let runtime_mux = self.config.mux;
         self.mux_on_disk = persisted.mux;
@@ -933,7 +964,7 @@ impl App {
         if let Some(settings) = self.project_settings.as_mut() {
             settings.refresh_global(&self.config);
         }
-        if favorites_changed {
+        if favorites_changed || hidden_title_prefixes_changed || hidden_path_prefixes_changed {
             self.apply_filter();
             if let Some(session_id) = selected_id {
                 self.focus_session(&session_id);
@@ -2607,6 +2638,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, s)| {
+                if !self.show_hidden_sessions
+                    && (self.session_title_is_hidden(s) || self.session_path_is_hidden(s))
+                {
+                    return false;
+                }
                 // Project filter
                 if let Some(ref proj) = self.project_filter {
                     if !s.project_root.eq_ignore_ascii_case(proj) {
@@ -2648,6 +2684,31 @@ impl App {
             self.selected = self.filtered_indices.len().saturating_sub(1);
         }
         self.scroll_offset = 0;
+    }
+
+    fn session_title_is_hidden(&self, session: &Session) -> bool {
+        let title = session.display_name().to_lowercase();
+        self.config
+            .hidden_title_prefixes
+            .iter()
+            .any(|prefix| !prefix.is_empty() && title.starts_with(&prefix.to_lowercase()))
+    }
+
+    fn session_path_is_hidden(&self, session: &Session) -> bool {
+        self.config
+            .hidden_path_prefixes
+            .iter()
+            .any(|prefix| path_has_prefix(&session.cwd, prefix))
+    }
+
+    pub fn toggle_hidden_sessions(&mut self) -> bool {
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        self.show_hidden_sessions = !self.show_hidden_sessions;
+        self.apply_filter();
+        if let Some(session_id) = selected_id {
+            self.focus_session(&session_id);
+        }
+        self.show_hidden_sessions
     }
 
     pub fn is_favorite(&self, session_id: &str) -> bool {
@@ -4515,6 +4576,57 @@ mod tests {
             app.apply_filter();
             assert_eq!(visible_ids(&app), vec!["abc1234"], "query {query:?}");
         }
+    }
+
+    #[test]
+    fn hidden_title_prefixes_filter_sessions_and_can_be_temporarily_shown() {
+        let mut hidden = session("hidden", "project", "2026-08-14T12:00:00Z");
+        hidden.summary = Some("Your objective: investigate the issue".to_string());
+        let mut differently_cased = session("hidden-case", "project", "2026-08-13T12:00:00Z");
+        differently_cased.summary = Some("YOUR OBJECTIVE: test another path".to_string());
+        let visible = session("visible", "project", "2026-08-12T12:00:00Z");
+        let config = UserConfig {
+            hidden_title_prefixes: vec!["Your objective:".to_string()],
+            ..UserConfig::default()
+        };
+        let mut app = App::new(vec![hidden, differently_cased, visible], config);
+
+        assert_eq!(visible_ids(&app), vec!["visible"]);
+
+        assert!(app.toggle_hidden_sessions());
+        assert_eq!(visible_ids(&app), vec!["hidden", "hidden-case", "visible"]);
+
+        assert!(!app.toggle_hidden_sessions());
+        assert_eq!(visible_ids(&app), vec!["visible"]);
+    }
+
+    #[test]
+    fn hidden_path_prefixes_match_path_components() {
+        let in_tmp = Session {
+            cwd: "/tmp/cst-work/project".to_string(),
+            ..session("tmp-session", "project", "2026-08-14T12:00:00Z")
+        };
+        let tmp_exact = Session {
+            cwd: "/tmp".to_string(),
+            ..session("tmp-exact", "project", "2026-08-13T12:00:00Z")
+        };
+        let similar = Session {
+            cwd: "/tmp2/project".to_string(),
+            ..session("tmp2-session", "project", "2026-08-12T12:00:00Z")
+        };
+        let config = UserConfig {
+            hidden_path_prefixes: vec!["/tmp".to_string()],
+            ..UserConfig::default()
+        };
+        let mut app = App::new(vec![in_tmp, tmp_exact, similar], config);
+
+        assert_eq!(visible_ids(&app), vec!["tmp2-session"]);
+
+        app.toggle_hidden_sessions();
+        assert_eq!(
+            visible_ids(&app),
+            vec!["tmp-session", "tmp-exact", "tmp2-session"]
+        );
     }
 
     #[test]
