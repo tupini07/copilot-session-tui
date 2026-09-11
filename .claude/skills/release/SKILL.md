@@ -17,16 +17,51 @@ Run all of these first. If any fails, stop and report; nothing has been created 
 there is nothing to unwind.
 
 ```bash
-git rev-parse --abbrev-ref HEAD      # must be main
-git status --porcelain               # must be empty
+git rev-parse --abbrev-ref HEAD                  # must be main
+git status --porcelain --untracked-files=no      # must be empty - modified tracked files
+git status --porcelain                           # untracked files: report, do not block
 git fetch origin
 git rev-list --count origin/main..HEAD   # must be 0 - unpushed commits
 git rev-list --count HEAD..origin/main   # must be 0 - unpulled commits
 ```
 
+**Be precise about what "dirty" means.** Only *modified tracked* files block a release:
+they are changes the tag will not contain, so what CI builds is not what the working tree
+says. Untracked files cannot end up in the tag either way, so they are not a problem —
+mention them and carry on. A check that a repository can never satisfy is one people
+learn to step over, which is worse than no check.
+
+If there *are* modified tracked files, do not silently work around them and do not just
+give up. Show the user what is modified and offer to stash it:
+
+```bash
+git stash push --include-untracked --message "parked for the vX.Y.Z release" -- <paths>
+```
+
+**Ask before stashing** — it moves the user's work out of the tree, and a stash is not a
+commit: it survives neither a fresh clone nor `git stash clear`. Say so, and say
+`git stash pop` brings it back.
+
 Local `main` must equal `origin/main` **in both directions**. Unpushed commits would be
 in the tag but not in what others see; unpulled ones mean you write the changelog against
-the wrong span.
+the wrong span — and the release would be built from a tree missing whatever landed on
+origin while you worked. Check this even when you are sure nothing has changed.
+
+When origin *has* moved, integrating it is the fix, not a reason to abort. Preview it
+read-only first, so a conflicted merge is something you report rather than something you
+are halfway through:
+
+```bash
+git merge-tree --write-tree HEAD origin/main   # exit 0 means it merges cleanly
+```
+
+Clean means *textually* clean. Two branches that both added a variant to the same enum
+or a field to the same struct will merge without complaint and still need the full
+`cargo build`, `cargo test` and `cargo clippy` run afterwards, because the thing being
+released is the combination and nobody has ever compiled it before. If it conflicts,
+stop and show the user; do not resolve a contributor's feature on their behalf without
+asking. Whatever arrived also needs its own changelog bullet, and a first-time outside
+contributor gets the thanks line.
 
 Then find the previous release:
 
