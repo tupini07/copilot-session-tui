@@ -1051,6 +1051,7 @@ fn run_app(
                     poll_interval: std::time::Duration::from_secs(
                         threads::doorbell::DEFAULT_POLL_SECONDS,
                     ),
+                    stall_detection: app.config.thread_stall_detection,
                     wakeups_per_hour: app
                         .config
                         .thread_wakeups_per_hour

@@ -26,6 +26,8 @@ pub enum MuxEvent {
     ThreadDelivery(Box<crate::threads::watcher::Delivery>),
     /// The thread watcher could not do its job, with a sentence saying why.
     ThreadWatchFailed(String),
+    /// A watched thread looks like it is going in circles. Reported, never acted on.
+    ThreadStalled(String),
     Term(crossterm::event::Event),
 }
 

@@ -2263,6 +2263,11 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
         MuxEvent::ThreadDelivery(delivery) => app.apply_thread_delivery(*delivery),
+        MuxEvent::ThreadStalled(notice) => {
+            // Reported only. Nothing was changed, so there is nothing to undo.
+            app.status_message = Some(notice);
+            true
+        }
         MuxEvent::ThreadWatchFailed(reason) => {
             // Said once rather than every minute: the watcher already backs off, and a
             // status line that keeps repeating the same failure is noise.

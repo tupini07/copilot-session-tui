@@ -1231,6 +1231,50 @@ fn fetch_issue_comments(
         .collect())
 }
 
+/// Comment text, for the one caller allowed to look at it.
+///
+/// Separate from [`fetch_thread_comments`] and named for its purpose, because carrying
+/// bodies around is exactly what the rest of the thread pipeline refuses to do. The only
+/// consumer is the stall check, which feeds them to a model that has no tools and no
+/// repository — see `threads::judge`.
+pub fn fetch_recent_bodies_for_review(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    limit: usize,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<String>, GithubError> {
+    if target.discussion {
+        // Discussions would need a second GraphQL query for bodies. The stall check is
+        // advisory, so skipping them loses a hint rather than breaking anything.
+        return Ok(Vec::new());
+    }
+    let runner = ProcessGhRunner { cancelled };
+    let mut args = strings(&["api", "--hostname", target.host]);
+    args.push(format!(
+        "repos/{}/{}/issues/{}/comments?per_page={limit}",
+        target.owner, target.repo, target.number
+    ));
+
+    let stdout = runner.run(&cwd, &args)?;
+    let comments: Vec<ApiCommentBody> = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub sent an unreadable comment list: {error}"),
+        )
+    })?;
+    Ok(comments
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|comment| comment.body.unwrap_or_default())
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct ApiCommentBody {
+    body: Option<String>,
+}
+
 /// Discussions need the last page, not the first: their comments cannot be filtered by
 /// time through GraphQL the way the REST endpoint allows.
 const DISCUSSION_RECENT_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){comments(last:30){nodes{id url createdAt author{login} replies(last:10){nodes{id url createdAt author{login}}}}}}}}";

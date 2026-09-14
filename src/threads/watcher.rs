@@ -20,6 +20,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use super::doorbell::{self, NotificationTransport, Ring, UreqTransport};
+use super::judge;
 use super::store::{self, ThreadState};
 use super::{
     classify, CommentSighting, PendingDelivery, PendingReason, ThreadKind, ThreadRef, Verdict,
@@ -172,6 +173,7 @@ fn earliest_interest(state: &ThreadState, thread: &ThreadRef) -> Option<String> 
 pub struct WatchSettings {
     pub poll_interval: Duration,
     pub wakeups_per_hour: u32,
+    pub stall_detection: bool,
 }
 
 #[must_use = "dropping the watcher stops its worker"]
@@ -276,6 +278,23 @@ impl ThreadWatcher {
                                         for delivery in deliveries.unwrap_or_default() {
                                             let _ = events
                                                 .send(MuxEvent::ThreadDelivery(Box::new(delivery)));
+                                        }
+
+                                        // Only after a burst, and only ever to report.
+                                        // A conversation that settles something takes a
+                                        // handful of turns; one that does not trips this
+                                        // within minutes.
+                                        if settings.stall_detection
+                                            && judge::is_a_burst(&comments, Utc::now())
+                                        {
+                                            let checking = Arc::new(AtomicBool::new(false));
+                                            if judge::examine(&thread, checking)
+                                                == Some(judge::Stall::Circling)
+                                            {
+                                                let _ = events.send(MuxEvent::ThreadStalled(
+                                                    judge::notice(&thread),
+                                                ));
+                                            }
                                         }
                                     }
                                     Err(error) => {

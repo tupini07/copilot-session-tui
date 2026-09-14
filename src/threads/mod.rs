@@ -16,6 +16,7 @@
 
 pub mod cli;
 pub mod doorbell;
+pub mod judge;
 pub mod store;
 pub mod watcher;
 
