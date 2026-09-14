@@ -45,6 +45,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Same reasoning as What's New below: this can be open over live Copilot panes, so
+    // it has to take every keystroke rather than let one through to a chat.
+    if crate::input::thread_inbox_active(app) {
+        crate::input::handle_thread_inbox_event(app, event);
+        return;
+    }
+
     // First, and before the prefix gate below: this is most likely to be on screen
     // right after a restart reopened these panes, and a keystroke aimed at dismissing
     // it must not land in a Copilot chat.
@@ -718,6 +725,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             app.mode = crate::app::Mode::Help;
         }
         CheckForUpdates => app.request_update(),
+        ThreadInbox => app.open_thread_inbox(),
         WhatsNew => {
             app.whats_new = Some(crate::ui::whats_new::WhatsNewScreen::new(
                 crate::changelog::whats_new_for_current_version(),

@@ -46,6 +46,11 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    if thread_inbox_active(app) {
+        handle_thread_inbox_event(app, event);
+        return Ok(());
+    }
+
     // Ahead of everything else it can cover, so a keystroke meant to dismiss it
     // cannot reach the view underneath.
     if whats_new_active(app) {
@@ -179,6 +184,39 @@ pub(crate) fn handle_update_restart_confirm(app: &mut App, key: KeyCode) {
 
 pub(crate) fn whats_new_active(app: &App) -> bool {
     app.whats_new.is_some()
+}
+
+pub(crate) fn thread_inbox_active(app: &App) -> bool {
+    app.thread_inbox.is_some()
+}
+
+/// Route the thread inbox.
+///
+/// Swallows every key it does not use, for the same reason as the What's New screen:
+/// this can be open over a workspace full of live Copilot panes, and a stray keystroke
+/// reaching one of them would be worse than a keystroke that does nothing. Accepting an
+/// item is the only thing here that starts anything, and it takes a deliberate Enter.
+pub(crate) fn handle_thread_inbox_event(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => app.thread_inbox = None,
+            KeyCode::Up | KeyCode::Char('k') => app.thread_inbox_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.thread_inbox_move(1),
+            KeyCode::Char('d') => app.thread_inbox_dismiss(),
+            KeyCode::Enter => {
+                if let Err(error) = app.thread_inbox_accept() {
+                    app.status_message = Some(format!("Could not open the session: {error}"));
+                }
+            }
+            _ => {}
+        },
+        Event::Mouse(mouse) => match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => app.thread_inbox_move(-1),
+            crossterm::event::MouseEventKind::ScrollDown => app.thread_inbox_move(1),
+            _ => {}
+        },
+        _ => {}
+    }
 }
 
 /// Route the What's New screen.
@@ -1336,7 +1374,9 @@ fn handle_project_settings(app: &mut App, key: KeyCode) {
             app.project_settings_selected = app.project_settings_selected.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.project_settings_selected < 3 {
+            // Bumped with every row added below; the rows here are positional, unlike
+            // the keyed rows in global settings.
+            if app.project_settings_selected < 4 {
                 app.project_settings_selected += 1;
             }
         }
@@ -1390,6 +1430,16 @@ fn toggle_project_override(app: &mut App) {
                         .or(Some(DEFAULT_MAX_AUTOPILOT_CONTINUES)),
                 );
             }
+        }
+        // Three states like yolo, and for the same reason: a repository doing sensitive
+        // work needs to be able to refuse thread wakes even when they are on globally.
+        4 => {
+            let next = match settings.threads_enabled_override() {
+                None => Some(true),
+                Some(true) => Some(false),
+                Some(false) => None,
+            };
+            settings.set_threads_enabled_override(next);
         }
         _ => {}
     }
@@ -2146,7 +2196,38 @@ mod tests {
         handle_project_settings(&mut app, KeyCode::Down);
         assert_eq!(app.project_settings_selected, 3);
         handle_project_settings(&mut app, KeyCode::Down);
-        assert_eq!(app.project_settings_selected, 3, "stops at the last row");
+        assert_eq!(app.project_settings_selected, 4);
+        handle_project_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.project_settings_selected, 4, "stops at the last row");
+    }
+
+    #[test]
+    fn a_repository_can_refuse_thread_wakes_even_when_they_are_on_globally() {
+        // Three states, like yolo: inheriting is not the same as agreeing, and a
+        // repository doing sensitive work has to be able to say no outright.
+        let temp = tempfile::tempdir().unwrap();
+        let global = config::UserConfig::default();
+        let mut app = App::new(Vec::new(), global.clone());
+        app.project_settings = Some(config::ProjectSettings::load(temp.path(), &global).unwrap());
+        app.mode = Mode::ProjectSettings;
+        app.project_settings_selected = 4;
+
+        assert!(global.threads_enabled, "the global default is on");
+        let states: Vec<Option<bool>> = (0..4)
+            .map(|_| {
+                toggle_project_override(&mut app);
+                app.project_settings
+                    .as_ref()
+                    .unwrap()
+                    .threads_enabled_override()
+            })
+            .collect();
+
+        assert_eq!(
+            states,
+            vec![Some(true), Some(false), None, Some(true)],
+            "inherit -> on -> off -> inherit"
+        );
     }
     fn key_event(code: KeyCode) -> Event {
         Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))

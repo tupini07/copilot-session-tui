@@ -123,15 +123,43 @@ fn render_leave(thread: &ThreadRef, session_id: &str, removed: bool) -> String {
     }
 }
 
-/// What this session is watching.
+/// End a correspondence for everyone watching it locally.
+///
+/// Distinct from `leave`, which is one session stepping back from a conversation that
+/// carries on without it. This says the whole thing is finished. It does not close the
+/// GitHub item — that is a separate decision a human usually wants to make.
+pub fn close(root: &Path, url: &str) -> Result<String> {
+    let thread = parse_thread_url(url).map_err(anyhow::Error::msg)?;
+    let dropped = store::update_in(root, |state| state.close(&thread))?;
+    Ok(render_close(&thread, dropped))
+}
+
+fn render_close(thread: &ThreadRef, dropped: usize) -> String {
+    if dropped == 0 {
+        return format!("No session was watching {}.", thread.url());
+    }
+    format!(
+        "Closed {}.\n{dropped} session{} will no longer be woken by it. The GitHub item \
+         itself is untouched.",
+        thread.url(),
+        if dropped == 1 { "" } else { "s" }
+    )
+}
+
+/// What this session is watching, and anything it has been unable to receive.
 pub fn list(root: &Path, session_id: &str) -> Result<String> {
     let state = store::load_in(root);
     let subscriptions = state.subscriptions_for(session_id);
-    Ok(render_list(&subscriptions, session_id))
+    let pending = state.pending_for(session_id);
+    Ok(render_list(&subscriptions, &pending, session_id))
 }
 
-fn render_list(subscriptions: &[&Subscription], session_id: &str) -> String {
-    if subscriptions.is_empty() {
+fn render_list(
+    subscriptions: &[&Subscription],
+    pending: &[&super::PendingDelivery],
+    session_id: &str,
+) -> String {
+    if subscriptions.is_empty() && pending.is_empty() {
         return format!(
             "Session {} is not watching any threads.\nUse `cst thread watch <url>` or \
              `cst thread post <url>` to start.",
@@ -159,6 +187,24 @@ fn render_list(subscriptions: &[&Subscription], session_id: &str) -> String {
             subscription.thread.kind.label(),
             state
         ));
+    }
+
+    // Said here as well as in the TUI, because an agent asking what it is watching is
+    // usually asking because it is wondering whether an answer arrived.
+    if !pending.is_empty() {
+        out.push_str(&format!(
+            "\n\n{} message{} could not be delivered and {} waiting for the user:",
+            pending.len(),
+            if pending.len() == 1 { "" } else { "s" },
+            if pending.len() == 1 { "is" } else { "are" }
+        ));
+        for held in pending {
+            out.push_str(&format!(
+                "\n  {} ({})",
+                held.thread.url(),
+                held.reason.describe()
+            ));
+        }
     }
     out
 }
@@ -264,7 +310,7 @@ mod tests {
 
     #[test]
     fn an_empty_list_points_at_the_command_that_would_fill_it() {
-        let report = render_list(&[], "0a1b2c3d");
+        let report = render_list(&[], &[], "0a1b2c3d");
 
         assert!(report.contains("not watching any"), "got: {report}");
         assert!(report.contains("cst thread watch"), "got: {report}");
@@ -273,7 +319,7 @@ mod tests {
     #[test]
     fn the_list_names_every_watched_thread_with_its_kind() {
         let subscription = Subscription::new("session-a", thread());
-        let report = render_list(&[&subscription], "session-a");
+        let report = render_list(&[&subscription], &[], "session-a");
 
         assert!(report.contains("https://github.com/o/r/issues/12"));
         assert!(report.contains("issue"), "got: {report}");

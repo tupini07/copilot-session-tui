@@ -42,14 +42,6 @@ pub enum Delivery {
     },
 }
 
-impl Delivery {
-    pub fn session_id(&self) -> &str {
-        match self {
-            Self::Wake { session_id, .. } | Self::Held { session_id, .. } => session_id,
-        }
-    }
-}
-
 /// Decide what a batch of comments means for everyone watching a thread.
 ///
 /// Pure apart from the state it is handed, so the security-relevant decisions can be
@@ -499,7 +491,14 @@ mod tests {
             Utc::now(),
         );
 
-        let woken: Vec<&str> = deliveries.iter().map(Delivery::session_id).collect();
+        let woken: Vec<&str> = deliveries
+            .iter()
+            .map(|delivery| match delivery {
+                Delivery::Wake { session_id, .. } | Delivery::Held { session_id, .. } => {
+                    session_id.as_str()
+                }
+            })
+            .collect();
         assert_eq!(woken, vec!["session-a", "session-b"]);
     }
 

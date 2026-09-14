@@ -570,6 +570,18 @@ pub struct App {
     /// recoverable, so a wake waits for the session to be genuinely idle.
     pub thread_pending_wakes: Vec<(String, crate::threads::ThreadRef)>,
 
+    /// The open thread inbox, if the user has asked to see what is waiting.
+    ///
+    /// Holds only a cursor: the items themselves live in `thread_pending`, so acting on
+    /// one cannot leave the modal showing a stale copy of what it just changed.
+    pub thread_inbox: Option<usize>,
+
+    /// Messages waiting on the user, cached so drawing a frame is not a file read.
+    ///
+    /// Refreshed when a delivery arrives and when the user acts on one; nothing else
+    /// writes pending deliveries while CST is running.
+    pub thread_pending: Vec<crate::threads::PendingDelivery>,
+
     /// The last reason the thread watcher gave for not working.
     ///
     /// Kept so it can be said once. The watcher already backs off; a status line
@@ -725,6 +737,8 @@ impl App {
             confirm_update_restart: false,
             whats_new: None,
             thread_pending_wakes: Vec::new(),
+            thread_inbox: None,
+            thread_pending: Vec::new(),
             thread_watch_notice: None,
             restart_after_update: None,
             update_restart_requested: false,
@@ -3211,7 +3225,10 @@ impl App {
 
         match delivery {
             // Already recorded by the watcher; the list just needs to show it.
-            Delivery::Held { .. } => true,
+            Delivery::Held { .. } => {
+                self.refresh_thread_pending();
+                true
+            }
             Delivery::Wake { session_id, thread } => {
                 if !self.has_running_pane_for(&session_id) {
                     // Never start a session unasked. It becomes something the user can
@@ -3307,6 +3324,23 @@ impl App {
         Ok(())
     }
 
+    /// Re-read the messages waiting on the user.
+    ///
+    /// Cheap and rare: called when a delivery arrives or the user acts on one, not on
+    /// every frame.
+    pub fn refresh_thread_pending(&mut self) {
+        self.thread_pending =
+            crate::threads::store::load_in(&crate::threads::store::state_root()).pending;
+    }
+
+    /// What is waiting on the user for one session, if anything.
+    pub fn thread_pending_for(&self, session_id: &str) -> Option<&crate::threads::PendingDelivery> {
+        self.thread_pending
+            .iter()
+            .filter(|pending| pending.session_id == session_id)
+            .min_by_key(|pending| pending.arrived_at)
+    }
+
     /// Record a message the user has to approve before anything runs.
     fn hold_thread_message(
         &mut self,
@@ -3323,6 +3357,82 @@ impl App {
                 arrived_at: chrono::Utc::now(),
             });
         });
+        self.refresh_thread_pending();
+    }
+
+    /// Open the list of messages waiting on the user.
+    pub fn open_thread_inbox(&mut self) {
+        self.refresh_thread_pending();
+        self.thread_inbox = Some(0);
+    }
+
+    pub fn thread_inbox_move(&mut self, delta: isize) {
+        let Some(selected) = self.thread_inbox else {
+            return;
+        };
+        if self.thread_pending.is_empty() {
+            return;
+        }
+        let last = self.thread_pending.len() - 1;
+        let next = (selected as isize + delta).clamp(0, last as isize) as usize;
+        self.thread_inbox = Some(next);
+    }
+
+    /// Accept the selected message: open its session if need be, and hand it the pointer.
+    ///
+    /// This is the only path that starts a session because of a GitHub comment, and it
+    /// exists so that starting one is always something the user chose.
+    pub fn thread_inbox_accept(&mut self) -> Result<()> {
+        let Some(selected) = self.thread_inbox else {
+            return Ok(());
+        };
+        let Some(pending) = self.thread_pending.get(selected).cloned() else {
+            return Ok(());
+        };
+
+        if !self.has_running_pane_for(&pending.session_id) {
+            let session = self
+                .sessions
+                .iter()
+                .find(|session| session.id == pending.session_id)
+                .cloned();
+            let Some(session) = session else {
+                anyhow::bail!("That session no longer exists");
+            };
+            let title = session.display_name().to_string();
+            self.attach_session(&session.id, &session.cwd, title)?;
+        }
+
+        // Queued rather than written straight out: a session that has only just been
+        // resumed is still starting up, and the queue already knows how to wait for it
+        // to be ready.
+        self.thread_pending_wakes
+            .push((pending.session_id.clone(), pending.thread.clone()));
+        self.thread_dismiss(selected);
+        self.flush_thread_wakes();
+        Ok(())
+    }
+
+    /// Drop the selected message without running anything.
+    pub fn thread_inbox_dismiss(&mut self) {
+        if let Some(selected) = self.thread_inbox {
+            self.thread_dismiss(selected);
+        }
+    }
+
+    fn thread_dismiss(&mut self, index: usize) {
+        let Some(pending) = self.thread_pending.get(index).cloned() else {
+            return;
+        };
+        let _ = crate::threads::store::update_in(&crate::threads::store::state_root(), |state| {
+            state.clear_pending(&pending.session_id, &pending.thread);
+        });
+        self.refresh_thread_pending();
+        if self.thread_pending.is_empty() {
+            self.thread_inbox = None;
+        } else if let Some(selected) = self.thread_inbox {
+            self.thread_inbox = Some(selected.min(self.thread_pending.len() - 1));
+        }
     }
 
     /// Say why the thread watcher is not working, once per distinct reason.

@@ -1616,8 +1616,10 @@ mod tests {
     #[test]
     fn a_repository_with_no_opinion_follows_the_global_thread_setting() {
         let temp = tempfile::tempdir().unwrap();
-        let mut global = UserConfig::default();
-        global.threads_enabled = false;
+        let global = UserConfig {
+            threads_enabled: false,
+            ..Default::default()
+        };
 
         let settings = ProjectSettings::load(temp.path(), &global).unwrap();
 

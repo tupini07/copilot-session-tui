@@ -180,6 +180,11 @@ enum ThreadCommand {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
+    /// End a correspondence for every session watching it
+    Close {
+        /// URL of a GitHub issue, pull request, or discussion
+        url: String,
+    },
     /// Stop being woken by a thread, leaving other sessions watching it
     Leave {
         /// URL of a GitHub issue, pull request, or discussion
@@ -331,6 +336,7 @@ fn main() -> Result<()> {
                     let text = threads::cli::read_body(body.as_deref(), body_file.as_deref())?;
                     threads::cli::post(&root, &session_id, url, &text)?
                 }
+                ThreadCommand::Close { url } => threads::cli::close(&root, url)?,
                 ThreadCommand::Leave { url, session } => {
                     let session_id = threads::cli::resolve_session(session.as_deref())?;
                     threads::cli::leave(&root, &session_id, url)?
@@ -465,6 +471,9 @@ fn main() -> Result<()> {
     if let Some(whats_new) = changelog::whats_new_on_startup() {
         app.whats_new = Some(ui::whats_new::WhatsNewScreen::new(whats_new));
     }
+    // Anything held while CST was closed is still held, so the list shows it from the
+    // first frame rather than only after the next comment arrives.
+    app.refresh_thread_pending();
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;
     if let Some(receiver) = session_load_receiver {

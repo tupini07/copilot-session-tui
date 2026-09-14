@@ -78,14 +78,6 @@ impl ThreadState {
             .find(|s| s.session_id == session_id && &s.thread == thread)
     }
 
-    /// Every active subscriber to one thread, which is how one comment fans out.
-    pub fn subscribers_of(&mut self, thread: &ThreadRef) -> Vec<&mut Subscription> {
-        self.subscriptions
-            .iter_mut()
-            .filter(|s| &s.thread == thread && s.is_active())
-            .collect()
-    }
-
     /// Subscribe a session, returning whether this was new.
     ///
     /// Idempotent: taking part in a thread twice is the normal case, and it must not

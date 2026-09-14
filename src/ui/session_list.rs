@@ -40,6 +40,9 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let has_project_filter = app.project_filter.is_some();
+    // The mail column only exists while something is waiting, so the usual list keeps
+    // its full width for names. Most people will never see it.
+    let mail_column = !app.thread_pending.is_empty();
     let lines_per_item = if has_project_filter { 1 } else { 2 };
     let grouped = app.favorites_section_active();
     let budget = (inner.height as usize).saturating_sub(app.list_header_lines());
@@ -105,9 +108,33 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  ")
             };
 
+            // A message waiting on the user, marked with `@` because it came from
+            // somebody. ASCII on purpose: the smoke harness reads this screen back
+            // through a PTY, where non-ASCII glyphs do not survive the trip.
+            let pending = app.thread_pending_for(&session.id);
+            let mail_indicator = if !mail_column {
+                None
+            } else if pending.is_some() {
+                Some(Span::styled(
+                    "@ ",
+                    Style::default()
+                        .fg(if is_selected {
+                            selection_fg
+                        } else {
+                            super::semantic_foreground_on(theme, theme.warning, theme.background)
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Some(Span::raw("  "))
+            };
+
             let name = session.display_name();
-            // 4 columns for indicators, 1 space + 8 columns for the time column
-            let max_name_width = (inner.width as usize).saturating_sub(13);
+            // 4 columns for indicators, 1 space + 8 columns for the time column, and
+            // two more only while some session is actually holding a message.
+            let max_name_width = (inner.width as usize)
+                .saturating_sub(13)
+                .saturating_sub(if mail_column { 2 } else { 0 });
             let truncated_name = text::truncate_to_width(name, max_name_width);
 
             let name_style = if is_selected {
@@ -118,24 +145,29 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(theme.text)
             };
 
-            let time = session.relative_time();
+            // How long something has been waiting matters more than when the session
+            // was last used, and it is the thing that turns a silent stall into
+            // something visible.
+            let time = match pending {
+                Some(pending) => waiting_for(pending.arrived_at),
+                None => session.relative_time(),
+            };
+            let time_style = Style::default().fg(if is_selected {
+                selection_fg
+            } else if pending.is_some() {
+                super::semantic_foreground_on(theme, theme.warning, theme.background)
+            } else {
+                super::semantic_foreground_on(theme, theme.muted, theme.background)
+            });
 
-            let line = Line::from(vec![
-                active_indicator,
-                favorite_indicator,
-                Span::styled(
-                    text::pad_to_width(&truncated_name, max_name_width),
-                    name_style,
-                ),
-                Span::styled(
-                    format!(" {:>8}", time),
-                    Style::default().fg(if is_selected {
-                        selection_fg
-                    } else {
-                        super::semantic_foreground_on(theme, theme.muted, theme.background)
-                    }),
-                ),
-            ]);
+            let mut spans = vec![active_indicator, favorite_indicator];
+            spans.extend(mail_indicator);
+            spans.push(Span::styled(
+                text::pad_to_width(&truncated_name, max_name_width),
+                name_style,
+            ));
+            spans.push(Span::styled(format!(" {:>8}", time), time_style));
+            let line = Line::from(spans);
 
             let lines = if has_project_filter {
                 vec![line]
@@ -204,6 +236,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// A one-line group label separating the arranged favorites from everything else.
+/// How long a message has been waiting, in the eight columns the time slot allows.
+///
+/// Says "waiting" rather than "ago" because it is not a record of something that
+/// happened, it is a thing still undone. A correspondence that quietly stalls for days
+/// is the failure this whole feature exists to prevent, so the number has to be visible
+/// without opening anything.
+fn waiting_for(arrived_at: chrono::DateTime<chrono::Utc>) -> String {
+    let waited = chrono::Utc::now().signed_duration_since(arrived_at);
+    if waited.num_minutes() < 1 {
+        "now".to_string()
+    } else if waited.num_minutes() < 60 {
+        format!("{}m wait", waited.num_minutes())
+    } else if waited.num_hours() < 24 {
+        format!("{}h wait", waited.num_hours())
+    } else {
+        format!("{}d wait", waited.num_days())
+    }
+}
+
 fn header(label: &str, color: ratatui::style::Color) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(
         format!("  {label}"),
@@ -289,6 +340,41 @@ pub mod tests {
             .collect()
     }
 
+    /// Render one session that has a message waiting, as a grid of cells.
+    fn render_cells_with_pending(
+        name: &str,
+        width: u16,
+        waited: chrono::Duration,
+    ) -> Vec<Vec<String>> {
+        let mut app = App::new(vec![session_named(name)], UserConfig::default());
+        app.thread_pending = vec![crate::threads::PendingDelivery {
+            session_id: "abcdef123456".to_string(),
+            thread: crate::threads::ThreadRef {
+                host: "github.com".to_string(),
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                number: 12,
+                kind: crate::threads::ThreadKind::Issue,
+            },
+            comment_url: "https://github.com/o/r/issues/12".to_string(),
+            reason: crate::threads::PendingReason::SessionClosed,
+            arrived_at: chrono::Utc::now() - waited,
+        }];
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, &mut app))
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Column at which `needle` starts, counted in cells.
     fn column_of(rows: &[Vec<String>], needle: &str) -> usize {
         for row in rows {
@@ -322,6 +408,83 @@ pub mod tests {
             column_of(&plain, "unknown"),
             column_of(&emoji, "unknown"),
             "the emoji shifted the time column"
+        );
+    }
+
+    #[test]
+    fn a_waiting_message_keeps_the_right_hand_column_aligned() {
+        // Same hazard as the emoji test above. The mail column changes the name budget,
+        // so getting the arithmetic wrong here would break every row's alignment for
+        // anyone using this feature.
+        let rows = render_cells_with_pending("plain name", 60, chrono::Duration::days(3));
+        let widths: Vec<usize> = rows
+            .iter()
+            .map(|row| row.concat().chars().count())
+            .collect();
+
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "rows must stay the same width: {widths:?}"
+        );
+    }
+
+    #[test]
+    fn a_message_waiting_for_days_says_so_where_the_time_would_be() {
+        // The whole point: a correspondence that quietly stalls has to be visible
+        // without opening anything, or the feature has reinvented its own problem.
+        let rows = render_cells_with_pending("plain name", 60, chrono::Duration::days(3));
+        let screen: String = rows.iter().map(|row| row.concat()).collect();
+
+        assert!(screen.contains("3d wait"), "got: {screen}");
+        assert!(
+            screen.contains('@'),
+            "the row must be marked as holding a message: {screen}"
+        );
+    }
+
+    #[test]
+    fn a_session_with_nothing_waiting_still_lines_up_beside_one_that_has() {
+        // The mail column is reserved for the whole list once anything is waiting, so a
+        // row that pads it differently from one that fills it would leave the list
+        // visibly ragged — the same failure the emoji test above guards.
+        let mut app = App::new(numbered_sessions(3), UserConfig::default());
+        app.thread_pending = vec![crate::threads::PendingDelivery {
+            session_id: "id-1".to_string(),
+            thread: crate::threads::ThreadRef {
+                host: "github.com".to_string(),
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                number: 12,
+                kind: crate::threads::ThreadKind::Issue,
+            },
+            comment_url: "https://github.com/o/r/issues/12".to_string(),
+            reason: crate::threads::PendingReason::SessionClosed,
+            arrived_at: chrono::Utc::now(),
+        }];
+
+        let backend = TestBackend::new(60, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::draw(f, &mut app))
+            .expect("draw succeeds");
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+
+        let widths: Vec<usize> = rows.iter().map(|row| row.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "rows must stay the same width: {widths:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.contains('@')).count(),
+            1,
+            "only the session holding a message is marked"
         );
     }
 

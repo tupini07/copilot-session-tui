@@ -105,11 +105,6 @@ impl ThreadRef {
             self.number
         )
     }
-
-    /// `owner/repo`, the form every `gh` subcommand wants for `--repo`.
-    pub fn repository(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
-    }
 }
 
 /// Parse a GitHub thread URL.
