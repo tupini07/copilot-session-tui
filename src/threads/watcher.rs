@@ -581,6 +581,55 @@ mod tests {
             .has_seen("1"));
     }
 
+    /// Proves the comment fetch against a real thread, read-only.
+    ///
+    /// `--paginate --slurp` wraps each page in an outer array, `since` filters by
+    /// `updated_at`, and a comment from a deleted account has no `user`. None of that is
+    /// visible in a hand-written fixture, and all of it decides whether a real thread
+    /// produces sightings or an error.
+    #[test]
+    #[ignore = "reads a real public GitHub thread; run with CST_THREADS_LIVE=1"]
+    fn comments_on_a_real_thread_parse_into_sightings() {
+        if std::env::var_os("CST_THREADS_LIVE").is_none() {
+            return;
+        }
+        let thread = ThreadRef {
+            host: "github.com".to_string(),
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 100_000,
+            kind: ThreadKind::Issue,
+        };
+
+        let comments = fetch_comments(
+            &thread,
+            std::env::temp_dir(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("the fetch should succeed against a real thread");
+
+        // A thread with more comments than one page, so `--paginate --slurp` is really
+        // exercised. Asserting a lower bound rather than an exact count keeps this from
+        // failing because somebody replied to a ten-year-old issue.
+        assert!(
+            comments.len() > 100,
+            "expected a multi-page thread, got {}",
+            comments.len()
+        );
+        for comment in &comments {
+            assert!(!comment.id.is_empty(), "every comment needs an id");
+            assert!(comment.url.contains("github.com"), "got: {}", comment.url);
+        }
+        // Ids must be distinct, or `seen_comment_ids` would silently swallow replies.
+        let mut ids: Vec<&String> = comments.iter().map(|comment| &comment.id).collect();
+        ids.sort();
+        let total = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "comment ids must be unique");
+        println!("fetched {total} comment(s) across pages");
+    }
+
     #[test]
     fn an_unreadable_timestamp_still_delivers_the_message() {
         let fallback = Utc::now();
