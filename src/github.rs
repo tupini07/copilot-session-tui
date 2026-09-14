@@ -945,6 +945,210 @@ pub fn fetch_patches(
         .collect())
 }
 
+/// Which thread to comment on.
+///
+/// Primitives rather than a `threads::ThreadRef` so this module keeps knowing nothing
+/// about subscriptions; it only knows how to talk to `gh`.
+#[derive(Debug, Clone, Copy)]
+pub struct CommentTarget<'a> {
+    pub host: &'a str,
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub number: u64,
+    /// Discussions have no REST endpoint and need a GraphQL mutation instead.
+    pub discussion: bool,
+}
+
+/// A comment that now exists on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedComment {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Deserialize)]
+struct ApiCreatedComment {
+    id: u64,
+    html_url: String,
+}
+
+/// Unwrap a GraphQL envelope, turning a pure-error response into a `GithubError`.
+///
+/// `data` wins when both are present: GraphQL reports a partially fulfilled request as
+/// usable data alongside an error, and discarding it would lose the answer.
+fn graph_payload<T: DeserializeOwned>(stdout: &[u8]) -> Result<T, GithubError> {
+    let response: GraphResponse<T> = serde_json::from_slice(stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub returned an unreadable response: {error}"),
+        )
+    })?;
+    if let Some(data) = response.data {
+        return Ok(data);
+    }
+    let message = response
+        .errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(GithubError::new(
+        GithubErrorKind::Cli,
+        if message.is_empty() {
+            "GitHub returned no data".to_string()
+        } else {
+            message
+        },
+    ))
+}
+
+/// Add a comment to an issue, pull request, or discussion.
+///
+/// The first mutating GitHub call in CST. Everything else here reads, so the failure
+/// modes are different: a retry after an ambiguous failure can double-post, which is
+/// why there is no retry and the error is handed straight back to the caller.
+pub fn post_comment(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    body: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<PostedComment, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    if target.discussion {
+        post_discussion_comment(&runner, &cwd, target, body)
+    } else {
+        post_issue_comment(&runner, &cwd, target, body)
+    }
+}
+
+/// Issues and pull requests share one REST endpoint.
+///
+/// `gh api` rather than `gh issue comment`/`gh pr comment` for two reasons: the REST
+/// endpoint treats both alike so there is no branch to get wrong, and it answers with
+/// the created comment as JSON, which is where the id comes from. The `gh` porcelain
+/// prints only a URL.
+fn post_issue_comment(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    body: &str,
+) -> Result<PostedComment, GithubError> {
+    let mut args = strings(&["api", "--hostname", target.host, "--method", "POST"]);
+    args.push(format!(
+        "repos/{}/{}/issues/{}/comments",
+        target.owner, target.repo, target.number
+    ));
+    // `-f` and not `-F`: `-F` type-converts, so a body that happens to start with `@`
+    // would be read as a filename and a body of `123` would be sent as a number.
+    args.push("-f".to_string());
+    args.push(format!("body={body}"));
+
+    let stdout = runner.run(cwd, &args)?;
+    let created: ApiCreatedComment = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub did not describe the comment it created: {error}"),
+        )
+    })?;
+    Ok(PostedComment {
+        id: created.id.to_string(),
+        url: created.html_url,
+    })
+}
+
+const DISCUSSION_ID_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){id}}}";
+
+const ADD_DISCUSSION_COMMENT: &str = "mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{id url}}}";
+
+#[derive(Deserialize)]
+struct GraphDiscussionIdData {
+    repository: Option<GraphDiscussionIdRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphDiscussionIdRepository {
+    discussion: Option<GraphNodeId>,
+}
+
+#[derive(Deserialize)]
+struct GraphNodeId {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct GraphAddCommentData {
+    #[serde(rename = "addDiscussionComment")]
+    add_discussion_comment: Option<GraphAddCommentPayload>,
+}
+
+#[derive(Deserialize)]
+struct GraphAddCommentPayload {
+    comment: Option<GraphPostedComment>,
+}
+
+#[derive(Deserialize)]
+struct GraphPostedComment {
+    id: String,
+    url: String,
+}
+
+/// Two round trips, because the mutation wants a node id and a URL only has a number.
+fn post_discussion_comment(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    body: &str,
+) -> Result<PostedComment, GithubError> {
+    let lookup = graphql_args(
+        target.host,
+        DISCUSSION_ID_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(cwd, &lookup)?;
+    let discussion_id = graph_payload::<GraphDiscussionIdData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::NotFound,
+                format!(
+                    "Discussion #{} was not found in {}/{}",
+                    target.number, target.owner, target.repo
+                ),
+            )
+        })?
+        .id;
+
+    // Built by hand rather than through `graphql_args`, which sends every variable
+    // with `-F`. A comment body must go as `-f` or `gh` would try to type-convert it.
+    let mut args = strings(&["api", "graphql", "--hostname", target.host]);
+    args.push("-f".to_string());
+    args.push(format!("discussionId={discussion_id}"));
+    args.push("-f".to_string());
+    args.push(format!("body={body}"));
+    args.push("-f".to_string());
+    args.push(format!("query={ADD_DISCUSSION_COMMENT}"));
+
+    let stdout = runner.run(cwd, &args)?;
+    let comment = graph_payload::<GraphAddCommentData>(&stdout)?
+        .add_discussion_comment
+        .and_then(|payload| payload.comment)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::InvalidResponse,
+                "GitHub did not describe the discussion comment it created",
+            )
+        })?;
+    Ok(PostedComment {
+        id: comment.id,
+        url: comment.url,
+    })
+}
+
 #[cfg(test)]
 fn fetch_item_from(
     runner: &dyn GhRunner,

@@ -40,11 +40,16 @@ pub fn pty_size(rows: u16, cols: u16) -> PtySize {
 
 impl PtySession {
     /// Spawn `command` under a new PTY, streaming its output to `output`.
+    ///
+    /// `extra_env` is added to the child's environment. It exists so a session can be
+    /// told which session it is: an agent running `cst thread post` is a separate
+    /// process with no other way to know.
     pub fn spawn(
         program: &str,
         args: &[String],
         cwd: Option<&Path>,
         size: PtySize,
+        extra_env: &[(&str, &str)],
         output: Sender<PtyChunk>,
     ) -> Result<Self> {
         let pair = native_pty_system()
@@ -63,6 +68,9 @@ impl PtySession {
         // Copilot renders a full-screen TUI; advertise a capable terminal so it does
         // not fall back to a degraded mode inside the pane.
         builder.env("TERM", "xterm-256color");
+        for (name, value) in extra_env {
+            builder.env(name, value);
+        }
 
         let child = pair
             .slave
@@ -344,7 +352,8 @@ mod tests {
     fn spawns_a_child_and_streams_its_output() {
         let (tx, rx) = mpsc::channel();
         let (program, args) = echo_command();
-        let mut session = PtySession::spawn(&program, &args, None, pty_size(24, 80), tx).unwrap();
+        let mut session =
+            PtySession::spawn(&program, &args, None, pty_size(24, 80), &[], tx).unwrap();
 
         let (text, exited) = collect_until_exit(&rx, &mut session);
 
@@ -356,7 +365,8 @@ mod tests {
     fn resize_is_recorded_and_ignores_no_op_changes() {
         let (tx, rx) = mpsc::channel();
         let (program, args) = echo_command();
-        let mut session = PtySession::spawn(&program, &args, None, pty_size(24, 80), tx).unwrap();
+        let mut session =
+            PtySession::spawn(&program, &args, None, pty_size(24, 80), &[], tx).unwrap();
 
         session.resize(pty_size(30, 100)).unwrap();
         assert_eq!(session.size().rows, 30);
@@ -383,7 +393,8 @@ mod tests {
                 vec!["-c".to_string(), script.to_string()],
             )
         };
-        let mut session = PtySession::spawn(&program, &args, None, pty_size(24, 80), tx).unwrap();
+        let mut session =
+            PtySession::spawn(&program, &args, None, pty_size(24, 80), &[], tx).unwrap();
 
         let (_, exited) = collect_until_exit(&rx, &mut session);
 
