@@ -17,6 +17,7 @@
 pub mod cli;
 pub mod doorbell;
 pub mod store;
+pub mod watcher;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -360,6 +361,13 @@ impl Subscription {
 
 /// How many comment ids to remember per subscription.
 const SEEN_HISTORY: usize = 200;
+
+/// Wake-ups one thread may give one session per hour before the rest wait for the user.
+///
+/// Twelve is deliberately loose. It is a runaway guard, not a conversation limit: a real
+/// exchange settling something takes a handful of turns, and a pair of agents talking in
+/// circles will blow past this within minutes.
+pub const DEFAULT_WAKEUPS_PER_HOUR: u32 = 12;
 
 /// A message that arrived but was not delivered, waiting on the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

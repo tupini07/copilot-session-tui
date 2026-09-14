@@ -1024,6 +1024,31 @@ fn run_app(
             std::time::Duration::from_secs(1),
         )
     });
+    // Started here rather than at construction so it only exists when there are panes to
+    // wake. The login is read once: it is what decides whether a comment came from one
+    // of our own agents, and asking GitHub every poll would be a round trip for an
+    // answer that does not change.
+    let _thread_watcher = app
+        .mux
+        .as_ref()
+        .filter(|_| app.config.threads_enabled)
+        .and_then(|mux| {
+            let login = threads::doorbell::current_login("github.com").ok()?;
+            Some(threads::watcher::ThreadWatcher::start(
+                mux.events.clone(),
+                threads::store::state_root(),
+                login,
+                threads::watcher::WatchSettings {
+                    poll_interval: std::time::Duration::from_secs(
+                        threads::doorbell::DEFAULT_POLL_SECONDS,
+                    ),
+                    wakeups_per_hour: app
+                        .config
+                        .thread_wakeups_per_hour
+                        .unwrap_or(threads::DEFAULT_WAKEUPS_PER_HOUR),
+                },
+            ))
+        });
     let mut last_non_mux_config_check = std::time::Instant::now();
     // In mux mode a dedicated thread feeds terminal events into the same channel as PTY
     // output, so the loop can wait on both at once instead of polling. Reading through

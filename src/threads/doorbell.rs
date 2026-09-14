@@ -268,6 +268,31 @@ impl NotificationTransport for UreqTransport {
     }
 }
 
+/// Which account CST's agents post as.
+///
+/// The whole "is this one of ours" decision hangs off this one string, so it is read
+/// from GitHub rather than configured: a wrong value here would either wake sessions on
+/// strangers' comments or never wake them at all.
+pub fn current_login(host: &str) -> Result<String, String> {
+    let output = std::process::Command::new("gh")
+        // No leading slash: a leading `/` makes some shells rewrite the path, and `gh`
+        // itself warns about exactly this.
+        .args(["api", "--hostname", host, "user", "--jq", ".login"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .map_err(|error| format!("Could not ask `gh` who you are: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`gh` could not say which account is logged in to {host}"
+        ));
+    }
+    let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if login.is_empty() {
+        return Err(format!("`gh` returned no account for {host}"));
+    }
+    Ok(login)
+}
+
 /// Read the token `gh` already holds for a host.
 ///
 /// Borrowing `gh`'s credential rather than asking for one of our own keeps Enterprise

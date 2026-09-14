@@ -1149,6 +1149,183 @@ fn post_discussion_comment(
     })
 }
 
+/// One comment, reduced to what deciding whether to wake a session needs.
+///
+/// No body. The comment text is written by whoever can reach the thread, and CST never
+/// puts it in front of an agent as prompt text — carrying it here would be the first
+/// step towards doing so by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub id: String,
+    pub author: String,
+    pub url: String,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ApiThreadComment {
+    id: u64,
+    html_url: String,
+    created_at: String,
+    user: Option<ApiCommentUser>,
+}
+
+#[derive(Deserialize)]
+struct ApiCommentUser {
+    login: String,
+}
+
+/// Recent comments on a thread, newest activity first being irrelevant — order is not
+/// relied on anywhere, because a comment is new when its id has not been seen before.
+///
+/// `since` keeps this cheap on a long-running conversation: without it, a thread with
+/// hundreds of comments would be refetched in full every time it moved.
+pub fn fetch_thread_comments(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    since: Option<&str>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    if target.discussion {
+        fetch_discussion_comments(&runner, &cwd, target)
+    } else {
+        fetch_issue_comments(&runner, &cwd, target, since)
+    }
+}
+
+fn fetch_issue_comments(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    since: Option<&str>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let mut endpoint = format!(
+        "repos/{}/{}/issues/{}/comments?per_page=100",
+        target.owner, target.repo, target.number
+    );
+    if let Some(since) = since {
+        endpoint.push_str(&format!("&since={since}"));
+    }
+    let mut args = strings(&["api", "--hostname", target.host, "--paginate", "--slurp"]);
+    args.push(endpoint);
+
+    let stdout = runner.run(cwd, &args)?;
+    // `--slurp` wraps each page in an outer array; flattening is what `api_pages` does.
+    let pages: Vec<Vec<ApiThreadComment>> = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub sent an unreadable comment list: {error}"),
+        )
+    })?;
+
+    Ok(pages
+        .into_iter()
+        .flatten()
+        .map(|comment| ThreadComment {
+            id: comment.id.to_string(),
+            author: comment.user.map(|user| user.login).unwrap_or_default(),
+            url: comment.html_url,
+            created_at: comment.created_at,
+        })
+        .collect())
+}
+
+/// Discussions need the last page, not the first: their comments cannot be filtered by
+/// time through GraphQL the way the REST endpoint allows.
+const DISCUSSION_RECENT_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){comments(last:30){nodes{id url createdAt author{login} replies(last:10){nodes{id url createdAt author{login}}}}}}}}";
+
+#[derive(Deserialize)]
+struct GraphRecentData {
+    repository: Option<GraphRecentRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentRepository {
+    discussion: Option<GraphRecentDiscussion>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentDiscussion {
+    comments: GraphRecentComments,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentComments {
+    #[serde(default)]
+    nodes: Vec<GraphRecentComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphRecentComment {
+    id: String,
+    url: String,
+    created_at: String,
+    author: Option<GraphRecentAuthor>,
+    #[serde(default)]
+    replies: Option<GraphRecentReplies>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentReplies {
+    #[serde(default)]
+    nodes: Vec<GraphRecentComment>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentAuthor {
+    login: String,
+}
+
+impl GraphRecentComment {
+    /// Flatten a comment and its replies, because a reply is just as much something
+    /// somebody may be waiting on as a top-level comment.
+    fn flatten(self, out: &mut Vec<ThreadComment>) {
+        let replies = self
+            .replies
+            .map(|replies| replies.nodes)
+            .unwrap_or_default();
+        out.push(ThreadComment {
+            id: self.id,
+            author: self.author.map(|author| author.login).unwrap_or_default(),
+            url: self.url,
+            created_at: self.created_at,
+        });
+        for reply in replies {
+            reply.flatten(out);
+        }
+    }
+}
+
+fn fetch_discussion_comments(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let args = graphql_args(
+        target.host,
+        DISCUSSION_RECENT_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(cwd, &args)?;
+    let discussion = graph_payload::<GraphRecentData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion);
+
+    let mut comments = Vec::new();
+    if let Some(discussion) = discussion {
+        for node in discussion.comments.nodes {
+            node.flatten(&mut comments);
+        }
+    }
+    Ok(comments)
+}
+
 #[cfg(test)]
 fn fetch_item_from(
     runner: &dyn GhRunner,

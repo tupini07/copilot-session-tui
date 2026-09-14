@@ -2219,7 +2219,10 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             if focused {
                 sync_outer_progress(app);
             }
-            focused || notification.is_some()
+            // The turn this pane just finished may be what a queued wake was waiting
+            // for, so this is the earliest safe moment to hand it over.
+            let woken = app.flush_thread_wakes();
+            focused || notification.is_some() || woken
         }
         MuxEvent::HostSequence(id, sequence) => {
             let progress = crate::host_terminal::progress_state_from_sequence(&sequence);
@@ -2251,6 +2254,12 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             }
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
+        MuxEvent::ThreadDelivery(delivery) => app.apply_thread_delivery(*delivery),
+        MuxEvent::ThreadWatchFailed(reason) => {
+            // Said once rather than every minute: the watcher already backs off, and a
+            // status line that keeps repeating the same failure is noise.
+            app.report_thread_watch_failure(reason)
+        }
         MuxEvent::Term(_) => true,
     }
 }
