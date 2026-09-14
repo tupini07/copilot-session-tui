@@ -254,6 +254,18 @@ fn write_receipt(root: &Path, receipt: &ManagedPluginReceipt) -> Result<()> {
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
+/// Whether CST is managing lifecycle hooks for this Copilot home *right now*.
+///
+/// Deliberately a live check and not "has this session ever reported". A journal proves
+/// hooks worked at some point in the past, which is not the same claim: a user who has
+/// since run `cst hooks uninstall` still has journals lying around, and trusting them
+/// would leave those panes with no progress indication at all.
+///
+/// One `stat`, so it is safe to call whenever a pane is created.
+pub fn is_managed(copilot_home: &Path) -> bool {
+    plugin_root(copilot_home).is_dir()
+}
+
 fn plugin_root(copilot_home: &Path) -> PathBuf {
     copilot_home.join("cst").join("plugins").join(PLUGIN_NAME)
 }
@@ -318,6 +330,25 @@ mod tests {
             desired_receipt().unwrap().bundle_sha256,
             without,
             "the skill must be part of the bundle hash"
+        );
+    }
+
+    #[test]
+    fn hooks_stop_counting_as_managed_the_moment_they_are_uninstalled() {
+        // This is the check that decides whether a pane may believe it is idle. Keying
+        // that on a session's own history would get the uninstall case backwards: the
+        // journals are still on disk afterwards, proving only that hooks once worked.
+        let temp = tempfile::tempdir().unwrap();
+
+        assert!(!is_managed(temp.path()), "nothing installed yet");
+
+        materialize(temp.path()).unwrap();
+        assert!(is_managed(temp.path()));
+
+        std::fs::remove_dir_all(plugin_root(temp.path())).unwrap();
+        assert!(
+            !is_managed(temp.path()),
+            "an uninstalled plugin reports nothing, whatever it left behind"
         );
     }
 
