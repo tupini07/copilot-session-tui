@@ -72,6 +72,25 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_autopilot_continues: Option<u32>,
 
+    /// Whether sessions may be woken by the GitHub threads they take part in.
+    ///
+    /// On by default, which costs nothing: the watcher never touches the network until
+    /// some session has actually subscribed to a thread.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub threads_enabled: bool,
+
+    /// How many times in an hour one thread may wake one session.
+    ///
+    /// A rate and not a total. An agent cannot estimate how many exchanges a piece of
+    /// work needs, so a budget would either cut off real conversations or be set so high
+    /// it never binds; a rate asks nobody to estimate anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_wakeups_per_hour: Option<u32>,
+
+    /// Whether a busy thread is checked for going in circles.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub thread_stall_detection: bool,
+
     #[serde(
         default,
         deserialize_with = "normalized_title_prefixes",
@@ -119,6 +138,12 @@ pub struct UserConfig {
 pub struct TerminalConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+}
+
+/// Keeps the default out of a written `config.json`, so the file stays a record of what
+/// the user actually chose rather than a snapshot of every default.
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn default_mux_prefix() -> String {
@@ -229,6 +254,9 @@ impl Default for UserConfig {
             model: None,
             reasoning_effort: None,
             max_autopilot_continues: None,
+            threads_enabled: true,
+            thread_wakeups_per_hour: None,
+            thread_stall_detection: true,
             hidden_title_prefixes: Vec::new(),
             hidden_path_prefixes: Vec::new(),
             mux: false,
@@ -276,6 +304,11 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_autopilot_continues: Option<u32>,
 
+    /// Whether sessions in this repository may be woken by GitHub threads. Absent means
+    /// "whatever the global setting says", so a repository can opt out on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads_enabled: Option<bool>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<PromptSnippet>,
 
@@ -302,6 +335,7 @@ pub struct ProjectSettings {
     global: EffectiveWorktreeConfig,
     global_yolo: bool,
     global_max_autopilot_continues: Option<u32>,
+    global_threads_enabled: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -330,6 +364,7 @@ impl ProjectSettings {
             global: global_worktree(global),
             global_yolo: global.yolo,
             global_max_autopilot_continues: global.max_autopilot_continues,
+            global_threads_enabled: global.threads_enabled,
         })
     }
 
@@ -358,6 +393,20 @@ impl ProjectSettings {
 
     pub fn set_max_autopilot_continues_override(&mut self, value: Option<u32>) {
         self.config.max_autopilot_continues = value;
+    }
+
+    pub fn threads_enabled_override(&self) -> Option<bool> {
+        self.config.threads_enabled
+    }
+
+    pub fn effective_threads_enabled(&self) -> bool {
+        self.config
+            .threads_enabled
+            .unwrap_or(self.global_threads_enabled)
+    }
+
+    pub fn set_threads_enabled_override(&mut self, value: Option<bool>) {
+        self.config.threads_enabled = value;
     }
 
     pub fn branch_prefix_override(&self) -> Option<&str> {
@@ -419,6 +468,7 @@ impl ProjectSettings {
         self.global = global_worktree(global);
         self.global_yolo = global.yolo;
         self.global_max_autopilot_continues = global.max_autopilot_continues;
+        self.global_threads_enabled = global.threads_enabled;
     }
 
     fn worktree_mut(&mut self) -> &mut ProjectWorktreeConfig {
@@ -448,6 +498,7 @@ impl ProjectConfig {
         self.worktree.is_none()
             && self.yolo.is_none()
             && self.max_autopilot_continues.is_none()
+            && self.threads_enabled.is_none()
             && self.snippets.is_empty()
             && self.extra.is_empty()
     }
@@ -1539,6 +1590,41 @@ mod tests {
                 .max_autopilot_continues_override(),
             Some(3)
         );
+    }
+
+    #[test]
+    fn a_project_that_only_opts_out_of_thread_wakes_still_gets_a_file() {
+        // Same hazard as the autopilot cap above: a field missing from `is_empty` makes
+        // the file look empty, and a project whose only setting is this one would have
+        // its opt-out deleted on the next save.
+        let temp = tempfile::tempdir().unwrap();
+        let global = UserConfig::default();
+        let mut settings = ProjectSettings::load(temp.path(), &global).unwrap();
+
+        settings.set_threads_enabled_override(Some(false));
+        settings.save().unwrap();
+
+        assert!(temp.path().join(".cst.json").exists());
+        let reloaded = ProjectSettings::load(temp.path(), &global).unwrap();
+        assert_eq!(reloaded.threads_enabled_override(), Some(false));
+        assert!(
+            !reloaded.effective_threads_enabled(),
+            "a repository must be able to opt out even when the global default is on"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_opinion_follows_the_global_thread_setting() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = UserConfig {
+            threads_enabled: false,
+            ..Default::default()
+        };
+
+        let settings = ProjectSettings::load(temp.path(), &global).unwrap();
+
+        assert_eq!(settings.threads_enabled_override(), None);
+        assert!(!settings.effective_threads_enabled());
     }
 
     #[test]

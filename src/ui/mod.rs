@@ -11,6 +11,7 @@ pub mod snippets;
 pub mod status_bar;
 pub mod tabs;
 pub mod terminal_pane;
+pub mod thread_inbox;
 pub mod whats_new;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -98,6 +99,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         github_inspector::draw(f, app);
         draw_context_overlays(f, app, theme);
         command_palette::draw_overlays(f, app);
+        thread_inbox::draw(f, app);
         whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
@@ -114,6 +116,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         draw_portable_mode_popup(f, app);
         command_palette::draw_overlays(f, app);
+        thread_inbox::draw(f, app);
         whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
@@ -174,6 +177,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
         command_palette::draw_overlays(f, app);
+        thread_inbox::draw(f, app);
         whats_new::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
@@ -273,6 +277,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     command_palette::draw_overlays(f, app);
+    thread_inbox::draw(f, app);
     whats_new::draw(f, app);
     if app.confirm_update_restart {
         popups::draw_update_restart_confirm(f, app);

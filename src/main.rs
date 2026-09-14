@@ -23,6 +23,7 @@ mod snippets;
 mod terminal_pane;
 mod text;
 mod theme;
+mod threads;
 mod ui;
 mod updater;
 mod windows_terminal;
@@ -134,6 +135,11 @@ enum Commands {
         #[command(subcommand)]
         action: HookPluginCommand,
     },
+    /// Take part in a GitHub thread and be woken when it moves
+    Thread {
+        #[command(subcommand)]
+        action: ThreadCommand,
+    },
     /// Receive one lifecycle event from the Copilot hook plugin
     #[command(hide = true)]
     HookEvent {
@@ -147,6 +153,51 @@ enum Commands {
         /// Directory to write the SVG files into
         #[arg(default_value = "docs/img")]
         out_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThreadCommand {
+    /// Watch a thread without posting to it
+    Watch {
+        /// URL of a GitHub issue, pull request, or discussion
+        url: String,
+        /// Which session to act for, when not running inside one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// Comment on a thread and start watching it
+    Post {
+        /// URL of a GitHub issue, pull request, or discussion
+        url: String,
+        /// Comment text
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the comment text from a file, or from stdin with `-`
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+        /// Which session to act for, when not running inside one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// End a correspondence for every session watching it
+    Close {
+        /// URL of a GitHub issue, pull request, or discussion
+        url: String,
+    },
+    /// Stop being woken by a thread, leaving other sessions watching it
+    Leave {
+        /// URL of a GitHub issue, pull request, or discussion
+        url: String,
+        /// Which session to act for, when not running inside one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
+    /// Show what this session is watching
+    List {
+        /// Which session to act for, when not running inside one
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
     },
 }
 
@@ -266,6 +317,38 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            return Ok(());
+        }
+        Some(Commands::Thread { action }) => {
+            let root = threads::cli::root();
+            let report = match action {
+                ThreadCommand::Watch { url, session } => {
+                    let session_id = threads::cli::resolve_session(session.as_deref())?;
+                    threads::cli::watch(&root, &session_id, url)?
+                }
+                ThreadCommand::Post {
+                    url,
+                    body,
+                    body_file,
+                    session,
+                } => {
+                    let session_id = threads::cli::resolve_session(session.as_deref())?;
+                    let text = threads::cli::read_body(body.as_deref(), body_file.as_deref())?;
+                    threads::cli::post(&root, &session_id, url, &text)?
+                }
+                ThreadCommand::Close { url } => threads::cli::close(&root, url)?,
+                ThreadCommand::Leave { url, session } => {
+                    let session_id = threads::cli::resolve_session(session.as_deref())?;
+                    threads::cli::leave(&root, &session_id, url)?
+                }
+                ThreadCommand::List { session } => {
+                    let session_id = threads::cli::resolve_session(session.as_deref())?;
+                    threads::cli::list(&root, &session_id)?
+                }
+            };
+            let mut stdout = std::io::stdout();
+            threads::cli::emit(&mut stdout, &report)?;
+            stdout.flush()?;
             return Ok(());
         }
         Some(Commands::HookEvent { .. }) => unreachable!("handled before normal startup"),
@@ -388,6 +471,9 @@ fn main() -> Result<()> {
     if let Some(whats_new) = changelog::whats_new_on_startup() {
         app.whats_new = Some(ui::whats_new::WhatsNewScreen::new(whats_new));
     }
+    // Anything held while CST was closed is still held, so the list shows it from the
+    // first frame rather than only after the next comment arrives.
+    app.refresh_thread_pending();
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;
     if let Some(receiver) = session_load_receiver {
@@ -947,6 +1033,32 @@ fn run_app(
             std::time::Duration::from_secs(1),
         )
     });
+    // Started here rather than at construction so it only exists when there are panes to
+    // wake. The login is read once: it is what decides whether a comment came from one
+    // of our own agents, and asking GitHub every poll would be a round trip for an
+    // answer that does not change.
+    let _thread_watcher = app
+        .mux
+        .as_ref()
+        .filter(|_| app.config.threads_enabled)
+        .and_then(|mux| {
+            let login = threads::doorbell::current_login("github.com").ok()?;
+            Some(threads::watcher::ThreadWatcher::start(
+                mux.events.clone(),
+                threads::store::state_root(),
+                login,
+                threads::watcher::WatchSettings {
+                    poll_interval: std::time::Duration::from_secs(
+                        threads::doorbell::DEFAULT_POLL_SECONDS,
+                    ),
+                    stall_detection: app.config.thread_stall_detection,
+                    wakeups_per_hour: app
+                        .config
+                        .thread_wakeups_per_hour
+                        .unwrap_or(threads::DEFAULT_WAKEUPS_PER_HOUR),
+                },
+            ))
+        });
     let mut last_non_mux_config_check = std::time::Instant::now();
     // In mux mode a dedicated thread feeds terminal events into the same channel as PTY
     // output, so the loop can wait on both at once instead of polling. Reading through

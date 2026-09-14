@@ -47,6 +47,27 @@ including failures.
 - **Comments explain why, not what.** A comment restating the line below it will be
   removed in review.
 
+## If you are working on `src/threads/`
+
+Two rules there are security properties, not preferences, and both are held up by tests
+that name them. If a change makes one of those tests fail, the change is wrong.
+
+- **A wake-up carries a link and never comment text.** Comment bodies are written by
+  anyone who can reach the thread, and a session may be running with `--yolo` in a real
+  repository. `threads::judge` is the single exception and pays for it: no tools, no
+  repository, an empty working directory.
+- **A comment from a login that is not ours never starts anything.** It becomes a pending
+  item for the user. Every CST agent posts as the same account, so a different author is
+  by definition somebody outside.
+
+A third thing, recorded because it looks like an obvious optimisation and is a dead end:
+**do not poll `GET /notifications`.** One conditional request covering every subscription
+is cheaper than one per thread, and it cannot work — GitHub never notifies you about your
+own activity, and every CST agent comments as the same account. The inbox would ring only
+for comments by other people, which is exactly the case CST refuses to act on
+automatically. This was built that way first and found by a live test; the module doc in
+`doorbell.rs` has the detail.
+
 ## Useful context
 
 - `cargo run -- doctor` reports the state of every external dependency; run it after

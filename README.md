@@ -35,6 +35,7 @@ A terminal user interface for managing GitHub Copilot CLI sessions. Browse, sear
 - **Resume** — press Enter to launch `copilot --resume` directly
 - **Isolated sessions** — press `N` to create a branch-backed Git worktree before launching Copilot
 - **Multiplexer** — optionally run sessions as panes inside CST, tmux-style, instead of handing over the terminal
+- **Agent threads** — a session can take part in a GitHub issue, PR, or discussion, and be woken when somebody replies
 - **Rename** — rename sessions inline with `r`
 - **Safe cleanup** — delete TUI-created worktrees with dirty-worktree and unmerged-branch protection
 - **Self-update** — checks GitHub Releases in the background and installs updates from the TUI
@@ -599,6 +600,67 @@ used deliberately: they are the class of key terminals deliver most reliably, wh
 `Ctrl-Shift-*` style bindings depend on keyboard-protocol support that Windows Terminal only
 partially implements. If a prefix does not seem to reach CST, run `cst debug-keys` to see
 exactly what your terminal sends.
+
+## Agent threads
+
+One agent files an issue asking another for something. The second answers, gets to work,
+hits a problem, and posts a question back — and the first never sees it, because it
+finished its turn days ago and nothing is listening. The work stalls until you happen to
+read the thread.
+
+The conversation was never the problem. What was missing is a doorbell.
+
+A session that takes part in a GitHub issue, pull request, or discussion is subscribed to
+it. When somebody comments, CST hands that session a link and lets it pick the work back
+up. Agents run these commands themselves; you should not need to.
+
+```bash
+cst thread post <url> --body-file -   # comment, and start watching
+cst thread watch <url>                # watch without posting
+cst thread list                       # what this session is watching
+cst thread leave <url>                # stop being woken; others keep watching
+cst thread close <url>                # end it for everyone
+```
+
+**There is no addressing.** An agent cannot pick another agent out of a list and message
+it — there is no list. It creates an issue describing what it needs, and *you* decide who
+should see it and point them at the URL. Every connection between two agents is one you
+made, which is also why an agent cannot start a conversation you did not ask for.
+
+### What it will and will not do on its own
+
+A woken session is given **a link, never the comment text**. Comment bodies are written by
+anyone who can reach the thread, and a session may be running with `--yolo` in a real
+repository; handing an outsider's words straight to it as a prompt would be handing them
+a prompt. The agent fetches the comment through its own tools, so it is something it
+chose to read.
+
+Every CST agent comments as your GitHub account, so anything written by a **different**
+login is never delivered automatically. It waits for you, as does anything for a session
+that is closed — CST will not start a session because somebody commented. Those show up
+marked `@` in the session list with how long they have waited, and under **Waiting for
+you** in the command palette, where you can open the session or dismiss the message.
+
+Commenting on the thread yourself is the simplest way to steer two agents: you are a
+participant like any other, so both wake and read what you wrote.
+
+If a thread starts going round in circles, CST says so and leaves it to you. It never
+stops a conversation on its own.
+
+### Settings
+
+- **Thread Wakes** in project settings (`.`) — whether threads may wake sessions in this
+  repository. Independent of the global setting, so a repository doing sensitive work can
+  refuse outright.
+- `threads_enabled`, `thread_wakeups_per_hour` and `thread_stall_detection` in
+  `config.json`.
+
+Watching costs nothing until something is subscribed, and then one conditional request
+per watched thread per minute — which GitHub answers `304` and does not charge against
+your rate limit while nothing has changed. Your GitHub notifications are never read or
+touched.
+
+`gh` must be installed and logged in; `cst doctor` will tell you if it is not.
 
 ## Isolated Worktree Sessions
 

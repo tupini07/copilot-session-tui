@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::{App, DeleteTarget, SettingsEditField, SettingsSection};
 use crate::theme::{fill_area, Theme, ThemeName};
 
-fn surface_style(theme: Theme) -> Style {
+pub(crate) fn surface_style(theme: Theme) -> Style {
     Style::default().fg(theme.text).bg(theme.surface)
 }
 
@@ -1705,6 +1705,23 @@ pub fn draw_project_settings(f: &mut Frame, app: &App) {
         ),
         Line::from(Span::styled(
             "    Blank inherits; Space overrides from whatever is in effect",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(""),
+        project_settings_row(
+            theme,
+            "Thread Wakes",
+            if settings.effective_threads_enabled() {
+                "On"
+            } else {
+                "Off"
+            },
+            settings.threads_enabled_override().is_some(),
+            app.project_settings_selected == 4,
+            false,
+        ),
+        Line::from(Span::styled(
+            "    Whether GitHub threads may wake sessions in this repository",
             Style::default().fg(theme.muted),
         )),
         Line::from(""),

@@ -252,10 +252,21 @@ fn newest_source(dir: &PathBuf) -> Option<std::time::SystemTime> {
 }
 
 fn marker_path() -> PathBuf {
+    state_root().join("app-state.json")
+}
+
+/// Thread subscriptions and undelivered messages, seeded to test the inbox.
+///
+/// Like the What's New marker, this has no `--copilot-home` style override, so the real
+/// file is saved and put back rather than isolated.
+fn threads_path() -> PathBuf {
+    state_root().join("threads.json")
+}
+
+fn state_root() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("copilot-session-tui")
-        .join("app-state.json")
 }
 
 fn main() -> anyhow::Result<()> {
@@ -272,23 +283,26 @@ fn main() -> anyhow::Result<()> {
     let home = copilot_home.path().to_path_buf();
 
     let marker = marker_path();
-    let saved = std::fs::read(&marker).ok();
-    let restore = |saved: &Option<Vec<u8>>| match saved {
+    let threads = threads_path();
+    let saved_marker = std::fs::read(&marker).ok();
+    let saved_threads = std::fs::read(&threads).ok();
+    let restore = |path: &PathBuf, saved: &Option<Vec<u8>>| match saved {
         Some(bytes) => {
-            let _ = std::fs::write(&marker, bytes);
+            let _ = std::fs::write(path, bytes);
         }
         None => {
-            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(path);
         }
     };
 
-    let result = run(&exe, &home, &marker);
-    restore(&saved);
-    println!("\nrestored the What's New marker to how it was found");
+    let result = run(&exe, &home, &marker, &threads);
+    restore(&marker, &saved_marker);
+    restore(&threads, &saved_threads);
+    println!("\nrestored the What's New marker and thread state to how they were found");
     result
 }
 
-fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf) -> anyhow::Result<()> {
+fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf, threads: &PathBuf) -> anyhow::Result<()> {
     let mut failures = Vec::new();
 
     // 1. A version behind: the notes for every release since should appear.
@@ -360,6 +374,53 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf) -> anyhow::Result<()> {
                     cst.screen()
                 ),
                 Err(error) => failures.push(format!("the palette entry did not open it: {error}")),
+            }
+        }
+        Err(error) => failures.push(format!("the command palette did not open: {error}")),
+    }
+    cst.quit()?;
+
+    // 5. A message that could not be delivered is visible and can be dismissed.
+    //
+    // This is the only path by which a GitHub comment can start a closed session, so it
+    // is worth proving against the real binary rather than only a TestBackend: raw mode,
+    // the event loop, and the modal being reachable at all.
+    std::fs::write(
+        threads,
+        br#"{"subscriptions":[],"pending":[{
+            "session_id":"smoke-session","comment_url":"https://github.com/o/r/issues/12",
+            "reason":"foreign_author","arrived_at":"2026-09-10T09:00:00Z",
+            "thread":{"host":"github.com","owner":"o","repo":"r","number":12,"kind":"issue"}
+        }],"notifications_cursor":null}"#,
+    )?;
+
+    let mut cst = Session::start(exe, home)?;
+    cst.wait_for("Copilot Session Manager")?;
+    cst.send(b"\x02\x02")?; // C-b C-b
+    match cst.wait_for("Command") {
+        Ok(()) => {
+            cst.send(b"waiting")?;
+            std::thread::sleep(Duration::from_millis(300));
+            cst.send(b"\r")?;
+            // Waited for on a string only the modal renders. "Waiting for you" is also
+            // the palette row's own title, so it matches before Enter is even processed.
+            match cst.wait_for("written by someone else") {
+                Ok(()) => {
+                    let screen = cst.screen();
+                    println!("--- a message held for the user ---\n{screen}\n");
+                    // ASCII only: the harness documents that other glyphs do not
+                    // survive ConPTY, so the reason and URL are what is asserted.
+                    for expected in ["issues/12", "dismiss"] {
+                        if !screen.contains(expected) {
+                            failures.push(format!("the inbox is missing {expected}"));
+                        }
+                    }
+                    cst.send(b"\x1b")?;
+                    if let Err(error) = cst.wait_until_gone("written by someone else") {
+                        failures.push(format!("Esc did not close the inbox: {error}"));
+                    }
+                }
+                Err(error) => failures.push(format!("the inbox did not open: {error}")),
             }
         }
         Err(error) => failures.push(format!("the command palette did not open: {error}")),

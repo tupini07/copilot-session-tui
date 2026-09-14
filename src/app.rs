@@ -562,6 +562,31 @@ pub struct App {
     pub confirm_update_restart: bool,
     /// Release notes to show once after an update, or on demand from the palette.
     pub whats_new: Option<crate::ui::whats_new::WhatsNewScreen>,
+
+    /// Wakes that arrived while their pane was mid-turn, waiting for it to finish.
+    ///
+    /// Writing into a pane that is working queues the text into the composer mid-message,
+    /// and writing into one showing a permission dialog answers that dialog. Neither is
+    /// recoverable, so a wake waits for the session to be genuinely idle.
+    pub thread_pending_wakes: Vec<(String, crate::threads::ThreadRef)>,
+
+    /// The open thread inbox, if the user has asked to see what is waiting.
+    ///
+    /// Holds only a cursor: the items themselves live in `thread_pending`, so acting on
+    /// one cannot leave the modal showing a stale copy of what it just changed.
+    pub thread_inbox: Option<usize>,
+
+    /// Messages waiting on the user, cached so drawing a frame is not a file read.
+    ///
+    /// Refreshed when a delivery arrives and when the user acts on one; nothing else
+    /// writes pending deliveries while CST is running.
+    pub thread_pending: Vec<crate::threads::PendingDelivery>,
+
+    /// The last reason the thread watcher gave for not working.
+    ///
+    /// Kept so it can be said once. The watcher already backs off; a status line
+    /// repeating the same failure every minute would only train the user to ignore it.
+    pub thread_watch_notice: Option<String>,
     pub restart_after_update: Option<UpdateRestartRequest>,
     update_restart_requested: bool,
     notification_worker: Option<NotificationWorker>,
@@ -711,6 +736,10 @@ impl App {
             update_notice: None,
             confirm_update_restart: false,
             whats_new: None,
+            thread_pending_wakes: Vec::new(),
+            thread_inbox: None,
+            thread_pending: Vec::new(),
+            thread_watch_notice: None,
             restart_after_update: None,
             update_restart_requested: false,
             notification_worker: None,
@@ -3185,6 +3214,235 @@ impl App {
                 .and_then(|id| mux.pane(id))
                 .is_some_and(|pane| pane.is_running())
         })
+    }
+
+    /// Act on what the thread watcher decided, now that pane state is knowable.
+    ///
+    /// The watcher settles *whether* a comment should reach a session; only the UI
+    /// thread can see whether that session has a running pane and whether it is busy.
+    pub fn apply_thread_delivery(&mut self, delivery: crate::threads::watcher::Delivery) -> bool {
+        use crate::threads::watcher::Delivery;
+
+        match delivery {
+            // Already recorded by the watcher; the list just needs to show it.
+            Delivery::Held { .. } => {
+                self.refresh_thread_pending();
+                true
+            }
+            Delivery::Wake { session_id, thread } => {
+                if !self.has_running_pane_for(&session_id) {
+                    // Never start a session unasked. It becomes something the user can
+                    // approve, with an age, so a stalled correspondence stays visible.
+                    self.hold_thread_message(
+                        &session_id,
+                        &thread,
+                        crate::threads::PendingReason::SessionClosed,
+                    );
+                    return true;
+                }
+                self.thread_pending_wakes.push((session_id, thread));
+                self.flush_thread_wakes()
+            }
+        }
+    }
+
+    /// Deliver every queued wake whose pane is now idle.
+    ///
+    /// Called both when a wake arrives and when a pane reports it has finished a turn,
+    /// so a message that landed mid-turn is delivered the moment the turn ends.
+    pub fn flush_thread_wakes(&mut self) -> bool {
+        let ready: Vec<(String, crate::threads::ThreadRef)> = self
+            .thread_pending_wakes
+            .iter()
+            .filter(|(session_id, _)| self.session_ready_for_wake(session_id))
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            return false;
+        }
+
+        let mut delivered = false;
+        for (session_id, thread) in ready {
+            match self.deliver_thread_pointer(&session_id, &thread) {
+                Ok(()) => {
+                    self.thread_pending_wakes
+                        .retain(|(queued, other)| queued != &session_id || other != &thread);
+                    delivered = true;
+                }
+                Err(error) => {
+                    // The pane went away between the check and the write. Hand it to
+                    // the user rather than dropping it silently.
+                    self.thread_pending_wakes
+                        .retain(|(queued, other)| queued != &session_id || other != &thread);
+                    self.hold_thread_message(
+                        &session_id,
+                        &thread,
+                        crate::threads::PendingReason::SessionClosed,
+                    );
+                    self.status_message = Some(format!("Could not wake the session: {error}"));
+                    delivered = true;
+                }
+            }
+        }
+        delivered
+    }
+
+    /// Whether a session can be written to without corrupting what it is doing.
+    fn session_ready_for_wake(&self, session_id: &str) -> bool {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
+            .is_some_and(|pane| {
+                pane.is_running() && !pane.is_working() && !pane.requires_user_action()
+            })
+    }
+
+    /// Hand a session the pointer, and press Enter so it actually starts a turn.
+    ///
+    /// `send_prompt_snippet` pastes without submitting, which is right for a snippet the
+    /// user is about to edit and wrong here — nobody is sitting in front of this pane.
+    fn deliver_thread_pointer(
+        &mut self,
+        session_id: &str,
+        thread: &crate::threads::ThreadRef,
+    ) -> Result<()> {
+        let pointer = crate::threads::wake_pointer(thread);
+        let Some(pane_id) = self.pane_for_session(session_id) else {
+            anyhow::bail!("the session is no longer open");
+        };
+        let Some(mux) = self.mux.as_mut() else {
+            anyhow::bail!("multiplexing is disabled");
+        };
+        let Some(pane) = mux.pane_mut(pane_id) else {
+            anyhow::bail!("the session is no longer open");
+        };
+        pane.send_prompt_snippet(&pointer)?;
+        pane.send_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))?;
+        Ok(())
+    }
+
+    /// Re-read the messages waiting on the user.
+    ///
+    /// Cheap and rare: called when a delivery arrives or the user acts on one, not on
+    /// every frame.
+    pub fn refresh_thread_pending(&mut self) {
+        self.thread_pending =
+            crate::threads::store::load_in(&crate::threads::store::state_root()).pending;
+    }
+
+    /// What is waiting on the user for one session, if anything.
+    pub fn thread_pending_for(&self, session_id: &str) -> Option<&crate::threads::PendingDelivery> {
+        self.thread_pending
+            .iter()
+            .filter(|pending| pending.session_id == session_id)
+            .min_by_key(|pending| pending.arrived_at)
+    }
+
+    /// Record a message the user has to approve before anything runs.
+    fn hold_thread_message(
+        &mut self,
+        session_id: &str,
+        thread: &crate::threads::ThreadRef,
+        reason: crate::threads::PendingReason,
+    ) {
+        let _ = crate::threads::store::update_in(&crate::threads::store::state_root(), |state| {
+            state.hold_for_user(crate::threads::PendingDelivery {
+                session_id: session_id.to_string(),
+                thread: thread.clone(),
+                comment_url: thread.url(),
+                reason,
+                arrived_at: chrono::Utc::now(),
+            });
+        });
+        self.refresh_thread_pending();
+    }
+
+    /// Open the list of messages waiting on the user.
+    pub fn open_thread_inbox(&mut self) {
+        self.refresh_thread_pending();
+        self.thread_inbox = Some(0);
+    }
+
+    pub fn thread_inbox_move(&mut self, delta: isize) {
+        let Some(selected) = self.thread_inbox else {
+            return;
+        };
+        if self.thread_pending.is_empty() {
+            return;
+        }
+        let last = self.thread_pending.len() - 1;
+        let next = (selected as isize + delta).clamp(0, last as isize) as usize;
+        self.thread_inbox = Some(next);
+    }
+
+    /// Accept the selected message: open its session if need be, and hand it the pointer.
+    ///
+    /// This is the only path that starts a session because of a GitHub comment, and it
+    /// exists so that starting one is always something the user chose.
+    pub fn thread_inbox_accept(&mut self) -> Result<()> {
+        let Some(selected) = self.thread_inbox else {
+            return Ok(());
+        };
+        let Some(pending) = self.thread_pending.get(selected).cloned() else {
+            return Ok(());
+        };
+
+        if !self.has_running_pane_for(&pending.session_id) {
+            let session = self
+                .sessions
+                .iter()
+                .find(|session| session.id == pending.session_id)
+                .cloned();
+            let Some(session) = session else {
+                anyhow::bail!("That session no longer exists");
+            };
+            let title = session.display_name().to_string();
+            self.attach_session(&session.id, &session.cwd, title)?;
+        }
+
+        // Queued rather than written straight out: a session that has only just been
+        // resumed is still starting up, and the queue already knows how to wait for it
+        // to be ready.
+        self.thread_pending_wakes
+            .push((pending.session_id.clone(), pending.thread.clone()));
+        self.thread_dismiss(selected);
+        self.flush_thread_wakes();
+        Ok(())
+    }
+
+    /// Drop the selected message without running anything.
+    pub fn thread_inbox_dismiss(&mut self) {
+        if let Some(selected) = self.thread_inbox {
+            self.thread_dismiss(selected);
+        }
+    }
+
+    fn thread_dismiss(&mut self, index: usize) {
+        let Some(pending) = self.thread_pending.get(index).cloned() else {
+            return;
+        };
+        let _ = crate::threads::store::update_in(&crate::threads::store::state_root(), |state| {
+            state.clear_pending(&pending.session_id, &pending.thread);
+        });
+        self.refresh_thread_pending();
+        if self.thread_pending.is_empty() {
+            self.thread_inbox = None;
+        } else if let Some(selected) = self.thread_inbox {
+            self.thread_inbox = Some(selected.min(self.thread_pending.len() - 1));
+        }
+    }
+
+    /// Say why the thread watcher is not working, once per distinct reason.
+    pub fn report_thread_watch_failure(&mut self, reason: String) -> bool {
+        if self.thread_watch_notice.as_deref() == Some(reason.as_str()) {
+            return false;
+        }
+        self.status_message = Some(format!("Thread watching paused: {reason}"));
+        self.thread_watch_notice = Some(reason);
+        true
     }
 
     pub fn sort_label(&self) -> &str {

@@ -945,6 +945,485 @@ pub fn fetch_patches(
         .collect())
 }
 
+/// Which thread to comment on.
+///
+/// Primitives rather than a `threads::ThreadRef` so this module keeps knowing nothing
+/// about subscriptions; it only knows how to talk to `gh`.
+#[derive(Debug, Clone, Copy)]
+pub struct CommentTarget<'a> {
+    pub host: &'a str,
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub number: u64,
+    /// Discussions have no REST endpoint and need a GraphQL mutation instead.
+    pub discussion: bool,
+}
+
+/// A comment that now exists on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedComment {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Deserialize)]
+struct ApiCreatedComment {
+    id: u64,
+    html_url: String,
+}
+
+/// Unwrap a GraphQL envelope, turning a pure-error response into a `GithubError`.
+///
+/// `data` wins when both are present: GraphQL reports a partially fulfilled request as
+/// usable data alongside an error, and discarding it would lose the answer.
+fn graph_payload<T: DeserializeOwned>(stdout: &[u8]) -> Result<T, GithubError> {
+    let response: GraphResponse<T> = serde_json::from_slice(stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub returned an unreadable response: {error}"),
+        )
+    })?;
+    if let Some(data) = response.data {
+        return Ok(data);
+    }
+    let message = response
+        .errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(GithubError::new(
+        GithubErrorKind::Cli,
+        if message.is_empty() {
+            "GitHub returned no data".to_string()
+        } else {
+            message
+        },
+    ))
+}
+
+/// Add a comment to an issue, pull request, or discussion.
+///
+/// The first mutating GitHub call in CST. Everything else here reads, so the failure
+/// modes are different: a retry after an ambiguous failure can double-post, which is
+/// why there is no retry and the error is handed straight back to the caller.
+pub fn post_comment(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    body: &str,
+    cancelled: Arc<AtomicBool>,
+) -> Result<PostedComment, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    if target.discussion {
+        post_discussion_comment(&runner, &cwd, target, body)
+    } else {
+        post_issue_comment(&runner, &cwd, target, body)
+    }
+}
+
+/// Issues and pull requests share one REST endpoint.
+///
+/// `gh api` rather than `gh issue comment`/`gh pr comment` for two reasons: the REST
+/// endpoint treats both alike so there is no branch to get wrong, and it answers with
+/// the created comment as JSON, which is where the id comes from. The `gh` porcelain
+/// prints only a URL.
+fn post_issue_comment(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    body: &str,
+) -> Result<PostedComment, GithubError> {
+    let mut args = strings(&["api", "--hostname", target.host, "--method", "POST"]);
+    args.push(format!(
+        "repos/{}/{}/issues/{}/comments",
+        target.owner, target.repo, target.number
+    ));
+    // `-f` and not `-F`: `-F` type-converts, so a body that happens to start with `@`
+    // would be read as a filename and a body of `123` would be sent as a number.
+    args.push("-f".to_string());
+    args.push(format!("body={body}"));
+
+    let stdout = runner.run(cwd, &args)?;
+    let created: ApiCreatedComment = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub did not describe the comment it created: {error}"),
+        )
+    })?;
+    Ok(PostedComment {
+        id: created.id.to_string(),
+        url: created.html_url,
+    })
+}
+
+const DISCUSSION_ID_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){id}}}";
+
+const ADD_DISCUSSION_COMMENT: &str = "mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{id url}}}";
+
+#[derive(Deserialize)]
+struct GraphDiscussionIdData {
+    repository: Option<GraphDiscussionIdRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphDiscussionIdRepository {
+    discussion: Option<GraphNodeId>,
+}
+
+#[derive(Deserialize)]
+struct GraphNodeId {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct GraphAddCommentData {
+    #[serde(rename = "addDiscussionComment")]
+    add_discussion_comment: Option<GraphAddCommentPayload>,
+}
+
+#[derive(Deserialize)]
+struct GraphAddCommentPayload {
+    comment: Option<GraphPostedComment>,
+}
+
+#[derive(Deserialize)]
+struct GraphPostedComment {
+    id: String,
+    url: String,
+}
+
+/// Two round trips, because the mutation wants a node id and a URL only has a number.
+fn post_discussion_comment(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    body: &str,
+) -> Result<PostedComment, GithubError> {
+    let lookup = graphql_args(
+        target.host,
+        DISCUSSION_ID_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(cwd, &lookup)?;
+    let discussion_id = graph_payload::<GraphDiscussionIdData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::NotFound,
+                format!(
+                    "Discussion #{} was not found in {}/{}",
+                    target.number, target.owner, target.repo
+                ),
+            )
+        })?
+        .id;
+
+    // Built by hand rather than through `graphql_args`, which sends every variable
+    // with `-F`. A comment body must go as `-f` or `gh` would try to type-convert it.
+    let mut args = strings(&["api", "graphql", "--hostname", target.host]);
+    args.push("-f".to_string());
+    args.push(format!("discussionId={discussion_id}"));
+    args.push("-f".to_string());
+    args.push(format!("body={body}"));
+    args.push("-f".to_string());
+    args.push(format!("query={ADD_DISCUSSION_COMMENT}"));
+
+    let stdout = runner.run(cwd, &args)?;
+    let comment = graph_payload::<GraphAddCommentData>(&stdout)?
+        .add_discussion_comment
+        .and_then(|payload| payload.comment)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::InvalidResponse,
+                "GitHub did not describe the discussion comment it created",
+            )
+        })?;
+    Ok(PostedComment {
+        id: comment.id,
+        url: comment.url,
+    })
+}
+
+/// One comment, reduced to what deciding whether to wake a session needs.
+///
+/// No body. The comment text is written by whoever can reach the thread, and CST never
+/// puts it in front of an agent as prompt text — carrying it here would be the first
+/// step towards doing so by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub id: String,
+    pub author: String,
+    pub url: String,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ApiThreadComment {
+    id: u64,
+    html_url: String,
+    created_at: String,
+    user: Option<ApiCommentUser>,
+}
+
+#[derive(Deserialize)]
+struct ApiCommentUser {
+    login: String,
+}
+
+/// Recent comments on a thread, newest activity first being irrelevant — order is not
+/// relied on anywhere, because a comment is new when its id has not been seen before.
+///
+/// `since` keeps this cheap on a long-running conversation: without it, a thread with
+/// hundreds of comments would be refetched in full every time it moved.
+pub fn fetch_thread_comments(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    since: Option<&str>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    if target.discussion {
+        fetch_discussion_comments(&runner, &cwd, target)
+    } else {
+        fetch_issue_comments(&runner, &cwd, target, since)
+    }
+}
+
+fn fetch_issue_comments(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+    since: Option<&str>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let mut endpoint = format!(
+        "repos/{}/{}/issues/{}/comments?per_page=100",
+        target.owner, target.repo, target.number
+    );
+    if let Some(since) = since {
+        endpoint.push_str(&format!("&since={since}"));
+    }
+    let mut args = strings(&["api", "--hostname", target.host, "--paginate", "--slurp"]);
+    args.push(endpoint);
+
+    let stdout = runner.run(cwd, &args)?;
+    // `--slurp` wraps each page in an outer array; flattening is what `api_pages` does.
+    let pages: Vec<Vec<ApiThreadComment>> = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub sent an unreadable comment list: {error}"),
+        )
+    })?;
+
+    Ok(pages
+        .into_iter()
+        .flatten()
+        .map(|comment| ThreadComment {
+            id: comment.id.to_string(),
+            author: comment.user.map(|user| user.login).unwrap_or_default(),
+            url: comment.html_url,
+            created_at: comment.created_at,
+        })
+        .collect())
+}
+
+const DISCUSSION_UPDATED_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){updatedAt}}}";
+
+#[derive(Deserialize)]
+struct GraphUpdatedData {
+    repository: Option<GraphUpdatedRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphUpdatedRepository {
+    discussion: Option<GraphUpdatedDiscussion>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphUpdatedDiscussion {
+    updated_at: String,
+}
+
+/// When a discussion last changed, as an opaque cursor.
+///
+/// GraphQL has no conditional requests, so a discussion cannot be polled for free the
+/// way an issue can. Asking only for `updatedAt` keeps the response tiny and the query
+/// cost at one point, which is the next best thing.
+pub fn fetch_discussion_updated_at(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<String, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    let args = graphql_args(
+        target.host,
+        DISCUSSION_UPDATED_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(&cwd, &args)?;
+    graph_payload::<GraphUpdatedData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion)
+        .map(|discussion| discussion.updated_at)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::NotFound,
+                format!(
+                    "Discussion #{} was not found in {}/{}",
+                    target.number, target.owner, target.repo
+                ),
+            )
+        })
+}
+
+/// Comment text, for the one caller allowed to look at it.
+///
+/// Separate from [`fetch_thread_comments`] and named for its purpose, because carrying
+/// bodies around is exactly what the rest of the thread pipeline refuses to do. The only
+/// consumer is the stall check, which feeds them to a model that has no tools and no
+/// repository — see `threads::judge`.
+pub fn fetch_recent_bodies_for_review(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    limit: usize,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Vec<String>, GithubError> {
+    if target.discussion {
+        // Discussions would need a second GraphQL query for bodies. The stall check is
+        // advisory, so skipping them loses a hint rather than breaking anything.
+        return Ok(Vec::new());
+    }
+    let runner = ProcessGhRunner { cancelled };
+    let mut args = strings(&["api", "--hostname", target.host]);
+    args.push(format!(
+        "repos/{}/{}/issues/{}/comments?per_page={limit}",
+        target.owner, target.repo, target.number
+    ));
+
+    let stdout = runner.run(&cwd, &args)?;
+    let comments: Vec<ApiCommentBody> = serde_json::from_slice(&stdout).map_err(|error| {
+        GithubError::new(
+            GithubErrorKind::InvalidResponse,
+            format!("GitHub sent an unreadable comment list: {error}"),
+        )
+    })?;
+    Ok(comments
+        .into_iter()
+        .rev()
+        .take(limit)
+        .map(|comment| comment.body.unwrap_or_default())
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct ApiCommentBody {
+    body: Option<String>,
+}
+
+/// Discussions need the last page, not the first: their comments cannot be filtered by
+/// time through GraphQL the way the REST endpoint allows.
+const DISCUSSION_RECENT_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){comments(last:30){nodes{id url createdAt author{login} replies(last:10){nodes{id url createdAt author{login}}}}}}}}";
+
+#[derive(Deserialize)]
+struct GraphRecentData {
+    repository: Option<GraphRecentRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentRepository {
+    discussion: Option<GraphRecentDiscussion>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentDiscussion {
+    comments: GraphRecentComments,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentComments {
+    #[serde(default)]
+    nodes: Vec<GraphRecentComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphRecentComment {
+    id: String,
+    url: String,
+    created_at: String,
+    author: Option<GraphRecentAuthor>,
+    #[serde(default)]
+    replies: Option<GraphRecentReplies>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentReplies {
+    #[serde(default)]
+    nodes: Vec<GraphRecentComment>,
+}
+
+#[derive(Deserialize)]
+struct GraphRecentAuthor {
+    login: String,
+}
+
+impl GraphRecentComment {
+    /// Flatten a comment and its replies, because a reply is just as much something
+    /// somebody may be waiting on as a top-level comment.
+    fn flatten(self, out: &mut Vec<ThreadComment>) {
+        let replies = self
+            .replies
+            .map(|replies| replies.nodes)
+            .unwrap_or_default();
+        out.push(ThreadComment {
+            id: self.id,
+            author: self.author.map(|author| author.login).unwrap_or_default(),
+            url: self.url,
+            created_at: self.created_at,
+        });
+        for reply in replies {
+            reply.flatten(out);
+        }
+    }
+}
+
+fn fetch_discussion_comments(
+    runner: &ProcessGhRunner,
+    cwd: &Path,
+    target: CommentTarget<'_>,
+) -> Result<Vec<ThreadComment>, GithubError> {
+    let args = graphql_args(
+        target.host,
+        DISCUSSION_RECENT_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(cwd, &args)?;
+    let discussion = graph_payload::<GraphRecentData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion);
+
+    let mut comments = Vec::new();
+    if let Some(discussion) = discussion {
+        for node in discussion.comments.nodes {
+            node.flatten(&mut comments);
+        }
+    }
+    Ok(comments)
+}
+
 #[cfg(test)]
 fn fetch_item_from(
     runner: &dyn GhRunner,

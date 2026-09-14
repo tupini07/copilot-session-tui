@@ -165,7 +165,18 @@ impl Pane {
             .unwrap_or_default();
 
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
-        let pty = PtySession::spawn(&program, &args, Some(&cwd), size, chunk_tx)?;
+        // The session tells its own agent who it is. `cst thread post` runs as a
+        // separate process inside the pane and has no other way to find out, and
+        // guessing from the working directory would be wrong the moment two sessions
+        // share a checkout.
+        let pty = PtySession::spawn(
+            &program,
+            &args,
+            Some(&cwd),
+            size,
+            &[(crate::threads::SESSION_ID_ENV, session_id.as_str())],
+            chunk_tx,
+        )?;
 
         // Device-status replies must reach the child, or ConPTY stalls on startup.
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(

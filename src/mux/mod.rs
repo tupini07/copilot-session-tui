@@ -19,6 +19,15 @@ pub enum MuxEvent {
     HookReadyConfirmed(PaneId, u64),
     HostSequence(PaneId, Vec<u8>),
     ConfigChanged,
+    /// A watched GitHub thread moved and somebody should hear about it.
+    ///
+    /// Boxed because the payload carries a whole `ThreadRef` while every other variant
+    /// is a couple of words wide, and the enum is passed by value on a hot channel.
+    ThreadDelivery(Box<crate::threads::watcher::Delivery>),
+    /// The thread watcher could not do its job, with a sentence saying why.
+    ThreadWatchFailed(String),
+    /// A watched thread looks like it is going in circles. Reported, never acted on.
+    ThreadStalled(String),
     Term(crossterm::event::Event),
 }
 

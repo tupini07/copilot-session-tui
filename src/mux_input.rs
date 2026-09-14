@@ -45,6 +45,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Same reasoning as What's New below: this can be open over live Copilot panes, so
+    // it has to take every keystroke rather than let one through to a chat.
+    if crate::input::thread_inbox_active(app) {
+        crate::input::handle_thread_inbox_event(app, event);
+        return;
+    }
+
     // First, and before the prefix gate below: this is most likely to be on screen
     // right after a restart reopened these panes, and a keystroke aimed at dismissing
     // it must not land in a Copilot chat.
@@ -718,6 +725,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             app.mode = crate::app::Mode::Help;
         }
         CheckForUpdates => app.request_update(),
+        ThreadInbox => app.open_thread_inbox(),
         WhatsNew => {
             app.whats_new = Some(crate::ui::whats_new::WhatsNewScreen::new(
                 crate::changelog::whats_new_for_current_version(),
@@ -2219,7 +2227,10 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             if focused {
                 sync_outer_progress(app);
             }
-            focused || notification.is_some()
+            // The turn this pane just finished may be what a queued wake was waiting
+            // for, so this is the earliest safe moment to hand it over.
+            let woken = app.flush_thread_wakes();
+            focused || notification.is_some() || woken
         }
         MuxEvent::HostSequence(id, sequence) => {
             let progress = crate::host_terminal::progress_state_from_sequence(&sequence);
@@ -2251,6 +2262,17 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             }
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
+        MuxEvent::ThreadDelivery(delivery) => app.apply_thread_delivery(*delivery),
+        MuxEvent::ThreadStalled(notice) => {
+            // Reported only. Nothing was changed, so there is nothing to undo.
+            app.status_message = Some(notice);
+            true
+        }
+        MuxEvent::ThreadWatchFailed(reason) => {
+            // Said once rather than every minute: the watcher already backs off, and a
+            // status line that keeps repeating the same failure is noise.
+            app.report_thread_watch_failure(reason)
+        }
         MuxEvent::Term(_) => true,
     }
 }
