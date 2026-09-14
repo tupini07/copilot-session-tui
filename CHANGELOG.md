@@ -3,6 +3,11 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.30.0 - 2026-09-14
+
+- Choose how far autopilot may carry on by itself, under Max Autopilot Continues in Global Settings.
+- Give one repository its own autopilot limit, for a codebase that should stay on a shorter leash.
+
 ## v0.29.0 - 2026-09-11
 
 - Run cst doctor to see whether Copilot CLI, gh and Git are set up, and what each one you are missing would give you.
