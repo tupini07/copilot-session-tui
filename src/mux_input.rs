@@ -2454,6 +2454,7 @@ mod tests {
                 args,
                 events_path: None,
                 terminal_light_mode: Some(false),
+                hooks_active: false,
             },
             24,
             80,

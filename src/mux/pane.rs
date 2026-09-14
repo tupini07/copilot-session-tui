@@ -129,6 +129,11 @@ pub struct PaneSpec {
     pub args: Vec<String>,
     pub events_path: Option<PathBuf>,
     pub terminal_light_mode: Option<bool>,
+    /// Whether CST is managing lifecycle hooks, so this child will report its own state.
+    ///
+    /// Decides whether the pane may assume it is idle on attach, or has to believe
+    /// whatever the terminal tells it.
+    pub hooks_active: bool,
 }
 
 impl Drop for Pane {
@@ -150,6 +155,7 @@ impl Pane {
             args,
             events_path,
             terminal_light_mode,
+            hooks_active,
         } = spec;
         let size = pty_size(rows, cols);
         let lifecycle_baseline = events_path
@@ -163,20 +169,20 @@ impl Pane {
             .as_deref()
             .map(crate::events::hooks::capture_file_len)
             .unwrap_or_default();
-        // A session whose hooks have reported before is idle at the moment we attach:
-        // the child has only just been launched, so it cannot be mid-turn. Without this
-        // the pane starts with no lifecycle state at all and falls back to whatever the
+        // A session whose child reports lifecycle state is idle at the moment we attach:
+        // it has only just been launched, so it cannot be mid-turn. Without this the
+        // pane starts with no lifecycle state at all and falls back to whatever the
         // terminal says — and Copilot announces itself as working for as long as a
         // background process it started is alive, which can be indefinitely. The first
         // `userPromptSubmitted` overwrites this within a keystroke if it is ever wrong.
         //
-        // Only when there is a journal. With no hooks installed there is nothing
-        // authoritative to prefer, and claiming idle would leave those users with no
-        // progress indication at all.
-        let seeded_hook_state = hook_events_path
-            .as_deref()
-            .filter(|path| crate::events::hooks::has_records(path))
-            .map(|_| HookActivity::Idle);
+        // Keyed on hooks being installed now, rather than on this session having
+        // reported before. The two are not the same claim: a session resumed but not yet
+        // prompted has no journal and perfectly working hooks, while a user who has
+        // since run `cst hooks uninstall` has journals that prove nothing. Claiming idle
+        // where nothing will ever correct it would leave the pane with no progress
+        // indication at all.
+        let seeded_hook_state = hooks_active.then_some(HookActivity::Idle);
 
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
         // The session tells its own agent who it is. `cst thread post` runs as a
@@ -1201,6 +1207,7 @@ mod tests {
             args,
             events_path: None,
             terminal_light_mode: Some(false),
+            hooks_active: false,
         }
     }
 
@@ -1395,18 +1402,18 @@ mod tests {
     /// Reproduces the stale spinner on a re-attached session.
     ///
     /// A session that finished its turn hours ago, with a background process Copilot
-    /// still counts as "working", so it re-announces progress over OSC on resume. The
-    /// authoritative journal already says `ready`, and before this was fixed the pane
-    /// ignored it — it started reading the journal at end-of-file, so `hook_state` was
-    /// `None` and the raw OSC won by default. The spinner then never stopped, because
-    /// the background process never ends.
+    /// still counts as "working", so it re-announces progress over OSC on resume. Before
+    /// this was fixed the pane started with no lifecycle state at all — it reads the
+    /// journal from end-of-file, so nothing arrives until the next turn — and the raw
+    /// OSC won by default. The spinner then never stopped, because the background
+    /// process never ends.
     #[test]
     fn a_session_that_finished_its_turn_does_not_spin_when_reattached() {
         let directory = tempfile::tempdir().unwrap();
         let events_path = directory.path().join("events.jsonl");
         std::fs::write(&events_path, "{\"type\":\"session.start\"}\n").unwrap();
         // The turn ended long before this pane existed, which is the whole point: the
-        // record is already on disk when the pane opens.
+        // record is already on disk when the pane opens, so nothing will be replayed.
         std::fs::write(
             directory.path().join(".cst-lifecycle.jsonl"),
             format!(
@@ -1425,6 +1432,7 @@ mod tests {
         });
         let mut spec = test_spec(45, program, args);
         spec.events_path = Some(events_path);
+        spec.hooks_active = true;
         let mut pane = Pane::spawn(spec, 24, 80, tx).unwrap();
 
         // Copilot re-announcing progress on resume, because its own idea of "working"
@@ -1435,16 +1443,16 @@ mod tests {
         assert_eq!(
             pane.effective_progress_state(),
             crate::host_terminal::ProgressState::Clear,
-            "the journal already said the turn was over"
+            "a child that reports its own state was not mid-turn when we attached"
         );
         pane.shutdown().unwrap();
     }
 
     #[test]
-    fn a_pane_without_hooks_installed_still_shows_raw_progress() {
-        // The guard on the fix above. With no journal there is nothing authoritative to
-        // seed from, and suppressing the raw signal would leave anyone who has not
-        // installed the lifecycle plugin with no progress indication at all.
+    fn a_session_resumed_but_not_yet_prompted_is_also_covered() {
+        // The journal only appears once something is submitted, so keying the fix on
+        // "has this session reported before" would have missed every session that was
+        // resumed and left alone — which is exactly the state a stale spinner sits in.
         let directory = tempfile::tempdir().unwrap();
         let events_path = directory.path().join("events.jsonl");
         std::fs::write(&events_path, "{\"type\":\"session.start\"}\n").unwrap();
@@ -1455,8 +1463,50 @@ mod tests {
         } else {
             "sleep 30"
         });
+        let mut spec = test_spec(47, program, args);
+        spec.events_path = Some(events_path);
+        spec.hooks_active = true;
+        let mut pane = Pane::spawn(spec, 24, 80, tx).unwrap();
+
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(false);
+
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear,
+            "no journal yet, but the hooks will still report"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_pane_without_hooks_installed_still_shows_raw_progress() {
+        // The guard on the fix above. With nothing to report lifecycle state, the raw
+        // sequence is the only signal there is, and suppressing it would leave anyone
+        // who has not installed the plugin with no progress indication at all.
+        let directory = tempfile::tempdir().unwrap();
+        let events_path = directory.path().join("events.jsonl");
+        std::fs::write(&events_path, "{\"type\":\"session.start\"}\n").unwrap();
+        // A journal left behind by hooks that have since been uninstalled. It proves
+        // they once worked, which is not a reason to believe they work now.
+        std::fs::write(
+            directory.path().join(".cst-lifecycle.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&HookLifecycleEvent::Ready { timestamp: 2 }).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
         let mut spec = test_spec(46, program, args);
         spec.events_path = Some(events_path);
+        spec.hooks_active = false;
         let mut pane = Pane::spawn(spec, 24, 80, tx).unwrap();
 
         pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");

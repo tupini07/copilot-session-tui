@@ -3129,6 +3129,9 @@ impl App {
         let (rows, cols) = self.pane_size;
         let events_path = self.notification_events_path(&session_id);
         let terminal_light_mode = self.theme_name().terminal_light_mode();
+        // Read now rather than cached at startup: `cst hooks install` from another
+        // terminal should take effect on the next pane, not the next CST.
+        let hooks_active = crate::hook_plugin::is_managed(&self.copilot_home);
         let Some(mux) = self.mux.as_mut() else {
             anyhow::bail!("Multiplexing is disabled");
         };
@@ -3150,6 +3153,7 @@ impl App {
                 args,
                 events_path: Some(events_path),
                 terminal_light_mode,
+                hooks_active,
             },
             rows,
             cols,
@@ -4529,6 +4533,7 @@ mod tests {
                 args,
                 events_path: None,
                 terminal_light_mode: Some(false),
+                hooks_active: false,
             },
             24,
             80,
@@ -5418,6 +5423,7 @@ mod tests {
                 args,
                 events_path: None,
                 terminal_light_mode: Some(false),
+                hooks_active: false,
             },
             24,
             80,

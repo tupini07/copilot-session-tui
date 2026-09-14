@@ -179,16 +179,6 @@ pub fn capture_file_len(path: &Path) -> u64 {
         .unwrap_or_default()
 }
 
-/// Whether this session has ever reported lifecycle state.
-///
-/// Used to tell "the hooks are working and simply have nothing new to say" apart from
-/// "there are no hooks here at all". The two need opposite treatment: the first means
-/// CST knows the session's state, the second means the raw terminal output is the only
-/// thing it has.
-pub fn has_records(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-}
-
 #[must_use = "dropping the monitor stops its worker"]
 pub struct HookMonitor {
     stop: Arc<AtomicBool>,
@@ -295,26 +285,6 @@ mod tests {
 
     fn payload(json: &[u8]) -> HookPayload {
         parse_payload(Cursor::new(json)).unwrap()
-    }
-
-    #[test]
-    fn a_session_with_no_hooks_is_told_apart_from_one_that_has_simply_gone_quiet() {
-        // The two need opposite treatment. A session that has reported before is one
-        // whose state CST knows; a session that never has is one where the raw terminal
-        // output is the only thing there is, and must keep being trusted.
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(".cst-lifecycle.jsonl");
-
-        assert!(!has_records(&path), "a missing journal means no hooks");
-
-        std::fs::write(&path, "").unwrap();
-        assert!(
-            !has_records(&path),
-            "an empty journal has still reported nothing"
-        );
-
-        std::fs::write(&path, "{\"state\":\"ready\",\"timestamp\":1}\n").unwrap();
-        assert!(has_records(&path));
     }
 
     #[test]
