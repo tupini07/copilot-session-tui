@@ -60,9 +60,13 @@ that name them. If a change makes one of those tests fail, the change is wrong.
   item for the user. Every CST agent posts as the same account, so a different author is
   by definition somebody outside.
 
-Nothing in `src/threads/` may mark a GitHub notification as read. That inbox is the
-user's own and shared with their browser; the `Last-Modified` cursor exists so we never
-have to touch it.
+A third thing, recorded because it looks like an obvious optimisation and is a dead end:
+**do not poll `GET /notifications`.** One conditional request covering every subscription
+is cheaper than one per thread, and it cannot work — GitHub never notifies you about your
+own activity, and every CST agent comments as the same account. The inbox would ring only
+for comments by other people, which is exactly the case CST refuses to act on
+automatically. This was built that way first and found by a live test; the module doc in
+`doorbell.rs` has the detail.
 
 ## Useful context
 

@@ -1231,6 +1231,60 @@ fn fetch_issue_comments(
         .collect())
 }
 
+const DISCUSSION_UPDATED_QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){discussion(number:$number){updatedAt}}}";
+
+#[derive(Deserialize)]
+struct GraphUpdatedData {
+    repository: Option<GraphUpdatedRepository>,
+}
+
+#[derive(Deserialize)]
+struct GraphUpdatedRepository {
+    discussion: Option<GraphUpdatedDiscussion>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphUpdatedDiscussion {
+    updated_at: String,
+}
+
+/// When a discussion last changed, as an opaque cursor.
+///
+/// GraphQL has no conditional requests, so a discussion cannot be polled for free the
+/// way an issue can. Asking only for `updatedAt` keeps the response tiny and the query
+/// cost at one point, which is the next best thing.
+pub fn fetch_discussion_updated_at(
+    cwd: PathBuf,
+    target: CommentTarget<'_>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<String, GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    let args = graphql_args(
+        target.host,
+        DISCUSSION_UPDATED_QUERY,
+        &[
+            ("owner", target.owner.to_string()),
+            ("repo", target.repo.to_string()),
+            ("number", target.number.to_string()),
+        ],
+    );
+    let stdout = runner.run(&cwd, &args)?;
+    graph_payload::<GraphUpdatedData>(&stdout)?
+        .repository
+        .and_then(|repository| repository.discussion)
+        .map(|discussion| discussion.updated_at)
+        .ok_or_else(|| {
+            GithubError::new(
+                GithubErrorKind::NotFound,
+                format!(
+                    "Discussion #{} was not found in {}/{}",
+                    target.number, target.owner, target.repo
+                ),
+            )
+        })
+}
+
 /// Comment text, for the one caller allowed to look at it.
 ///
 /// Separate from [`fetch_thread_comments`] and named for its purpose, because carrying

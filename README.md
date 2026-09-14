@@ -655,9 +655,10 @@ stops a conversation on its own.
 - `threads_enabled`, `thread_wakeups_per_hour` and `thread_stall_detection` in
   `config.json`.
 
-Watching costs nothing until something is subscribed, and then one conditional request a
-minute that GitHub does not charge against your rate limit when nothing has changed. CST
-never marks your GitHub notifications as read.
+Watching costs nothing until something is subscribed, and then one conditional request
+per watched thread per minute — which GitHub answers `304` and does not charge against
+your rate limit while nothing has changed. Your GitHub notifications are never read or
+touched.
 
 `gh` must be installed and logged in; `cst doctor` will tell you if it is not.
 

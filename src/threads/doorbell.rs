@@ -1,200 +1,113 @@
-//! The doorbell: one cheap question that covers every watched thread.
+//! Noticing that a watched thread has moved, without paying for the check.
 //!
-//! GitHub's notifications endpoint answers a conditional request with `304 Not Modified`
-//! and, crucially, **does not charge it against the rate limit**. One request per minute
-//! therefore covers any number of subscriptions, and the cost stops growing with the
-//! catalogue. That is why there are no polling tiers here: the problem tiers would solve
-//! does not arise.
+//! ## Why this does not use the notifications inbox
 //!
-//! It is a doorbell and not a payload. The response says which threads moved; the
-//! comments themselves are fetched only for the threads that did.
+//! The obvious design is one conditional `GET /notifications`, which covers every
+//! subscription in a single free request. It was built that way first, and it does not
+//! work, for a reason that is invisible until you try it against a real account:
 //!
-//! Two rules that look like details and are not:
+//! **GitHub never notifies you about your own activity, and every CST agent comments as
+//! the same account.** Verified rather than reasoned about — an agent posted to a real
+//! issue and the inbox stayed at `304` for half a minute afterwards, with the thread
+//! absent from the notification list entirely. The one case the inbox *would* have
+//! reported is a comment by somebody else, which is exactly the case CST refuses to act
+//! on automatically. It would have rung only when it must not wake anything.
 //!
-//! * **Nothing here ever marks a notification read.** That inbox is the user's own,
-//!   shared with their browser. Marking read would make their real notifications
-//!   disappear. The `Last-Modified` watermark is a private cursor that touches nothing.
-//! * **`gh api` is not used.** It exits non-zero on a 304, which would land in
-//!   `cli_error`'s stderr sniffing — a mechanism `github.rs` itself flags as brittle.
-//!   `ureq` is already a dependency and hands back the status and headers directly.
+//! So each watched thread is asked about directly. That costs one request per thread
+//! instead of one in total, and buys back three things: it sees same-account traffic,
+//! which is the entire point; it touches the user's notification inbox not at all, so
+//! there is no way to eat their unread badges; and it works for discussions without
+//! depending on whether those appear in notifications.
+//!
+//! The cost stays near zero anyway. `GET /repos/{o}/{r}/issues/{n}` returns an `ETag`,
+//! and a request carrying `If-None-Match` answers `304` **without being charged against
+//! the rate limit** — confirmed against the live API. A handful of watched threads is a
+//! handful of free requests a minute.
+//!
+//! `ureq` and not `gh api`: `gh` exits non-zero on a `304`, which would land in
+//! `cli_error`'s stderr sniffing, a mechanism `github.rs` itself flags as brittle.
 
 use std::time::Duration;
 
-use serde::Deserialize;
-
 use super::{ThreadKind, ThreadRef};
 
-/// GitHub's own guidance if it declines to say. Its `X-Poll-Interval` is 60 in practice.
+/// How often to ask, when nothing says otherwise.
 pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
-/// What one poll produced.
+/// What one thread poll produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ring {
-    /// Nothing has changed since the cursor, and the request was free.
+    /// Unchanged since the stored cursor, and the request was free.
     Quiet,
-    /// Threads that moved, with the cursor to store for next time.
-    Moved {
-        threads: Vec<ThreadRef>,
-        cursor: Option<String>,
-    },
+    /// Something happened; `cursor` is what to send next time.
+    Moved { cursor: Option<String> },
 }
 
 /// A raw HTTP response, narrow enough that tests can build one by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoorbellResponse {
     pub status: u16,
-    pub last_modified: Option<String>,
-    pub poll_interval: Option<u64>,
+    /// `ETag`, the cursor for the next conditional request.
+    pub cursor: Option<String>,
     pub body: Vec<u8>,
 }
 
 /// How the poll reaches GitHub, behind a trait so the 304 path can be tested offline.
-pub trait NotificationTransport {
+pub trait ThreadTransport {
     fn fetch(
         &self,
         url: &str,
         token: &str,
-        if_modified_since: Option<&str>,
+        if_none_match: Option<&str>,
     ) -> Result<DoorbellResponse, String>;
 }
 
-#[derive(Debug, Deserialize)]
-struct ApiNotification {
-    subject: ApiSubject,
-    repository: ApiNotificationRepository,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiSubject {
-    #[serde(rename = "type")]
-    kind: String,
-    /// Absent for some subject types, which is why a missing URL is handled rather
-    /// than treated as malformed.
-    url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiNotificationRepository {
-    full_name: String,
-}
-
-/// The notifications endpoint for a host.
+/// The API URL that reflects a thread's activity.
 ///
-/// Enterprise installs serve the API under `/api/v3` on their own hostname rather than
-/// on a separate `api.` domain.
-pub fn notifications_url(host: &str) -> String {
-    if host.eq_ignore_ascii_case("github.com") {
-        "https://api.github.com/notifications?all=true".to_string()
+/// Pull requests are served by the `issues` endpoint as well, and it is the one that
+/// changes when somebody comments — `pulls/{n}` tracks the branch, not the conversation.
+///
+/// Discussions have no REST representation at all; they are handled through GraphQL
+/// elsewhere, so this returns `None` and the caller takes the other path.
+pub fn thread_api_url(thread: &ThreadRef) -> Option<String> {
+    if thread.kind == ThreadKind::Discussion {
+        return None;
+    }
+    let base = if thread.host.eq_ignore_ascii_case("github.com") {
+        "https://api.github.com".to_string()
     } else {
-        format!("https://{host}/api/v3/notifications?all=true")
-    }
-}
-
-/// How long to wait before the next poll.
-///
-/// GitHub's `X-Poll-Interval` is a floor, not a suggestion: the documentation says to
-/// obey it, and it rises when their servers are busy. Configuring a faster poll must
-/// not be able to override it.
-pub fn poll_delay(configured: Duration, server_interval: Option<u64>) -> Duration {
-    let floor = Duration::from_secs(server_interval.unwrap_or(DEFAULT_POLL_SECONDS));
-    configured.max(floor)
-}
-
-/// Turn a response into the list of watched threads that moved.
-pub fn interpret(
-    response: &DoorbellResponse,
-    watched: &[ThreadRef],
-) -> Result<(Ring, Option<u64>), String> {
-    if response.status == 304 {
-        return Ok((Ring::Quiet, response.poll_interval));
-    }
-    if response.status == 401 || response.status == 403 {
-        return Err(
-            "GitHub refused the notifications request; run `gh auth login` and check the \
-             token has the `notifications` scope"
-                .to_string(),
-        );
-    }
-    if response.status != 200 {
-        return Err(format!(
-            "GitHub answered the notifications request with HTTP {}",
-            response.status
-        ));
-    }
-
-    let notifications: Vec<ApiNotification> = serde_json::from_slice(&response.body)
-        .map_err(|error| format!("GitHub sent an unreadable notification list: {error}"))?;
-
-    let mut moved: Vec<ThreadRef> = Vec::new();
-    for notification in &notifications {
-        for thread in matched_threads(notification, watched) {
-            if !moved.contains(&thread) {
-                moved.push(thread);
-            }
-        }
-    }
-
-    Ok((
-        Ring::Moved {
-            threads: moved,
-            cursor: response.last_modified.clone(),
-        },
-        response.poll_interval,
+        // Enterprise serves its API under /api/v3 on its own hostname.
+        format!("https://{}/api/v3", thread.host)
+    };
+    Some(format!(
+        "{base}/repos/{}/{}/issues/{}",
+        thread.owner, thread.repo, thread.number
     ))
 }
 
-/// Which watched threads one notification refers to.
-///
-/// Usually exactly one. The exception is a discussion notification: GitHub does not
-/// always give those a `subject.url`, so there is no number to match on and the only
-/// honest answer is "some discussion in this repository moved". Returning every watched
-/// discussion there costs one extra check each and never misses the real one.
-fn matched_threads(notification: &ApiNotification, watched: &[ThreadRef]) -> Vec<ThreadRef> {
-    let Some(kind) = subject_kind(&notification.subject.kind) else {
-        return Vec::new();
-    };
-    let repository = notification.repository.full_name.to_ascii_lowercase();
-
-    let in_repository = |thread: &&ThreadRef| {
-        thread.kind == kind
-            && format!("{}/{}", thread.owner, thread.repo).to_ascii_lowercase() == repository
-    };
-
-    match notification
-        .subject
-        .url
-        .as_deref()
-        .and_then(number_from_api_url)
-    {
-        Some(number) => watched
-            .iter()
-            .filter(in_repository)
-            .filter(|thread| thread.number == number)
-            .cloned()
-            .collect(),
-        None => watched.iter().filter(in_repository).cloned().collect(),
-    }
+/// How long to wait before the next round of polls.
+pub fn poll_delay(configured: Duration) -> Duration {
+    configured.max(Duration::from_secs(5))
 }
 
-/// Map GitHub's `subject.type` onto the kinds that carry a conversation.
-///
-/// Everything else — releases, commits, security alerts — is somebody else's business
-/// and must not be mistaken for a thread somebody is waiting on.
-fn subject_kind(subject_type: &str) -> Option<ThreadKind> {
-    match subject_type {
-        "Issue" => Some(ThreadKind::Issue),
-        "PullRequest" => Some(ThreadKind::PullRequest),
-        "Discussion" => Some(ThreadKind::Discussion),
-        _ => None,
+/// Turn a response into whether this thread moved.
+pub fn interpret(response: &DoorbellResponse) -> Result<Ring, String> {
+    match response.status {
+        304 => Ok(Ring::Quiet),
+        200 => Ok(Ring::Moved {
+            cursor: response.cursor.clone(),
+        }),
+        401 | 403 => Err(
+            "GitHub refused the request; run `gh auth login` and check the token can read \
+             this repository"
+                .to_string(),
+        ),
+        404 => Err(
+            "That thread is no longer readable; it may have been deleted or made private"
+                .to_string(),
+        ),
+        other => Err(format!("GitHub answered with HTTP {other}")),
     }
-}
-
-/// Pull the item number out of an API subject URL.
-///
-/// These are API URLs (`.../repos/o/r/issues/12`), not the browser ones, and pull
-/// requests appear under `pulls`. The number is always the last segment.
-fn number_from_api_url(url: &str) -> Option<u64> {
-    url.rsplit('/').next()?.parse().ok()
 }
 
 /// A real HTTP poll.
@@ -221,12 +134,12 @@ impl UreqTransport {
     }
 }
 
-impl NotificationTransport for UreqTransport {
+impl ThreadTransport for UreqTransport {
     fn fetch(
         &self,
         url: &str,
         token: &str,
-        if_modified_since: Option<&str>,
+        if_none_match: Option<&str>,
     ) -> Result<DoorbellResponse, String> {
         let mut request = self
             .agent
@@ -237,23 +150,19 @@ impl NotificationTransport for UreqTransport {
             )
             .header("Accept", "application/vnd.github+json")
             .header("Authorization", &format!("Bearer {token}"));
-        if let Some(since) = if_modified_since {
-            request = request.header("If-Modified-Since", since);
+        if let Some(etag) = if_none_match {
+            request = request.header("If-None-Match", etag);
         }
 
         let response = request
             .call()
             .map_err(|error| format!("Could not reach GitHub: {error}"))?;
         let status = response.status().as_u16();
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string)
-        };
-        let last_modified = header("last-modified");
-        let poll_interval = header("x-poll-interval").and_then(|value| value.parse().ok());
+        let cursor = response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = response
             .into_body()
             .read_to_vec()
@@ -261,8 +170,7 @@ impl NotificationTransport for UreqTransport {
 
         Ok(DoorbellResponse {
             status,
-            last_modified,
-            poll_interval,
+            cursor,
             body,
         })
     }
@@ -319,204 +227,84 @@ pub fn token_for(host: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn thread(number: u64, kind: ThreadKind) -> ThreadRef {
+    fn thread(kind: ThreadKind) -> ThreadRef {
         ThreadRef {
             host: "github.com".to_string(),
             owner: "microsoft".to_string(),
-            repo: "SpeakingBigMapsIntoExistence".to_string(),
-            number,
+            repo: "maps".to_string(),
+            number: 2366,
             kind,
         }
     }
 
-    fn response(status: u16, body: &str) -> DoorbellResponse {
+    fn response(status: u16) -> DoorbellResponse {
         DoorbellResponse {
             status,
-            last_modified: Some("Mon, 14 Sep 2026 16:04:34 GMT".to_string()),
-            poll_interval: Some(60),
-            body: body.as_bytes().to_vec(),
+            cursor: Some("W/\"abc\"".to_string()),
+            body: Vec::new(),
         }
     }
 
-    fn notification(kind: &str, repo: &str, url: &str) -> String {
-        format!(
-            r#"{{"subject":{{"type":"{kind}","url":"{url}"}},"repository":{{"full_name":"{repo}"}}}}"#
-        )
+    #[test]
+    fn an_unchanged_thread_costs_nothing() {
+        // The economic argument for polling every thread separately: a 304 is free, so
+        // a handful of watched threads is a handful of free requests a minute.
+        assert_eq!(interpret(&response(304)).unwrap(), Ring::Quiet);
     }
 
     #[test]
-    fn an_unchanged_inbox_costs_nothing_and_moves_no_cursor() {
-        // The whole economic argument for this design: a 304 is free, so polling every
-        // minute forever is affordable.
-        let watched = vec![thread(2366, ThreadKind::Issue)];
-        let (ring, interval) = interpret(&response(304, ""), &watched).unwrap();
-
-        assert_eq!(ring, Ring::Quiet);
-        assert_eq!(interval, Some(60));
-    }
-
-    #[test]
-    fn a_comment_on_a_watched_issue_is_reported_with_the_new_cursor() {
-        let watched = vec![thread(2366, ThreadKind::Issue)];
-        let body = format!(
-            "[{}]",
-            notification(
-                "Issue",
-                "microsoft/SpeakingBigMapsIntoExistence",
-                "https://api.github.com/repos/microsoft/SpeakingBigMapsIntoExistence/issues/2366"
-            )
-        );
-
-        let (ring, _) = interpret(&response(200, &body), &watched).unwrap();
-
+    fn a_thread_that_moved_hands_back_the_cursor_for_next_time() {
         assert_eq!(
-            ring,
+            interpret(&response(200)).unwrap(),
             Ring::Moved {
-                threads: vec![thread(2366, ThreadKind::Issue)],
-                cursor: Some("Mon, 14 Sep 2026 16:04:34 GMT".to_string()),
+                cursor: Some("W/\"abc\"".to_string()),
             }
         );
     }
 
     #[test]
-    fn the_rest_of_a_busy_inbox_is_ignored_rather_than_mistaken_for_a_thread() {
-        // A real inbox is mostly releases and repositories nobody is waiting on.
-        let watched = vec![thread(2366, ThreadKind::Issue)];
-        let body = format!(
-            "[{},{},{}]",
-            notification(
-                "Release",
-                "some/other",
-                "https://api.github.com/repos/some/other/releases/1"
-            ),
-            notification(
-                "Issue",
-                "unrelated/repo",
-                "https://api.github.com/repos/unrelated/repo/issues/2366"
-            ),
-            notification(
-                "Issue",
-                "microsoft/SpeakingBigMapsIntoExistence",
-                "https://api.github.com/repos/microsoft/SpeakingBigMapsIntoExistence/issues/999"
-            )
+    fn a_pull_request_is_polled_on_the_issues_endpoint_that_tracks_its_conversation() {
+        // `pulls/{n}` changes when the branch changes; `issues/{n}` changes when
+        // somebody comments, which is what anyone here is waiting for.
+        assert_eq!(
+            thread_api_url(&thread(ThreadKind::PullRequest)).unwrap(),
+            "https://api.github.com/repos/microsoft/maps/issues/2366"
         );
+        assert_eq!(
+            thread_api_url(&thread(ThreadKind::Issue)).unwrap(),
+            "https://api.github.com/repos/microsoft/maps/issues/2366"
+        );
+    }
 
-        let (ring, _) = interpret(&response(200, &body), &watched).unwrap();
+    #[test]
+    fn a_discussion_has_no_rest_url_and_says_so_rather_than_inventing_one() {
+        assert_eq!(thread_api_url(&thread(ThreadKind::Discussion)), None);
+    }
+
+    #[test]
+    fn an_enterprise_host_is_asked_on_its_own_domain_not_api_github_com() {
+        let mut enterprise = thread(ThreadKind::Issue);
+        enterprise.host = "github.mycorp.example".to_string();
 
         assert_eq!(
-            ring,
-            Ring::Moved {
-                threads: vec![],
-                cursor: Some("Mon, 14 Sep 2026 16:04:34 GMT".to_string()),
-            }
+            thread_api_url(&enterprise).unwrap(),
+            "https://github.mycorp.example/api/v3/repos/microsoft/maps/issues/2366"
         );
     }
 
     #[test]
-    fn a_pull_request_notification_matches_a_watched_pull_request() {
-        // Subject URLs say `pulls` where the browser URL says `pull`.
-        let watched = vec![thread(41, ThreadKind::PullRequest)];
-        let body = format!(
-            "[{}]",
-            notification(
-                "PullRequest",
-                "microsoft/SpeakingBigMapsIntoExistence",
-                "https://api.github.com/repos/microsoft/SpeakingBigMapsIntoExistence/pulls/41"
-            )
-        );
+    fn a_thread_that_can_no_longer_be_read_says_so_instead_of_retrying_silently() {
+        let error = interpret(&response(404)).unwrap_err();
+        assert!(error.contains("deleted or made private"), "got: {error}");
 
-        let (ring, _) = interpret(&response(200, &body), &watched).unwrap();
-
-        let Ring::Moved { threads, .. } = ring else {
-            panic!("expected a ring");
-        };
-        assert_eq!(threads, vec![thread(41, ThreadKind::PullRequest)]);
-    }
-
-    #[test]
-    fn an_issue_notification_never_matches_a_discussion_with_the_same_number() {
-        // Issue #7 and discussion #7 can both exist in one repository.
-        let watched = vec![thread(7, ThreadKind::Discussion)];
-        let body = format!(
-            "[{}]",
-            notification(
-                "Issue",
-                "microsoft/SpeakingBigMapsIntoExistence",
-                "https://api.github.com/repos/microsoft/SpeakingBigMapsIntoExistence/issues/7"
-            )
-        );
-
-        let (ring, _) = interpret(&response(200, &body), &watched).unwrap();
-
-        assert_eq!(
-            ring,
-            Ring::Moved {
-                threads: vec![],
-                cursor: Some("Mon, 14 Sep 2026 16:04:34 GMT".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn a_discussion_notification_without_a_url_still_reaches_its_repository() {
-        // GitHub does not reliably give discussion notifications a subject URL. Falling
-        // back to every watched discussion in that repository costs one extra check and
-        // is the difference between discussions working and silently never waking.
-        let watched = vec![
-            thread(7, ThreadKind::Discussion),
-            thread(8, ThreadKind::Discussion),
-            thread(9, ThreadKind::Issue),
-        ];
-        let body = r#"[{"subject":{"type":"Discussion","url":null},
-            "repository":{"full_name":"microsoft/SpeakingBigMapsIntoExistence"}}]"#;
-
-        let (ring, _) = interpret(&response(200, body), &watched).unwrap();
-
-        let Ring::Moved { threads, .. } = ring else {
-            panic!("expected a ring");
-        };
-        assert_eq!(
-            threads,
-            vec![
-                thread(7, ThreadKind::Discussion),
-                thread(8, ThreadKind::Discussion)
-            ],
-            "issues in the same repository must not be dragged in"
-        );
-    }
-
-    #[test]
-    fn a_rejected_token_says_which_scope_is_missing_rather_than_retrying_forever() {
-        let watched = vec![thread(1, ThreadKind::Issue)];
-
-        let error = interpret(&response(403, ""), &watched).unwrap_err();
-
-        assert!(error.contains("notifications"), "got: {error}");
+        let error = interpret(&response(403)).unwrap_err();
         assert!(error.contains("gh auth login"), "got: {error}");
     }
 
-    #[test]
-    fn githubs_poll_interval_is_a_floor_that_a_faster_setting_cannot_undercut() {
-        // The documentation says to obey it, and it rises when GitHub is busy.
-        assert_eq!(
-            poll_delay(Duration::from_secs(5), Some(60)),
-            Duration::from_secs(60)
-        );
-        assert_eq!(
-            poll_delay(Duration::from_secs(300), Some(60)),
-            Duration::from_secs(300)
-        );
-        assert_eq!(
-            poll_delay(Duration::from_secs(5), None),
-            Duration::from_secs(DEFAULT_POLL_SECONDS)
-        );
-    }
-
-    /// Proves against the real API that a conditional poll is free.
+    /// Proves against the real API that a conditional poll is free, and — the thing that
+    /// forced this design — that a comment from our own account is visible here.
     ///
-    /// The economics of this whole module rest on it, and no offline test can show that
-    /// GitHub really sends `304` and really leaves `X-RateLimit-Used` untouched. Ignored
-    /// by default because it spends a request against the running user's account.
+    /// Ignored by default because it spends requests against the running user's account.
     #[test]
     #[ignore = "talks to the real GitHub API; run with CST_DOORBELL_LIVE=1"]
     fn a_conditional_poll_really_is_free_against_the_live_api() {
@@ -525,34 +313,25 @@ mod tests {
         }
         let transport = UreqTransport::new();
         let token = token_for("github.com").expect("gh must be logged in for this test");
-        let url = notifications_url("github.com");
+        let thread = ThreadRef {
+            host: "github.com".to_string(),
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 100_000,
+            kind: ThreadKind::Issue,
+        };
+        let url = thread_api_url(&thread).unwrap();
 
         let first = transport.fetch(&url, &token, None).unwrap();
-        assert_eq!(first.status, 200, "an unconditional poll returns the list");
+        assert_eq!(first.status, 200);
         let cursor = first
-            .last_modified
-            .expect("GitHub must send Last-Modified or there is no cursor to store");
+            .cursor
+            .expect("GitHub must send an ETag or there is no cursor to store");
 
         let second = transport.fetch(&url, &token, Some(&cursor)).unwrap();
         assert_eq!(
             second.status, 304,
             "the same request with the cursor must be Not Modified"
-        );
-        assert!(
-            first.poll_interval.is_some(),
-            "GitHub must tell us how often it will accept a poll"
-        );
-    }
-
-    #[test]
-    fn an_enterprise_host_is_asked_on_its_own_domain_not_api_github_com() {
-        assert_eq!(
-            notifications_url("github.com"),
-            "https://api.github.com/notifications?all=true"
-        );
-        assert_eq!(
-            notifications_url("github.mycorp.example"),
-            "https://github.mycorp.example/api/v3/notifications?all=true"
         );
     }
 }

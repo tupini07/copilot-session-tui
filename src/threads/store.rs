@@ -35,13 +35,14 @@ pub struct ThreadState {
     #[serde(default)]
     pub pending: Vec<PendingDelivery>,
 
-    /// The `Last-Modified` last returned by `GET /notifications`.
+    /// Per-thread `ETag`, keyed by canonical URL.
     ///
-    /// Our private cursor into the notifications inbox. CST deliberately never marks a
-    /// notification read: that inbox is the user's own, shared with their browser, and
-    /// marking read here would make their real notifications disappear there.
+    /// What makes polling every watched thread affordable: a request carrying one of
+    /// these comes back `304` without being charged against the rate limit. Losing the
+    /// map costs one full fetch per thread, not correctness, which is why it is fine
+    /// for a corrupt file to start over.
     #[serde(default)]
-    pub notifications_cursor: Option<String>,
+    pub cursors: BTreeMap<String, String>,
 
     /// Anything a newer CST wrote that this one does not understand, so downgrading does
     /// not silently discard it. Same approach as `UserConfig::extra`.
@@ -366,16 +367,18 @@ mod tests {
     }
 
     #[test]
-    fn the_notifications_cursor_survives_a_restart_so_the_inbox_is_not_replayed() {
+    fn a_thread_cursor_survives_a_restart_so_the_first_poll_is_still_free() {
         let temp = tempfile::tempdir().unwrap();
         update_in(temp.path(), |state| {
-            state.notifications_cursor = Some("Mon, 14 Sep 2026 16:04:34 GMT".to_string());
+            state
+                .cursors
+                .insert(thread(1).url(), "W/\"abc\"".to_string());
         })
         .unwrap();
 
         assert_eq!(
-            load_in(temp.path()).notifications_cursor.as_deref(),
-            Some("Mon, 14 Sep 2026 16:04:34 GMT")
+            load_in(temp.path()).cursors.get(&thread(1).url()),
+            Some(&"W/\"abc\"".to_string())
         );
     }
 }

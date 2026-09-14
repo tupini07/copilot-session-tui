@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use super::doorbell::{self, NotificationTransport, Ring, UreqTransport};
+use super::doorbell::{self, Ring, ThreadTransport, UreqTransport};
 use super::judge;
 use super::store::{self, ThreadState};
 use super::{
@@ -82,6 +82,13 @@ pub fn plan(
                 continue;
             }
             subscription.mark_seen(&comment.id);
+
+            // Anything already there when this session joined is history, not a message
+            // for it. Without this, taking part in a long-running thread would wake you
+            // once for every comment anybody had ever left on it.
+            if comment.created_at < subscription.subscribed_at {
+                continue;
+            }
 
             match classify(comment, our_login, subscription) {
                 Verdict::SkipOwn => {}
@@ -168,6 +175,61 @@ fn earliest_interest(state: &ThreadState, thread: &ThreadRef) -> Option<String> 
         .map(|moment| moment.to_rfc3339())
 }
 
+/// Ask one thread whether it has moved, and remember the answer for next time.
+///
+/// Issues and pull requests are a conditional HTTP request: free when nothing changed.
+/// Discussions have no REST endpoint, so their `updatedAt` is fetched through GraphQL
+/// and compared against the stored value — the same idea, one round trip more expensive.
+fn thread_moved(
+    transport: &impl ThreadTransport,
+    root: &std::path::Path,
+    thread: &ThreadRef,
+    token: &str,
+) -> Result<bool, String> {
+    let key = thread.url();
+    let previous = store::load_in(root).cursors.get(&key).cloned();
+
+    let cursor = match doorbell::thread_api_url(thread) {
+        Some(url) => {
+            let response = transport.fetch(&url, token, previous.as_deref())?;
+            match doorbell::interpret(&response)? {
+                Ring::Quiet => return Ok(false),
+                Ring::Moved { cursor } => cursor,
+            }
+        }
+        None => {
+            let stamp = crate::github::fetch_discussion_updated_at(
+                root.to_path_buf(),
+                crate::github::CommentTarget {
+                    host: &thread.host,
+                    owner: &thread.owner,
+                    repo: &thread.repo,
+                    number: thread.number,
+                    discussion: true,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .map_err(|error| error.to_string())?;
+            if previous.as_deref() == Some(stamp.as_str()) {
+                return Ok(false);
+            }
+            Some(stamp)
+        }
+    };
+
+    // Recorded even on the very first sighting, so a thread that never changes again is
+    // asked about for free from here on.
+    let _ = store::update_in(root, |state| match cursor {
+        Some(cursor) => {
+            state.cursors.insert(key, cursor);
+        }
+        None => {
+            state.cursors.remove(&key);
+        }
+    });
+    Ok(true)
+}
+
 /// How the watcher is configured, resolved once so a reload is a restart of the loop.
 #[derive(Debug, Clone)]
 pub struct WatchSettings {
@@ -232,84 +294,66 @@ impl ThreadWatcher {
                     continue;
                 };
 
-                let cursor = state.notifications_cursor.clone();
-                let url = doorbell::notifications_url(&host);
-                let response = match transport.fetch(&url, &active_token, cursor.as_deref()) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                        delay = (delay * 2).min(Duration::from_secs(600));
+                delay = doorbell::poll_delay(settings.poll_interval);
+
+                // One conditional request per watched thread. More requests than asking
+                // the notifications inbox once, and the only version that works: GitHub
+                // does not notify you about your own activity, and every CST agent
+                // comments as the same account.
+                for thread in watched {
+                    if worker_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let moved = match thread_moved(&transport, &root, &thread, &active_token) {
+                        Ok(moved) => moved,
+                        Err(error) => {
+                            // A rejected token will not fix itself; re-read it next
+                            // time in case the user has just logged in.
+                            token = None;
+                            let _ = events.send(MuxEvent::ThreadWatchFailed(error));
+                            delay = settings.poll_interval.max(Duration::from_secs(300));
+                            break;
+                        }
+                    };
+                    if !moved {
                         continue;
                     }
-                };
 
-                match doorbell::interpret(&response, &watched) {
-                    Ok((ring, server_interval)) => {
-                        delay = doorbell::poll_delay(settings.poll_interval, server_interval);
-                        if let Ring::Moved { threads, cursor } = ring {
-                            // The cursor advances even when nothing we watch moved, so
-                            // an inbox full of other people's noise is paid for once.
-                            let _ = store::update_in(&root, |state| {
-                                state.notifications_cursor = cursor;
-                            });
-                            for thread in threads {
-                                // Fetched here and not on the UI thread: this is a `gh`
-                                // process and a network round trip, and the event loop
-                                // draws the terminal.
-                                let since = earliest_interest(&state, &thread);
-                                let cancelled = Arc::new(AtomicBool::new(false));
-                                match fetch_comments(
-                                    &thread,
-                                    root.clone(),
-                                    since.as_deref(),
-                                    cancelled,
-                                ) {
-                                    Ok(comments) => {
-                                        let deliveries = store::update_in(&root, |state| {
-                                            plan(
-                                                state,
-                                                &thread,
-                                                &comments,
-                                                &our_login,
-                                                settings.wakeups_per_hour,
-                                                Utc::now(),
-                                            )
-                                        });
-                                        for delivery in deliveries.unwrap_or_default() {
-                                            let _ = events
-                                                .send(MuxEvent::ThreadDelivery(Box::new(delivery)));
-                                        }
-
-                                        // Only after a burst, and only ever to report.
-                                        // A conversation that settles something takes a
-                                        // handful of turns; one that does not trips this
-                                        // within minutes.
-                                        if settings.stall_detection
-                                            && judge::is_a_burst(&comments, Utc::now())
-                                        {
-                                            let checking = Arc::new(AtomicBool::new(false));
-                                            if judge::examine(&thread, checking)
-                                                == Some(judge::Stall::Circling)
-                                            {
-                                                let _ = events.send(MuxEvent::ThreadStalled(
-                                                    judge::notice(&thread),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                                    }
-                                }
+                    // Fetched here and not on the UI thread: this is a `gh` process and
+                    // a network round trip, and the event loop draws the terminal.
+                    let since = earliest_interest(&state, &thread);
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let comments =
+                        match fetch_comments(&thread, root.clone(), since.as_deref(), cancelled) {
+                            Ok(comments) => comments,
+                            Err(error) => {
+                                let _ = events.send(MuxEvent::ThreadWatchFailed(error));
+                                continue;
                             }
-                        }
+                        };
+
+                    let deliveries = store::update_in(&root, |state| {
+                        plan(
+                            state,
+                            &thread,
+                            &comments,
+                            &our_login,
+                            settings.wakeups_per_hour,
+                            Utc::now(),
+                        )
+                    });
+                    for delivery in deliveries.unwrap_or_default() {
+                        let _ = events.send(MuxEvent::ThreadDelivery(Box::new(delivery)));
                     }
-                    Err(error) => {
-                        // A rejected token will not fix itself; make the next attempt
-                        // re-read it in case the user has just logged in.
-                        token = None;
-                        let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                        delay = settings.poll_interval.max(Duration::from_secs(300));
+
+                    // Only after a burst, and only ever to report. A conversation that
+                    // settles something takes a handful of turns; one that does not
+                    // trips this within minutes.
+                    if settings.stall_detection && judge::is_a_burst(&comments, Utc::now()) {
+                        let checking = Arc::new(AtomicBool::new(false));
+                        if judge::examine(&thread, checking) == Some(judge::Stall::Circling) {
+                            let _ = events.send(MuxEvent::ThreadStalled(judge::notice(&thread)));
+                        }
                     }
                 }
             }
@@ -556,6 +600,35 @@ mod tests {
     }
 
     #[test]
+    fn joining_a_long_thread_does_not_wake_you_for_its_entire_history() {
+        // Found by the live round trip: an agent that joined a thread with existing
+        // comments was woken once per comment already on it.
+        let mut state = ThreadState::default();
+        state.subscribe("session-a", thread());
+
+        let mut old = comment("1", "tupini07");
+        old.created_at = Utc::now() - chrono::Duration::days(30);
+
+        let deliveries = plan(&mut state, &thread(), &[old], "tupini07", 12, Utc::now());
+
+        assert!(deliveries.is_empty(), "got: {deliveries:?}");
+    }
+
+    #[test]
+    fn a_reply_that_lands_after_you_joined_still_wakes_you() {
+        // The other half of the rule above: skipping history must not skip the answer.
+        let mut state = ThreadState::default();
+        state.subscribe("session-a", thread());
+
+        let mut reply = comment("2", "tupini07");
+        reply.created_at = Utc::now() + chrono::Duration::seconds(1);
+
+        let deliveries = plan(&mut state, &thread(), &[reply], "tupini07", 12, Utc::now());
+
+        assert_eq!(deliveries.len(), 1, "got: {deliveries:?}");
+    }
+
+    #[test]
     fn a_paused_subscription_is_skipped_without_losing_its_place() {
         let mut state = state_with(&["session-a"]);
         state
@@ -628,6 +701,88 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), total, "comment ids must be unique");
         println!("fetched {total} comment(s) across pages");
+    }
+
+    /// The whole loop against real GitHub: one agent posts, the other is woken.
+    ///
+    /// This is the test that found the original design was broken. The first doorbell
+    /// asked `GET /notifications` once for everything, which is cheaper and does not
+    /// work: GitHub never reports your own activity, and every CST agent comments as the
+    /// same account, so the inbox stayed silent for exactly the traffic this feature
+    /// exists to carry. Nothing offline could have shown that.
+    ///
+    /// Posts a real comment on the configured issue each time it runs.
+    #[test]
+    #[ignore = "posts to a real GitHub issue; run with CST_THREADS_ROUNDTRIP=<issue url>"]
+    fn one_agent_posting_wakes_the_other_against_real_github() {
+        let Ok(url) = std::env::var("CST_THREADS_ROUNDTRIP") else {
+            return;
+        };
+        let thread = super::super::parse_thread_url(&url).expect("a thread URL");
+        let root = tempfile::tempdir().unwrap();
+        let login = doorbell::current_login(&thread.host).expect("gh must be logged in");
+        let token = doorbell::token_for(&thread.host).expect("gh must have a token");
+        let transport = UreqTransport::new();
+
+        // Agent A is waiting on this thread; agent B is about to answer.
+        store::update_in(root.path(), |state| {
+            state.subscribe("live-a", thread.clone());
+        })
+        .unwrap();
+
+        // Settle the cursor first, so the poll after B posts is a real change and not
+        // just the first sighting of the thread.
+        thread_moved(&transport, root.path(), &thread, &token).unwrap();
+        assert!(
+            !thread_moved(&transport, root.path(), &thread, &token).unwrap(),
+            "an unchanged thread must report nothing on the second look"
+        );
+
+        super::super::cli::post(
+            root.path(),
+            "live-b",
+            &url,
+            &format!(
+                "Round-trip check at {}. Agent B is blocked and needs the thing.",
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .expect("posting should succeed");
+
+        assert!(
+            thread_moved(&transport, root.path(), &thread, &token).unwrap(),
+            "a comment from our own account must be visible; this is what the \
+             notifications inbox could not see"
+        );
+
+        let comments = fetch_comments(
+            &thread,
+            root.path().to_path_buf(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("fetching comments should succeed");
+
+        let deliveries = store::update_in(root.path(), |state| {
+            plan(state, &thread, &comments, &login, 12, Utc::now())
+        })
+        .unwrap();
+
+        assert!(
+            deliveries.contains(&Delivery::Wake {
+                session_id: "live-a".to_string(),
+                thread: thread.clone(),
+            }),
+            "agent A should have been woken, got: {deliveries:?}"
+        );
+        assert!(
+            !deliveries.iter().any(|delivery| matches!(
+                delivery,
+                Delivery::Wake { session_id, .. } if session_id == "live-b"
+            )),
+            "agent B must not be woken by its own comment, got: {deliveries:?}"
+        );
+        println!("round trip OK: {deliveries:?}");
     }
 
     #[test]
