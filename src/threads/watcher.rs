@@ -711,7 +711,12 @@ mod tests {
     /// same account, so the inbox stayed silent for exactly the traffic this feature
     /// exists to carry. Nothing offline could have shown that.
     ///
-    /// Posts a real comment on the configured issue each time it runs.
+    /// Deliberately transport-agnostic — it takes whatever URL it is given. Run against
+    /// an issue and against a discussion, which share no code below `cli::post`: one
+    /// posts through REST and polls with `If-None-Match`, the other posts through a
+    /// GraphQL mutation and polls by comparing `updatedAt`.
+    ///
+    /// Posts a real comment on the configured thread each time it runs.
     #[test]
     #[ignore = "posts to a real GitHub issue; run with CST_THREADS_ROUNDTRIP=<issue url>"]
     fn one_agent_posting_wakes_the_other_against_real_github() {
