@@ -47,6 +47,23 @@ including failures.
 - **Comments explain why, not what.** A comment restating the line below it will be
   removed in review.
 
+## If you are working on `src/threads/`
+
+Two rules there are security properties, not preferences, and both are held up by tests
+that name them. If a change makes one of those tests fail, the change is wrong.
+
+- **A wake-up carries a link and never comment text.** Comment bodies are written by
+  anyone who can reach the thread, and a session may be running with `--yolo` in a real
+  repository. `threads::judge` is the single exception and pays for it: no tools, no
+  repository, an empty working directory.
+- **A comment from a login that is not ours never starts anything.** It becomes a pending
+  item for the user. Every CST agent posts as the same account, so a different author is
+  by definition somebody outside.
+
+Nothing in `src/threads/` may mark a GitHub notification as read. That inbox is the
+user's own and shared with their browser; the `Last-Modified` cursor exists so we never
+have to touch it.
+
 ## Useful context
 
 - `cargo run -- doctor` reports the state of every external dependency; run it after
