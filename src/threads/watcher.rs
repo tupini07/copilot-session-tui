@@ -785,6 +785,79 @@ mod tests {
         println!("round trip OK: {deliveries:?}");
     }
 
+    /// Discussions against real GitHub, read-only.
+    ///
+    /// The one transport with no conditional request behind it: GraphQL has no `ETag`,
+    /// so a discussion is polled by comparing `updatedAt`. Their comments also carry
+    /// opaque node ids rather than numbers, and their replies are nested rather than
+    /// flat — which is why comment ids are strings and why `flatten` exists at all.
+    /// None of that is visible in a fixture.
+    #[test]
+    #[ignore = "reads a real public discussion; run with CST_THREADS_LIVE=1"]
+    fn a_real_discussion_polls_and_flattens_its_nested_replies() {
+        if std::env::var_os("CST_THREADS_LIVE").is_none() {
+            return;
+        }
+        let thread = ThreadRef {
+            host: "github.com".to_string(),
+            owner: "vercel".to_string(),
+            repo: "next.js".to_string(),
+            number: 10_640,
+            kind: ThreadKind::Discussion,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let token = doorbell::token_for(&thread.host).expect("gh must have a token");
+        let transport = UreqTransport::new();
+
+        // First look establishes the cursor; the second must be quiet, which is the
+        // whole `updatedAt` comparison working.
+        assert!(
+            thread_moved(&transport, root.path(), &thread, &token).unwrap(),
+            "the first sighting of a thread always counts as movement"
+        );
+        assert!(
+            !thread_moved(&transport, root.path(), &thread, &token).unwrap(),
+            "an unchanged discussion must report nothing on the second look"
+        );
+
+        let comments = fetch_comments(
+            &thread,
+            root.path().to_path_buf(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("fetching discussion comments should succeed");
+
+        assert!(
+            comments.len() > 5,
+            "expected a busy discussion, got {}",
+            comments.len()
+        );
+        // Replies are nested under their parent in GraphQL. If `flatten` were dropping
+        // them, only top-level comments would arrive and a reply — which is exactly the
+        // shape an answer takes — would never wake anybody.
+        assert!(
+            comments.len() > 30,
+            "nested replies should be flattened in, got {}",
+            comments.len()
+        );
+        for comment in &comments {
+            assert!(!comment.id.is_empty(), "every comment needs an id");
+            // Node ids, not numbers. This is why the id type is a string.
+            assert!(
+                comment.id.parse::<u64>().is_err(),
+                "expected an opaque node id, got {}",
+                comment.id
+            );
+        }
+        let mut ids: Vec<&String> = comments.iter().map(|comment| &comment.id).collect();
+        ids.sort();
+        let total = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "comment ids must be unique");
+        println!("discussion: {total} comment(s) including nested replies");
+    }
+
     #[test]
     fn an_unreadable_timestamp_still_delivers_the_message() {
         let fallback = Utc::now();
