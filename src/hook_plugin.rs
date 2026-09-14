@@ -8,6 +8,12 @@ use std::process::Command;
 const PLUGIN_NAME: &str = "cst-lifecycle";
 const PLUGIN_MANIFEST: &str = include_str!("../copilot-plugin/plugin.json");
 const HOOKS_TEMPLATE: &str = include_str!("../copilot-plugin/hooks.json");
+/// Instructions every CST session gets for taking part in a GitHub thread.
+///
+/// Bundled with the plugin rather than asking people to edit
+/// `~/.copilot/copilot-instructions.md`: CST already installs and refreshes this plugin,
+/// so every session picks the skill up with no setup at all.
+const THREADS_SKILL: &str = include_str!("../copilot-plugin/skills/cst-threads/SKILL.md");
 const RECEIPT_FILE: &str = ".cst-managed.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +194,16 @@ fn materialize(copilot_home: &Path) -> Result<PathBuf> {
     }
     std::fs::write(root.join("hooks.json"), serde_json::to_vec_pretty(&hooks)?)
         .context("Failed to write CST plugin hooks")?;
+
+    // Legacy plugin layout: skills live in `skills/<name>/SKILL.md`. Shipping it here
+    // means every CST session gets the instructions without anyone editing their own
+    // `copilot-instructions.md`.
+    let skill_dir = root.join("skills").join("cst-threads");
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("Failed to create {}", skill_dir.display()))?;
+    std::fs::write(skill_dir.join("SKILL.md"), THREADS_SKILL)
+        .context("Failed to write the CST threads skill")?;
+
     Ok(root)
 }
 
@@ -206,6 +222,11 @@ fn desired_receipt() -> Result<ManagedPluginReceipt> {
     digest.update(PLUGIN_MANIFEST.as_bytes());
     digest.update([0]);
     digest.update(HOOKS_TEMPLATE.as_bytes());
+    // The skill has to be in the hash as well. Without it, editing the instructions
+    // agents read would never re-register the plugin, and every installed copy would go
+    // on serving the old text for as long as the version number stayed put.
+    digest.update([0]);
+    digest.update(THREADS_SKILL.as_bytes());
     Ok(ManagedPluginReceipt {
         cst_version: env!("CARGO_PKG_VERSION").to_string(),
         executable,
@@ -266,6 +287,38 @@ mod tests {
             assert!(entry["bash"].as_str().unwrap().contains("hook-event"));
             assert!(entry["powershell"].as_str().unwrap().contains("hook-event"));
         }
+    }
+
+    #[test]
+    fn the_threads_skill_ships_where_copilot_looks_for_it() {
+        // Legacy plugin layout. Getting this path wrong fails silently: the plugin
+        // installs, the hooks work, and agents simply never learn the commands exist.
+        let temp = tempfile::tempdir().unwrap();
+        let root = materialize(temp.path()).unwrap();
+
+        let skill = root.join("skills").join("cst-threads").join("SKILL.md");
+        let text = std::fs::read_to_string(&skill)
+            .unwrap_or_else(|_| panic!("no skill at {}", skill.display()));
+        assert!(text.starts_with("---"), "a skill needs frontmatter");
+        assert!(text.contains("cst thread post"), "got: {text}");
+    }
+
+    #[test]
+    fn editing_the_skill_text_is_enough_to_make_an_installed_plugin_refresh() {
+        // The receipt hash is what decides whether to re-register. A skill left out of
+        // it would leave every installed copy serving stale instructions until the
+        // version number happened to change.
+        let mut without = Sha256::new();
+        without.update(PLUGIN_MANIFEST.as_bytes());
+        without.update([0]);
+        without.update(HOOKS_TEMPLATE.as_bytes());
+        let without = format!("{:x}", without.finalize());
+
+        assert_ne!(
+            desired_receipt().unwrap().bundle_sha256,
+            without,
+            "the skill must be part of the bundle hash"
+        );
     }
 
     #[test]
