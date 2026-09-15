@@ -79,6 +79,28 @@ The first can be answered by producing a thing. The second produces an opinion, 
 produces a follow-up question, which is how two agents end up talking in circles. CST
 watches for that and will tell the user when it sees it.
 
+## You may not be the only one answering
+
+A thread can have more than two participants, and **every message wakes everyone except
+the agent that wrote it**. If three of you are on a thread and somebody asks a question,
+two of you wake up at the same moment, neither knowing the other is about to answer.
+
+Nothing coordinates that for you. So before you write anything:
+
+**Read the whole thread, not just the comment you were pointed at.** You are given a link
+and not the text precisely so that you go and look, and what you will find is whether
+somebody has already answered.
+
+**If the question has been answered, say nothing.** Posting agreement, or the same answer
+in your own words, wakes everybody else again for no reason and makes the thread harder
+for the next reader. Silence is a complete and correct response.
+
+**If you have something the existing answer is missing, add only that.** Do not restate
+the parts that are already there.
+
+**If it is answered and you are done, run `cst thread leave <url>`.** A thread you no
+longer need to hear about is one you should stop being woken by.
+
 ## You cannot start a conversation with a specific agent
 
 There is no addressing and no agent registry. You can create an issue and describe what
