@@ -2596,6 +2596,94 @@ mod tests {
         assert!(app.thread_pending_wakes.is_empty());
     }
 
+    /// A wake-up really reaches the child, not just the queue.
+    ///
+    /// Everything else about delivery is asserted on CST's own state, which would look
+    /// identical if the write never left the process. Here the child echoes what it is
+    /// given, so its screen is the evidence.
+    ///
+    /// It does **not** cover the stacking fix, though it was written to. With an echoing
+    /// child the second delivery is blocked by the working state as well, so the test
+    /// passed with the fix removed — proving nothing. `a_second_wake_up_waits_until_the
+    /// _first_has_been_taken` is the one that isolates it, verified by removing the fix
+    /// and watching it fail.
+    #[test]
+    fn a_wake_up_reaches_the_child_process_and_not_only_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        // A child that prints whatever is typed at it, so the write is observable.
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "findstr \"^\"".to_string()],
+            )
+        } else {
+            ("/bin/cat".to_string(), Vec::new())
+        };
+        let pane = crate::mux::Pane::spawn(
+            crate::mux::PaneSpec {
+                id: 1,
+                title: "echo".to_string(),
+                cwd: temp.path().to_path_buf(),
+                session_id: "session-a".to_string(),
+                program,
+                args,
+                events_path: None,
+                terminal_light_mode: Some(false),
+                hooks_active: false,
+            },
+            24,
+            200,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = crate::app::View::Attached(1);
+
+        let wake = |number| crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: crate::threads::ThreadRef {
+                host: "github.com".to_string(),
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                number,
+                kind: crate::threads::ThreadKind::Issue,
+            },
+        };
+
+        app.apply_thread_delivery(wake(12));
+        app.apply_thread_delivery(wake(13));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut screen = String::new();
+        while std::time::Instant::now() < deadline {
+            if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.pane_mut(1)) {
+                pane.refresh_from_callbacks(false);
+                screen = pane
+                    .with_screen(|screen| screen.contents())
+                    .unwrap_or_default();
+            }
+            if screen.contains("issues/12") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert!(
+            screen.contains("issues/12"),
+            "the notice should have reached the child, got: {screen}"
+        );
+        assert!(
+            screen.contains("thread leave"),
+            "and in full, not truncated on the way, got: {screen}"
+        );
+    }
+
     fn send_prefix_command(app: &mut App, command: char) {
         handle_attached_key(
             app,

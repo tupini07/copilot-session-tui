@@ -311,6 +311,7 @@ mod tests {
                 thread: thread(1),
                 comment_url: format!("https://github.com/o/r/issues/1#issuecomment-{id}"),
                 reason: PendingReason::SessionClosed,
+                author: None,
                 arrived_at: arrived,
             });
         }

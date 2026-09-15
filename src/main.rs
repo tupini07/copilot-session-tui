@@ -1052,6 +1052,7 @@ fn run_app(
                         threads::doorbell::DEFAULT_POLL_SECONDS,
                     ),
                     stall_detection: app.config.thread_stall_detection,
+                    trusted_authors: app.config.thread_trusted_authors.clone(),
                     wakeups_per_hour: app
                         .config
                         .thread_wakeups_per_hour

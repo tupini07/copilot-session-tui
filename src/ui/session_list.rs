@@ -358,6 +358,7 @@ pub mod tests {
             },
             comment_url: "https://github.com/o/r/issues/12".to_string(),
             reason: crate::threads::PendingReason::SessionClosed,
+            author: None,
             arrived_at: chrono::Utc::now() - waited,
         }];
         let backend = TestBackend::new(width, 12);
@@ -459,6 +460,7 @@ pub mod tests {
             },
             comment_url: "https://github.com/o/r/issues/12".to_string(),
             reason: crate::threads::PendingReason::SessionClosed,
+            author: None,
             arrived_at: chrono::Utc::now(),
         }];
 

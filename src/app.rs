@@ -3413,6 +3413,7 @@ impl App {
                 thread: thread.clone(),
                 comment_url: thread.url(),
                 reason,
+                author: None,
                 arrived_at: chrono::Utc::now(),
             });
         });

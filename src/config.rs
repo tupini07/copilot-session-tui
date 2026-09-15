@@ -91,6 +91,14 @@ pub struct UserConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub thread_stall_detection: bool,
 
+    /// GitHub logins whose comments may wake a session, besides your own.
+    ///
+    /// For working with a colleague's agent. Empty by default and deliberately explicit:
+    /// a login in here can cause work to start on this machine, so it is something you
+    /// write down rather than something CST infers from who has been talking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thread_trusted_authors: Vec<String>,
+
     #[serde(
         default,
         deserialize_with = "normalized_title_prefixes",
@@ -257,6 +265,7 @@ impl Default for UserConfig {
             threads_enabled: true,
             thread_wakeups_per_hour: None,
             thread_stall_detection: true,
+            thread_trusted_authors: Vec::new(),
             hidden_title_prefixes: Vec::new(),
             hidden_path_prefixes: Vec::new(),
             mux: false,
