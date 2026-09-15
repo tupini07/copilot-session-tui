@@ -23,6 +23,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use crate::config::GithubCommentFilter;
+
 fn path_has_prefix(path: &str, prefix: &str) -> bool {
     #[cfg(windows)]
     {
@@ -194,7 +196,7 @@ impl SettingsSection {
     pub const fn rows(self) -> &'static [usize] {
         match self {
             Self::General => &[0, 1, 2, 18, 3],
-            Self::Filters => &[16, 17],
+            Self::Filters => &[16, 17, 19],
             Self::Worktrees => &[4, 5],
             Self::Terminal => &[6, 7, 8],
             Self::Notifications => &[9, 10, 11, 12, 13, 14, 15],
@@ -289,32 +291,6 @@ pub enum CopilotReviewStatus {
     Failed(String),
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum GithubCommentFilter {
-    #[default]
-    All,
-    Unresolved,
-    Resolved,
-}
-
-impl GithubCommentFilter {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Unresolved => "unresolved",
-            Self::Resolved => "resolved",
-        }
-    }
-
-    pub fn includes(self, thread_resolved: Option<bool>) -> bool {
-        match self {
-            Self::All => true,
-            Self::Unresolved => thread_resolved == Some(false),
-            Self::Resolved => thread_resolved == Some(true),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubInspector {
     pub screen: GithubInspectorScreen,
@@ -354,11 +330,16 @@ pub struct GithubInspector {
 }
 
 impl GithubInspector {
+    #[cfg(any(test, feature = "screenshots"))]
     pub fn number_prompt() -> Self {
+        Self::number_prompt_with_filter(GithubCommentFilter::All)
+    }
+
+    pub fn number_prompt_with_filter(comment_filter: GithubCommentFilter) -> Self {
         Self {
             screen: GithubInspectorScreen::NumberPrompt,
             copilot_review_status: CopilotReviewStatus::Idle,
-            comment_filter: GithubCommentFilter::All,
+            comment_filter,
             input: String::new(),
             prompt_error: None,
             tab: GithubTab::Overview,
@@ -410,11 +391,7 @@ impl GithubInspector {
         if !self.can_filter_comments() {
             return;
         }
-        self.comment_filter = match self.comment_filter {
-            GithubCommentFilter::All => GithubCommentFilter::Unresolved,
-            GithubCommentFilter::Unresolved => GithubCommentFilter::Resolved,
-            GithubCommentFilter::Resolved => GithubCommentFilter::All,
-        };
+        self.comment_filter = self.comment_filter.next();
         self.scroll_offsets[GithubTab::Comments.index()] = 0;
         self.max_scroll = 0;
         self.scrollbar_drag = None;
@@ -502,7 +479,6 @@ impl GithubInspector {
 
     fn reset_navigation(&mut self) {
         self.tab = GithubTab::Overview;
-        self.comment_filter = GithubCommentFilter::All;
         self.scroll_offsets = [0; 3];
         self.max_scroll = 0;
         self.selected_file = 0;
@@ -1340,7 +1316,9 @@ impl App {
         }
         self.cancel_github_request();
         self.cancel_copilot_review();
-        self.github_inspector = Some(GithubInspector::number_prompt());
+        self.github_inspector = Some(GithubInspector::number_prompt_with_filter(
+            self.config.github_comment_filter,
+        ));
         // Resolving the repository is a network round trip that does not depend
         // on the number, so it can happen while the user is still typing it.
         self.prefetch_github_repository();
@@ -1549,7 +1527,9 @@ impl App {
             return;
         };
         self.cancel_copilot_review();
-        self.github_inspector = Some(GithubInspector::number_prompt());
+        self.github_inspector = Some(GithubInspector::number_prompt_with_filter(
+            self.config.github_comment_filter,
+        ));
         self.start_github_request(cwd, number);
     }
 
@@ -1814,9 +1794,10 @@ impl App {
             if let (Some(issue_or_pull_request), Some(discussion)) =
                 (issue_or_pull_request, discussion)
             {
-                let inspector = self
-                    .github_inspector
-                    .get_or_insert_with(GithubInspector::number_prompt);
+                let comment_filter = self.config.github_comment_filter;
+                let inspector = self.github_inspector.get_or_insert_with(|| {
+                    GithubInspector::number_prompt_with_filter(comment_filter)
+                });
                 inspector.request_cwd = Some(cwd.clone());
                 inspector.number = Some(number);
                 inspector.lookup_kind = lookup_kind;
@@ -1846,9 +1827,10 @@ impl App {
         lookup_kind: crate::github::GithubLookupKind,
         item: GithubItem,
     ) {
+        let comment_filter = self.config.github_comment_filter;
         let inspector = self
             .github_inspector
-            .get_or_insert_with(GithubInspector::number_prompt);
+            .get_or_insert_with(|| GithubInspector::number_prompt_with_filter(comment_filter));
         inspector.prompt_error = None;
         inspector.request_cwd = Some(cwd.clone());
         inspector.number = Some(number);
@@ -1896,9 +1878,10 @@ impl App {
             });
         });
 
+        let comment_filter = self.config.github_comment_filter;
         let inspector = self
             .github_inspector
-            .get_or_insert_with(GithubInspector::number_prompt);
+            .get_or_insert_with(|| GithubInspector::number_prompt_with_filter(comment_filter));
         inspector.request_id = request_id;
         if !revalidation {
             inspector.screen = GithubInspectorScreen::Loading;
@@ -5519,6 +5502,20 @@ mod tests {
         assert_eq!(inspector.comment_filter, GithubCommentFilter::Resolved);
         inspector.cycle_comment_filter();
         assert_eq!(inspector.comment_filter, GithubCommentFilter::All);
+    }
+
+    #[test]
+    fn navigation_resets_preserve_the_inspectors_configured_comment_filter() {
+        let mut inspector =
+            GithubInspector::number_prompt_with_filter(GithubCommentFilter::Resolved);
+        inspector.tab = GithubTab::Comments;
+        inspector.scroll_offsets[GithubTab::Comments.index()] = 12;
+
+        inspector.reset_navigation();
+
+        assert_eq!(inspector.comment_filter, GithubCommentFilter::Resolved);
+        assert_eq!(inspector.tab, GithubTab::Overview);
+        assert_eq!(inspector.active_scroll(), 0);
     }
 
     #[test]

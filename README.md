@@ -430,7 +430,9 @@ Inline pull-request comments identify their review threads as **RESOLVED** or
 **UNRESOLVED** when GitHub provides that state. On a pull request's **Comments** tab,
 press `f` to cycle through **all**, **unresolved**, and **resolved** comments. The two
 filtered views contain only review-thread comments; ordinary comments and review
-summaries remain in **all**. Discussion comments retain their reply nesting, upvotes,
+summaries remain in **all**. Choose the initial view under **Filters** in Global Settings,
+or set `github_comment_filter` to `"all"`, `"unresolved"`, or `"resolved"` in
+`config.json`. Discussion comments retain their reply nesting, upvotes,
 reactions, and accepted-answer marker. Use Tab /
 Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the mouse
 wheel to scroll, and `q` to leave. Scrollbars can also be grabbed and dragged: the
@@ -758,6 +760,7 @@ missing file is also ignored instead of resetting a running instance to defaults
   "theme": "catppuccin-mocha",
   "hidden_title_prefixes": ["Your objective:"],
   "hidden_path_prefixes": ["/tmp"],
+  "github_comment_filter": "unresolved",
   "terminal": {
     "shell": "pwsh"
   },

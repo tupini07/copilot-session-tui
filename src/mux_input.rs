@@ -2667,6 +2667,20 @@ mod tests {
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
+    #[test]
+    fn github_inspector_opens_with_the_configured_comment_filter() {
+        let mut app = attached_mux_app("github-filter-default");
+        app.config.github_comment_filter = crate::config::GithubCommentFilter::Resolved;
+
+        app.open_github_inspector();
+
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().comment_filter,
+            crate::config::GithubCommentFilter::Resolved
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
     /// A pull request whose tree is `src/{ui/pane.rs, lib.rs}`, so there is a
     /// nested directory to fold and two files to move between.
     fn pull_request_app() -> App {

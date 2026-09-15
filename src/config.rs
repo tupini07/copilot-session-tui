@@ -15,6 +15,53 @@ pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 pub const DEFAULT_MUX_PREFIX: &str = "C-b";
 pub const DEFAULT_NTFY_SERVER: &str = "https://ntfy.sh";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GithubCommentFilter {
+    #[default]
+    All,
+    Unresolved,
+    Resolved,
+}
+
+impl GithubCommentFilter {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Unresolved => "unresolved",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    pub const fn settings_label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Unresolved => "UNRESOLVED",
+            Self::Resolved => "RESOLVED",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Unresolved,
+            Self::Unresolved => Self::Resolved,
+            Self::Resolved => Self::All,
+        }
+    }
+
+    pub const fn includes(self, thread_resolved: Option<bool>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unresolved => matches!(thread_resolved, Some(false)),
+            Self::Resolved => matches!(thread_resolved, Some(true)),
+        }
+    }
+
+    fn is_all(&self) -> bool {
+        *self == Self::All
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSnippet {
     pub name: String,
@@ -104,6 +151,10 @@ pub struct UserConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub hidden_path_prefixes: Vec<String>,
+
+    /// Initial filter for pull-request comments in newly opened GitHub inspectors.
+    #[serde(default, skip_serializing_if = "GithubCommentFilter::is_all")]
+    pub github_comment_filter: GithubCommentFilter,
 
     /// Run sessions inside CST as multiplexed panes instead of launching and exiting.
     #[serde(default)]
@@ -259,6 +310,7 @@ impl Default for UserConfig {
             thread_stall_detection: true,
             hidden_title_prefixes: Vec::new(),
             hidden_path_prefixes: Vec::new(),
+            github_comment_filter: GithubCommentFilter::All,
             mux: false,
             mux_prefix: default_mux_prefix(),
             worktree: WorktreeConfig::default(),
@@ -983,9 +1035,29 @@ mod tests {
         assert!(config.favorites.is_empty());
         assert!(config.hidden_title_prefixes.is_empty());
         assert!(config.hidden_path_prefixes.is_empty());
+        assert_eq!(config.github_comment_filter, GithubCommentFilter::All);
         assert_eq!(config.worktree.branch_prefix, DEFAULT_BRANCH_PREFIX);
         assert_eq!(config.worktree.root, default_worktree_root());
         assert!(config.terminal.shell.is_none());
+    }
+
+    #[test]
+    fn github_comment_filter_round_trips_and_the_default_stays_sparse() {
+        let default_json = serde_json::to_value(UserConfig::default()).unwrap();
+        assert!(default_json.get("github_comment_filter").is_none());
+
+        let config = UserConfig {
+            github_comment_filter: GithubCommentFilter::Unresolved,
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""github_comment_filter":"unresolved""#));
+
+        let loaded: UserConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            loaded.github_comment_filter,
+            GithubCommentFilter::Unresolved
+        );
     }
 
     #[test]
