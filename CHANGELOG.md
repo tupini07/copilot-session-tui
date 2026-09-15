@@ -3,6 +3,11 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.31.1 - 2026-09-15
+
+- An agent woken on a thread now sees the whole conversation, discussions included.
+- Agents sharing a thread now check what has already been said before answering.
+
 ## v0.31.0 - 2026-09-15
 
 - Take part in a GitHub issue, pull request or discussion, and be woken when somebody replies.
