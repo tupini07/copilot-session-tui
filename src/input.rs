@@ -1167,13 +1167,13 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                     .unwrap_or_default(),
             ),
             3 => app.open_theme_picker(),
-            19 => begin_global_edit(
+            20 => begin_global_edit(
                 app,
                 SettingsEditField::ThreadTrustedAuthors,
                 app.config.thread_trusted_authors.join(", "),
             ),
-            20 => app.config.threads_enabled = !app.config.threads_enabled,
-            21 => begin_global_edit(
+            21 => app.config.threads_enabled = !app.config.threads_enabled,
+            22 => begin_global_edit(
                 app,
                 SettingsEditField::ThreadWakeupsPerHour,
                 app.config
@@ -1181,7 +1181,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                     .map(|limit| limit.to_string())
                     .unwrap_or_default(),
             ),
-            22 => app.config.thread_stall_detection = !app.config.thread_stall_detection,
+            23 => app.config.thread_stall_detection = !app.config.thread_stall_detection,
             16 => begin_global_edit(
                 app,
                 SettingsEditField::HiddenTitlePrefixes,
@@ -1192,6 +1192,9 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::HiddenPathPrefixes,
                 app.config.hidden_path_prefixes.join(", "),
             ),
+            19 => {
+                app.config.github_comment_filter = app.config.github_comment_filter.next();
+            }
             4 => begin_global_edit(
                 app,
                 SettingsEditField::BranchPrefix,
@@ -2412,6 +2415,30 @@ mod tests {
         assert!(
             seen.contains(&18),
             "arrowing through General reaches it: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn github_comment_filter_setting_cycles_through_each_default() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::Filters;
+        app.settings_selected = 19;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::Unresolved
+        );
+        handle_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::Resolved
+        );
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::All
         );
     }
 

@@ -426,14 +426,24 @@ discussion URL to request a discussion explicitly. If a discussion and an issue 
 request share a number, CST shows both titles and asks which one to open.
 
 Issues and discussions have **Overview** and **Comments** tabs; pull requests add **Files**.
-Discussion comments retain their reply nesting, upvotes, reactions, and accepted-answer
-marker. Use Tab /
+Inline pull-request comments identify their review threads as **RESOLVED** or
+**UNRESOLVED** when GitHub provides that state. On a pull request's **Comments** tab,
+press `f` to cycle through **all**, **unresolved**, and **resolved** comments. The two
+filtered views contain only review-thread comments; ordinary comments and review
+summaries remain in **all**. Choose the initial view under **Filters** in Global Settings,
+or set `github_comment_filter` to `"all"`, `"unresolved"`, or `"resolved"` in
+`config.json`. Discussion comments retain their reply nesting, upvotes,
+reactions, and accepted-answer marker. Use Tab /
 Shift+Tab between tabs, arrow keys or PageUp/PageDown/Home/End to navigate, the mouse
 wheel to scroll, and `q` to leave. Scrollbars can also be grabbed and dragged: the
 pointer keeps hold of the bar it took even once it wanders off the track, and the bottom
 of the track is the end of the content, so a long comment thread or diff is one drag away
 from its end. Grabbing the tree's or the diff's bar also moves the keys to that pane. GitHub references such as `#2029` shown in the
 attached chat can also be opened directly with a left click.
+
+On an open pull request, press `r` to request a GitHub Copilot code review. The footer
+shows when the request is in progress, confirms when GitHub accepts it, and keeps a
+failed request visible so it can be retried.
 
 Those references are colour-coded once CST has looked them up. The `#` carries the
 kind — yellow for an issue, cyan for a pull request, and blue for a discussion — and the number carries the state:
@@ -761,6 +771,7 @@ missing file is also ignored instead of resetting a running instance to defaults
   "theme": "catppuccin-mocha",
   "hidden_title_prefixes": ["Your objective:"],
   "hidden_path_prefixes": ["/tmp"],
+  "github_comment_filter": "unresolved",
   "terminal": {
     "shell": "pwsh"
   },

@@ -1413,6 +1413,21 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "GitHub Comment Filter",
+        app.config.github_comment_filter.settings_label(),
+        theme.accent_alt,
+        app.settings_selected == 19,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Initial pull-request comment view; press f in the inspector to cycle",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
     let filters_end = lines.len();
 
     let threads_start = lines.len();
@@ -1436,7 +1451,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         } else {
             theme.warning
         },
-        app.settings_selected == 19,
+        app.settings_selected == 20,
         trusted_editing,
     ));
     lines.push(Line::from(Span::styled(
@@ -1459,7 +1474,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         } else {
             theme.muted
         },
-        app.settings_selected == 20,
+        app.settings_selected == 21,
         false,
     ));
     lines.push(Line::from(Span::styled(
@@ -1487,7 +1502,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         } else {
             theme.muted
         },
-        app.settings_selected == 21,
+        app.settings_selected == 22,
         wakeups_editing,
     ));
     lines.push(Line::from(Span::styled(
@@ -1510,7 +1525,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         } else {
             theme.muted
         },
-        app.settings_selected == 22,
+        app.settings_selected == 23,
         false,
     ));
     lines.push(Line::from(Span::styled(
@@ -2254,10 +2269,11 @@ mod help_tests {
             (SettingsSection::General, 18, "Max Autopilot Continues"),
             (SettingsSection::Filters, 16, "Hidden Title Prefixes"),
             (SettingsSection::Filters, 17, "Hidden Path Prefixes"),
-            (SettingsSection::Threads, 19, "Trusted Authors"),
-            (SettingsSection::Threads, 20, "Thread Wakes"),
-            (SettingsSection::Threads, 21, "Wakes Per Hour"),
-            (SettingsSection::Threads, 22, "Stall Detection"),
+            (SettingsSection::Filters, 19, "GitHub Comment Filter"),
+            (SettingsSection::Threads, 20, "Trusted Authors"),
+            (SettingsSection::Threads, 21, "Thread Wakes"),
+            (SettingsSection::Threads, 22, "Wakes Per Hour"),
+            (SettingsSection::Threads, 23, "Stall Detection"),
             (SettingsSection::Worktrees, 4, "Branch Prefix"),
             (SettingsSection::Worktrees, 5, "Worktree Root"),
             (SettingsSection::Terminal, 6, "Multiplexer"),
@@ -2292,6 +2308,12 @@ mod help_tests {
             rows.iter()
                 .any(|row| row.contains("Hidden Title Prefixes   (none)")),
             "filter label and value columns are not separated:\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("GitHub Comment Filter   ALL")),
+            "GitHub comment filter default is missing:\n{}",
             rows.join("\n")
         );
     }
