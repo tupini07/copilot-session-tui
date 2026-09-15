@@ -2531,6 +2531,71 @@ mod tests {
         );
     }
 
+    /// A busy thread must not stack its notices into one message.
+    ///
+    /// Reported from a live autopilot run: the same notice appeared four times in a
+    /// single message. Each was a genuine wake-up for a different comment, but Copilot
+    /// had not consumed the previous one, so they piled up in the composer.
+    #[test]
+    fn a_second_wake_up_waits_until_the_first_has_been_taken() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+        let wake = |number| crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: crate::threads::ThreadRef {
+                number,
+                ..thread.clone()
+            },
+        };
+
+        app.apply_thread_delivery(wake(12));
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "the first wake-up goes straight through"
+        );
+
+        // Copilot has not started a turn, so the notice is still sitting there.
+        app.apply_thread_delivery(wake(13));
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            1,
+            "a second notice must not stack onto one that has not been taken"
+        );
+
+        // The turn runs and finishes. Starting it is what empties the composer, but a
+        // pane mid-turn is not writable either, so the wake-up waits for the end.
+        {
+            let pane = app.mux.as_mut().unwrap().pane_mut(1).unwrap();
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Working { timestamp: 1 },
+                false,
+            );
+            assert!(!pane.has_draft(), "the turn took what was in the composer");
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Ready { timestamp: 2 },
+                false,
+            );
+            pane.confirm_hook_ready(2, false);
+        }
+
+        assert!(app.flush_thread_wakes(), "now the second one is delivered");
+        assert!(app.thread_pending_wakes.is_empty());
+    }
+
     fn send_prefix_command(app: &mut App, command: char) {
         handle_attached_key(
             app,

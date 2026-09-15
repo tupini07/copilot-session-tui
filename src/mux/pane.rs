@@ -75,14 +75,17 @@ pub struct Pane {
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
-    /// Whether the user has typed something into this pane that they have not sent.
+    /// Whether this pane's composer holds text that has not been consumed.
     ///
-    /// CST cannot read Copilot's composer, so this is inferred from the keys it forwards.
-    /// It is deliberately sticky: set by anything that composes text, and cleared only by
-    /// evidence the composer is empty — a submit, or a turn starting. Guessing "they
-    /// probably cleared it" would let a wake-up paste itself onto a half-written message
-    /// and send it, which is what this exists to prevent.
-    user_draft: bool,
+    /// CST cannot read Copilot's composer, so this is inferred: from the keys it
+    /// forwards, and from anything it writes there itself. Both matter. Writing over a
+    /// half-typed message mangles it and sends it early; writing over a wake-up that
+    /// Copilot has not picked up yet stacks them into one unreadable message, which is
+    /// what a busy thread produced.
+    ///
+    /// Deliberately sticky: set by anything that puts text there, cleared only by
+    /// evidence it is gone — a submit, or a turn starting.
+    composer_occupied: bool,
 
     working: bool,
     progress_state: crate::host_terminal::ProgressState,
@@ -286,7 +289,7 @@ impl Pane {
                 rows: size.rows,
                 cols: size.cols,
             },
-            user_draft: false,
+            composer_occupied: false,
             working: false,
             progress_state: crate::host_terminal::ProgressState::Clear,
             raw_progress_generation: 0,
@@ -317,9 +320,19 @@ impl Pane {
         }
     }
 
-    /// Whether the user has an unsent message in this pane.
+    /// Whether this pane's composer holds text nobody has sent yet.
     pub fn has_draft(&self) -> bool {
-        self.user_draft
+        self.composer_occupied
+    }
+
+    /// Note that CST has written into the composer itself.
+    ///
+    /// Copilot does not always consume what is written the moment it is written — an
+    /// autopilot run working through background agents will leave it sitting there. A
+    /// second wake-up arriving then would stack onto the first, and the user would get
+    /// one message containing the same notice several times over.
+    pub fn note_injection(&mut self) {
+        self.composer_occupied = true;
     }
 
     /// Note a key on its way to the child, to track whether a draft is being composed.
@@ -334,7 +347,7 @@ impl Pane {
         // Copilot submits on a bare Enter and inserts a newline for the chorded ones, so
         // only the bare one means the composer is now empty.
         if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
-            self.user_draft = false;
+            self.composer_occupied = false;
             return;
         }
         let composes = match key.code {
@@ -346,7 +359,7 @@ impl Pane {
             _ => false,
         };
         if composes {
-            self.user_draft = true;
+            self.composer_occupied = true;
         }
     }
 
@@ -693,7 +706,7 @@ impl Pane {
                 // A turn started, so whatever was being composed has been sent. This is
                 // the authoritative clear: it catches a message submitted by a route CST
                 // never saw, such as a mouse click or a paste that ends in a newline.
-                self.user_draft = false;
+                self.composer_occupied = false;
                 self.hook_state = Some(HookActivity::Working);
                 self.hook_waiting = None;
                 self.hook_ready_pending = None;

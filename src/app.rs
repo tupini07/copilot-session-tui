@@ -3374,6 +3374,12 @@ impl App {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ))?;
+        // Pressing Enter is not the same as the message being taken. Copilot leaves it
+        // in the composer while it is busy in a way the hooks do not report — an
+        // autopilot run working through background agents, say. The composer counts as
+        // occupied until a turn actually starts, so the next wake-up waits its turn
+        // rather than stacking onto this one.
+        pane.note_injection();
         Ok(())
     }
 
