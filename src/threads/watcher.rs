@@ -566,6 +566,86 @@ mod tests {
     }
 
     #[test]
+    fn one_message_reaches_every_other_participant_and_never_its_author() {
+        // Three agents on one thread. This is the fan-out: a single question wakes both
+        // of the others, independently, with nothing telling either that the other is
+        // also about to answer.
+        let mut state = state_with(&["session-a", "session-b", "session-c"]);
+        state
+            .subscription_mut("session-c", &thread())
+            .unwrap()
+            .record_authored("1");
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("1", "tupini07")],
+            "tupini07",
+            12,
+            Utc::now(),
+        );
+
+        assert_eq!(
+            deliveries,
+            vec![
+                Delivery::Wake {
+                    session_id: "session-a".to_string(),
+                    thread: thread(),
+                },
+                Delivery::Wake {
+                    session_id: "session-b".to_string(),
+                    thread: thread(),
+                },
+            ],
+            "the author is not woken by its own question"
+        );
+    }
+
+    #[test]
+    fn two_agents_answering_at_once_is_one_wake_each_not_one_per_message() {
+        // The damper that stops a crowded thread amplifying. Both answers land in the
+        // same poll, so the third agent is woken once to go and read the thread rather
+        // than once per message, and each answerer hears only the other.
+        let mut state = state_with(&["session-a", "session-b", "session-c"]);
+        state
+            .subscription_mut("session-a", &thread())
+            .unwrap()
+            .record_authored("1");
+        state
+            .subscription_mut("session-b", &thread())
+            .unwrap()
+            .record_authored("2");
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("1", "tupini07"), comment("2", "tupini07")],
+            "tupini07",
+            12,
+            Utc::now(),
+        );
+
+        assert_eq!(
+            deliveries.len(),
+            3,
+            "two messages among three agents, got: {deliveries:?}"
+        );
+        for session in ["session-a", "session-b", "session-c"] {
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| matches!(
+                        delivery,
+                        Delivery::Wake { session_id, .. } if session_id == session
+                    ))
+                    .count(),
+                1,
+                "{session} should be woken exactly once, got: {deliveries:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_thread_that_keeps_waking_one_session_is_held_rather_than_left_to_run_away() {
         let mut state = state_with(&["session-a"]);
         let now = Utc::now();
@@ -788,6 +868,79 @@ mod tests {
             "agent B must not be woken by its own comment, got: {deliveries:?}"
         );
         println!("round trip OK: {deliveries:?}");
+    }
+
+    /// Three agents on one real thread: one posts, the other two hear it.
+    ///
+    /// The offline test covers the same rule, but not what happens when three
+    /// subscriptions share one state file and the ids being compared are the ones GitHub
+    /// actually issued. The author is recognised by a comment id recorded through the
+    /// real posting path, so a mismatch there would show up as an agent woken by its own
+    /// message — the failure that is hardest to spot by reading the code.
+    ///
+    /// Posts a real comment on the configured thread each time it runs.
+    #[test]
+    #[ignore = "posts to a real GitHub thread; run with CST_THREADS_MULTIPARTY=<url>"]
+    fn a_crowded_thread_wakes_everyone_but_the_author_against_real_github() {
+        let Ok(url) = std::env::var("CST_THREADS_MULTIPARTY") else {
+            return;
+        };
+        let thread = super::super::parse_thread_url(&url).expect("a thread URL");
+        let root = tempfile::tempdir().unwrap();
+        let login = doorbell::current_login(&thread.host).expect("gh must be logged in");
+        let token = doorbell::token_for(&thread.host).expect("gh must have a token");
+        let transport = UreqTransport::new();
+
+        for session in ["live-a", "live-b", "live-c"] {
+            store::update_in(root.path(), |state| {
+                state.subscribe(session, thread.clone());
+            })
+            .unwrap();
+        }
+
+        // Settle the cursor so the poll after the post is a real change.
+        thread_moved(&transport, root.path(), &thread, &token).unwrap();
+
+        super::super::cli::post(
+            root.path(),
+            "live-c",
+            &url,
+            &format!(
+                "Crowded-thread check at {}. Agent C is asking the other two.",
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .expect("posting should succeed");
+
+        assert!(thread_moved(&transport, root.path(), &thread, &token).unwrap());
+        let comments = fetch_comments(
+            &thread,
+            root.path().to_path_buf(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("fetching comments should succeed");
+
+        let deliveries = store::update_in(root.path(), |state| {
+            plan(state, &thread, &comments, &login, 12, Utc::now())
+        })
+        .unwrap();
+
+        let woken: Vec<&str> = deliveries
+            .iter()
+            .filter_map(|delivery| match delivery {
+                Delivery::Wake { session_id, .. } => Some(session_id.as_str()),
+                Delivery::Held { .. } => None,
+            })
+            .collect();
+
+        assert!(woken.contains(&"live-a"), "got: {deliveries:?}");
+        assert!(woken.contains(&"live-b"), "got: {deliveries:?}");
+        assert!(
+            !woken.contains(&"live-c"),
+            "the author must not be woken by its own question, got: {deliveries:?}"
+        );
+        println!("crowded thread woke: {woken:?}");
     }
 
     /// Discussions against real GitHub, read-only.
