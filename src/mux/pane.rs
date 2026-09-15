@@ -185,18 +185,24 @@ impl Pane {
         let seeded_hook_state = hooks_active.then_some(HookActivity::Idle);
 
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel();
-        // The session tells its own agent who it is. `cst thread post` runs as a
-        // separate process inside the pane and has no other way to find out, and
-        // guessing from the working directory would be wrong the moment two sessions
-        // share a checkout.
-        let pty = PtySession::spawn(
-            &program,
-            &args,
-            Some(&cwd),
-            size,
-            &[(crate::threads::SESSION_ID_ENV, session_id.as_str())],
-            chunk_tx,
-        )?;
+        // The session tells its own agent two things about itself.
+        //
+        // Which session it is: `thread post` runs as a separate process inside the pane
+        // and has no other way to find out, and guessing from the working directory
+        // would be wrong the moment two sessions share a checkout.
+        //
+        // And where this exact CST lives, for the same reason the lifecycle hooks are
+        // materialized with an absolute path rather than a bare command: `cst` is a
+        // shell function from the installer's profile integration, so it does not exist
+        // in the non-interactive shell an agent runs commands in.
+        let executable = crate::updater::invocation_executable()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut environment = vec![(crate::threads::SESSION_ID_ENV, session_id.as_str())];
+        if !executable.is_empty() {
+            environment.push((crate::threads::CLI_PATH_ENV, executable.as_str()));
+        }
+        let pty = PtySession::spawn(&program, &args, Some(&cwd), size, &environment, chunk_tx)?;
 
         // Device-status replies must reach the child, or ConPTY stalls on startup.
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
@@ -1444,6 +1450,44 @@ mod tests {
             pane.effective_progress_state(),
             crate::host_terminal::ProgressState::Clear,
             "a child that reports its own state was not mid-turn when we attached"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_pane_tells_its_agent_which_session_it_is_and_where_cst_lives() {
+        // Both are the answer to the same failure: an agent inside the pane is a
+        // separate process that cannot ask the TUI anything. Without the session id it
+        // does not know who it is; without the path it reports the whole feature as
+        // unavailable, because `cst` is a shell function that its shell never loaded.
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "echo SEEN-%CST_SESSION_ID%-%CST_BIN%"
+        } else {
+            "echo SEEN-$CST_SESSION_ID-$CST_BIN"
+        });
+        let mut pane = Pane::spawn(test_spec(48, program, args), 24, 200, tx).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut screen = String::new();
+        while std::time::Instant::now() < deadline {
+            pane.refresh_from_callbacks(false);
+            screen = pane
+                .with_screen(|screen| screen.contents())
+                .unwrap_or_default();
+            if screen.contains("SEEN-") && screen.contains("copilot-session-tui") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            screen.contains("test-session-48"),
+            "the pane must name its session, got: {screen}"
+        );
+        assert!(
+            screen.contains("copilot-session-tui"),
+            "the pane must say where CST lives, got: {screen}"
         );
         pane.shutdown().unwrap();
     }

@@ -312,7 +312,18 @@ mod tests {
         let text = std::fs::read_to_string(&skill)
             .unwrap_or_else(|_| panic!("no skill at {}", skill.display()));
         assert!(text.starts_with("---"), "a skill needs frontmatter");
-        assert!(text.contains("cst thread post"), "got: {text}");
+        assert!(
+            text.contains("copilot-session-tui thread post"),
+            "got: {text}"
+        );
+        // The commands agents are given must never be `cst`. That is a shell function
+        // the installer writes into a human's profile, and the non-interactive shell an
+        // agent runs commands in does not load it — so the agent gets "command not
+        // found" and reports the feature as unavailable, which is how this was found.
+        assert!(
+            !text.contains("\ncst ") && !text.contains("`cst thread"),
+            "the skill tells agents to run a command that does not exist for them"
+        );
     }
 
     #[test]
