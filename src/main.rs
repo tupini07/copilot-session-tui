@@ -1156,6 +1156,10 @@ fn run_app(
         app.poll_update();
         app.poll_notifications();
         app.poll_github();
+        // Also on the tick, not only when a pane reports a turn ending: a wake-up can be
+        // waiting on a half-typed message, and a pane holding an abandoned draft emits
+        // no events at all. Cheap — the queue is almost always empty.
+        repaint |= app.flush_thread_wakes();
         // Covers every route into the Files tab — keys, mouse, or opening
         // straight onto it — rather than each one separately.
         if app.github_files_tab_active() {

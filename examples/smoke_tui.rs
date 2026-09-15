@@ -316,10 +316,12 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf, threads: &PathBuf) -> an
         Ok(()) => {
             let screen = cst.screen();
             println!("--- What's New on first launch after an update ---\n{screen}\n");
-            // Only what is above the fold. The span grows with every release, so
-            // asserting that an older one is visible without scrolling is a test that
-            // breaks on its own schedule rather than on a real regression.
-            for expected in ["You were on v0.25.0", "v0.28.0"] {
+            // Only what is above the fold, and only what stays true as releases pile
+            // up. Naming a specific old version dates the test twice over: it drops
+            // below the fold, and then out of the capped span entirely. This one asks
+            // where the user was, and that the newest release is what they are shown.
+            let newest = format!("v{}", env!("CARGO_PKG_VERSION"));
+            for expected in ["You were on v0.25.0", newest.as_str()] {
                 if !screen.contains(expected) {
                     failures.push(format!("the span is missing {expected}"));
                 }
@@ -328,12 +330,14 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf, threads: &PathBuf) -> an
                 failures.push("the version already seen was shown again".to_string());
             }
 
-            // End reaches the bottom, which is also how the rest of the span is
-            // checked: the oldest release above the marker has to be in there.
+            // End reaches the bottom, where a span this long is truncated. The notice
+            // is the thing worth asserting: the bound has to be stated rather than the
+            // older releases silently vanishing. Naming a version here would pass by
+            // luck, since the one it named is the one the notice happens to mention.
             cst.send(b"\x1b[F")?;
-            if let Err(error) = cst.wait_for("v0.26.0") {
+            if let Err(error) = cst.wait_for("earlier releases") {
                 failures.push(format!(
-                    "scrolling did not reach the oldest release: {error}"
+                    "scrolling did not reach the truncation notice: {error}"
                 ));
             }
 

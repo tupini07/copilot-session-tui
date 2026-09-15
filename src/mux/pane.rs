@@ -75,6 +75,15 @@ pub struct Pane {
     pty: PtySession,
     mouse_captured: bool,
     viewport: Viewport,
+    /// Whether the user has typed something into this pane that they have not sent.
+    ///
+    /// CST cannot read Copilot's composer, so this is inferred from the keys it forwards.
+    /// It is deliberately sticky: set by anything that composes text, and cleared only by
+    /// evidence the composer is empty — a submit, or a turn starting. Guessing "they
+    /// probably cleared it" would let a wake-up paste itself onto a half-written message
+    /// and send it, which is what this exists to prevent.
+    user_draft: bool,
+
     working: bool,
     progress_state: crate::host_terminal::ProgressState,
     raw_progress_generation: u64,
@@ -277,6 +286,7 @@ impl Pane {
                 rows: size.rows,
                 cols: size.cols,
             },
+            user_draft: false,
             working: false,
             progress_state: crate::host_terminal::ProgressState::Clear,
             raw_progress_generation: 0,
@@ -304,6 +314,39 @@ impl Pane {
             parser
                 .callbacks_mut()
                 .set_terminal_light_mode(terminal_light_mode);
+        }
+    }
+
+    /// Whether the user has an unsent message in this pane.
+    pub fn has_draft(&self) -> bool {
+        self.user_draft
+    }
+
+    /// Note a key on its way to the child, to track whether a draft is being composed.
+    ///
+    /// Only a plain Enter clears it. Everything else that could be editing — backspace,
+    /// arrows, a newline chord — leaves the draft standing, because the cost of the two
+    /// mistakes is not symmetric. Believing in a draft that is not there delays a
+    /// wake-up; believing there is none when there is loses the user's words.
+    pub fn note_user_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Copilot submits on a bare Enter and inserts a newline for the chorded ones, so
+        // only the bare one means the composer is now empty.
+        if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
+            self.user_draft = false;
+            return;
+        }
+        let composes = match key.code {
+            // A chord like Ctrl-C or Ctrl-L is a command, not typing.
+            KeyCode::Char(_) => !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+            KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab => true,
+            _ => false,
+        };
+        if composes {
+            self.user_draft = true;
         }
     }
 
@@ -647,6 +690,10 @@ impl Pane {
             }
             HookLifecycleEvent::Working { .. } => {
                 let cycle_started = self.hook_state != Some(HookActivity::Working);
+                // A turn started, so whatever was being composed has been sent. This is
+                // the authoritative clear: it catches a message submitted by a route CST
+                // never saw, such as a mouse click or a paste that ends in a newline.
+                self.user_draft = false;
                 self.hook_state = Some(HookActivity::Working);
                 self.hook_waiting = None;
                 self.hook_ready_pending = None;
@@ -1451,6 +1498,100 @@ mod tests {
             crate::host_terminal::ProgressState::Clear,
             "a child that reports its own state was not mid-turn when we attached"
         );
+        pane.shutdown().unwrap();
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn typing_marks_a_draft_and_sending_it_clears_it() {
+        // A wake-up that lands between these two is the bug this prevents: it pastes
+        // onto the half-written message and submits the pair.
+        use crossterm::event::KeyCode;
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(49, program, args), 24, 80, tx).unwrap();
+
+        assert!(!pane.has_draft(), "nothing typed yet");
+        pane.note_user_key(&key(KeyCode::Char('h')));
+        assert!(pane.has_draft());
+
+        pane.note_user_key(&key(KeyCode::Enter));
+        assert!(!pane.has_draft(), "sending empties the composer");
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn editing_keeps_the_draft_and_a_newline_chord_does_not_send_it() {
+        // Backspace could be clearing the last character or the whole message; CST
+        // cannot see which. It keeps the draft, because delaying a wake-up costs a
+        // little and overwriting what somebody wrote costs a lot.
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+
+        pane.note_user_key(&key(KeyCode::Char('h')));
+        pane.note_user_key(&key(KeyCode::Backspace));
+        assert!(pane.has_draft(), "backspace is editing, not sending");
+
+        pane.note_user_key(&crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        ));
+        assert!(
+            pane.has_draft(),
+            "a chorded Enter inserts a newline rather than submitting"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_control_chord_is_a_command_and_not_the_start_of_a_message() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(51, program, args), 24, 80, tx).unwrap();
+
+        pane.note_user_key(&crossterm::event::KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(!pane.has_draft());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_turn_starting_clears_a_draft_submitted_by_a_route_cst_never_saw() {
+        // A mouse click, or a paste ending in a newline, sends the message without CST
+        // seeing an Enter. The turn beginning is the authoritative evidence.
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(52, program, args), 24, 80, tx).unwrap();
+        pane.note_user_key(&key(crossterm::event::KeyCode::Char('h')));
+        assert!(pane.has_draft());
+
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+
+        assert!(!pane.has_draft());
         pane.shutdown().unwrap();
     }
 

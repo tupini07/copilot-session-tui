@@ -911,6 +911,9 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
     }
     if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
         if pane.is_running() {
+            // Noted before sending: a thread wake-up must not paste itself onto a
+            // half-written message and submit the pair.
+            pane.note_user_key(&key);
             let _ = pane.send_key(&key);
         } else if matches!(
             key.code,
