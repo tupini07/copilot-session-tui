@@ -2467,6 +2467,70 @@ mod tests {
         app.mux.as_mut().unwrap().push(pane);
     }
 
+    /// The reported bug, end to end: typing, a wake-up arriving, and what happens next.
+    ///
+    /// Deliberately driven through `handle_attached_event` rather than by calling the
+    /// draft tracker directly. The unit tests cover the rules; this covers the wiring,
+    /// which is where the mistake actually was — a gate that never asked the question.
+    #[test]
+    fn a_wake_up_waits_for_a_half_typed_message_and_arrives_once_it_is_sent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+
+        // The user starts typing a message, through the real event path.
+        for character in "you probably saw it".chars() {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+            );
+        }
+        assert!(
+            app.mux.as_ref().unwrap().pane(1).unwrap().has_draft(),
+            "typing through the real key path must register a draft"
+        );
+
+        // A reply lands mid-sentence. This is the moment that mangled the message.
+        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: thread.clone(),
+        });
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            1,
+            "the wake-up must wait rather than paste onto a half-written message"
+        );
+
+        // The user finishes and sends. Now the pane is free.
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(
+            !app.mux.as_ref().unwrap().pane(1).unwrap().has_draft(),
+            "sending clears the draft"
+        );
+
+        assert!(app.flush_thread_wakes(), "the wake-up is delivered now");
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "and stops waiting once delivered"
+        );
+    }
+
     fn send_prefix_command(app: &mut App, command: char) {
         handle_attached_key(
             app,
