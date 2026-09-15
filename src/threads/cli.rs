@@ -161,9 +161,10 @@ fn render_list(
 ) -> String {
     if subscriptions.is_empty() && pending.is_empty() {
         return format!(
-            "Session {} is not watching any threads.\nUse `cst thread watch <url>` or \
-             `cst thread post <url>` to start.",
-            short(session_id)
+            "Session {} is not watching any threads.\nUse `{cli} thread watch <url>` or \
+             `{cli} thread post <url>` to start.",
+            short(session_id),
+            cli = super::AGENT_CLI
         );
     }
 
@@ -313,7 +314,10 @@ mod tests {
         let report = render_list(&[], &[], "0a1b2c3d");
 
         assert!(report.contains("not watching any"), "got: {report}");
-        assert!(report.contains("cst thread watch"), "got: {report}");
+        assert!(
+            report.contains("copilot-session-tui thread watch"),
+            "got: {report}"
+        );
     }
 
     #[test]

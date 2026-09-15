@@ -30,6 +30,16 @@ use serde::{Deserialize, Serialize};
 /// sessions share a checkout.
 pub const SESSION_ID_ENV: &str = "CST_SESSION_ID";
 
+/// Absolute path to the CST an agent should call.
+///
+/// `cst` is a shell function the installer writes into a profile, so it does not exist in
+/// the non-interactive shell an agent runs commands in — an agent told to run `cst` gets
+/// "command not found" and reports the feature as unavailable. `copilot-session-tui` is a
+/// real binary on `PATH`, and this is the belt to that braces: the exact executable of
+/// the CST that opened the pane, which is also what the lifecycle hooks are materialized
+/// with and for the same reason.
+pub const CLI_PATH_ENV: &str = "CST_BIN";
+
 /// Which session the calling process belongs to.
 ///
 /// `explicit` wins so the commands stay usable outside a CST pane — running them by
@@ -387,11 +397,18 @@ pub struct PendingDelivery {
 ///
 /// One line, which also keeps it clear of `Pane::send_prompt_snippet`'s refusal to
 /// paste multiline text before the child has enabled bracketed paste.
+/// The command name given to agents, which is deliberately not `cst`.
+///
+/// `cst` is a shell function written into a profile by the installer, so it is absent
+/// from the non-interactive shell an agent runs commands in. Telling an agent to use it
+/// makes the whole feature look unavailable — which is exactly how this was found.
+pub const AGENT_CLI: &str = "copilot-session-tui";
+
 pub fn wake_pointer(thread: &ThreadRef) -> String {
     let url = thread.url();
     format!(
         "A new comment arrived on {url} — read it and decide whether it changes your \
-         work. If this thread no longer concerns you, run: cst thread leave {url}"
+         work. If this thread no longer concerns you, run: {AGENT_CLI} thread leave {url}"
     )
 }
 
@@ -475,7 +492,14 @@ mod tests {
         let pointer = wake_pointer(&thread());
 
         assert!(pointer.contains("/microsoft/SpeakingBigMapsIntoExistence/issues/2366"));
-        assert!(pointer.contains("cst thread leave"));
+        assert!(pointer.contains("copilot-session-tui thread leave"));
+        // Never the bare `cst`: that is a shell function from a human's profile, absent
+        // from the shell an agent runs commands in. An agent told to use it gets
+        // "command not found" and reports the whole feature as unavailable.
+        assert!(
+            !pointer.contains(" cst "),
+            "the pointer must not name a command agents cannot run: {pointer}"
+        );
         // One line, or `send_prompt_snippet` refuses it before bracketed paste is on.
         assert!(!pointer.contains('\n'), "got: {pointer}");
     }

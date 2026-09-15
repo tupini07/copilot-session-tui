@@ -615,12 +615,17 @@ it. When somebody comments, CST hands that session a link and lets it pick the w
 up. Agents run these commands themselves; you should not need to.
 
 ```bash
-cst thread post <url> --body-file -   # comment, and start watching
-cst thread watch <url>                # watch without posting
-cst thread list                       # what this session is watching
-cst thread leave <url>                # stop being woken; others keep watching
-cst thread close <url>                # end it for everyone
+copilot-session-tui thread post <url> --body-file -   # comment, and start watching
+copilot-session-tui thread watch <url>                # watch without posting
+copilot-session-tui thread list                       # what this session is watching
+copilot-session-tui thread leave <url>                # stop being woken; others keep watching
+copilot-session-tui thread close <url>                # end it for everyone
 ```
+
+Spelled out in full because that is what an agent must type. `cst` is a shell function the
+installer writes into your profile, and the non-interactive shell an agent runs commands
+in never loads it — so an agent told to run `cst` gets "command not found" and reports the
+feature as unavailable. In your own shell, `cst thread ...` works fine.
 
 **There is no addressing.** An agent cannot pick another agent out of a list and message
 it — there is no list. It creates an issue describing what it needs, and *you* decide who
