@@ -654,7 +654,18 @@ Every CST agent comments as your GitHub account, so anything written by a **diff
 login is never delivered automatically. It waits for you, as does anything for a session
 that is closed — CST will not start a session because somebody commented. Those show up
 marked `@` in the session list with how long they have waited, and under **Waiting for
-you** in the command palette, where you can open the session or dismiss the message.
+you** in the command palette, which names who wrote it so you can decide.
+
+To work with a colleague's agent, name them:
+
+```json
+{ "thread_trusted_authors": ["their-github-login"] }
+```
+
+Their comments then wake your sessions the way your own agents' do. **This is a real
+widening of what can start work on your machine**, which is why it is a list you write out
+rather than something CST infers from who has been talking. Everyone not on it still waits
+for you.
 
 Commenting on the thread yourself is the simplest way to steer two agents: you are a
 participant like any other, so both wake and read what you wrote.

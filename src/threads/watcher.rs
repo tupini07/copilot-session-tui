@@ -56,6 +56,7 @@ pub fn plan(
     thread: &ThreadRef,
     comments: &[CommentSighting],
     our_login: &str,
+    trusted: &[String],
     wakeups_per_hour: u32,
     now: DateTime<Utc>,
 ) -> Vec<Delivery> {
@@ -90,13 +91,14 @@ pub fn plan(
                 continue;
             }
 
-            match classify(comment, our_login, subscription) {
+            match classify(comment, our_login, trusted, subscription) {
                 Verdict::SkipOwn => {}
                 Verdict::HoldForUser(reason) => {
                     held.push(PendingDelivery {
                         session_id: session_id.clone(),
                         thread: thread.clone(),
                         comment_url: comment.url.clone(),
+                        author: Some(comment.author.clone()),
                         reason,
                         arrived_at: now,
                     });
@@ -123,6 +125,7 @@ pub fn plan(
                             thread: thread.clone(),
                             comment_url: comment.url.clone(),
                             reason: PendingReason::Throttled,
+                            author: Some(comment.author.clone()),
                             arrived_at: now,
                         });
                         deliveries.push(Delivery::Held {
@@ -235,6 +238,7 @@ fn thread_moved(
 pub struct WatchSettings {
     pub poll_interval: Duration,
     pub wakeups_per_hour: u32,
+    pub trusted_authors: Vec<String>,
     pub stall_detection: bool,
 }
 
@@ -338,6 +342,7 @@ impl ThreadWatcher {
                             &thread,
                             &comments,
                             &our_login,
+                            &settings.trusted_authors,
                             settings.wakeups_per_hour,
                             Utc::now(),
                         )
@@ -446,6 +451,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -472,6 +478,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -490,6 +497,7 @@ mod tests {
             &thread(),
             &[comment("1", "a-stranger")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -521,6 +529,7 @@ mod tests {
                 comment("3", "tupini07"),
             ],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -534,8 +543,24 @@ mod tests {
         let mut state = state_with(&["session-a"]);
         let comments = [comment("1", "tupini07")];
 
-        let first = plan(&mut state, &thread(), &comments, "tupini07", 12, Utc::now());
-        let second = plan(&mut state, &thread(), &comments, "tupini07", 12, Utc::now());
+        let first = plan(
+            &mut state,
+            &thread(),
+            &comments,
+            "tupini07",
+            &[],
+            12,
+            Utc::now(),
+        );
+        let second = plan(
+            &mut state,
+            &thread(),
+            &comments,
+            "tupini07",
+            &[],
+            12,
+            Utc::now(),
+        );
 
         assert_eq!(first.len(), 1);
         assert!(second.is_empty(), "got: {second:?}");
@@ -550,6 +575,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -581,6 +607,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -621,6 +648,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07"), comment("2", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -646,6 +674,56 @@ mod tests {
     }
 
     #[test]
+    fn a_trusted_colleague_produces_a_real_wake_and_a_stranger_still_does_not() {
+        // `classify` is tested on its own, but this is the level that decides whether a
+        // session actually runs. Both directions in one place, because the interesting
+        // property is that trusting somebody does not quietly trust everybody.
+        let mut state = state_with(&["session-a"]);
+        let trusted = vec!["a-colleague".to_string()];
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("1", "a-colleague")],
+            "tupini07",
+            &trusted,
+            12,
+            Utc::now(),
+        );
+        assert_eq!(
+            deliveries,
+            vec![Delivery::Wake {
+                session_id: "session-a".to_string(),
+                thread: thread(),
+            }]
+        );
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("2", "a-stranger")],
+            "tupini07",
+            &trusted,
+            12,
+            Utc::now(),
+        );
+        assert_eq!(
+            deliveries,
+            vec![Delivery::Held {
+                session_id: "session-a".to_string(),
+                thread: thread(),
+                reason: PendingReason::ForeignAuthor,
+            }]
+        );
+        // And the held one names who wrote it, which is what the user needs in order to
+        // decide whether to add them to the list.
+        assert_eq!(
+            state.pending_for("session-a")[0].author.as_deref(),
+            Some("a-stranger")
+        );
+    }
+
+    #[test]
     fn a_thread_that_keeps_waking_one_session_is_held_rather_than_left_to_run_away() {
         let mut state = state_with(&["session-a"]);
         let now = Utc::now();
@@ -656,6 +734,7 @@ mod tests {
                 &thread(),
                 &[comment(&id.to_string(), "tupini07")],
                 "tupini07",
+                &[],
                 2,
                 now,
             );
@@ -665,6 +744,7 @@ mod tests {
             &thread(),
             &[comment("3", "tupini07")],
             "tupini07",
+            &[],
             2,
             now,
         );
@@ -689,7 +769,15 @@ mod tests {
         let mut old = comment("1", "tupini07");
         old.created_at = Utc::now() - chrono::Duration::days(30);
 
-        let deliveries = plan(&mut state, &thread(), &[old], "tupini07", 12, Utc::now());
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[old],
+            "tupini07",
+            &[],
+            12,
+            Utc::now(),
+        );
 
         assert!(deliveries.is_empty(), "got: {deliveries:?}");
     }
@@ -703,7 +791,15 @@ mod tests {
         let mut reply = comment("2", "tupini07");
         reply.created_at = Utc::now() + chrono::Duration::seconds(1);
 
-        let deliveries = plan(&mut state, &thread(), &[reply], "tupini07", 12, Utc::now());
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[reply],
+            "tupini07",
+            &[],
+            12,
+            Utc::now(),
+        );
 
         assert_eq!(deliveries.len(), 1, "got: {deliveries:?}");
     }
@@ -721,6 +817,7 @@ mod tests {
             &thread(),
             &[comment("1", "tupini07")],
             "tupini07",
+            &[],
             12,
             Utc::now(),
         );
@@ -849,7 +946,7 @@ mod tests {
         .expect("fetching comments should succeed");
 
         let deliveries = store::update_in(root.path(), |state| {
-            plan(state, &thread, &comments, &login, 12, Utc::now())
+            plan(state, &thread, &comments, &login, &[], 12, Utc::now())
         })
         .unwrap();
 
@@ -922,7 +1019,7 @@ mod tests {
         .expect("fetching comments should succeed");
 
         let deliveries = store::update_in(root.path(), |state| {
-            plan(state, &thread, &comments, &login, 12, Utc::now())
+            plan(state, &thread, &comments, &login, &[], 12, Utc::now())
         })
         .unwrap();
 

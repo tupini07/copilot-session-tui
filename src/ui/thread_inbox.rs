@@ -106,13 +106,20 @@ fn entry_lines<'a>(
         Style::default().fg(theme.text)
     };
 
+    // Naming who wrote it, because "someone else" cannot answer the question being
+    // asked: whether to let this person's words start work on your machine. It is also
+    // the name to add to the trusted list if the answer is yes.
+    let reason = match (&pending.author, pending.reason) {
+        (Some(author), crate::threads::PendingReason::ForeignAuthor) => {
+            format!("  (written by {author})")
+        }
+        _ => format!("  ({})", pending.reason.describe()),
+    };
+
     vec![
         Line::from(vec![
             Span::styled(format!("{marker}{name}"), title_style),
-            Span::styled(
-                format!("  ({})", pending.reason.describe()),
-                Style::default().fg(theme.warning),
-            ),
+            Span::styled(reason, Style::default().fg(theme.warning)),
         ]),
         Line::from(Span::styled(
             format!("    {}", pending.thread.url()),
@@ -145,6 +152,7 @@ mod tests {
             },
             comment_url: "https://github.com/microsoft/maps/issues/2366".to_string(),
             reason,
+            author: None,
             arrived_at: chrono::Utc::now(),
         }
     }
@@ -181,6 +189,30 @@ mod tests {
         let screen = rendered(PendingReason::ForeignAuthor);
 
         assert!(screen.contains("written by someone else"), "got: {screen}");
+    }
+
+    #[test]
+    fn a_known_author_is_named_so_the_decision_can_be_made() {
+        // "Someone else" cannot answer the question being asked. The name is both what
+        // makes the decision possible and what you would add to the trusted list.
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut held = pending(PendingReason::ForeignAuthor);
+        held.author = Some("a-colleague".to_string());
+        app.thread_pending = vec![held];
+        app.thread_inbox = Some(0);
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, &app)).expect("draw succeeds");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(screen.contains("a-colleague"), "got: {screen}");
     }
 
     #[test]

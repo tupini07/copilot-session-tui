@@ -292,6 +292,12 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
     if pane.is_unread() {
         return "● ".to_string();
     }
+    // Something typed here and never sent. Ranked below anything the session wants from
+    // the user, because a draft is not waiting on them — it is waiting on them to come
+    // back, which is a quieter thing.
+    if pane.has_draft() {
+        return "✎ ".to_string();
+    }
     match pane.effective_progress_state() {
         ProgressState::Normal | ProgressState::Indeterminate => {
             format!("{} ", crate::ui::spinner_frame())
@@ -944,6 +950,36 @@ mod tests {
 
         // Every state keeps the cell the same width, so titles never shift sideways.
         assert_eq!(crate::text::display_width(&tab_marker(&pane)), 2);
+        let _ = pane.shutdown();
+    }
+
+    #[test]
+    fn an_unsent_draft_is_marked_without_shifting_the_tab_title() {
+        // A marker wider than two columns pushes every title along and invalidates click
+        // hit-testing, which is why the cell is fixed. A new glyph is the way that gets
+        // broken, so it is measured rather than assumed.
+        let (tx, _) = mpsc::channel();
+        let mut pane = silent_pane(tx);
+
+        pane.note_user_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('h'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert_eq!(tab_marker(&pane), "✎ ", "something typed and not sent");
+        assert_eq!(
+            crate::text::display_width(&tab_marker(&pane)),
+            2,
+            "the draft glyph must occupy the same cell as every other marker"
+        );
+
+        // And it yields to anything the session actually wants from the user: a draft is
+        // waiting on them to come back, not asking them for something.
+        pane.apply_lifecycle(crate::events::lifecycle::LifecycleEvent::InputRequested {
+            tool_call_id: "question-1".into(),
+            kind: crate::events::lifecycle::InputKind::Question,
+        });
+        assert_eq!(tab_marker(&pane), "? ");
         let _ = pane.shutdown();
     }
 

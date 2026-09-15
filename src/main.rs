@@ -1052,6 +1052,7 @@ fn run_app(
                         threads::doorbell::DEFAULT_POLL_SECONDS,
                     ),
                     stall_detection: app.config.thread_stall_detection,
+                    trusted_authors: app.config.thread_trusted_authors.clone(),
                     wakeups_per_hour: app
                         .config
                         .thread_wakeups_per_hour
@@ -1156,6 +1157,10 @@ fn run_app(
         app.poll_update();
         app.poll_notifications();
         app.poll_github();
+        // Also on the tick, not only when a pane reports a turn ending: a wake-up can be
+        // waiting on a half-typed message, and a pane holding an abandoned draft emits
+        // no events at all. Cheap — the queue is almost always empty.
+        repaint |= app.flush_thread_wakes();
         // Covers every route into the Files tab — keys, mouse, or opening
         // straight onto it — rather than each one separately.
         if app.github_files_tab_active() {

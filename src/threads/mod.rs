@@ -251,9 +251,20 @@ impl PendingReason {
 pub fn classify(
     comment: &CommentSighting,
     our_login: &str,
+    trusted: &[String],
     subscription: &Subscription,
 ) -> Verdict {
     if !comment.author.eq_ignore_ascii_case(our_login) {
+        // A named collaborator is treated like one of our own agents, because that is
+        // what working with somebody's agent means. It is a real widening of the trust
+        // boundary — a comment from a trusted login starts work on this machine — so it
+        // is a list somebody types out, never inferred from who happens to be talking.
+        if trusted
+            .iter()
+            .any(|login| login.eq_ignore_ascii_case(&comment.author))
+        {
+            return Verdict::Wake;
+        }
         return Verdict::HoldForUser(PendingReason::ForeignAuthor);
     }
     if subscription
@@ -382,6 +393,13 @@ pub struct PendingDelivery {
     pub thread: ThreadRef,
     pub comment_url: String,
     pub reason: PendingReason,
+    /// Who wrote it, when that is the reason it is here.
+    ///
+    /// The decision being asked of the user is whether to let this person's words start
+    /// work on their machine, and "someone else" is not enough to answer that. It is also
+    /// the name they would add to the trusted list if the answer is yes.
+    #[serde(default)]
+    pub author: Option<String>,
     /// Drives the age shown in the session list, so a stalled correspondence becomes
     /// visible instead of waiting silently forever.
     #[serde(default = "Utc::now")]
@@ -441,7 +459,7 @@ mod tests {
         subscription.record_authored("99");
 
         assert_eq!(
-            classify(&sighting("99", "tupini07"), "tupini07", &subscription),
+            classify(&sighting("99", "tupini07"), "tupini07", &[], &subscription),
             Verdict::SkipOwn
         );
     }
@@ -453,7 +471,7 @@ mod tests {
         let subscription = Subscription::new("session-a", thread());
 
         assert_eq!(
-            classify(&sighting("100", "tupini07"), "tupini07", &subscription),
+            classify(&sighting("100", "tupini07"), "tupini07", &[], &subscription),
             Verdict::Wake
         );
     }
@@ -466,7 +484,7 @@ mod tests {
         subscription.record_authored("1");
 
         assert_eq!(
-            classify(&sighting("2", "TUPINI07"), "tupini07", &subscription),
+            classify(&sighting("2", "TUPINI07"), "tupini07", &[], &subscription),
             Verdict::Wake
         );
     }
@@ -481,8 +499,58 @@ mod tests {
             classify(
                 &sighting("101", "drive-by-contributor"),
                 "tupini07",
+                &[],
                 &subscription
             ),
+            Verdict::HoldForUser(PendingReason::ForeignAuthor)
+        );
+    }
+
+    #[test]
+    fn a_named_collaborator_wakes_the_session_like_one_of_our_own_agents() {
+        // What working with somebody else's agent means. Their comment has to be able to
+        // start a turn, or the conversation only ever runs in one direction.
+        let subscription = Subscription::new("session-a", thread());
+        let trusted = vec!["Coworker".to_string()];
+
+        assert_eq!(
+            classify(
+                &sighting("101", "coworker"),
+                "tupini07",
+                &trusted,
+                &subscription
+            ),
+            Verdict::Wake,
+            "GitHub logins are case-insensitive and the list is typed by hand"
+        );
+    }
+
+    #[test]
+    fn trusting_one_person_does_not_trust_everybody_else() {
+        // The whole point of a list. A stranger on a public thread stays a stranger
+        // however many colleagues have been added.
+        let subscription = Subscription::new("session-a", thread());
+        let trusted = vec!["coworker".to_string()];
+
+        assert_eq!(
+            classify(
+                &sighting("102", "drive-by-contributor"),
+                "tupini07",
+                &trusted,
+                &subscription
+            ),
+            Verdict::HoldForUser(PendingReason::ForeignAuthor)
+        );
+    }
+
+    #[test]
+    fn nobody_is_trusted_until_somebody_is_named() {
+        // The default has to stay closed: a fresh install must not let any commenter
+        // start work, and an empty list is what a fresh install has.
+        let subscription = Subscription::new("session-a", thread());
+
+        assert_eq!(
+            classify(&sighting("103", "anyone"), "tupini07", &[], &subscription),
             Verdict::HoldForUser(PendingReason::ForeignAuthor)
         );
     }

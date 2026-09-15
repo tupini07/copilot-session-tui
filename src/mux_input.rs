@@ -911,6 +911,9 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
     }
     if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
         if pane.is_running() {
+            // Noted before sending: a thread wake-up must not paste itself onto a
+            // half-written message and submit the pair.
+            pane.note_user_key(&key);
             let _ = pane.send_key(&key);
         } else if matches!(
             key.code,
@@ -2468,6 +2471,286 @@ mod tests {
         )
         .unwrap();
         app.mux.as_mut().unwrap().push(pane);
+    }
+
+    /// The reported bug, end to end: typing, a wake-up arriving, and what happens next.
+    ///
+    /// Deliberately driven through `handle_attached_event` rather than by calling the
+    /// draft tracker directly. The unit tests cover the rules; this covers the wiring,
+    /// which is where the mistake actually was — a gate that never asked the question.
+    #[test]
+    fn a_wake_up_waits_for_a_half_typed_message_and_arrives_once_it_is_sent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+
+        // The user starts typing a message, through the real event path.
+        for character in "you probably saw it".chars() {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+            );
+        }
+        assert!(
+            app.mux.as_ref().unwrap().pane(1).unwrap().has_draft(),
+            "typing through the real key path must register a draft"
+        );
+
+        // A reply lands mid-sentence. This is the moment that mangled the message.
+        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: thread.clone(),
+        });
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            1,
+            "the wake-up must wait rather than paste onto a half-written message"
+        );
+
+        // The user finishes and sends. Now the pane is free.
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert!(
+            !app.mux.as_ref().unwrap().pane(1).unwrap().has_draft(),
+            "sending clears the draft"
+        );
+
+        assert!(app.flush_thread_wakes(), "the wake-up is delivered now");
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "and stops waiting once delivered"
+        );
+    }
+
+    /// A busy thread must not stack its notices into one message.
+    ///
+    /// Reported from a live autopilot run: the same notice appeared four times in a
+    /// single message. Each was a genuine wake-up for a different comment, but Copilot
+    /// had not consumed the previous one, so they piled up in the composer.
+    #[test]
+    fn a_second_wake_up_waits_until_the_first_has_been_taken() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+        let wake = |number| crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: crate::threads::ThreadRef {
+                number,
+                ..thread.clone()
+            },
+        };
+
+        app.apply_thread_delivery(wake(12));
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "the first wake-up goes straight through"
+        );
+
+        // Copilot has not started a turn, so the notice is still sitting there.
+        app.apply_thread_delivery(wake(13));
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            1,
+            "a second notice must not stack onto one that has not been taken"
+        );
+
+        // The turn runs and finishes. Starting it is what empties the composer, but a
+        // pane mid-turn is not writable either, so the wake-up waits for the end.
+        {
+            let pane = app.mux.as_mut().unwrap().pane_mut(1).unwrap();
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Working { timestamp: 1 },
+                false,
+            );
+            assert!(!pane.has_draft(), "the turn took what was in the composer");
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Ready { timestamp: 2 },
+                false,
+            );
+            pane.confirm_hook_ready(2, false);
+        }
+
+        assert!(app.flush_thread_wakes(), "now the second one is delivered");
+        assert!(app.thread_pending_wakes.is_empty());
+    }
+
+    /// A wake-up really reaches the child, not just the queue.
+    ///
+    /// Everything else about delivery is asserted on CST's own state, which would look
+    /// identical if the write never left the process. Here the child echoes what it is
+    /// given, so its screen is the evidence.
+    ///
+    /// It does **not** cover the stacking fix, though it was written to. With an echoing
+    /// child the second delivery is blocked by the working state as well, so the test
+    /// passed with the fix removed — proving nothing. `a_second_wake_up_waits_until_the
+    /// _first_has_been_taken` is the one that isolates it, verified by removing the fix
+    /// and watching it fail.
+    #[test]
+    fn a_wake_up_reaches_the_child_process_and_not_only_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        // A child that prints whatever is typed at it, so the write is observable.
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "findstr \"^\"".to_string()],
+            )
+        } else {
+            ("/bin/cat".to_string(), Vec::new())
+        };
+        let pane = crate::mux::Pane::spawn(
+            crate::mux::PaneSpec {
+                id: 1,
+                title: "echo".to_string(),
+                cwd: temp.path().to_path_buf(),
+                session_id: "session-a".to_string(),
+                program,
+                args,
+                events_path: None,
+                terminal_light_mode: Some(false),
+                hooks_active: false,
+            },
+            24,
+            200,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
+
+        let wake = |number| crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: crate::threads::ThreadRef {
+                host: "github.com".to_string(),
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                number,
+                kind: crate::threads::ThreadKind::Issue,
+            },
+        };
+
+        app.apply_thread_delivery(wake(12));
+        app.apply_thread_delivery(wake(13));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut screen = String::new();
+        while std::time::Instant::now() < deadline {
+            if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.pane_mut(1)) {
+                pane.refresh_from_callbacks(false);
+                screen = pane
+                    .with_screen(|screen| screen.contents())
+                    .unwrap_or_default();
+            }
+            if screen.contains("issues/12") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert!(
+            screen.contains("issues/12"),
+            "the notice should have reached the child, got: {screen}"
+        );
+        assert!(
+            screen.contains("thread leave"),
+            "and in full, not truncated on the way, got: {screen}"
+        );
+    }
+
+    /// A wake-up that can never be delivered ends up with the user, not nowhere.
+    ///
+    /// The pane here holds an unsent draft and nothing will clear it, which is what an
+    /// abandoned half-typed message looks like. Waiting forever would swallow the
+    /// message in silence — the exact failure the whole feature exists to prevent.
+    #[test]
+    fn a_wake_up_that_waits_too_long_is_handed_to_the_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
+
+        // Somebody typed and walked away.
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        );
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: thread.clone(),
+        });
+        assert_eq!(app.thread_pending_wakes.len(), 1, "waiting on the draft");
+
+        // Backdate it rather than waiting five real minutes.
+        app.thread_pending_wakes[0].queued_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+        assert!(app.flush_thread_wakes());
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "it stops waiting rather than holding the message forever"
+        );
+        assert_eq!(
+            app.thread_pending.len(),
+            1,
+            "and becomes something the user is asked about"
+        );
     }
 
     fn send_prefix_command(app: &mut App, command: char) {
