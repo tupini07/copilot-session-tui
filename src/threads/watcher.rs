@@ -674,6 +674,56 @@ mod tests {
     }
 
     #[test]
+    fn a_trusted_colleague_produces_a_real_wake_and_a_stranger_still_does_not() {
+        // `classify` is tested on its own, but this is the level that decides whether a
+        // session actually runs. Both directions in one place, because the interesting
+        // property is that trusting somebody does not quietly trust everybody.
+        let mut state = state_with(&["session-a"]);
+        let trusted = vec!["a-colleague".to_string()];
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("1", "a-colleague")],
+            "tupini07",
+            &trusted,
+            12,
+            Utc::now(),
+        );
+        assert_eq!(
+            deliveries,
+            vec![Delivery::Wake {
+                session_id: "session-a".to_string(),
+                thread: thread(),
+            }]
+        );
+
+        let deliveries = plan(
+            &mut state,
+            &thread(),
+            &[comment("2", "a-stranger")],
+            "tupini07",
+            &trusted,
+            12,
+            Utc::now(),
+        );
+        assert_eq!(
+            deliveries,
+            vec![Delivery::Held {
+                session_id: "session-a".to_string(),
+                thread: thread(),
+                reason: PendingReason::ForeignAuthor,
+            }]
+        );
+        // And the held one names who wrote it, which is what the user needs in order to
+        // decide whether to add them to the list.
+        assert_eq!(
+            state.pending_for("session-a")[0].author.as_deref(),
+            Some("a-stranger")
+        );
+    }
+
+    #[test]
     fn a_thread_that_keeps_waking_one_session_is_held_rather_than_left_to_run_away() {
         let mut state = state_with(&["session-a"]);
         let now = Utc::now();

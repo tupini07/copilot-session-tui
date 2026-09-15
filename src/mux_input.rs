@@ -2488,6 +2488,9 @@ mod tests {
         }));
         push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
         app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
 
         let thread = crate::threads::ThreadRef {
             host: "github.com".to_string(),
@@ -2552,6 +2555,9 @@ mod tests {
         }));
         push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
         app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
 
         let thread = crate::threads::ThreadRef {
             host: "github.com".to_string(),
@@ -2650,6 +2656,9 @@ mod tests {
         .unwrap();
         app.mux.as_mut().unwrap().push(pane);
         app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
 
         let wake = |number| crate::threads::watcher::Delivery::Wake {
             session_id: "session-a".to_string(),
@@ -2687,6 +2696,60 @@ mod tests {
         assert!(
             screen.contains("thread leave"),
             "and in full, not truncated on the way, got: {screen}"
+        );
+    }
+
+    /// A wake-up that can never be delivered ends up with the user, not nowhere.
+    ///
+    /// The pane here holds an unsent draft and nothing will clear it, which is what an
+    /// abandoned half-typed message looks like. Waiting forever would swallow the
+    /// message in silence — the exact failure the whole feature exists to prevent.
+    #[test]
+    fn a_wake_up_that_waits_too_long_is_handed_to_the_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+        // Never the real state directory: delivery writes held messages, and a test
+        // must not put one into the running user's inbox.
+        app.thread_state_root = temp.path().to_path_buf();
+
+        // Somebody typed and walked away.
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+        );
+
+        let thread = crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number: 12,
+            kind: crate::threads::ThreadKind::Issue,
+        };
+        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: thread.clone(),
+        });
+        assert_eq!(app.thread_pending_wakes.len(), 1, "waiting on the draft");
+
+        // Backdate it rather than waiting five real minutes.
+        app.thread_pending_wakes[0].queued_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+        assert!(app.flush_thread_wakes());
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "it stops waiting rather than holding the message forever"
+        );
+        assert_eq!(
+            app.thread_pending.len(),
+            1,
+            "and becomes something the user is asked about"
         );
     }
 

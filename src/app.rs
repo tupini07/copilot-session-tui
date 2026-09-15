@@ -636,6 +636,13 @@ pub struct App {
     /// recoverable, so a wake waits for the session to be genuinely idle.
     pub thread_pending_wakes: Vec<QueuedWake>,
 
+    /// Where thread subscriptions and held messages live.
+    ///
+    /// A field rather than a call to `state_root()` at each use, so a test can point it
+    /// at a temporary directory. Without that, anything exercising delivery writes into
+    /// the running user's real state — which is how this field came to exist.
+    pub thread_state_root: PathBuf,
+
     /// The open thread inbox, if the user has asked to see what is waiting.
     ///
     /// Holds only a cursor: the items themselves live in `thread_pending`, so acting on
@@ -805,6 +812,7 @@ impl App {
             confirm_update_restart: false,
             whats_new: None,
             thread_pending_wakes: Vec::new(),
+            thread_state_root: crate::threads::store::state_root(),
             thread_inbox: None,
             thread_pending: Vec::new(),
             thread_watch_notice: None,
@@ -3554,8 +3562,7 @@ impl App {
     /// Cheap and rare: called when a delivery arrives or the user acts on one, not on
     /// every frame.
     pub fn refresh_thread_pending(&mut self) {
-        self.thread_pending =
-            crate::threads::store::load_in(&crate::threads::store::state_root()).pending;
+        self.thread_pending = crate::threads::store::load_in(&self.thread_state_root).pending;
     }
 
     /// What is waiting on the user for one session, if anything.
@@ -3573,7 +3580,7 @@ impl App {
         thread: &crate::threads::ThreadRef,
         reason: crate::threads::PendingReason,
     ) {
-        let _ = crate::threads::store::update_in(&crate::threads::store::state_root(), |state| {
+        let _ = crate::threads::store::update_in(&self.thread_state_root, |state| {
             state.hold_for_user(crate::threads::PendingDelivery {
                 session_id: session_id.to_string(),
                 thread: thread.clone(),
@@ -3653,7 +3660,7 @@ impl App {
         let Some(pending) = self.thread_pending.get(index).cloned() else {
             return;
         };
-        let _ = crate::threads::store::update_in(&crate::threads::store::state_root(), |state| {
+        let _ = crate::threads::store::update_in(&self.thread_state_root, |state| {
             state.clear_pending(&pending.session_id, &pending.thread);
         });
         self.refresh_thread_pending();
