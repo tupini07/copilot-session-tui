@@ -1,5 +1,6 @@
 use crate::app::{
-    App, DiffRenderCache, FilesPane, GithubInspector, GithubInspectorScreen, GithubTab,
+    App, CopilotReviewStatus, DiffRenderCache, FilesPane, GithubCommentFilter, GithubInspector,
+    GithubInspectorScreen, GithubTab,
 };
 use crate::github::{DiscussionKind, GithubItem};
 use crate::text;
@@ -854,7 +855,7 @@ fn build_active_lines(
 ) -> Vec<Line<'static>> {
     match inspector.tab {
         GithubTab::Overview => overview_lines(item, width, theme),
-        GithubTab::Comments => comment_lines(item, width, theme),
+        GithubTab::Comments => comment_lines(item, width, theme, inspector.comment_filter),
         // The Files tab draws its own split panes; an item without files has none.
         GithubTab::Files => vec![Line::from(Span::styled(
             " No changed files",
@@ -950,14 +951,28 @@ fn overview_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'st
     lines
 }
 
-fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'static>> {
+fn comment_lines(
+    item: &GithubItem,
+    width: usize,
+    theme: Theme,
+    filter: GithubCommentFilter,
+) -> Vec<Line<'static>> {
     if let GithubItem::Discussion(discussion) = item {
         return discussion_comment_lines(discussion, width, theme);
     }
-    let entries = item.discussion();
+    let entries: Vec<_> = item
+        .discussion()
+        .iter()
+        .filter(|entry| filter.includes(entry.thread_resolved))
+        .collect();
     if entries.is_empty() {
+        let empty = match filter {
+            GithubCommentFilter::All => " No comments or reviews",
+            GithubCommentFilter::Unresolved => " No unresolved review comments",
+            GithubCommentFilter::Resolved => " No resolved review comments",
+        };
         return vec![Line::from(Span::styled(
-            " No comments or reviews",
+            empty,
             Style::default().fg(theme.muted),
         ))];
     }
@@ -973,15 +988,29 @@ fn comment_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'sta
         if let Some(state) = &entry.review_state {
             context.push_str(&format!(" · {}", state.to_ascii_uppercase()));
         }
+        if let Some(resolved) = entry.thread_resolved {
+            context.push_str(if resolved {
+                " · RESOLVED"
+            } else {
+                " · UNRESOLVED"
+            });
+        }
         if let Some(path) = &entry.path {
             context.push_str(&format!(" · {path}"));
             if let Some(line) = entry.line {
                 context.push_str(&format!(":{line}"));
             }
         }
+        let context_color = match entry.thread_resolved {
+            Some(true) => theme.muted,
+            Some(false) => theme.warning,
+            None => theme.info,
+        };
         lines.push(Line::from(Span::styled(
             format!(" {context}"),
-            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(context_color)
+                .add_modifier(Modifier::BOLD),
         )));
         let body = if entry.body.trim().is_empty() {
             "(no comment body)"
@@ -1130,11 +1159,79 @@ fn diff_lines(inspector: &GithubInspector, item: &GithubItem, theme: Theme) -> V
 }
 
 fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect, theme: Theme) {
-    let mut spans = vec![
-        Span::raw(" "),
-        key("Tab/Shift+Tab", theme),
-        Span::raw(" tabs  "),
-    ];
+    let can_request_review = inspector.can_request_copilot_review();
+    if can_request_review {
+        match &inspector.copilot_review_status {
+            CopilotReviewStatus::Requesting => {
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("{} Requesting Copilot review...  ", super::spinner_frame()),
+                            Style::default().fg(theme.info),
+                        ),
+                        key("q", theme),
+                        Span::raw(" close"),
+                    ]))
+                    .style(Style::default().fg(theme.text).bg(theme.chrome_bg)),
+                    area,
+                );
+                return;
+            }
+            CopilotReviewStatus::Failed(message) => {
+                let message: String = message
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("unknown error")
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .collect();
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(" "),
+                        key("r", theme),
+                        Span::raw(" retry  "),
+                        key("q", theme),
+                        Span::raw(" close  "),
+                        Span::styled(
+                            format!("Copilot review failed: {message}"),
+                            Style::default().fg(theme.error),
+                        ),
+                    ]))
+                    .style(Style::default().fg(theme.text).bg(theme.chrome_bg)),
+                    area,
+                );
+                return;
+            }
+            CopilotReviewStatus::Idle | CopilotReviewStatus::Requested => {}
+        }
+    }
+
+    let filterable_comments = inspector.can_filter_comments();
+    let mut spans = vec![Span::raw(" ")];
+    if filterable_comments {
+        spans.extend([key("Tab", theme), Span::raw(" tabs  ")]);
+    } else {
+        spans.extend([key("Tab/Shift+Tab", theme), Span::raw(" tabs  ")]);
+    }
+    if filterable_comments {
+        spans.extend([
+            key("f", theme),
+            Span::raw(format!(" filter: {}  ", inspector.comment_filter.label())),
+        ]);
+    }
+    if can_request_review {
+        match inspector.copilot_review_status {
+            CopilotReviewStatus::Idle => {
+                spans.extend([key("r", theme), Span::raw(" Copilot review  ")])
+            }
+            CopilotReviewStatus::Requested => spans.push(Span::styled(
+                "Copilot review requested  ",
+                Style::default().fg(theme.success),
+            )),
+            CopilotReviewStatus::Requesting | CopilotReviewStatus::Failed(_) => {}
+        }
+    }
     if inspector.tab == GithubTab::Files {
         if inspector.files_pane == FilesPane::Diff {
             spans.extend([
@@ -1144,8 +1241,6 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect, theme: Th
                 Span::raw(" horizontal  "),
                 key("Esc", theme),
                 Span::raw(" files  "),
-                key("q", theme),
-                Span::raw(" close"),
             ]);
         } else {
             spans.extend([
@@ -1155,20 +1250,19 @@ fn draw_footer(f: &mut Frame, inspector: &GithubInspector, area: Rect, theme: Th
                 Span::raw(" fold  "),
                 key("Enter", theme),
                 Span::raw(" diff  "),
-                key("q", theme),
-                Span::raw(" close"),
             ]);
         }
+    } else if filterable_comments {
+        spans.extend([key("↑↓/PgUp/PgDn", theme), Span::raw(" scroll  ")]);
     } else {
         spans.extend([
             key("↑↓/PgUp/PgDn", theme),
             Span::raw(" navigate  "),
             key("wheel", theme),
             Span::raw(" scroll  "),
-            key("q", theme),
-            Span::raw(" close"),
         ]);
     }
+    spans.extend([key("q", theme), Span::raw(" close")]);
     f.render_widget(
         Paragraph::new(Line::from(spans))
             .style(Style::default().fg(theme.text).bg(theme.chrome_bg)),
@@ -1324,6 +1418,7 @@ mod tests {
                 body: "Looks useful.".to_string(),
                 created_at: "2026-01-03T00:00:00Z".to_string(),
                 review_state: None,
+                thread_resolved: None,
                 path: None,
                 line: None,
             }],
@@ -1377,11 +1472,16 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let comments = comment_lines(&item, 100, ThemeName::Nord.theme())
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let comments = comment_lines(
+            &item,
+            100,
+            ThemeName::Nord.theme(),
+            GithubCommentFilter::All,
+        )
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
 
         assert!(overview.contains("Category: Agents"), "got:\n{overview}");
         assert!(overview.contains("Answer: accepted"), "got:\n{overview}");
@@ -1390,6 +1490,109 @@ mod tests {
         assert!(comments.contains("ACCEPTED ANSWER"), "got:\n{comments}");
         assert!(comments.contains("@reply-agent"), "got:\n{comments}");
         assert!(comments.contains("Acknowledged."), "got:\n{comments}");
+    }
+
+    #[test]
+    fn pull_request_comments_distinguish_resolved_review_threads() {
+        let mut item = pull(None);
+        let GithubItem::PullRequest(pull) = &mut item else {
+            unreachable!()
+        };
+        let inline = |resolved, body: &str| DiscussionEntry {
+            kind: DiscussionKind::InlineReview,
+            author: Author {
+                login: "reviewer".to_string(),
+            },
+            body: body.to_string(),
+            created_at: "2026-01-03T00:00:00Z".to_string(),
+            review_state: None,
+            thread_resolved: Some(resolved),
+            path: Some("src/lib.rs".to_string()),
+            line: Some(12),
+        };
+        pull.discussion = vec![
+            DiscussionEntry {
+                kind: DiscussionKind::Comment,
+                author: Author {
+                    login: "author".to_string(),
+                },
+                body: "General context.".to_string(),
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                review_state: None,
+                thread_resolved: None,
+                path: None,
+                line: None,
+            },
+            inline(false, "This still needs work."),
+            inline(true, "This was addressed."),
+        ];
+
+        let theme = ThemeName::Nord.theme();
+        let comments = comment_lines(&item, 100, theme, GithubCommentFilter::All);
+        let unresolved = comments
+            .iter()
+            .find(|line| line.to_string().contains("UNRESOLVED"))
+            .expect("unresolved label");
+        let resolved = comments
+            .iter()
+            .find(|line| line.to_string().contains(" · RESOLVED · "))
+            .expect("resolved label");
+        assert_eq!(unresolved.spans[0].style.fg, Some(theme.warning));
+        assert_eq!(resolved.spans[0].style.fg, Some(theme.muted));
+
+        let comments = comments
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(comments.contains("UNRESOLVED"), "got:\n{comments}");
+        assert!(comments.contains(" · RESOLVED · "), "got:\n{comments}");
+        assert!(comments.contains("General context."), "got:\n{comments}");
+
+        let unresolved = comment_lines(&item, 100, theme, GithubCommentFilter::Unresolved)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            unresolved.contains("This still needs work."),
+            "got:\n{unresolved}"
+        );
+        assert!(
+            !unresolved.contains("This was addressed."),
+            "got:\n{unresolved}"
+        );
+        assert!(
+            !unresolved.contains("General context."),
+            "got:\n{unresolved}"
+        );
+
+        let resolved = comment_lines(&item, 100, theme, GithubCommentFilter::Resolved)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(resolved.contains("This was addressed."), "got:\n{resolved}");
+        assert!(
+            !resolved.contains("This still needs work."),
+            "got:\n{resolved}"
+        );
+        assert!(!resolved.contains("General context."), "got:\n{resolved}");
+    }
+
+    #[test]
+    fn pull_request_comment_footer_shows_the_current_filter() {
+        let mut app = app_with(pull(None));
+        let inspector = app.github_inspector.as_mut().unwrap();
+        inspector.tab = GithubTab::Comments;
+        inspector.comment_filter = GithubCommentFilter::Unresolved;
+
+        let text = render(&mut app, 84, 20);
+
+        assert!(text.contains("filter: unresolved"), "got:\n{text}");
+        assert!(text.contains("Copilot review"), "got:\n{text}");
+        assert!(text.contains("q close"), "got:\n{text}");
     }
 
     #[test]
@@ -1477,6 +1680,15 @@ mod tests {
         pull.merged = false;
         assert!(header_text(&closed).contains("CLOSED"));
         assert!(!header_text(&closed).contains("MERGED"));
+    }
+
+    #[test]
+    fn open_pull_request_footer_offers_copilot_review() {
+        let mut app = app_with(pull(None));
+
+        let text = render(&mut app, 60, 20);
+
+        assert!(text.contains("Copilot review"), "got:\n{text}");
     }
 
     fn app_with(item: GithubItem) -> App {
@@ -1850,6 +2062,7 @@ mod tests {
                     body: format!("Comment number {n}."),
                     created_at: "2026-01-03T00:00:00Z".to_string(),
                     review_state: None,
+                    thread_resolved: None,
                     path: None,
                     line: None,
                 })

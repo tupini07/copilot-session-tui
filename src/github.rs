@@ -157,6 +157,9 @@ pub struct DiscussionEntry {
     pub body: String,
     pub created_at: String,
     pub review_state: Option<String>,
+    /// Resolution belongs to the review thread, so every inline reply in it shares
+    /// this value. Other comment kinds, and REST fallback data, leave it unknown.
+    pub thread_resolved: Option<bool>,
     pub path: Option<String>,
     pub line: Option<u64>,
 }
@@ -945,6 +948,51 @@ pub fn fetch_patches(
         .collect())
 }
 
+const COPILOT_REVIEWER: &str = "copilot-pull-request-reviewer[bot]";
+
+/// Ask GitHub Copilot to review a pull request.
+///
+/// This is intentionally a single attempt. A cancelled or ambiguous mutating request
+/// must not be retried automatically, because GitHub may already have accepted it.
+pub fn request_copilot_review(
+    cwd: PathBuf,
+    repository: RepositoryRef,
+    number: u64,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), GithubError> {
+    let runner = ProcessGhRunner { cancelled };
+    request_copilot_review_with(&runner, &cwd, &repository, number)
+}
+
+fn request_copilot_review_with(
+    runner: &impl GhRunner,
+    cwd: &Path,
+    repository: &RepositoryRef,
+    number: u64,
+) -> Result<(), GithubError> {
+    let mut args = strings(&["api", "--hostname"]);
+    args.push(repository.host.clone());
+    args.extend(strings(&["--method", "POST"]));
+    args.push(repository.endpoint(&format!("pulls/{number}/requested_reviewers")));
+    args.extend(strings(&["-f", &format!("reviewers[]={COPILOT_REVIEWER}")]));
+
+    runner.run(cwd, &args).map(|_| ()).map_err(|error| {
+        if error.kind == GithubErrorKind::Cancelled {
+            error
+        } else if error.kind == GithubErrorKind::MissingCli {
+            GithubError::new(
+                error.kind,
+                "Requesting a Copilot review requires the `gh` CLI in PATH",
+            )
+        } else {
+            GithubError::new(
+                error.kind,
+                format!("Could not request Copilot review: {}", error.message),
+            )
+        }
+    })
+}
+
 /// Which thread to comment on.
 ///
 /// Primitives rather than a `threads::ThreadRef` so this module keeps knowing nothing
@@ -1600,6 +1648,7 @@ fn load_issue(
             body: comment.body.unwrap_or_default(),
             created_at: comment.created_at,
             review_state: None,
+            thread_resolved: None,
             path: None,
             line: None,
         })
@@ -1656,6 +1705,7 @@ fn load_pull_request(
         body: comment.body.unwrap_or_default(),
         created_at: comment.created_at,
         review_state: None,
+        thread_resolved: None,
         path: None,
         line: None,
     }));
@@ -1665,6 +1715,7 @@ fn load_pull_request(
         body: review.body.unwrap_or_default(),
         created_at: review.submitted_at.unwrap_or_default(),
         review_state: review.state,
+        thread_resolved: None,
         path: None,
         line: None,
     }));
@@ -1674,6 +1725,7 @@ fn load_pull_request(
         body: comment.body.unwrap_or_default(),
         created_at: comment.created_at,
         review_state: None,
+        thread_resolved: None,
         path: comment.path,
         line: comment.line.or(comment.original_line),
     }));
@@ -2049,7 +2101,7 @@ query($owner:String!,$name:String!,$number:Int!,$page:Int!){
         labels(first:$page){nodes{name color} pageInfo{hasNextPage}}
         comments(first:$page){nodes{body createdAt author{login}} pageInfo{hasNextPage}}
         reviews(first:$page){nodes{body state submittedAt author{login}} pageInfo{hasNextPage}}
-        reviewThreads(first:$page){nodes{comments(first:20){nodes{body path line originalLine createdAt author{login}} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}
+        reviewThreads(first:$page){nodes{isResolved comments(first:20){nodes{body path line originalLine createdAt author{login}} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}
         files(first:$page){nodes{path additions deletions changeType} pageInfo{hasNextPage}}
       }
     }
@@ -2249,6 +2301,7 @@ fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<Git
                     body: comment.body.unwrap_or_default(),
                     created_at: comment.created_at,
                     review_state: None,
+                    thread_resolved: None,
                     path: None,
                     line: None,
                 })
@@ -2295,6 +2348,7 @@ fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<Git
                         body: comment.body.unwrap_or_default(),
                         created_at: comment.created_at,
                         review_state: None,
+                        thread_resolved: None,
                         path: None,
                         line: None,
                     }),
@@ -2309,11 +2363,13 @@ fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<Git
                         body: review.body.unwrap_or_default(),
                         created_at: review.submitted_at.unwrap_or_default(),
                         review_state: review.state,
+                        thread_resolved: None,
                         path: None,
                         line: None,
                     }),
             );
             for thread in pull.review_threads.nodes {
+                let resolved = thread.is_resolved;
                 discussion.extend(thread.comments.nodes.into_iter().map(|comment| {
                     DiscussionEntry {
                         kind: DiscussionKind::InlineReview,
@@ -2321,6 +2377,7 @@ fn convert_graph_item(repository: &RepositoryRef, item: GraphItem) -> Option<Git
                         body: comment.body.unwrap_or_default(),
                         created_at: comment.created_at,
                         review_state: None,
+                        thread_resolved: Some(resolved),
                         path: comment.path,
                         line: comment.line.or(comment.original_line),
                     }
@@ -2695,7 +2752,9 @@ struct GraphReview {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GraphThread {
+    is_resolved: bool,
     comments: GraphConnection<GraphThreadComment>,
 }
 
@@ -2875,6 +2934,45 @@ mod tests {
 
         assert!(resolved.is_empty());
         assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn copilot_review_uses_the_requested_reviewers_endpoint() {
+        let runner = FakeRunner::ok(&["{}"]);
+
+        request_copilot_review_with(&runner, Path::new("/repo"), &repository(), 7)
+            .expect("request succeeds");
+
+        assert_eq!(
+            runner.calls.borrow()[0],
+            strings(&[
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST",
+                "repos/octo/widgets/pulls/7/requested_reviewers",
+                "-f",
+                "reviewers[]=copilot-pull-request-reviewer[bot]",
+            ])
+        );
+    }
+
+    #[test]
+    fn copilot_review_errors_name_the_action_that_failed() {
+        let runner = FakeRunner::new(vec![Err(GithubError::new(
+            GithubErrorKind::Cli,
+            "GitHub rejected the reviewer",
+        ))]);
+
+        let error =
+            request_copilot_review_with(&runner, Path::new("/repo"), &repository(), 7).unwrap_err();
+
+        assert_eq!(error.kind, GithubErrorKind::Cli);
+        assert_eq!(
+            error.message,
+            "Could not request Copilot review: GitHub rejected the reviewer"
+        );
     }
 
     fn repository() -> RepositoryRef {
@@ -3264,7 +3362,7 @@ mod tests {
                 "labels":{{"nodes":[{{"name":"bug","color":"ff0000"}}],"pageInfo":{{"hasNextPage":false}}}},
                 "comments":{{"nodes":[{{"body":"looks good","createdAt":"2026-01-01T02:00:00Z","author":{{"login":"octo"}}}}],"pageInfo":{{"hasNextPage":false}}}},
                 "reviews":{{"nodes":[{{"body":"approved","state":"APPROVED","submittedAt":"2026-01-01T03:00:00Z","author":{{"login":"hubot"}}}}],"pageInfo":{{"hasNextPage":false}}}},
-                "reviewThreads":{{"nodes":[{{"comments":{{"nodes":[{{"body":"nit","path":"src/lib.rs","line":12,"originalLine":null,"createdAt":"2026-01-01T01:00:00Z","author":{{"login":"hubot"}}}}],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":{page_info}}}}},
+                "reviewThreads":{{"nodes":[{{"isResolved":false,"comments":{{"nodes":[{{"body":"nit","path":"src/lib.rs","line":12,"originalLine":null,"createdAt":"2026-01-01T01:00:00Z","author":{{"login":"hubot"}}}}],"pageInfo":{{"hasNextPage":false}}}}}}],"pageInfo":{{"hasNextPage":{page_info}}}}},
                 "files":{{"nodes":{files},"pageInfo":{{"hasNextPage":false}}}}
             }}}}}}}}"#
         )
@@ -3329,6 +3427,7 @@ mod tests {
             ]
         );
         assert_eq!(item.discussion()[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(item.discussion()[0].thread_resolved, Some(false));
     }
 
     #[test]

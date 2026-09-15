@@ -1177,6 +1177,9 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::HiddenPathPrefixes,
                 app.config.hidden_path_prefixes.join(", "),
             ),
+            19 => {
+                app.config.github_comment_filter = app.config.github_comment_filter.next();
+            }
             4 => begin_global_edit(
                 app,
                 SettingsEditField::BranchPrefix,
@@ -1793,7 +1796,7 @@ mod tests {
         );
         assert_eq!(
             rows,
-            (0..=18).collect::<Vec<_>>(),
+            (0..=19).collect::<Vec<_>>(),
             "every settings row must belong to exactly one section, with no gaps"
         );
 
@@ -2371,6 +2374,30 @@ mod tests {
         assert!(
             seen.contains(&18),
             "arrowing through General reaches it: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn github_comment_filter_setting_cycles_through_each_default() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.mode = Mode::Settings;
+        app.settings_section = SettingsSection::Filters;
+        app.settings_selected = 19;
+
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::Unresolved
+        );
+        handle_settings(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::Resolved
+        );
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.config.github_comment_filter,
+            config::GithubCommentFilter::All
         );
     }
 
