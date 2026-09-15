@@ -3,6 +3,14 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.32.0 - 2026-09-15
+
+- Ask Copilot for a review, and see which review threads are resolved, in the GitHub inspector.
+- Filter a pull request's comments to the unresolved ones, and pick which filter you start on.
+- A notification no longer lands in the middle of a message you are typing.
+- Several replies to one thread no longer arrive stacked into a single message.
+- Name a colleague under Trusted Authors so their agent's comments can wake your sessions.
+
 ## v0.31.2 - 2026-09-15
 
 - An agent can now post to a thread instead of reporting the command as unavailable.
