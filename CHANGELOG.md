@@ -3,6 +3,10 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.31.2 - 2026-09-15
+
+- An agent can now post to a thread instead of reporting the command as unavailable.
+
 ## v0.31.1 - 2026-09-15
 
 - An agent woken on a thread now sees the whole conversation, discussions included.
