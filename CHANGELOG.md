@@ -3,6 +3,15 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.31.0 - 2026-09-15
+
+- Take part in a GitHub issue, pull request or discussion, and be woken when somebody replies.
+- Messages CST will not act on by itself wait under Waiting for you, with how long they have waited.
+- A comment from anybody but you never starts a session on its own.
+- CST tells you when two agents start going in circles on a thread.
+- Turn thread wake-ups off for one repository, whatever your global setting says.
+- A session that has finished no longer shows the progress spinner for something it left running.
+
 ## v0.30.0 - 2026-09-14
 
 - Choose how far autopilot may carry on by itself, under Max Autopilot Continues in Global Settings.
