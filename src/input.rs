@@ -1167,6 +1167,21 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                     .unwrap_or_default(),
             ),
             3 => app.open_theme_picker(),
+            19 => begin_global_edit(
+                app,
+                SettingsEditField::ThreadTrustedAuthors,
+                app.config.thread_trusted_authors.join(", "),
+            ),
+            20 => app.config.threads_enabled = !app.config.threads_enabled,
+            21 => begin_global_edit(
+                app,
+                SettingsEditField::ThreadWakeupsPerHour,
+                app.config
+                    .thread_wakeups_per_hour
+                    .map(|limit| limit.to_string())
+                    .unwrap_or_default(),
+            ),
+            22 => app.config.thread_stall_detection = !app.config.thread_stall_detection,
             16 => begin_global_edit(
                 app,
                 SettingsEditField::HiddenTitlePrefixes,
@@ -1247,6 +1262,29 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
     match field {
         SettingsEditField::Model => {
             app.config.model = (!value.is_empty()).then_some(value);
+        }
+        SettingsEditField::ThreadTrustedAuthors => {
+            // Same shape as the prefix lists: comma-separated, trimmed, de-duplicated.
+            // A login is not a path, but the parsing is identical and reusing it keeps
+            // one place where "what does a comma-separated setting mean" is answered.
+            app.config.thread_trusted_authors = config::parse_title_prefixes(&value);
+        }
+        SettingsEditField::ThreadWakeupsPerHour => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                app.config.thread_wakeups_per_hour = None;
+            } else {
+                match trimmed.parse::<u32>() {
+                    Ok(limit) if limit > 0 => app.config.thread_wakeups_per_hour = Some(limit),
+                    _ => {
+                        // Left in the field rather than discarded, so a typo is a
+                        // correction instead of silently reverting to the default.
+                        app.status_message =
+                            Some("Wakes per hour must be a positive number".to_string());
+                        return;
+                    }
+                }
+            }
         }
         SettingsEditField::HiddenTitlePrefixes => {
             app.config.hidden_title_prefixes = config::parse_title_prefixes(&value);
@@ -1791,9 +1829,12 @@ mod tests {
             listed,
             "a settings row is claimed by more than one section"
         );
+        // Derived from what the sections actually claim, so adding a row does not date
+        // the test. What is being checked is the shape: a contiguous run from zero.
+        let highest = rows.last().copied().unwrap_or_default();
         assert_eq!(
             rows,
-            (0..=18).collect::<Vec<_>>(),
+            (0..=highest).collect::<Vec<_>>(),
             "every settings row must belong to exactly one section, with no gaps"
         );
 

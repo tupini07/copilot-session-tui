@@ -1415,12 +1415,118 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     lines.push(Line::from(""));
     let filters_end = lines.len();
 
+    let threads_start = lines.len();
+    // The trusted list comes first because it is the only one here that changes what
+    // somebody else can cause to happen on this machine.
+    let trusted_editing = app.settings_editing == Some(SettingsEditField::ThreadTrustedAuthors);
+    let trusted_display = if trusted_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.thread_trusted_authors.is_empty() {
+        "(only you)".to_string()
+    } else {
+        app.config.thread_trusted_authors.join(", ")
+    };
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Trusted Authors",
+        &trusted_display,
+        if app.config.thread_trusted_authors.is_empty() {
+            theme.muted
+        } else {
+            theme.warning
+        },
+        app.settings_selected == 19,
+        trusted_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Comma-separated GitHub logins whose comments may wake a session",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Thread Wakes",
+        if app.config.threads_enabled {
+            "On"
+        } else {
+            "Off"
+        },
+        if app.config.threads_enabled {
+            theme.success
+        } else {
+            theme.muted
+        },
+        app.settings_selected == 20,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Costs nothing until a session takes part in a thread",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    let wakeups_editing = app.settings_editing == Some(SettingsEditField::ThreadWakeupsPerHour);
+    let wakeups_display = if wakeups_editing {
+        format!("{}█", app.settings_input)
+    } else {
+        match app.config.thread_wakeups_per_hour {
+            Some(limit) => limit.to_string(),
+            None => format!("{} (default)", crate::threads::DEFAULT_WAKEUPS_PER_HOUR),
+        }
+    };
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Wakes Per Hour",
+        &wakeups_display,
+        if app.config.thread_wakeups_per_hour.is_some() {
+            theme.accent_alt
+        } else {
+            theme.muted
+        },
+        app.settings_selected == 21,
+        wakeups_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Beyond this, a thread's messages wait for you instead",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.push(lines.len());
+    lines.push(settings_row(
+        theme,
+        "Stall Detection",
+        if app.config.thread_stall_detection {
+            "On"
+        } else {
+            "Off"
+        },
+        if app.config.thread_stall_detection {
+            theme.success
+        } else {
+            theme.muted
+        },
+        app.settings_selected == 22,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Says when two agents look like they are going in circles",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+    let threads_end = lines.len();
+
     let (section_start, section_end) = match app.settings_section {
         SettingsSection::General => (general_start, general_end),
         SettingsSection::Filters => (filters_start, filters_end),
         SettingsSection::Worktrees => (worktrees_start, worktrees_end),
         SettingsSection::Terminal => (terminal_start, terminal_end),
         SettingsSection::Notifications => (notifications_start, notifications_end),
+        SettingsSection::Threads => (threads_start, threads_end),
     };
     let visible_lines = lines[section_start..section_end].to_vec();
     f.render_widget(
@@ -2148,6 +2254,10 @@ mod help_tests {
             (SettingsSection::General, 18, "Max Autopilot Continues"),
             (SettingsSection::Filters, 16, "Hidden Title Prefixes"),
             (SettingsSection::Filters, 17, "Hidden Path Prefixes"),
+            (SettingsSection::Threads, 19, "Trusted Authors"),
+            (SettingsSection::Threads, 20, "Thread Wakes"),
+            (SettingsSection::Threads, 21, "Wakes Per Hour"),
+            (SettingsSection::Threads, 22, "Stall Detection"),
             (SettingsSection::Worktrees, 4, "Branch Prefix"),
             (SettingsSection::Worktrees, 5, "Worktree Root"),
             (SettingsSection::Terminal, 6, "Multiplexer"),

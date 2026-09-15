@@ -152,6 +152,8 @@ pub struct TakeoverTarget {
 pub enum SettingsEditField {
     Model,
     MaxAutopilotContinues,
+    ThreadTrustedAuthors,
+    ThreadWakeupsPerHour,
     HiddenTitlePrefixes,
     HiddenPathPrefixes,
     BranchPrefix,
@@ -170,14 +172,16 @@ pub enum SettingsSection {
     Worktrees,
     Terminal,
     Notifications,
+    Threads,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::General,
         Self::Worktrees,
         Self::Terminal,
         Self::Notifications,
+        Self::Threads,
         Self::Filters,
     ];
 
@@ -188,6 +192,7 @@ impl SettingsSection {
             Self::Worktrees => "Worktrees",
             Self::Terminal => "Terminal",
             Self::Notifications => "Notifications",
+            Self::Threads => "Threads",
         }
     }
 
@@ -198,6 +203,9 @@ impl SettingsSection {
             Self::Worktrees => &[4, 5],
             Self::Terminal => &[6, 7, 8],
             Self::Notifications => &[9, 10, 11, 12, 13, 14, 15],
+            // Numbered after everything else rather than renumbering: the indices are
+            // keys, not positions.
+            Self::Threads => &[19, 20, 21, 22],
         }
     }
 
