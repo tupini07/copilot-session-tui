@@ -1099,6 +1099,12 @@ fn handle_ready_github_key(app: &mut App, key: KeyEvent) {
         KeyCode::Left => scroll_github_diff_horizontal(app, -4),
         KeyCode::Right => scroll_github_diff_horizontal(app, 4),
         KeyCode::Enter if files_tab => activate_github_tree_row(app),
+        KeyCode::Char('r') => app.request_copilot_review(),
+        KeyCode::Char('f') => {
+            if let Some(inspector) = app.github_inspector.as_mut() {
+                inspector.cycle_comment_filter();
+            }
+        }
         _ => {}
     }
 }
@@ -2747,6 +2753,33 @@ mod tests {
         assert_eq!(inspector.tree_selected, 3);
         assert_eq!(inspector.selected_file, 1, "the diff follows the cursor");
         assert_eq!(inspector.files_pane, crate::app::FilesPane::Tree);
+    }
+
+    #[test]
+    fn r_requests_a_copilot_review_from_an_open_pull_request() {
+        let mut app = pull_request_app();
+
+        press(&mut app, KeyCode::Char('r'));
+
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().copilot_review_status,
+            crate::app::CopilotReviewStatus::Failed(
+                "The inspected pull request has no working directory".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn f_cycles_the_pull_request_comment_filter() {
+        let mut app = pull_request_app();
+        app.github_inspector.as_mut().unwrap().tab = crate::app::GithubTab::Comments;
+
+        press(&mut app, KeyCode::Char('f'));
+
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().comment_filter,
+            crate::app::GithubCommentFilter::Unresolved
+        );
     }
 
     #[test]

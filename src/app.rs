@@ -280,9 +280,46 @@ pub enum GithubInspectorScreen {
     Error(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CopilotReviewStatus {
+    #[default]
+    Idle,
+    Requesting,
+    Requested,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GithubCommentFilter {
+    #[default]
+    All,
+    Unresolved,
+    Resolved,
+}
+
+impl GithubCommentFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Unresolved => "unresolved",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    pub fn includes(self, thread_resolved: Option<bool>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unresolved => thread_resolved == Some(false),
+            Self::Resolved => thread_resolved == Some(true),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubInspector {
     pub screen: GithubInspectorScreen,
+    pub copilot_review_status: CopilotReviewStatus,
+    pub comment_filter: GithubCommentFilter,
     pub input: String,
     pub prompt_error: Option<String>,
     pub tab: GithubTab,
@@ -320,6 +357,8 @@ impl GithubInspector {
     pub fn number_prompt() -> Self {
         Self {
             screen: GithubInspectorScreen::NumberPrompt,
+            copilot_review_status: CopilotReviewStatus::Idle,
+            comment_filter: GithubCommentFilter::All,
             input: String::new(),
             prompt_error: None,
             tab: GithubTab::Overview,
@@ -352,6 +391,33 @@ impl GithubInspector {
             GithubInspectorScreen::Ready(item) => Some(item),
             _ => None,
         }
+    }
+
+    pub fn can_request_copilot_review(&self) -> bool {
+        matches!(
+            self.ready_item(),
+            Some(GithubItem::PullRequest(pull))
+                if !pull.merged && pull.common.state.eq_ignore_ascii_case("open")
+        )
+    }
+
+    pub fn can_filter_comments(&self) -> bool {
+        self.tab == GithubTab::Comments
+            && matches!(self.ready_item(), Some(GithubItem::PullRequest(_)))
+    }
+
+    pub fn cycle_comment_filter(&mut self) {
+        if !self.can_filter_comments() {
+            return;
+        }
+        self.comment_filter = match self.comment_filter {
+            GithubCommentFilter::All => GithubCommentFilter::Unresolved,
+            GithubCommentFilter::Unresolved => GithubCommentFilter::Resolved,
+            GithubCommentFilter::Resolved => GithubCommentFilter::All,
+        };
+        self.scroll_offsets[GithubTab::Comments.index()] = 0;
+        self.max_scroll = 0;
+        self.scrollbar_drag = None;
     }
 
     pub fn choose_item(&mut self, kind: crate::github::GithubLookupKind) -> Option<GithubItem> {
@@ -436,6 +502,7 @@ impl GithubInspector {
 
     fn reset_navigation(&mut self) {
         self.tab = GithubTab::Overview;
+        self.comment_filter = GithubCommentFilter::All;
         self.scroll_offsets = [0; 3];
         self.max_scroll = 0;
         self.selected_file = 0;
@@ -471,6 +538,11 @@ pub struct GithubLoadResult {
 pub struct GithubPatchResult {
     request_id: u64,
     result: std::result::Result<Vec<(String, Option<String>)>, GithubError>,
+}
+
+struct GithubReviewResult {
+    request_id: u64,
+    result: std::result::Result<(), GithubError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,6 +731,8 @@ pub struct App {
     github_request_cancel: Option<Arc<AtomicBool>>,
     github_patch_receiver: Option<mpsc::Receiver<GithubPatchResult>>,
     github_patch_cancel: Option<Arc<AtomicBool>>,
+    github_review_receiver: Option<mpsc::Receiver<GithubReviewResult>>,
+    github_review_cancel: Option<Arc<AtomicBool>>,
     github_repo_receiver: Option<mpsc::Receiver<(PathBuf, Option<crate::github::RepositoryRef>)>>,
     github_reference_receiver: Option<mpsc::Receiver<ResolvedReferences>>,
     /// What each seen `#1234` points at; `None` means "not a reference".
@@ -805,6 +879,8 @@ impl App {
             github_request_cancel: None,
             github_patch_receiver: None,
             github_patch_cancel: None,
+            github_review_receiver: None,
+            github_review_cancel: None,
             github_repositories: std::collections::HashMap::new(),
             github_repo_receiver: None,
             github_reference_receiver: None,
@@ -1263,6 +1339,7 @@ impl App {
             return;
         }
         self.cancel_github_request();
+        self.cancel_copilot_review();
         self.github_inspector = Some(GithubInspector::number_prompt());
         // Resolving the repository is a network round trip that does not depend
         // on the number, so it can happen while the user is still typing it.
@@ -1471,6 +1548,7 @@ impl App {
             self.status_message = Some("The focused session has no working directory".to_string());
             return;
         };
+        self.cancel_copilot_review();
         self.github_inspector = Some(GithubInspector::number_prompt());
         self.start_github_request(cwd, number);
     }
@@ -1478,13 +1556,62 @@ impl App {
     pub fn close_github_inspector(&mut self) {
         self.cancel_github_request();
         self.cancel_github_patches();
+        self.cancel_copilot_review();
         self.github_inspector = None;
     }
 
     pub fn github_loading(&self) -> bool {
-        self.github_inspector
-            .as_ref()
-            .is_some_and(|inspector| matches!(inspector.screen, GithubInspectorScreen::Loading))
+        self.github_inspector.as_ref().is_some_and(|inspector| {
+            matches!(inspector.screen, GithubInspectorScreen::Loading)
+                || inspector.copilot_review_status == CopilotReviewStatus::Requesting
+        })
+    }
+
+    pub fn request_copilot_review(&mut self) {
+        let Some((cwd, repository, number, request_id)) =
+            self.github_inspector.as_ref().and_then(|inspector| {
+                if !inspector.can_request_copilot_review()
+                    || matches!(
+                        inspector.copilot_review_status,
+                        CopilotReviewStatus::Requesting | CopilotReviewStatus::Requested
+                    )
+                {
+                    return None;
+                }
+                let item = inspector.ready_item()?;
+                Some((
+                    inspector.request_cwd.clone(),
+                    item.common().repository.clone(),
+                    item.common().number,
+                    inspector.request_id,
+                ))
+            })
+        else {
+            return;
+        };
+        let Some(cwd) = cwd else {
+            if let Some(inspector) = self.github_inspector.as_mut() {
+                inspector.copilot_review_status = CopilotReviewStatus::Failed(
+                    "The inspected pull request has no working directory".to_string(),
+                );
+            }
+            return;
+        };
+
+        self.cancel_copilot_review();
+        if let Some(inspector) = self.github_inspector.as_mut() {
+            inspector.copilot_review_status = CopilotReviewStatus::Requesting;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            let result =
+                crate::github::request_copilot_review(cwd, repository, number, worker_cancelled);
+            let _ = sender.send(GithubReviewResult { request_id, result });
+        });
+        self.github_review_receiver = Some(receiver);
+        self.github_review_cancel = Some(cancelled);
     }
 
     pub fn submit_github_number(&mut self) {
@@ -1797,6 +1924,7 @@ impl App {
         self.poll_github_references();
         self.poll_github_item();
         self.poll_github_patches();
+        self.poll_copilot_review();
     }
 
     fn poll_github_item(&mut self) {
@@ -2092,6 +2220,52 @@ impl App {
             cancelled.store(true, Ordering::Release);
         }
         self.github_patch_receiver = None;
+    }
+
+    fn poll_copilot_review(&mut self) {
+        let Some(receiver) = self.github_review_receiver.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.github_review_receiver = None;
+                self.github_review_cancel = None;
+                if let Some(inspector) = self.github_inspector.as_mut() {
+                    if inspector.copilot_review_status == CopilotReviewStatus::Requesting {
+                        inspector.copilot_review_status = CopilotReviewStatus::Failed(
+                            "Copilot review requester stopped before returning a result"
+                                .to_string(),
+                        );
+                    }
+                }
+                return;
+            }
+        };
+        self.github_review_receiver = None;
+        self.github_review_cancel = None;
+        self.apply_copilot_review_result(result);
+    }
+
+    fn apply_copilot_review_result(&mut self, result: GithubReviewResult) {
+        let Some(inspector) = self.github_inspector.as_mut() else {
+            return;
+        };
+        if inspector.request_id != result.request_id {
+            return;
+        }
+        inspector.copilot_review_status = match result.result {
+            Ok(()) => CopilotReviewStatus::Requested,
+            Err(error) => CopilotReviewStatus::Failed(error.to_string()),
+        };
+    }
+
+    fn cancel_copilot_review(&mut self) {
+        if let Some(cancelled) = self.github_review_cancel.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.github_review_receiver = None;
     }
 
     pub fn attached_scratchpad_visible(&self) -> bool {
@@ -2409,6 +2583,7 @@ impl App {
             || self.notification_pending > 0
             || self.github_request_receiver.is_some()
             || self.github_patch_receiver.is_some()
+            || self.github_review_receiver.is_some()
             || self.github_repo_receiver.is_some()
             || self.github_reference_receiver.is_some()
             || self
@@ -5274,6 +5449,76 @@ mod tests {
             app.github_inspector.as_ref().unwrap().screen,
             GithubInspectorScreen::Choose { .. }
         ));
+    }
+
+    #[test]
+    fn copilot_review_results_update_only_the_pull_request_that_requested_them() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut inspector = GithubInspector::number_prompt();
+        inspector.request_id = 42;
+        inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        inspector.copilot_review_status = CopilotReviewStatus::Requesting;
+        app.github_inspector = Some(inspector);
+
+        app.apply_copilot_review_result(GithubReviewResult {
+            request_id: 41,
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().copilot_review_status,
+            CopilotReviewStatus::Requesting
+        );
+
+        app.apply_copilot_review_result(GithubReviewResult {
+            request_id: 42,
+            result: Ok(()),
+        });
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().copilot_review_status,
+            CopilotReviewStatus::Requested
+        );
+    }
+
+    #[test]
+    fn copilot_review_failure_remains_visible_for_retry() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let mut inspector = GithubInspector::number_prompt();
+        inspector.request_id = 42;
+        inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        inspector.copilot_review_status = CopilotReviewStatus::Requesting;
+        app.github_inspector = Some(inspector);
+
+        app.apply_copilot_review_result(GithubReviewResult {
+            request_id: 42,
+            result: Err(GithubError {
+                kind: crate::github::GithubErrorKind::Cli,
+                message: "review unavailable".to_string(),
+            }),
+        });
+
+        assert_eq!(
+            app.github_inspector.as_ref().unwrap().copilot_review_status,
+            CopilotReviewStatus::Failed("review unavailable".to_string())
+        );
+    }
+
+    #[test]
+    fn pull_request_comment_filter_cycles_and_returns_to_the_top() {
+        let mut inspector = GithubInspector::number_prompt();
+        inspector.screen = GithubInspectorScreen::Ready(cached_pull(7, "2026-01-02T00:00:00Z"));
+        inspector.tab = GithubTab::Comments;
+        inspector.scroll_offsets[GithubTab::Comments.index()] = 12;
+        inspector.max_scroll = 30;
+
+        inspector.cycle_comment_filter();
+        assert_eq!(inspector.comment_filter, GithubCommentFilter::Unresolved);
+        assert_eq!(inspector.active_scroll(), 0);
+        assert_eq!(inspector.max_scroll, 0);
+
+        inspector.cycle_comment_filter();
+        assert_eq!(inspector.comment_filter, GithubCommentFilter::Resolved);
+        inspector.cycle_comment_filter();
+        assert_eq!(inspector.comment_filter, GithubCommentFilter::All);
     }
 
     #[test]
