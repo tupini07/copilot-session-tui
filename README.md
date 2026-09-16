@@ -553,8 +553,11 @@ fields so older CST instances preserve them if they save the shared config.
 Unauthenticated ntfy topics are effectively passwords, so use a long, unguessable topic.
 Messages on public ntfy servers may be readable by anyone who discovers the topic.
 
-Notifications are published for every configured work cycle regardless of whether the
-terminal tab is focused, giving the ntfy app a useful history. The default **Status only**
+A notification is published whenever the tab would have been marked for your attention,
+and only then. A turn that finishes while you are watching that pane is already on your
+screen, so it marks nothing and sends nothing. Questions, approvals and errors are sent
+whichever pane you are looking at, because those mark the tab regardless — they block the
+session until you deal with them. The default **Status only**
 mode sends `CST · <session title>` plus `Ready for attention`, `Question waiting for your
 response`, `Plan waiting for approval`, or `Copilot reported an error`. The **Ready Events**
 setting controls all three ready/question/approval messages. Project paths, session IDs,

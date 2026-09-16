@@ -564,8 +564,10 @@ impl Pane {
                     self.working = false;
                     self.needs_attention = !attended;
                     if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
-                        notifications.push(PaneNotification::Ready);
                         self.ready_sent_in_cycle = true;
+                        if !attended {
+                            notifications.push(PaneNotification::Ready);
+                        }
                     }
                 }
                 PaneSignalEvent::Progress(_) if self.working => {
@@ -588,8 +590,10 @@ impl Pane {
                         && !self.error_sent_in_cycle
                         && !self.ready_sent_in_cycle
                     {
-                        notifications.push(PaneNotification::Ready);
                         self.ready_sent_in_cycle = true;
+                        if !attended {
+                            notifications.push(PaneNotification::Ready);
+                        }
                     }
                 }
                 PaneSignalEvent::Progress(_) => {
@@ -619,8 +623,10 @@ impl Pane {
                         && !self.error_sent_in_cycle
                         && !self.ready_sent_in_cycle
                     {
-                        notifications.push(PaneNotification::Ready);
                         self.ready_sent_in_cycle = true;
+                        if !attended {
+                            notifications.push(PaneNotification::Ready);
+                        }
                     }
                 }
             }
@@ -818,7 +824,7 @@ impl Pane {
     pub fn confirm_hook_ready(
         &mut self,
         timestamp: u64,
-        _attended: bool,
+        attended: bool,
     ) -> Option<PaneNotification> {
         if self.hook_ready_pending != Some(timestamp) || self.hook_state != Some(HookActivity::Idle)
         {
@@ -843,9 +849,12 @@ impl Pane {
         if self.raw_completion_pending && !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
             self.raw_completion_pending = false;
             self.hook_completion_window = false;
-            self.needs_attention = !_attended;
+            self.needs_attention = !attended;
             self.ready_sent_in_cycle = true;
-            Some(PaneNotification::Ready)
+            // Nothing to tell you about a turn you watched finish. The marker and the
+            // notification now answer the same question — "does this pane want you?" —
+            // so a turn that leaves no `●` sends nothing either.
+            (!attended).then_some(PaneNotification::Ready)
         } else {
             self.needs_attention = false;
             None
@@ -1781,8 +1790,16 @@ mod tests {
         pane.shutdown().unwrap();
     }
 
+    /// A turn you watched finish neither marks the tab nor notifies you.
+    ///
+    /// This used to send the notification anyway, on the reasoning that a phone's
+    /// notification list is a log of what your agents did and should not depend on where
+    /// you happened to be looking. That holds for a phone you pick up later; it does not
+    /// hold once the same channel is being read on the machine you are sitting at, where
+    /// it is just an alert about something already on screen. The marker and the
+    /// notification now answer the same question.
     #[test]
-    fn attended_completion_does_not_create_an_attention_marker() {
+    fn a_completion_you_watched_notifies_nobody_and_marks_nothing() {
         let (tx, _) = mpsc::channel();
         let (program, args) = shell_command(if cfg!(windows) {
             "ping -n 30 127.0.0.1 > nul"
@@ -1797,10 +1814,9 @@ mod tests {
         let (_, notifications) = pane.refresh_from_callbacks(true);
 
         assert!(!pane.needs_attention());
-        assert_eq!(
-            notifications,
-            vec![PaneNotification::Ready],
-            "phone history is independent of focus"
+        assert!(
+            notifications.is_empty(),
+            "a turn finished under your nose is not news, got: {notifications:?}"
         );
         pane.shutdown().unwrap();
     }
@@ -2093,6 +2109,45 @@ mod tests {
         pane.shutdown().unwrap();
     }
 
+    /// The same completion, watched: no marker and no notification.
+    ///
+    /// The twin of the test above, and the only cover for this path — sessions running
+    /// the lifecycle plugin finish through `confirm_hook_ready` rather than through raw
+    /// progress signals, so gating one without the other would leave the common case
+    /// notifying exactly as before. Verified by reverting the gate and watching this
+    /// fail on its own.
+    #[test]
+    fn a_watched_completion_confirmed_by_the_hooks_notifies_nobody() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(52, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, true);
+
+        pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            true,
+        );
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, true);
+
+        assert_eq!(
+            ready.ready_confirmation,
+            Some(2),
+            "the turn still completes; only the telling changes"
+        );
+        assert_eq!(pane.confirm_hook_ready(2, true), None);
+        assert!(!pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
     #[test]
     fn raw_clear_after_ready_confirmation_still_finalizes_completion() {
         let (tx, _) = mpsc::channel();
@@ -2305,15 +2360,17 @@ mod tests {
         });
         let mut pane = Pane::spawn(test_spec(35, program, args), 24, 80, tx).unwrap();
 
+        // Unattended throughout: this is about one cycle not reporting itself twice,
+        // and a watched pane now sends nothing at all, which would hide the bug.
         pane.feed_synthetic(b"\x1b]9;4;2;0\x1b\\");
-        let (_, error) = pane.refresh_from_callbacks(true);
+        let (_, error) = pane.refresh_from_callbacks(false);
         assert_eq!(error, vec![PaneNotification::Error]);
         pane.feed_synthetic(b"\x1b]9;4;2;0\x1b\\\x1b]9;4;0;0\x1b\\");
-        let (_, duplicate_and_clear) = pane.refresh_from_callbacks(true);
+        let (_, duplicate_and_clear) = pane.refresh_from_callbacks(false);
         assert!(duplicate_and_clear.is_empty());
 
         pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\\x1b]9;4;0;0\x1b\\");
-        let (_, next_cycle) = pane.refresh_from_callbacks(true);
+        let (_, next_cycle) = pane.refresh_from_callbacks(false);
         assert_eq!(next_cycle, vec![PaneNotification::Ready]);
         pane.shutdown().unwrap();
     }
