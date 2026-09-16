@@ -3,6 +3,10 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.32.1 - 2026-09-16
+
+- Thread notices arrive one at a time, instead of several stacked into a single message.
+
 ## v0.32.0 - 2026-09-15
 
 - Ask Copilot for a review, and see which review threads are resolved, in the GitHub inspector.
