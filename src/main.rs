@@ -471,8 +471,14 @@ fn main() -> Result<()> {
     if let Some(whats_new) = changelog::whats_new_on_startup() {
         app.whats_new = Some(ui::whats_new::WhatsNewScreen::new(whats_new));
     }
-    // Anything held while CST was closed is still held, so the list shows it from the
-    // first frame rather than only after the next comment arrives.
+    // Anything a previous run planned but never got into a composer is picked back up,
+    // and anything held while CST was closed is still held — so the list shows both from
+    // the first frame rather than only after the next comment arrives. The comment behind
+    // a notice is marked seen as soon as it is planned, so a notice dropped here would be
+    // a message nobody is ever told about again.
+    if let Err(error) = threads::store::resume_in(&app.thread_state_root) {
+        eprintln!("Could not resume thread notices: {error}");
+    }
     app.refresh_thread_pending();
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;

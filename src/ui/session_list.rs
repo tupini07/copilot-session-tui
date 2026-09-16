@@ -149,7 +149,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             // was last used, and it is the thing that turns a silent stall into
             // something visible.
             let time = match pending {
-                Some(pending) => waiting_for(pending.arrived_at),
+                Some(pending) => waiting_for(pending.planned_at),
                 None => session.relative_time(),
             };
             let time_style = Style::default().fg(if is_selected {
@@ -347,7 +347,7 @@ pub mod tests {
         waited: chrono::Duration,
     ) -> Vec<Vec<String>> {
         let mut app = App::new(vec![session_named(name)], UserConfig::default());
-        app.thread_pending = vec![crate::threads::PendingDelivery {
+        app.thread_pending = vec![crate::threads::Notice {
             session_id: "abcdef123456".to_string(),
             thread: crate::threads::ThreadRef {
                 host: "github.com".to_string(),
@@ -357,9 +357,11 @@ pub mod tests {
                 kind: crate::threads::ThreadKind::Issue,
             },
             comment_url: "https://github.com/o/r/issues/12".to_string(),
-            reason: crate::threads::PendingReason::SessionClosed,
+            status: crate::threads::NoticeStatus::Waiting {
+                reason: crate::threads::PendingReason::SessionClosed,
+            },
             author: None,
-            arrived_at: chrono::Utc::now() - waited,
+            planned_at: chrono::Utc::now() - waited,
         }];
         let backend = TestBackend::new(width, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -449,7 +451,7 @@ pub mod tests {
         // row that pads it differently from one that fills it would leave the list
         // visibly ragged — the same failure the emoji test above guards.
         let mut app = App::new(numbered_sessions(3), UserConfig::default());
-        app.thread_pending = vec![crate::threads::PendingDelivery {
+        app.thread_pending = vec![crate::threads::Notice {
             session_id: "id-1".to_string(),
             thread: crate::threads::ThreadRef {
                 host: "github.com".to_string(),
@@ -459,9 +461,11 @@ pub mod tests {
                 kind: crate::threads::ThreadKind::Issue,
             },
             comment_url: "https://github.com/o/r/issues/12".to_string(),
-            reason: crate::threads::PendingReason::SessionClosed,
+            status: crate::threads::NoticeStatus::Waiting {
+                reason: crate::threads::PendingReason::SessionClosed,
+            },
             author: None,
-            arrived_at: chrono::Utc::now(),
+            planned_at: chrono::Utc::now(),
         }];
 
         let backend = TestBackend::new(60, 14);

@@ -389,6 +389,10 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf, threads: &PathBuf) -> an
     // This is the only path by which a GitHub comment can start a closed session, so it
     // is worth proving against the real binary rather than only a TestBackend: raw mode,
     // the event loop, and the modal being reachable at all.
+    //
+    // Seeded in the **old** `pending` shape on purpose. It is what a user upgrading from
+    // 0.32 has on disk, and reading it is the one migration that cannot be checked by
+    // unit tests alone — nobody would notice a silently empty inbox after an upgrade.
     std::fs::write(
         threads,
         br#"{"subscriptions":[],"pending":[{
@@ -425,6 +429,62 @@ fn run(exe: &PathBuf, home: &PathBuf, marker: &PathBuf, threads: &PathBuf) -> an
                     }
                 }
                 Err(error) => failures.push(format!("the inbox did not open: {error}")),
+            }
+        }
+        Err(error) => failures.push(format!("the command palette did not open: {error}")),
+    }
+    cst.quit()?;
+
+    // And the file it left behind is in the new shape, so the next run does not have to
+    // migrate it again — and so a downgrade is the only way back, not an accident.
+    match std::fs::read_to_string(threads) {
+        Ok(saved) => {
+            if !saved.contains("\"notices\"") {
+                failures.push("the upgraded state file has no notices".to_string());
+            }
+            if saved.contains("\"pending\"") {
+                failures.push("the old pending list was written back out".to_string());
+            }
+        }
+        Err(error) => failures.push(format!("the thread state was not saved: {error}")),
+    }
+
+    // 6. A notice the previous run planned but never delivered is not lost.
+    //
+    // This is the whole reason the status is on disk. CST marks the comment behind a
+    // notice as seen the moment it plans one, so a notice that only existed in memory
+    // meant the message was never mentioned again. Written here in the `planned` state
+    // a crashed run would leave behind, and the session it names is not running — so a
+    // correct build must surface it rather than silently start anything or forget it.
+    std::fs::write(
+        threads,
+        br#"{"subscriptions":[],"notices":[{
+            "session_id":"smoke-session","comment_url":"https://github.com/o/r/issues/77",
+            "state":"planned","planned_at":"2026-09-10T09:00:00Z",
+            "thread":{"host":"github.com","owner":"o","repo":"r","number":77,"kind":"issue"}
+        }],"cursors":{}}"#,
+    )?;
+
+    let mut cst = Session::start(exe, home)?;
+    cst.wait_for("Copilot Session Manager")?;
+    cst.send(b"\x02\x02")?; // C-b C-b
+    match cst.wait_for("Command") {
+        Ok(()) => {
+            cst.send(b"waiting")?;
+            std::thread::sleep(Duration::from_millis(300));
+            cst.send(b"\r")?;
+            match cst.wait_for("its session is closed") {
+                Ok(()) => {
+                    let screen = cst.screen();
+                    println!("--- a notice that outlived the run that planned it ---\n{screen}\n");
+                    if !screen.contains("issues/77") {
+                        failures.push("the resumed notice names the wrong thread".to_string());
+                    }
+                    cst.send(b"\x1b")?;
+                }
+                Err(error) => failures.push(format!(
+                    "a planned notice did not survive a restart: {error}"
+                )),
             }
         }
         Err(error) => failures.push(format!("the command palette did not open: {error}")),

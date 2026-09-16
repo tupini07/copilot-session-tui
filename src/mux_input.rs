@@ -2271,7 +2271,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             }
         }
         MuxEvent::ConfigChanged => app.request_config_reload(),
-        MuxEvent::ThreadDelivery(delivery) => app.apply_thread_delivery(*delivery),
+        MuxEvent::ThreadNoticesChanged => app.apply_thread_notices(),
         MuxEvent::ThreadStalled(notice) => {
             // Reported only. Nothing was changed, so there is nothing to undo.
             app.status_message = Some(notice);
@@ -2473,6 +2473,46 @@ mod tests {
         app.mux.as_mut().unwrap().push(pane);
     }
 
+    fn test_thread(number: u64) -> crate::threads::ThreadRef {
+        crate::threads::ThreadRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            number,
+            kind: crate::threads::ThreadKind::Issue,
+        }
+    }
+
+    /// Write down a notice the way the watcher does, then act on it the way CST does.
+    ///
+    /// The split is the point of the design: the watcher only records, and everything
+    /// about panes happens later, on whatever process is running at the time.
+    fn plan_and_apply(app: &mut App, session_id: &str, thread: &crate::threads::ThreadRef) -> bool {
+        crate::threads::store::update_in(&app.thread_state_root, |state| {
+            state.record_notice(crate::threads::Notice {
+                session_id: session_id.to_string(),
+                thread: thread.clone(),
+                comment_url: thread.url(),
+                author: None,
+                status: crate::threads::NoticeStatus::Planned,
+                planned_at: chrono::Utc::now(),
+            });
+        })
+        .expect("recording a notice");
+        app.apply_thread_notices()
+    }
+
+    fn notices_in(app: &App) -> Vec<crate::threads::Notice> {
+        crate::threads::store::load_in(&app.thread_state_root).notices
+    }
+
+    fn count_with_status(app: &App, status: crate::threads::NoticeStatus) -> usize {
+        notices_in(app)
+            .iter()
+            .filter(|notice| notice.status == status)
+            .count()
+    }
+
     /// The reported bug, end to end: typing, a wake-up arriving, and what happens next.
     ///
     /// Deliberately driven through `handle_attached_event` rather than by calling the
@@ -2488,17 +2528,11 @@ mod tests {
         }));
         push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
         app.view = crate::app::View::Attached(1);
-        // Never the real state directory: delivery writes held messages, and a test
+        // Never the real state directory: delivery writes notices to disk, and a test
         // must not put one into the running user's inbox.
         app.thread_state_root = temp.path().to_path_buf();
 
-        let thread = crate::threads::ThreadRef {
-            host: "github.com".to_string(),
-            owner: "o".to_string(),
-            repo: "r".to_string(),
-            number: 12,
-            kind: crate::threads::ThreadKind::Issue,
-        };
+        let thread = test_thread(12);
 
         // The user starts typing a message, through the real event path.
         for character in "you probably saw it".chars() {
@@ -2513,12 +2547,9 @@ mod tests {
         );
 
         // A reply lands mid-sentence. This is the moment that mangled the message.
-        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
-            session_id: "session-a".to_string(),
-            thread: thread.clone(),
-        });
+        plan_and_apply(&mut app, "session-a", &thread);
         assert_eq!(
-            app.thread_pending_wakes.len(),
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
             1,
             "the wake-up must wait rather than paste onto a half-written message"
         );
@@ -2534,11 +2565,10 @@ mod tests {
         );
 
         assert!(app.flush_thread_wakes(), "the wake-up is delivered now");
-        assert!(
-            app.thread_pending_wakes
-                .iter()
-                .all(|queued| queued.delivered),
-            "nothing is left waiting; the entry that remains has been written and is \
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
+            1,
+            "nothing is left planned; the notice that remains has been written and is \
              held only until a turn takes it"
         );
     }
@@ -2558,40 +2588,19 @@ mod tests {
         }));
         push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
         app.view = crate::app::View::Attached(1);
-        // Never the real state directory: delivery writes held messages, and a test
-        // must not put one into the running user's inbox.
         app.thread_state_root = temp.path().to_path_buf();
 
-        let thread = crate::threads::ThreadRef {
-            host: "github.com".to_string(),
-            owner: "o".to_string(),
-            repo: "r".to_string(),
-            number: 12,
-            kind: crate::threads::ThreadKind::Issue,
-        };
-        let wake = |number| crate::threads::watcher::Delivery::Wake {
-            session_id: "session-a".to_string(),
-            thread: crate::threads::ThreadRef {
-                number,
-                ..thread.clone()
-            },
-        };
-
-        app.apply_thread_delivery(wake(12));
-        assert!(
-            app.thread_pending_wakes
-                .iter()
-                .all(|queued| queued.delivered),
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
+            1,
             "the first wake-up goes straight through"
         );
 
         // Copilot has not started a turn, so the notice is still sitting there.
-        app.apply_thread_delivery(wake(13));
+        plan_and_apply(&mut app, "session-a", &test_thread(13));
         assert_eq!(
-            app.thread_pending_wakes
-                .iter()
-                .filter(|queued| !queued.delivered)
-                .count(),
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
             1,
             "a second notice must not stack onto one that has not been taken"
         );
@@ -2613,11 +2622,89 @@ mod tests {
         }
 
         assert!(app.flush_thread_wakes(), "now the second one is delivered");
-        assert!(
-            app.thread_pending_wakes
-                .iter()
-                .all(|queued| queued.delivered),
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
+            0,
             "nothing is left waiting once the pane is free again"
+        );
+    }
+
+    /// A notice planned by one run is still delivered by the next.
+    ///
+    /// This is why the status lives on disk rather than in memory. The comment behind a
+    /// notice is marked seen the moment it is planned, so anything lost at a restart is
+    /// a message the session is never told about again — which is the exact failure the
+    /// whole feature exists to prevent.
+    #[test]
+    fn a_notice_planned_before_a_restart_is_delivered_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread = test_thread(12);
+
+        // The run that hears about the comment. It records the notice and then dies
+        // before any pane is available to receive it.
+        crate::threads::store::update_in(temp.path(), |state| {
+            state.record_notice(crate::threads::Notice {
+                session_id: "session-a".to_string(),
+                thread: thread.clone(),
+                comment_url: thread.url(),
+                author: None,
+                status: crate::threads::NoticeStatus::Planned,
+                planned_at: chrono::Utc::now(),
+            });
+        })
+        .expect("recording a notice");
+
+        // A fresh process, with nothing carried over but the file.
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.thread_state_root = temp.path().to_path_buf();
+        crate::threads::store::resume_in(temp.path()).expect("resume");
+        // Exactly what startup does, in the same order.
+        app.refresh_thread_pending();
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+
+        app.flush_thread_wakes();
+
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
+            1,
+            "the new run picks up what the old one planned"
+        );
+    }
+
+    /// A notice written into a composer that a restart threw away is written again.
+    ///
+    /// `Sent` means "sitting in a composer waiting for a turn". That composer does not
+    /// survive the process, so on the way back up the notice has to return to the queue
+    /// or it would be dropped having never reached anyone.
+    #[test]
+    fn a_notice_left_in_a_composer_returns_to_the_queue_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let thread = test_thread(12);
+        crate::threads::store::update_in(temp.path(), |state| {
+            state.record_notice(crate::threads::Notice {
+                session_id: "session-a".to_string(),
+                thread: thread.clone(),
+                comment_url: thread.url(),
+                author: None,
+                status: crate::threads::NoticeStatus::Sent,
+                planned_at: chrono::Utc::now(),
+            });
+        })
+        .expect("recording a notice");
+
+        crate::threads::store::resume_in(temp.path()).expect("resume");
+
+        let notices = crate::threads::store::load_in(temp.path()).notices;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0].status,
+            crate::threads::NoticeStatus::Planned,
+            "a notice that was in a composer that no longer exists is queued again"
         );
     }
 
@@ -2669,23 +2756,10 @@ mod tests {
         .unwrap();
         app.mux.as_mut().unwrap().push(pane);
         app.view = crate::app::View::Attached(1);
-        // Never the real state directory: delivery writes held messages, and a test
-        // must not put one into the running user's inbox.
         app.thread_state_root = temp.path().to_path_buf();
 
-        let wake = |number| crate::threads::watcher::Delivery::Wake {
-            session_id: "session-a".to_string(),
-            thread: crate::threads::ThreadRef {
-                host: "github.com".to_string(),
-                owner: "o".to_string(),
-                repo: "r".to_string(),
-                number,
-                kind: crate::threads::ThreadKind::Issue,
-            },
-        };
-
-        app.apply_thread_delivery(wake(12));
-        app.apply_thread_delivery(wake(13));
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
+        plan_and_apply(&mut app, "session-a", &test_thread(13));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut screen = String::new();
@@ -2727,8 +2801,6 @@ mod tests {
         }));
         push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
         app.view = crate::app::View::Attached(1);
-        // Never the real state directory: delivery writes held messages, and a test
-        // must not put one into the running user's inbox.
         app.thread_state_root = temp.path().to_path_buf();
 
         // Somebody typed and walked away.
@@ -2737,26 +2809,28 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
         );
 
-        let thread = crate::threads::ThreadRef {
-            host: "github.com".to_string(),
-            owner: "o".to_string(),
-            repo: "r".to_string(),
-            number: 12,
-            kind: crate::threads::ThreadKind::Issue,
-        };
-        app.apply_thread_delivery(crate::threads::watcher::Delivery::Wake {
-            session_id: "session-a".to_string(),
-            thread: thread.clone(),
-        });
-        assert_eq!(app.thread_pending_wakes.len(), 1, "waiting on the draft");
+        let thread = test_thread(12);
+        plan_and_apply(&mut app, "session-a", &thread);
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
+            1,
+            "waiting on the draft"
+        );
 
-        // Backdate it rather than waiting five real minutes.
-        app.thread_pending_wakes[0].queued_at =
-            std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        // Backdate it rather than waiting five real minutes. This is also the assertion
+        // that the deadline is measured from a persisted timestamp: an in-memory clock
+        // could not be moved from here.
+        crate::threads::store::update_in(app.thread_state_root.clone().as_path(), |state| {
+            if let Some(notice) = state.notice_mut("session-a", &thread) {
+                notice.planned_at = chrono::Utc::now() - chrono::Duration::hours(1);
+            }
+        })
+        .expect("backdating");
 
         assert!(app.flush_thread_wakes());
-        assert!(
-            app.thread_pending_wakes.is_empty(),
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
+            0,
             "it stops waiting rather than holding the message forever"
         );
         assert_eq!(
@@ -2784,37 +2858,29 @@ mod tests {
         app.view = crate::app::View::Attached(1);
         app.thread_state_root = temp.path().to_path_buf();
 
-        let wake = |number| crate::threads::watcher::Delivery::Wake {
-            session_id: "session-a".to_string(),
-            thread: crate::threads::ThreadRef {
-                host: "github.com".to_string(),
-                owner: "o".to_string(),
-                repo: "r".to_string(),
-                number,
-                kind: crate::threads::ThreadKind::Issue,
-            },
-        };
-
-        // First goes straight through. It stays on the list, marked delivered, because
-        // being written is not the same as being read.
-        app.apply_thread_delivery(wake(12));
-        assert_eq!(app.thread_pending_wakes.len(), 1);
-        assert!(app.thread_pending_wakes[0].delivered);
+        // First goes straight through. It stays on the list, marked sent, because being
+        // written is not the same as being read.
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
+        assert_eq!(notices_in(&app).len(), 1);
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
+            1
+        );
 
         // The same thread moving again adds nothing: the notice is the same link, and
         // the first one has not been read yet.
-        app.apply_thread_delivery(wake(12));
-        app.apply_thread_delivery(wake(12));
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
         assert_eq!(
-            app.thread_pending_wakes.len(),
+            notices_in(&app).len(),
             1,
             "a repeat notice for one thread should not be queued behind the first"
         );
 
         // Two other threads do queue, because each names somewhere different to look.
-        app.apply_thread_delivery(wake(13));
-        app.apply_thread_delivery(wake(14));
-        assert_eq!(app.thread_pending_wakes.len(), 3);
+        plan_and_apply(&mut app, "session-a", &test_thread(13));
+        plan_and_apply(&mut app, "session-a", &test_thread(14));
+        assert_eq!(notices_in(&app).len(), 3);
 
         // Freeing the pane must release exactly one of them, not both at once.
         // Timestamps have to keep climbing: the pane drops lifecycle events older than
@@ -2839,28 +2905,26 @@ mod tests {
         free(&mut app);
         app.flush_thread_wakes();
         assert_eq!(
-            app.thread_pending_wakes.len(),
+            notices_in(&app).len(),
             2,
             "the last notice waits for its own turn rather than stacking"
         );
         assert_eq!(
-            app.thread_pending_wakes
-                .iter()
-                .filter(|queued| !queued.delivered)
-                .count(),
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
             1,
             "only one notice may be unread at a time"
         );
 
         free(&mut app);
         app.flush_thread_wakes();
-        assert_eq!(app.thread_pending_wakes.len(), 1, "and then it arrives");
+        assert_eq!(notices_in(&app).len(), 1, "and then it arrives");
 
         free(&mut app);
         app.flush_thread_wakes();
         assert!(
-            app.thread_pending_wakes.is_empty(),
-            "the list empties once the last one is read"
+            notices_in(&app).is_empty(),
+            "the list empties once the last one is read, got: {:?}",
+            notices_in(&app)
         );
     }
 

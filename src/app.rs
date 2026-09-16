@@ -572,23 +572,6 @@ struct ResolvedReferences {
     periodic_batch_len: usize,
     generations: HashMap<u64, u64>,
 }
-/// A wake-up waiting for its pane to become writable.
-///
-/// Carries when it was queued, so a message cannot be held forever by a pane that never
-/// becomes ready — an unsent draft left on screen, say.
-pub struct QueuedWake {
-    pub session_id: String,
-    pub thread: crate::threads::ThreadRef,
-    pub queued_at: std::time::Instant,
-    /// Written into the composer, but not yet taken by a turn.
-    ///
-    /// The entry stays here rather than being dropped at the moment it is written, so a
-    /// thread that keeps moving cannot produce a second notice about itself while the
-    /// first is still sitting unread. One outstanding notice per thread is the whole
-    /// rule; dropping the entry on write would only enforce it until the write happened.
-    pub delivered: bool,
-}
-
 pub struct App {
     pub sessions: Vec<Session>,
     pub filtered_indices: Vec<usize>,
@@ -636,13 +619,6 @@ pub struct App {
     /// Release notes to show once after an update, or on demand from the palette.
     pub whats_new: Option<crate::ui::whats_new::WhatsNewScreen>,
 
-    /// Wakes that arrived while their pane was mid-turn, waiting for it to finish.
-    ///
-    /// Writing into a pane that is working queues the text into the composer mid-message,
-    /// and writing into one showing a permission dialog answers that dialog. Neither is
-    /// recoverable, so a wake waits for the session to be genuinely idle.
-    pub thread_pending_wakes: Vec<QueuedWake>,
-
     /// Where thread subscriptions and held messages live.
     ///
     /// A field rather than a call to `state_root()` at each use, so a test can point it
@@ -656,11 +632,18 @@ pub struct App {
     /// one cannot leave the modal showing a stale copy of what it just changed.
     pub thread_inbox: Option<usize>,
 
-    /// Messages waiting on the user, cached so drawing a frame is not a file read.
+    /// Notices waiting on the user, cached so drawing a frame is not a file read.
     ///
-    /// Refreshed when a delivery arrives and when the user acts on one; nothing else
-    /// writes pending deliveries while CST is running.
-    pub thread_pending: Vec<crate::threads::PendingDelivery>,
+    /// Refreshed whenever the watcher records something and whenever the user acts on a
+    /// notice. The file behind it is the truth; this is a copy for the renderer.
+    pub thread_pending: Vec<crate::threads::Notice>,
+
+    /// How many notices are still CST's to deal with rather than the user's.
+    ///
+    /// Only here so the idle tick can decide it has nothing to do without reading the
+    /// state file five times a minute forever. Safe to cache because the one writer
+    /// outside this thread — the watcher — says so on the mux channel.
+    thread_live_notices: usize,
 
     /// The last reason the thread watcher gave for not working.
     ///
@@ -818,10 +801,10 @@ impl App {
             update_notice: None,
             confirm_update_restart: false,
             whats_new: None,
-            thread_pending_wakes: Vec::new(),
             thread_state_root: crate::threads::store::state_root(),
             thread_inbox: None,
             thread_pending: Vec::new(),
+            thread_live_notices: 0,
             thread_watch_notice: None,
             restart_after_update: None,
             update_restart_requested: false,
@@ -3417,113 +3400,103 @@ impl App {
     /// sent. A draft left on screen while somebody goes to lunch would otherwise hold the
     /// message indefinitely, and a thread nobody hears about is the exact failure this
     /// feature exists to prevent.
-    const WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(300);
+    const WAKE_PATIENCE_SECS: i64 = 300;
 
-    /// Act on what the thread watcher decided, now that pane state is knowable.
+    /// Act on the notices the watcher wrote down, now that pane state is knowable.
     ///
-    /// The watcher settles *whether* a comment should reach a session; only the UI
-    /// thread can see whether that session has a running pane and whether it is busy.
-    pub fn apply_thread_delivery(&mut self, delivery: crate::threads::watcher::Delivery) -> bool {
-        use crate::threads::watcher::Delivery;
-
-        match delivery {
-            // Already recorded by the watcher; the list just needs to show it.
-            Delivery::Held { .. } => {
-                self.refresh_thread_pending();
-                true
-            }
-            Delivery::Wake { session_id, thread } => {
-                if !self.has_running_pane_for(&session_id) {
-                    // Never start a session unasked. It becomes something the user can
-                    // approve, with an age, so a stalled correspondence stays visible.
-                    self.hold_thread_message(
-                        &session_id,
-                        &thread,
-                        crate::threads::PendingReason::SessionClosed,
-                    );
-                    return true;
-                }
-                // One notice per thread at a time. A second says nothing the first did
-                // not — the text is the same link — and queueing it only means two
-                // identical notices arriving back to back once the pane frees up.
-                //
-                // The original keeps its place in the queue rather than the newer one
-                // replacing it, so a thread that keeps moving cannot push its own
-                // deadline out and sit unheard indefinitely.
-                if self
-                    .thread_pending_wakes
-                    .iter()
-                    .any(|queued| queued.session_id == session_id && queued.thread == thread)
-                {
-                    return false;
-                }
-                self.thread_pending_wakes.push(QueuedWake {
-                    session_id,
-                    thread,
-                    queued_at: std::time::Instant::now(),
-                    delivered: false,
-                });
-                self.flush_thread_wakes()
-            }
-        }
+    /// The watcher settles *whether* a comment should reach a session and records that
+    /// decision on disk; only the UI thread can see whether the session has a running
+    /// pane, whether it is busy, and whether somebody is typing into it. Splitting it
+    /// this way is also what makes a restart harmless: the decision outlives the process
+    /// that made it, so a notice planned just before a crash is still delivered after.
+    pub fn apply_thread_notices(&mut self) -> bool {
+        self.refresh_thread_pending();
+        self.flush_thread_wakes()
     }
 
-    /// Deliver every queued wake whose pane is now idle.
+    /// Deliver what can be delivered, and give up on what has waited too long.
     ///
-    /// Called both when a wake arrives and when a pane reports it has finished a turn,
-    /// so a message that landed mid-turn is delivered the moment the turn ends.
+    /// Called on every idle tick as well as on events, because a pane holding an
+    /// abandoned draft emits nothing at all. The counter is what keeps that affordable:
+    /// an install with no notices never touches the disk, and the only thing that can
+    /// add one behind CST's back — the watcher thread — announces itself.
     pub fn flush_thread_wakes(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        let queued: Vec<(String, crate::threads::ThreadRef, std::time::Instant, bool)> = self
-            .thread_pending_wakes
-            .iter()
-            .map(|queued| {
-                (
-                    queued.session_id.clone(),
-                    queued.thread.clone(),
-                    queued.queued_at,
-                    queued.delivered,
-                )
-            })
-            .collect();
+        if self.thread_live_notices == 0 {
+            return false;
+        }
+        let live: Vec<(String, crate::threads::ThreadRef, bool, i64)> =
+            crate::threads::store::load_in(&self.thread_state_root)
+                .notices
+                .iter()
+                .filter_map(|notice| {
+                    let sent = match notice.status {
+                        crate::threads::NoticeStatus::Planned => false,
+                        crate::threads::NoticeStatus::Sent => true,
+                        // Already in front of the user; nothing to do without them.
+                        crate::threads::NoticeStatus::Waiting { .. } => return None,
+                    };
+                    Some((
+                        notice.session_id.clone(),
+                        notice.thread.clone(),
+                        sent,
+                        notice.age_seconds(),
+                    ))
+                })
+                .collect();
+        if live.is_empty() {
+            return false;
+        }
 
         let mut changed = false;
-        for (session_id, thread, queued_at, delivered) in queued {
-            if delivered {
-                // Written already. It stops taking up the slot once the composer is
-                // empty again, which is the evidence a turn took it.
+        for (session_id, thread, sent, age) in live {
+            if sent {
+                // Written into the composer already. It keeps holding this session's
+                // slot until the composer is empty again, which is the evidence that a
+                // turn actually took it — otherwise the next notice would be typed on
+                // top of this one and the two would arrive as one unreadable message.
                 if self.composer_is_free(&session_id) {
-                    self.drop_queued_wake(&session_id, &thread);
+                    self.update_threads(|state| state.drop_notice(&session_id, &thread));
+                    changed = true;
                 }
                 continue;
             }
-            // Readiness is re-asked for every entry rather than decided once up front.
-            // Delivering one notice occupies that pane's composer, so the next has to
-            // wait its turn — deciding in advance is how several ended up written on
-            // top of each other and arriving as a single unreadable message.
+            if !self.has_running_pane_for(&session_id) {
+                // Never start a session unasked. It becomes something the user can
+                // approve, with an age, so a stalled correspondence stays visible.
+                self.hold_thread_message(
+                    &session_id,
+                    &thread,
+                    crate::threads::PendingReason::SessionClosed,
+                );
+                changed = true;
+                continue;
+            }
+            // Readiness is re-asked per notice rather than decided once up front:
+            // delivering one occupies that pane's composer, so a second notice for the
+            // same session has to wait for the next pass.
             if self.session_ready_for_wake(&session_id) {
-                let outcome = self.deliver_thread_pointer(&session_id, &thread);
-                if outcome.is_ok() {
-                    self.mark_wake_delivered(&session_id, &thread);
-                } else {
-                    self.drop_queued_wake(&session_id, &thread);
-                }
-                if let Err(error) = outcome {
-                    // The pane went away between the check and the write. Hand it to the
-                    // user rather than dropping it silently.
-                    self.hold_thread_message(
-                        &session_id,
-                        &thread,
-                        crate::threads::PendingReason::SessionClosed,
-                    );
-                    self.status_message = Some(format!("Could not wake the session: {error}"));
+                match self.deliver_thread_pointer(&session_id, &thread) {
+                    Ok(()) => self.update_threads(|state| {
+                        if let Some(notice) = state.notice_mut(&session_id, &thread) {
+                            notice.status = crate::threads::NoticeStatus::Sent;
+                        }
+                    }),
+                    Err(error) => {
+                        // The pane went away between the check and the write. Hand it to
+                        // the user rather than dropping it silently.
+                        self.hold_thread_message(
+                            &session_id,
+                            &thread,
+                            crate::threads::PendingReason::SessionClosed,
+                        );
+                        self.status_message = Some(format!("Could not wake the session: {error}"));
+                    }
                 }
                 changed = true;
-            } else if now.duration_since(queued_at) >= Self::WAKE_PATIENCE {
+            } else if age >= Self::WAKE_PATIENCE_SECS {
                 // Waited too long and still nowhere to put it. A pane that never becomes
-                // writable — a draft left on screen, a turn that never ends — must not
-                // swallow the message in silence.
-                self.drop_queued_wake(&session_id, &thread);
+                // writable — a draft left on screen over lunch, a turn that never ends —
+                // must not swallow the message in silence.
                 self.hold_thread_message(
                     &session_id,
                     &thread,
@@ -3532,33 +3505,25 @@ impl App {
                 changed = true;
             }
         }
+        if changed {
+            self.refresh_thread_pending();
+        }
         changed
+    }
+
+    fn update_threads(&self, change: impl FnOnce(&mut crate::threads::store::ThreadState)) {
+        let _ = crate::threads::store::update_in(&self.thread_state_root, change);
     }
 
     /// Whether a session's composer has been emptied since a notice was written into it.
     ///
-    /// A pane that has gone away counts as free, or its notice would sit in the queue
-    /// forever holding the slot against a thread that may well move again.
+    /// A pane that has gone away counts as free, or the notice would hold that session's
+    /// slot forever against a thread that may well move again.
     fn composer_is_free(&self, session_id: &str) -> bool {
         self.mux
             .as_ref()
             .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
             .is_none_or(|pane| !pane.has_draft())
-    }
-
-    fn mark_wake_delivered(&mut self, session_id: &str, thread: &crate::threads::ThreadRef) {
-        if let Some(queued) = self
-            .thread_pending_wakes
-            .iter_mut()
-            .find(|queued| queued.session_id == session_id && &queued.thread == thread)
-        {
-            queued.delivered = true;
-        }
-    }
-
-    fn drop_queued_wake(&mut self, session_id: &str, thread: &crate::threads::ThreadRef) {
-        self.thread_pending_wakes
-            .retain(|queued| queued.session_id != session_id || &queued.thread != thread);
     }
 
     /// Whether a session can be written to without corrupting what it is doing.
@@ -3602,47 +3567,50 @@ impl App {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ))?;
-        // Pressing Enter is not the same as the message being taken. Copilot leaves it
-        // in the composer while it is busy in a way the hooks do not report — an
-        // autopilot run working through background agents, say. The composer counts as
-        // occupied until a turn actually starts, so the next wake-up waits its turn
-        // rather than stacking onto this one.
+        // Pressing Enter is not the same as the message being taken. Copilot leaves it in
+        // the composer while it is busy in a way the hooks do not report — an autopilot
+        // run working through background agents, say. The composer counts as occupied
+        // until a turn actually starts, so the next notice waits rather than stacking.
         pane.note_injection();
         Ok(())
     }
 
-    /// Re-read the messages waiting on the user.
-    ///
-    /// Cheap and rare: called when a delivery arrives or the user acts on one, not on
-    /// every frame.
+    /// Re-read the notices from disk: what the user is asked about, and what is in hand.
     pub fn refresh_thread_pending(&mut self) {
-        self.thread_pending = crate::threads::store::load_in(&self.thread_state_root).pending;
+        let notices = crate::threads::store::load_in(&self.thread_state_root).notices;
+        self.thread_live_notices = notices
+            .iter()
+            .filter(|notice| !notice.is_waiting_for_user())
+            .count();
+        self.thread_pending = notices
+            .into_iter()
+            .filter(crate::threads::Notice::is_waiting_for_user)
+            .collect();
     }
 
     /// What is waiting on the user for one session, if anything.
-    pub fn thread_pending_for(&self, session_id: &str) -> Option<&crate::threads::PendingDelivery> {
+    pub fn thread_pending_for(&self, session_id: &str) -> Option<&crate::threads::Notice> {
         self.thread_pending
             .iter()
-            .filter(|pending| pending.session_id == session_id)
-            .min_by_key(|pending| pending.arrived_at)
+            .filter(|notice| notice.session_id == session_id)
+            .min_by_key(|notice| notice.planned_at)
     }
 
-    /// Record a message the user has to approve before anything runs.
+    /// Stop trying to deliver a notice, and put it in front of the user instead.
     fn hold_thread_message(
         &mut self,
         session_id: &str,
         thread: &crate::threads::ThreadRef,
         reason: crate::threads::PendingReason,
     ) {
-        let _ = crate::threads::store::update_in(&self.thread_state_root, |state| {
-            state.hold_for_user(crate::threads::PendingDelivery {
-                session_id: session_id.to_string(),
-                thread: thread.clone(),
-                comment_url: thread.url(),
-                reason,
-                author: None,
-                arrived_at: chrono::Utc::now(),
-            });
+        self.update_threads(|state| {
+            // Only ever changes a notice that is still there. If it went while this pass
+            // was deciding — `cst thread leave` running in the agent's own shell — then
+            // the agent has said the thread no longer concerns it, and re-creating the
+            // notice would put back exactly what it asked to be rid of.
+            if let Some(notice) = state.notice_mut(session_id, thread) {
+                notice.status = crate::threads::NoticeStatus::Waiting { reason };
+            }
         });
         self.refresh_thread_pending();
     }
@@ -3690,16 +3658,19 @@ impl App {
             self.attach_session(&session.id, &session.cwd, title)?;
         }
 
-        // Queued rather than written straight out: a session that has only just been
-        // resumed is still starting up, and the queue already knows how to wait for it
-        // to be ready.
-        self.thread_pending_wakes.push(QueuedWake {
-            session_id: pending.session_id.clone(),
-            thread: pending.thread.clone(),
-            queued_at: std::time::Instant::now(),
-            delivered: false,
+        // Put back in the queue rather than written straight out: a session that has
+        // only just been resumed is still starting up, and the queue already knows how
+        // to wait for it. The clock restarts here, because the patience deadline should
+        // measure how long *this* attempt has been waiting, not how long the message sat
+        // in the inbox before the user got to it.
+        self.update_threads(|state| {
+            if let Some(notice) = state.notice_mut(&pending.session_id, &pending.thread) {
+                notice.status = crate::threads::NoticeStatus::Planned;
+                notice.planned_at = chrono::Utc::now();
+            }
         });
-        self.thread_dismiss(selected);
+        self.refresh_thread_pending();
+        self.reselect_inbox();
         self.flush_thread_wakes();
         Ok(())
     }
@@ -3715,10 +3686,15 @@ impl App {
         let Some(pending) = self.thread_pending.get(index).cloned() else {
             return;
         };
-        let _ = crate::threads::store::update_in(&self.thread_state_root, |state| {
-            state.clear_pending(&pending.session_id, &pending.thread);
+        self.update_threads(|state| {
+            state.drop_notice(&pending.session_id, &pending.thread);
         });
         self.refresh_thread_pending();
+        self.reselect_inbox();
+    }
+
+    /// Keep the inbox cursor pointing at something after a row leaves the list.
+    fn reselect_inbox(&mut self) {
         if self.thread_pending.is_empty() {
             self.thread_inbox = None;
         } else if let Some(selected) = self.thread_inbox {

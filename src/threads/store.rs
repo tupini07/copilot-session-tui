@@ -24,16 +24,25 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::{PendingDelivery, Subscription, ThreadRef};
+use super::{Notice, NoticeStatus, PendingDelivery, Subscription, ThreadRef};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadState {
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
 
-    /// Messages that arrived but were not delivered, waiting on the user.
+    /// Every notice CST still has something to do about.
+    ///
+    /// Covers the whole life of one: decided on, written into a composer, or waiting for
+    /// the user. Keeping all three here rather than only the last is what lets a restart
+    /// resume instead of forgetting — the comment behind a notice is marked seen as soon
+    /// as it is planned, so anything lost at that point is never mentioned again.
     #[serde(default)]
-    pub pending: Vec<PendingDelivery>,
+    pub notices: Vec<Notice>,
+
+    /// Written by the version before notices had a status. Read, never written.
+    #[serde(default, skip_serializing)]
+    pending: Vec<PendingDelivery>,
 
     /// Per-thread `ETag`, keyed by canonical URL.
     ///
@@ -102,8 +111,8 @@ impl ThreadState {
         let before = self.subscriptions.len();
         self.subscriptions
             .retain(|s| !(s.session_id == session_id && &s.thread == thread));
-        self.pending
-            .retain(|p| !(p.session_id == session_id && &p.thread == thread));
+        self.notices
+            .retain(|n| !(n.session_id == session_id && &n.thread == thread));
         self.subscriptions.len() != before
     }
 
@@ -111,7 +120,7 @@ impl ThreadState {
     pub fn close(&mut self, thread: &ThreadRef) -> usize {
         let before = self.subscriptions.len();
         self.subscriptions.retain(|s| &s.thread != thread);
-        self.pending.retain(|p| &p.thread != thread);
+        self.notices.retain(|n| &n.thread != thread);
         before - self.subscriptions.len()
     }
 
@@ -122,33 +131,80 @@ impl ThreadState {
             .collect()
     }
 
-    /// Queue a message for the user, collapsing repeats of the same thread.
+    /// Record a notice, or update the one already tracking this thread.
     ///
-    /// A thread that keeps moving while its session is closed should read as one item
-    /// that is getting older, not as a pile that buries everything else in the list.
-    pub fn hold_for_user(&mut self, delivery: PendingDelivery) {
+    /// One notice per session per thread. A thread that moves again while its notice is
+    /// still unread has nothing new to say — the notice is the same link — so the newer
+    /// arrival refreshes what it points at without resetting when it was planned. That
+    /// keeps a busy thread from pushing out its own deadline indefinitely.
+    pub fn record_notice(&mut self, notice: Notice) {
         if let Some(existing) = self
-            .pending
+            .notices
             .iter_mut()
-            .find(|p| p.session_id == delivery.session_id && p.thread == delivery.thread)
+            .find(|n| n.session_id == notice.session_id && n.thread == notice.thread)
         {
-            existing.comment_url = delivery.comment_url;
-            existing.reason = delivery.reason;
+            existing.comment_url = notice.comment_url;
+            existing.author = notice.author.or(existing.author.take());
+            // The status is left exactly as it was. Wherever the existing notice has got
+            // to — queued, sitting in a composer, or in front of the user — it already
+            // says "go and read this thread", and the new comment is on that same
+            // thread. Overwriting it would walk a notice already delivered back to
+            // planned and send the same link a second time.
             return;
         }
-        self.pending.push(delivery);
+        self.notices.push(notice);
     }
 
-    pub fn pending_for(&self, session_id: &str) -> Vec<&PendingDelivery> {
-        self.pending
+    pub fn notice_mut(&mut self, session_id: &str, thread: &ThreadRef) -> Option<&mut Notice> {
+        self.notices
+            .iter_mut()
+            .find(|n| n.session_id == session_id && &n.thread == thread)
+    }
+
+    pub fn drop_notice(&mut self, session_id: &str, thread: &ThreadRef) {
+        self.notices
+            .retain(|n| !(n.session_id == session_id && &n.thread == thread));
+    }
+
+    /// Everything the user is being asked about.
+    pub fn waiting_for_user(&self) -> Vec<&Notice> {
+        self.notices
             .iter()
-            .filter(|p| p.session_id == session_id)
+            .filter(|n| n.is_waiting_for_user())
             .collect()
     }
 
-    pub fn clear_pending(&mut self, session_id: &str, thread: &ThreadRef) {
-        self.pending
-            .retain(|p| !(p.session_id == session_id && &p.thread == thread));
+    /// Fold in anything written before notices had a status, and recover from a restart.
+    ///
+    /// A notice recorded as sent was sitting in a composer that no longer exists, so it
+    /// goes back to planned and is written again. Without this the comment behind it is
+    /// already marked seen and would never be mentioned a second time.
+    fn adopt_legacy(&mut self) {
+        for legacy in std::mem::take(&mut self.pending) {
+            self.record_notice(Notice {
+                session_id: legacy.session_id,
+                thread: legacy.thread,
+                comment_url: legacy.comment_url,
+                author: legacy.author,
+                status: NoticeStatus::Waiting {
+                    reason: legacy.reason,
+                },
+                planned_at: legacy.arrived_at,
+            });
+        }
+    }
+
+    /// Put sent notices back in the queue, because the composer holding them is gone.
+    ///
+    /// Only correct at startup. Running it on every read would undo the sent marking
+    /// within a single session and write the same notice over and over, which is the
+    /// bug this whole mechanism exists to prevent.
+    fn resume_after_restart(&mut self) {
+        for notice in &mut self.notices {
+            if notice.status == NoticeStatus::Sent {
+                notice.status = NoticeStatus::Planned;
+            }
+        }
     }
 }
 
@@ -158,10 +214,17 @@ impl ThreadState {
 /// corrupt file must never stop CST from starting. The cost is that a damaged file loses
 /// subscriptions, which the agents can recreate by posting again.
 pub fn load_in(root: &Path) -> ThreadState {
-    fs::read_to_string(state_path(root))
+    let mut state: ThreadState = fs::read_to_string(state_path(root))
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    state.adopt_legacy();
+    state
+}
+
+/// Load once at startup, putting anything a previous run left mid-flight back in hand.
+pub fn resume_in(root: &Path) -> Result<()> {
+    update_in(root, |state| state.resume_after_restart())
 }
 
 /// Read, change and save under one lock held for the whole cycle.
@@ -304,22 +367,24 @@ mod tests {
     #[test]
     fn one_thread_that_keeps_moving_stays_one_ageing_item_rather_than_a_pile() {
         let mut state = ThreadState::default();
-        let arrived = chrono::Utc::now() - chrono::Duration::days(3);
+        let planned = chrono::Utc::now() - chrono::Duration::days(3);
         for id in 1..=4 {
-            state.hold_for_user(PendingDelivery {
+            state.record_notice(Notice {
                 session_id: "session-a".to_string(),
                 thread: thread(1),
                 comment_url: format!("https://github.com/o/r/issues/1#issuecomment-{id}"),
-                reason: PendingReason::SessionClosed,
+                status: NoticeStatus::Waiting {
+                    reason: PendingReason::SessionClosed,
+                },
                 author: None,
-                arrived_at: arrived,
+                planned_at: planned,
             });
         }
 
-        let pending = state.pending_for("session-a");
+        let pending = state.waiting_for_user();
         assert_eq!(pending.len(), 1);
         // The age must survive the collapse, or a long wait would look brand new.
-        assert_eq!(pending[0].arrived_at, arrived);
+        assert_eq!(pending[0].planned_at, planned);
         assert!(
             pending[0].comment_url.ends_with("-4"),
             "newest comment wins"
@@ -337,6 +402,46 @@ mod tests {
         let reloaded = load_in(temp.path());
         assert_eq!(reloaded.subscriptions.len(), 1);
         assert_eq!(reloaded.subscriptions[0].thread, thread(7));
+    }
+
+    /// The shape on disk, pinned.
+    ///
+    /// Asserted on the literal JSON rather than a round trip, because the point of the
+    /// status being persisted is that another build — and a human reading the file —
+    /// can tell what is still owed to a session. A round trip would keep passing while
+    /// the field quietly renamed itself.
+    #[test]
+    fn a_notice_is_saved_with_its_status_as_a_readable_column() {
+        let temp = tempfile::tempdir().unwrap();
+        update_in(temp.path(), |state| {
+            state.record_notice(Notice {
+                session_id: "session-a".to_string(),
+                thread: thread(1),
+                comment_url: "https://github.com/o/r/issues/1".to_string(),
+                author: None,
+                status: NoticeStatus::Planned,
+                planned_at: chrono::Utc::now(),
+            });
+        })
+        .unwrap();
+
+        let saved = fs::read_to_string(state_path(temp.path())).unwrap();
+        assert!(saved.contains(r#""state": "planned""#), "got: {saved}");
+
+        update_in(temp.path(), |state| {
+            state.notice_mut("session-a", &thread(1)).unwrap().status = NoticeStatus::Waiting {
+                reason: PendingReason::Throttled,
+            };
+        })
+        .unwrap();
+
+        let saved = fs::read_to_string(state_path(temp.path())).unwrap();
+        assert!(saved.contains(r#""state": "waiting""#), "got: {saved}");
+        assert!(saved.contains(r#""reason": "throttled""#), "got: {saved}");
+        assert_eq!(
+            load_in(temp.path()).notices[0].reason(),
+            Some(PendingReason::Throttled)
+        );
     }
 
     #[test]

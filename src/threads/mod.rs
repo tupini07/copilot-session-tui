@@ -386,7 +386,73 @@ const SEEN_HISTORY: usize = 200;
 /// circles will blow past this within minutes.
 pub const DEFAULT_WAKEUPS_PER_HOUR: u32 = 12;
 
+/// How far a notice has got.
+///
+/// On disk rather than in memory, because the interesting states are exactly the ones a
+/// restart used to lose: a notice decided on but not yet written, and one written into a
+/// composer that no turn has taken. Both were held in memory while the comment that
+/// caused them was already recorded as seen, so stopping CST in that window meant the
+/// message was never mentioned again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum NoticeStatus {
+    /// Decided on; nothing has been written to the session yet.
+    Planned,
+    /// Written into the composer, still waiting for a turn to take it.
+    Sent,
+    /// Not going anywhere without the user saying so.
+    Waiting { reason: PendingReason },
+}
+
+/// One notice about one thread, for one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub session_id: String,
+    pub thread: ThreadRef,
+    pub comment_url: String,
+    /// Who wrote it, when that is why the user is being asked.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Flattened, so the file reads as a status column — `"state": "planned"` on the
+    /// notice itself — rather than a nested object nobody would recognise at a glance.
+    #[serde(flatten)]
+    pub status: NoticeStatus,
+    /// When this was decided on.
+    ///
+    /// Drives both the age shown in the session list and the deadline after which a
+    /// notice stops waiting for a busy pane. Persisted so neither is reset by a restart.
+    #[serde(default = "Utc::now")]
+    pub planned_at: DateTime<Utc>,
+}
+
+impl Notice {
+    pub fn is_waiting_for_user(&self) -> bool {
+        matches!(self.status, NoticeStatus::Waiting { .. })
+    }
+
+    pub fn reason(&self) -> Option<PendingReason> {
+        match self.status {
+            NoticeStatus::Waiting { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// How long ago this was decided on, never negative.
+    ///
+    /// A clock that moved backwards between runs would otherwise read as a notice from
+    /// the future, and the patience deadline would never fire.
+    pub fn age_seconds(&self) -> i64 {
+        Utc::now()
+            .signed_duration_since(self.planned_at)
+            .num_seconds()
+            .max(0)
+    }
+}
+
 /// A message that arrived but was not delivered, waiting on the user.
+///
+/// Superseded by [`Notice`]; kept so a file written by the version that used it still
+/// loads, with its entries folded in as notices already waiting for the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDelivery {
     pub session_id: String,

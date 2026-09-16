@@ -23,25 +23,9 @@ use super::doorbell::{self, Ring, ThreadTransport, UreqTransport};
 use super::judge;
 use super::store::{self, ThreadState};
 use super::{
-    classify, CommentSighting, PendingDelivery, PendingReason, ThreadKind, ThreadRef, Verdict,
+    classify, CommentSighting, Notice, NoticeStatus, PendingReason, ThreadKind, ThreadRef, Verdict,
 };
 use crate::mux::MuxEvent;
-
-/// What the watcher concluded about one comment for one subscriber.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    /// Hand this session a pointer, if the UI thread finds somewhere to put it.
-    Wake {
-        session_id: String,
-        thread: ThreadRef,
-    },
-    /// Do not run anything; show it to the user instead.
-    Held {
-        session_id: String,
-        thread: ThreadRef,
-        reason: PendingReason,
-    },
-}
 
 /// Decide what a batch of comments means for everyone watching a thread.
 ///
@@ -51,6 +35,10 @@ pub enum Delivery {
 /// Comments are marked seen whatever the outcome. A comment that was examined and
 /// deliberately not delivered must not be examined again on the next poll, or a thread
 /// with one foreign comment would re-raise the same notice every minute.
+///
+/// Reports whether this batch produced anything for anybody, which is all the caller
+/// needs: the notices themselves are already on the state, and what happens to one next
+/// depends on panes the watcher cannot see.
 pub fn plan(
     state: &mut ThreadState,
     thread: &ThreadRef,
@@ -59,7 +47,7 @@ pub fn plan(
     trusted: &[String],
     wakeups_per_hour: u32,
     now: DateTime<Utc>,
-) -> Vec<Delivery> {
+) -> bool {
     let subscriber_ids: Vec<String> = state
         .subscriptions
         .iter()
@@ -67,8 +55,7 @@ pub fn plan(
         .map(|subscription| subscription.session_id.clone())
         .collect();
 
-    let mut deliveries: Vec<Delivery> = Vec::new();
-    let mut held: Vec<PendingDelivery> = Vec::new();
+    let mut recorded: Vec<Notice> = Vec::new();
 
     for session_id in subscriber_ids {
         let Some(subscription) = state.subscription_mut(&session_id, thread) else {
@@ -94,56 +81,49 @@ pub fn plan(
             match classify(comment, our_login, trusted, subscription) {
                 Verdict::SkipOwn => {}
                 Verdict::HoldForUser(reason) => {
-                    held.push(PendingDelivery {
+                    recorded.push(Notice {
                         session_id: session_id.clone(),
                         thread: thread.clone(),
                         comment_url: comment.url.clone(),
                         author: Some(comment.author.clone()),
-                        reason,
-                        arrived_at: now,
-                    });
-                    deliveries.push(Delivery::Held {
-                        session_id: session_id.clone(),
-                        thread: thread.clone(),
-                        reason,
+                        status: NoticeStatus::Waiting { reason },
+                        planned_at: now,
                     });
                 }
                 Verdict::Wake => {
                     if already_woken {
                         continue;
                     }
-                    if subscription.may_wake(now, wakeups_per_hour) {
+                    already_woken = true;
+                    // Written down as planned before anything is delivered. The comment
+                    // is marked seen either way, so a notice that only existed in memory
+                    // would be lost by a restart and never mentioned again.
+                    let status = if subscription.may_wake(now, wakeups_per_hour) {
                         subscription.record_wakeup(now);
-                        already_woken = true;
-                        deliveries.push(Delivery::Wake {
-                            session_id: session_id.clone(),
-                            thread: thread.clone(),
-                        });
+                        NoticeStatus::Planned
                     } else {
-                        held.push(PendingDelivery {
-                            session_id: session_id.clone(),
-                            thread: thread.clone(),
-                            comment_url: comment.url.clone(),
+                        NoticeStatus::Waiting {
                             reason: PendingReason::Throttled,
-                            author: Some(comment.author.clone()),
-                            arrived_at: now,
-                        });
-                        deliveries.push(Delivery::Held {
-                            session_id: session_id.clone(),
-                            thread: thread.clone(),
-                            reason: PendingReason::Throttled,
-                        });
-                        already_woken = true;
-                    }
+                        }
+                    };
+                    recorded.push(Notice {
+                        session_id: session_id.clone(),
+                        thread: thread.clone(),
+                        comment_url: comment.url.clone(),
+                        author: Some(comment.author.clone()),
+                        status,
+                        planned_at: now,
+                    });
                 }
             }
         }
     }
 
-    for delivery in held {
-        state.hold_for_user(delivery);
+    let produced = !recorded.is_empty();
+    for notice in recorded {
+        state.record_notice(notice);
     }
-    deliveries
+    produced
 }
 
 /// Turn a fetched comment into what the rules operate on.
@@ -336,7 +316,7 @@ impl ThreadWatcher {
                             }
                         };
 
-                    let deliveries = store::update_in(&root, |state| {
+                    let produced = store::update_in(&root, |state| {
                         plan(
                             state,
                             &thread,
@@ -347,8 +327,25 @@ impl ThreadWatcher {
                             Utc::now(),
                         )
                     });
-                    for delivery in deliveries.unwrap_or_default() {
-                        let _ = events.send(MuxEvent::ThreadDelivery(Box::new(delivery)));
+                    // The notices are already on disk; this only asks the UI thread to
+                    // look, since it is the side that knows which panes can take one.
+                    // Nothing is sent when the batch was all our own comments, which is
+                    // most of them: a wake CST posted itself moves every thread it is
+                    // watching.
+                    match produced {
+                        Ok(true) => {
+                            let _ = events.send(MuxEvent::ThreadNoticesChanged);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            // The comments are marked seen in the same write that records
+                            // the notices, so a failed write loses neither — but it does
+                            // mean nothing was saved, and silence here would look exactly
+                            // like a quiet thread.
+                            let _ = events.send(MuxEvent::ThreadWatchFailed(format!(
+                                "Could not record thread notices: {error}"
+                            )));
+                        }
                     }
 
                     // Only after a burst, and only ever to report. A conversation that
@@ -415,6 +412,42 @@ pub fn fetch_comments(
 mod tests {
     use super::*;
 
+    /// What `plan` wrote down, in the shape these assertions are written in.
+    ///
+    /// `plan` itself only reports how many notices it recorded; the notices left on the
+    /// state are the actual product, and reading them back is what proves a decision
+    /// would survive the process that made it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Delivery {
+        Wake {
+            session_id: String,
+            thread: ThreadRef,
+        },
+        Held {
+            session_id: String,
+            thread: ThreadRef,
+            reason: PendingReason,
+        },
+    }
+
+    fn recorded(state: &ThreadState) -> Vec<Delivery> {
+        state
+            .notices
+            .iter()
+            .map(|notice| match notice.status {
+                NoticeStatus::Waiting { reason } => Delivery::Held {
+                    session_id: notice.session_id.clone(),
+                    thread: notice.thread.clone(),
+                    reason,
+                },
+                _ => Delivery::Wake {
+                    session_id: notice.session_id.clone(),
+                    thread: notice.thread.clone(),
+                },
+            })
+            .collect()
+    }
+
     fn thread() -> ThreadRef {
         ThreadRef {
             host: "github.com".to_string(),
@@ -446,7 +479,7 @@ mod tests {
     fn a_reply_from_another_agent_wakes_the_session_that_was_waiting() {
         let mut state = state_with(&["session-a"]);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07")],
@@ -455,6 +488,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(
             deliveries,
@@ -473,7 +507,7 @@ mod tests {
             .unwrap()
             .record_authored("1");
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07")],
@@ -482,6 +516,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert!(deliveries.is_empty(), "got: {deliveries:?}");
     }
@@ -492,7 +527,7 @@ mod tests {
         // on the rule in isolation: no Wake may appear for a foreign author, ever.
         let mut state = state_with(&["session-a"]);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "a-stranger")],
@@ -501,6 +536,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(
             deliveries,
@@ -513,14 +549,14 @@ mod tests {
         assert!(!deliveries
             .iter()
             .any(|delivery| matches!(delivery, Delivery::Wake { .. })));
-        assert_eq!(state.pending_for("session-a").len(), 1);
+        assert_eq!(state.waiting_for_user().len(), 1);
     }
 
     #[test]
     fn three_replies_arriving_together_are_one_thing_to_go_and_look_at() {
         let mut state = state_with(&["session-a"]);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[
@@ -533,6 +569,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(deliveries.len(), 1, "got: {deliveries:?}");
     }
@@ -561,16 +598,15 @@ mod tests {
             12,
             Utc::now(),
         );
-
-        assert_eq!(first.len(), 1);
-        assert!(second.is_empty(), "got: {second:?}");
+        assert!(first);
+        assert!(!second, "the same comment must not be examined twice");
     }
 
     #[test]
     fn one_comment_reaches_every_session_watching_the_thread() {
         let mut state = state_with(&["session-a", "session-b"]);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07")],
@@ -579,6 +615,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         let woken: Vec<&str> = deliveries
             .iter()
@@ -602,7 +639,7 @@ mod tests {
             .unwrap()
             .record_authored("1");
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07")],
@@ -611,6 +648,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(
             deliveries,
@@ -643,7 +681,7 @@ mod tests {
             .unwrap()
             .record_authored("2");
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07"), comment("2", "tupini07")],
@@ -652,6 +690,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(
             deliveries.len(),
@@ -681,7 +720,7 @@ mod tests {
         let mut state = state_with(&["session-a"]);
         let trusted = vec!["a-colleague".to_string()];
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "a-colleague")],
@@ -691,14 +730,18 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(
-            deliveries,
+            recorded(&state),
             vec![Delivery::Wake {
                 session_id: "session-a".to_string(),
                 thread: thread(),
             }]
         );
 
-        let deliveries = plan(
+        // A fresh state for the other direction. Both comments on one thread would leave
+        // the first notice in place — it already says "go and read this thread" — and
+        // that would test the collapsing rule rather than the trust rule.
+        let mut state = state_with(&["session-a"]);
+        plan(
             &mut state,
             &thread(),
             &[comment("2", "a-stranger")],
@@ -708,7 +751,7 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(
-            deliveries,
+            recorded(&state),
             vec![Delivery::Held {
                 session_id: "session-a".to_string(),
                 thread: thread(),
@@ -718,7 +761,7 @@ mod tests {
         // And the held one names who wrote it, which is what the user needs in order to
         // decide whether to add them to the list.
         assert_eq!(
-            state.pending_for("session-a")[0].author.as_deref(),
+            state.waiting_for_user()[0].author.as_deref(),
             Some("a-stranger")
         );
     }
@@ -738,8 +781,12 @@ mod tests {
                 2,
                 now,
             );
+            // The session read it and the notice was dropped, which is the only way a
+            // third wake can even be asked for: an undelivered notice would absorb the
+            // next comment rather than count against the rate.
+            state.drop_notice("session-a", &thread());
         }
-        let over = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("3", "tupini07")],
@@ -750,7 +797,7 @@ mod tests {
         );
 
         assert_eq!(
-            over,
+            recorded(&state),
             vec![Delivery::Held {
                 session_id: "session-a".to_string(),
                 thread: thread(),
@@ -769,7 +816,7 @@ mod tests {
         let mut old = comment("1", "tupini07");
         old.created_at = Utc::now() - chrono::Duration::days(30);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[old],
@@ -778,6 +825,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert!(deliveries.is_empty(), "got: {deliveries:?}");
     }
@@ -791,7 +839,7 @@ mod tests {
         let mut reply = comment("2", "tupini07");
         reply.created_at = Utc::now() + chrono::Duration::seconds(1);
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[reply],
@@ -800,6 +848,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert_eq!(deliveries.len(), 1, "got: {deliveries:?}");
     }
@@ -812,7 +861,7 @@ mod tests {
             .unwrap()
             .state = super::super::SubscriptionState::Paused;
 
-        let deliveries = plan(
+        plan(
             &mut state,
             &thread(),
             &[comment("1", "tupini07")],
@@ -821,6 +870,7 @@ mod tests {
             12,
             Utc::now(),
         );
+        let deliveries = recorded(&state);
 
         assert!(deliveries.is_empty());
         // The comment was not marked seen, so resuming picks it up rather than
@@ -945,10 +995,11 @@ mod tests {
         )
         .expect("fetching comments should succeed");
 
-        let deliveries = store::update_in(root.path(), |state| {
+        store::update_in(root.path(), |state| {
             plan(state, &thread, &comments, &login, &[], 12, Utc::now())
         })
         .unwrap();
+        let deliveries = recorded(&store::load_in(root.path()));
 
         assert!(
             deliveries.contains(&Delivery::Wake {
@@ -965,6 +1016,118 @@ mod tests {
             "agent B must not be woken by its own comment, got: {deliveries:?}"
         );
         println!("round trip OK: {deliveries:?}");
+    }
+
+    /// A real comment, then the process goes away before anything is delivered.
+    ///
+    /// The offline tests seed a notice and restart around it. This one starts where the
+    /// bug started: a comment GitHub actually issued an id for, marked seen by the same
+    /// write that planned the notice. That coupling is the whole hazard — once the
+    /// comment is seen, a lost notice is a message nobody is ever told about again — and
+    /// it only exists on the real path, where the id comes from GitHub rather than a
+    /// fixture.
+    ///
+    /// Posts a real comment on the configured thread each time it runs.
+    #[test]
+    #[ignore = "posts to a real GitHub issue; run with CST_THREADS_ROUNDTRIP=<issue url>"]
+    fn a_notice_from_a_real_comment_survives_the_process_that_planned_it() {
+        let Ok(url) = std::env::var("CST_THREADS_ROUNDTRIP") else {
+            return;
+        };
+        let thread = super::super::parse_thread_url(&url).expect("a thread URL");
+        let root = tempfile::tempdir().unwrap();
+        let login = doorbell::current_login(&thread.host).expect("gh must be logged in");
+        let token = doorbell::token_for(&thread.host).expect("gh must have a token");
+        let transport = UreqTransport::new();
+
+        store::update_in(root.path(), |state| {
+            state.subscribe("live-a", thread.clone());
+        })
+        .unwrap();
+        thread_moved(&transport, root.path(), &thread, &token).unwrap();
+
+        super::super::cli::post(
+            root.path(),
+            "live-b",
+            &url,
+            &format!(
+                "Restart-durability check at {}. Agent B is asking and then CST dies.",
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .expect("posting should succeed");
+
+        assert!(thread_moved(&transport, root.path(), &thread, &token).unwrap());
+        let comments = fetch_comments(
+            &thread,
+            root.path().to_path_buf(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("fetching comments should succeed");
+
+        store::update_in(root.path(), |state| {
+            plan(state, &thread, &comments, &login, &[], 12, Utc::now())
+        })
+        .unwrap();
+
+        // The comment is already spent: nothing will ever raise it a second time.
+        let after_planning = store::load_in(root.path());
+        assert!(
+            after_planning
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.session_id == "live-a"
+                    && comments
+                        .iter()
+                        .all(|comment| subscription.has_seen(&comment.id))),
+            "the comments must be marked seen, which is what makes losing a notice fatal"
+        );
+        assert_eq!(
+            after_planning
+                .notices
+                .iter()
+                .find(|notice| notice.session_id == "live-a")
+                .map(|notice| notice.status),
+            Some(NoticeStatus::Planned),
+            "got: {:?}",
+            after_planning.notices
+        );
+
+        // The notice reaches a composer, which is as far as it gets: Copilot is mid-turn
+        // and has not taken it. Then CST dies. Everything above this line — the queue and
+        // the fact that one had been written — was in memory before this change.
+        drop(after_planning);
+        store::update_in(root.path(), |state| {
+            state
+                .notice_mut("live-a", &thread)
+                .expect("the planned notice")
+                .status = NoticeStatus::Sent;
+        })
+        .unwrap();
+
+        store::resume_in(root.path()).expect("the next run reads the same file");
+
+        let after_restart = store::load_in(root.path());
+        let survivor = after_restart
+            .notices
+            .iter()
+            .find(|notice| notice.session_id == "live-a")
+            .expect("the notice must outlive the run that planned it");
+        assert_eq!(
+            survivor.status,
+            NoticeStatus::Planned,
+            "a notice left in a composer that no longer exists must be queued again"
+        );
+        assert!(
+            survivor.comment_url.starts_with(&format!(
+                "https://{}/{}/{}",
+                thread.host, thread.owner, thread.repo
+            )),
+            "and still point at the real comment, got: {}",
+            survivor.comment_url
+        );
+        println!("survived a restart pointing at {}", survivor.comment_url);
     }
 
     /// Three agents on one real thread: one posts, the other two hear it.
@@ -1018,10 +1181,11 @@ mod tests {
         )
         .expect("fetching comments should succeed");
 
-        let deliveries = store::update_in(root.path(), |state| {
+        store::update_in(root.path(), |state| {
             plan(state, &thread, &comments, &login, &[], 12, Utc::now())
         })
         .unwrap();
+        let deliveries = recorded(&store::load_in(root.path()));
 
         let woken: Vec<&str> = deliveries
             .iter()
