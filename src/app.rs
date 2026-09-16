@@ -580,6 +580,13 @@ pub struct QueuedWake {
     pub session_id: String,
     pub thread: crate::threads::ThreadRef,
     pub queued_at: std::time::Instant,
+    /// Written into the composer, but not yet taken by a turn.
+    ///
+    /// The entry stays here rather than being dropped at the moment it is written, so a
+    /// thread that keeps moving cannot produce a second notice about itself while the
+    /// first is still sitting unread. One outstanding notice per thread is the whole
+    /// rule; dropping the entry on write would only enforce it until the write happened.
+    pub delivered: bool,
 }
 
 pub struct App {
@@ -3436,10 +3443,25 @@ impl App {
                     );
                     return true;
                 }
+                // One notice per thread at a time. A second says nothing the first did
+                // not — the text is the same link — and queueing it only means two
+                // identical notices arriving back to back once the pane frees up.
+                //
+                // The original keeps its place in the queue rather than the newer one
+                // replacing it, so a thread that keeps moving cannot push its own
+                // deadline out and sit unheard indefinitely.
+                if self
+                    .thread_pending_wakes
+                    .iter()
+                    .any(|queued| queued.session_id == session_id && queued.thread == thread)
+                {
+                    return false;
+                }
                 self.thread_pending_wakes.push(QueuedWake {
                     session_id,
                     thread,
                     queued_at: std::time::Instant::now(),
+                    delivered: false,
                 });
                 self.flush_thread_wakes()
             }
@@ -3452,54 +3474,86 @@ impl App {
     /// so a message that landed mid-turn is delivered the moment the turn ends.
     pub fn flush_thread_wakes(&mut self) -> bool {
         let now = std::time::Instant::now();
-        let ready: Vec<(String, crate::threads::ThreadRef)> = self
+        let queued: Vec<(String, crate::threads::ThreadRef, std::time::Instant, bool)> = self
             .thread_pending_wakes
             .iter()
-            .filter(|queued| self.session_ready_for_wake(&queued.session_id))
-            .map(|queued| (queued.session_id.clone(), queued.thread.clone()))
-            .collect();
-        // Anything that has waited too long stops waiting and becomes the user's to
-        // decide about. A pane that never becomes writable — a draft left on screen, a
-        // turn that never ends — must not swallow the message in silence.
-        let expired: Vec<(String, crate::threads::ThreadRef)> = self
-            .thread_pending_wakes
-            .iter()
-            .filter(|queued| {
-                !self.session_ready_for_wake(&queued.session_id)
-                    && now.duration_since(queued.queued_at) >= Self::WAKE_PATIENCE
+            .map(|queued| {
+                (
+                    queued.session_id.clone(),
+                    queued.thread.clone(),
+                    queued.queued_at,
+                    queued.delivered,
+                )
             })
-            .map(|queued| (queued.session_id.clone(), queued.thread.clone()))
             .collect();
-        if ready.is_empty() && expired.is_empty() {
-            return false;
-        }
 
-        let mut delivered = false;
-        for (session_id, thread) in ready {
-            let outcome = self.deliver_thread_pointer(&session_id, &thread);
-            self.drop_queued_wake(&session_id, &thread);
-            if let Err(error) = outcome {
-                // The pane went away between the check and the write. Hand it to the
-                // user rather than dropping it silently.
+        let mut changed = false;
+        for (session_id, thread, queued_at, delivered) in queued {
+            if delivered {
+                // Written already. It stops taking up the slot once the composer is
+                // empty again, which is the evidence a turn took it.
+                if self.composer_is_free(&session_id) {
+                    self.drop_queued_wake(&session_id, &thread);
+                }
+                continue;
+            }
+            // Readiness is re-asked for every entry rather than decided once up front.
+            // Delivering one notice occupies that pane's composer, so the next has to
+            // wait its turn — deciding in advance is how several ended up written on
+            // top of each other and arriving as a single unreadable message.
+            if self.session_ready_for_wake(&session_id) {
+                let outcome = self.deliver_thread_pointer(&session_id, &thread);
+                if outcome.is_ok() {
+                    self.mark_wake_delivered(&session_id, &thread);
+                } else {
+                    self.drop_queued_wake(&session_id, &thread);
+                }
+                if let Err(error) = outcome {
+                    // The pane went away between the check and the write. Hand it to the
+                    // user rather than dropping it silently.
+                    self.hold_thread_message(
+                        &session_id,
+                        &thread,
+                        crate::threads::PendingReason::SessionClosed,
+                    );
+                    self.status_message = Some(format!("Could not wake the session: {error}"));
+                }
+                changed = true;
+            } else if now.duration_since(queued_at) >= Self::WAKE_PATIENCE {
+                // Waited too long and still nowhere to put it. A pane that never becomes
+                // writable — a draft left on screen, a turn that never ends — must not
+                // swallow the message in silence.
+                self.drop_queued_wake(&session_id, &thread);
                 self.hold_thread_message(
                     &session_id,
                     &thread,
                     crate::threads::PendingReason::SessionClosed,
                 );
-                self.status_message = Some(format!("Could not wake the session: {error}"));
+                changed = true;
             }
-            delivered = true;
         }
-        for (session_id, thread) in expired {
-            self.drop_queued_wake(&session_id, &thread);
-            self.hold_thread_message(
-                &session_id,
-                &thread,
-                crate::threads::PendingReason::SessionClosed,
-            );
-            delivered = true;
+        changed
+    }
+
+    /// Whether a session's composer has been emptied since a notice was written into it.
+    ///
+    /// A pane that has gone away counts as free, or its notice would sit in the queue
+    /// forever holding the slot against a thread that may well move again.
+    fn composer_is_free(&self, session_id: &str) -> bool {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
+            .is_none_or(|pane| !pane.has_draft())
+    }
+
+    fn mark_wake_delivered(&mut self, session_id: &str, thread: &crate::threads::ThreadRef) {
+        if let Some(queued) = self
+            .thread_pending_wakes
+            .iter_mut()
+            .find(|queued| queued.session_id == session_id && &queued.thread == thread)
+        {
+            queued.delivered = true;
         }
-        delivered
     }
 
     fn drop_queued_wake(&mut self, session_id: &str, thread: &crate::threads::ThreadRef) {
@@ -3643,6 +3697,7 @@ impl App {
             session_id: pending.session_id.clone(),
             thread: pending.thread.clone(),
             queued_at: std::time::Instant::now(),
+            delivered: false,
         });
         self.thread_dismiss(selected);
         self.flush_thread_wakes();

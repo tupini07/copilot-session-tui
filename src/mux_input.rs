@@ -2535,8 +2535,11 @@ mod tests {
 
         assert!(app.flush_thread_wakes(), "the wake-up is delivered now");
         assert!(
-            app.thread_pending_wakes.is_empty(),
-            "and stops waiting once delivered"
+            app.thread_pending_wakes
+                .iter()
+                .all(|queued| queued.delivered),
+            "nothing is left waiting; the entry that remains has been written and is \
+             held only until a turn takes it"
         );
     }
 
@@ -2576,14 +2579,19 @@ mod tests {
 
         app.apply_thread_delivery(wake(12));
         assert!(
-            app.thread_pending_wakes.is_empty(),
+            app.thread_pending_wakes
+                .iter()
+                .all(|queued| queued.delivered),
             "the first wake-up goes straight through"
         );
 
         // Copilot has not started a turn, so the notice is still sitting there.
         app.apply_thread_delivery(wake(13));
         assert_eq!(
-            app.thread_pending_wakes.len(),
+            app.thread_pending_wakes
+                .iter()
+                .filter(|queued| !queued.delivered)
+                .count(),
             1,
             "a second notice must not stack onto one that has not been taken"
         );
@@ -2605,7 +2613,12 @@ mod tests {
         }
 
         assert!(app.flush_thread_wakes(), "now the second one is delivered");
-        assert!(app.thread_pending_wakes.is_empty());
+        assert!(
+            app.thread_pending_wakes
+                .iter()
+                .all(|queued| queued.delivered),
+            "nothing is left waiting once the pane is free again"
+        );
     }
 
     /// A wake-up really reaches the child, not just the queue.
@@ -2750,6 +2763,104 @@ mod tests {
             app.thread_pending.len(),
             1,
             "and becomes something the user is asked about"
+        );
+    }
+
+    /// Two notices never arrive back to back, whether or not they are the same thread.
+    ///
+    /// The earlier fix stopped a second notice being *written* while the first sat
+    /// unconsumed, but the queue could still hold several and release them together:
+    /// readiness was decided once before the loop, so every entry was delivered on that
+    /// one decision. This covers both halves of that.
+    #[test]
+    fn a_queue_of_notices_is_released_one_at_a_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        push_test_pane_at(&mut app, 1, "session-a", temp.path().to_path_buf());
+        app.view = crate::app::View::Attached(1);
+        app.thread_state_root = temp.path().to_path_buf();
+
+        let wake = |number| crate::threads::watcher::Delivery::Wake {
+            session_id: "session-a".to_string(),
+            thread: crate::threads::ThreadRef {
+                host: "github.com".to_string(),
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+                number,
+                kind: crate::threads::ThreadKind::Issue,
+            },
+        };
+
+        // First goes straight through. It stays on the list, marked delivered, because
+        // being written is not the same as being read.
+        app.apply_thread_delivery(wake(12));
+        assert_eq!(app.thread_pending_wakes.len(), 1);
+        assert!(app.thread_pending_wakes[0].delivered);
+
+        // The same thread moving again adds nothing: the notice is the same link, and
+        // the first one has not been read yet.
+        app.apply_thread_delivery(wake(12));
+        app.apply_thread_delivery(wake(12));
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            1,
+            "a repeat notice for one thread should not be queued behind the first"
+        );
+
+        // Two other threads do queue, because each names somewhere different to look.
+        app.apply_thread_delivery(wake(13));
+        app.apply_thread_delivery(wake(14));
+        assert_eq!(app.thread_pending_wakes.len(), 3);
+
+        // Freeing the pane must release exactly one of them, not both at once.
+        // Timestamps have to keep climbing: the pane drops lifecycle events older than
+        // the last one it saw, so reusing them makes the second turn a no-op.
+        let mut clock = 0u64;
+        let mut free = |app: &mut App| {
+            let pane = app.mux.as_mut().unwrap().pane_mut(1).unwrap();
+            clock += 1;
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Working { timestamp: clock },
+                false,
+            );
+            clock += 1;
+            pane.apply_hook(
+                crate::events::hooks::HookLifecycleEvent::Ready { timestamp: clock },
+                false,
+            );
+            pane.confirm_hook_ready(clock, false);
+        };
+
+        // The read one drops off, exactly one more is written, and the last still waits.
+        free(&mut app);
+        app.flush_thread_wakes();
+        assert_eq!(
+            app.thread_pending_wakes.len(),
+            2,
+            "the last notice waits for its own turn rather than stacking"
+        );
+        assert_eq!(
+            app.thread_pending_wakes
+                .iter()
+                .filter(|queued| !queued.delivered)
+                .count(),
+            1,
+            "only one notice may be unread at a time"
+        );
+
+        free(&mut app);
+        app.flush_thread_wakes();
+        assert_eq!(app.thread_pending_wakes.len(), 1, "and then it arrives");
+
+        free(&mut app);
+        app.flush_thread_wakes();
+        assert!(
+            app.thread_pending_wakes.is_empty(),
+            "the list empties once the last one is read"
         );
     }
 
