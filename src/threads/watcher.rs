@@ -1018,6 +1018,118 @@ mod tests {
         println!("round trip OK: {deliveries:?}");
     }
 
+    /// A real comment, then the process goes away before anything is delivered.
+    ///
+    /// The offline tests seed a notice and restart around it. This one starts where the
+    /// bug started: a comment GitHub actually issued an id for, marked seen by the same
+    /// write that planned the notice. That coupling is the whole hazard — once the
+    /// comment is seen, a lost notice is a message nobody is ever told about again — and
+    /// it only exists on the real path, where the id comes from GitHub rather than a
+    /// fixture.
+    ///
+    /// Posts a real comment on the configured thread each time it runs.
+    #[test]
+    #[ignore = "posts to a real GitHub issue; run with CST_THREADS_ROUNDTRIP=<issue url>"]
+    fn a_notice_from_a_real_comment_survives_the_process_that_planned_it() {
+        let Ok(url) = std::env::var("CST_THREADS_ROUNDTRIP") else {
+            return;
+        };
+        let thread = super::super::parse_thread_url(&url).expect("a thread URL");
+        let root = tempfile::tempdir().unwrap();
+        let login = doorbell::current_login(&thread.host).expect("gh must be logged in");
+        let token = doorbell::token_for(&thread.host).expect("gh must have a token");
+        let transport = UreqTransport::new();
+
+        store::update_in(root.path(), |state| {
+            state.subscribe("live-a", thread.clone());
+        })
+        .unwrap();
+        thread_moved(&transport, root.path(), &thread, &token).unwrap();
+
+        super::super::cli::post(
+            root.path(),
+            "live-b",
+            &url,
+            &format!(
+                "Restart-durability check at {}. Agent B is asking and then CST dies.",
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .expect("posting should succeed");
+
+        assert!(thread_moved(&transport, root.path(), &thread, &token).unwrap());
+        let comments = fetch_comments(
+            &thread,
+            root.path().to_path_buf(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("fetching comments should succeed");
+
+        store::update_in(root.path(), |state| {
+            plan(state, &thread, &comments, &login, &[], 12, Utc::now())
+        })
+        .unwrap();
+
+        // The comment is already spent: nothing will ever raise it a second time.
+        let after_planning = store::load_in(root.path());
+        assert!(
+            after_planning
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.session_id == "live-a"
+                    && comments
+                        .iter()
+                        .all(|comment| subscription.has_seen(&comment.id))),
+            "the comments must be marked seen, which is what makes losing a notice fatal"
+        );
+        assert_eq!(
+            after_planning
+                .notices
+                .iter()
+                .find(|notice| notice.session_id == "live-a")
+                .map(|notice| notice.status),
+            Some(NoticeStatus::Planned),
+            "got: {:?}",
+            after_planning.notices
+        );
+
+        // The notice reaches a composer, which is as far as it gets: Copilot is mid-turn
+        // and has not taken it. Then CST dies. Everything above this line — the queue and
+        // the fact that one had been written — was in memory before this change.
+        drop(after_planning);
+        store::update_in(root.path(), |state| {
+            state
+                .notice_mut("live-a", &thread)
+                .expect("the planned notice")
+                .status = NoticeStatus::Sent;
+        })
+        .unwrap();
+
+        store::resume_in(root.path()).expect("the next run reads the same file");
+
+        let after_restart = store::load_in(root.path());
+        let survivor = after_restart
+            .notices
+            .iter()
+            .find(|notice| notice.session_id == "live-a")
+            .expect("the notice must outlive the run that planned it");
+        assert_eq!(
+            survivor.status,
+            NoticeStatus::Planned,
+            "a notice left in a composer that no longer exists must be queued again"
+        );
+        assert!(
+            survivor.comment_url.starts_with(&format!(
+                "https://{}/{}/{}",
+                thread.host, thread.owner, thread.repo
+            )),
+            "and still point at the real comment, got: {}",
+            survivor.comment_url
+        );
+        println!("survived a restart pointing at {}", survivor.comment_url);
+    }
+
     /// Three agents on one real thread: one posts, the other two hear it.
     ///
     /// The offline test covers the same rule, but not what happens when three
