@@ -15,7 +15,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::theme::Theme;
-use crate::threads::PendingDelivery;
+use crate::threads::Notice;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let Some(selected) = app.thread_inbox else {
@@ -86,12 +86,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// The reason is spelled out because the three are not interchangeable — a comment from
 /// a stranger is a very different thing to accept than a reply to your own agent, and
 /// the user is about to decide whether to start a process because of it.
-fn entry_lines<'a>(
-    app: &App,
-    pending: &PendingDelivery,
-    selected: bool,
-    theme: Theme,
-) -> Vec<Line<'a>> {
+fn entry_lines<'a>(app: &App, pending: &Notice, selected: bool, theme: Theme) -> Vec<Line<'a>> {
     let marker = if selected { "> " } else { "  " };
     let name = app
         .sessions
@@ -109,11 +104,14 @@ fn entry_lines<'a>(
     // Naming who wrote it, because "someone else" cannot answer the question being
     // asked: whether to let this person's words start work on your machine. It is also
     // the name to add to the trusted list if the answer is yes.
-    let reason = match (&pending.author, pending.reason) {
-        (Some(author), crate::threads::PendingReason::ForeignAuthor) => {
+    let reason = match (&pending.author, pending.reason()) {
+        (Some(author), Some(crate::threads::PendingReason::ForeignAuthor)) => {
             format!("  (written by {author})")
         }
-        _ => format!("  ({})", pending.reason.describe()),
+        (_, Some(reason)) => format!("  ({})", reason.describe()),
+        // Only notices waiting on the user reach this list, so this is unreachable in
+        // practice; saying nothing beats asserting in a draw call.
+        (_, None) => String::new(),
     };
 
     vec![
@@ -140,8 +138,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn pending(reason: PendingReason) -> PendingDelivery {
-        PendingDelivery {
+    fn pending(reason: PendingReason) -> Notice {
+        Notice {
             session_id: "abcdef123456".to_string(),
             thread: ThreadRef {
                 host: "github.com".to_string(),
@@ -151,9 +149,9 @@ mod tests {
                 kind: ThreadKind::Issue,
             },
             comment_url: "https://github.com/microsoft/maps/issues/2366".to_string(),
-            reason,
+            status: crate::threads::NoticeStatus::Waiting { reason },
             author: None,
-            arrived_at: chrono::Utc::now(),
+            planned_at: chrono::Utc::now(),
         }
     }
 

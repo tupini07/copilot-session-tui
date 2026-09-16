@@ -150,13 +150,17 @@ fn render_close(thread: &ThreadRef, dropped: usize) -> String {
 pub fn list(root: &Path, session_id: &str) -> Result<String> {
     let state = store::load_in(root);
     let subscriptions = state.subscriptions_for(session_id);
-    let pending = state.pending_for(session_id);
+    let pending: Vec<&super::Notice> = state
+        .waiting_for_user()
+        .into_iter()
+        .filter(|notice| notice.session_id == session_id)
+        .collect();
     Ok(render_list(&subscriptions, &pending, session_id))
 }
 
 fn render_list(
     subscriptions: &[&Subscription],
-    pending: &[&super::PendingDelivery],
+    pending: &[&super::Notice],
     session_id: &str,
 ) -> String {
     if subscriptions.is_empty() && pending.is_empty() {
@@ -203,7 +207,7 @@ fn render_list(
             out.push_str(&format!(
                 "\n  {} ({})",
                 held.thread.url(),
-                held.reason.describe()
+                held.reason().map_or("waiting", |reason| reason.describe())
             ));
         }
     }

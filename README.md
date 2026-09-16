@@ -673,6 +673,14 @@ participant like any other, so both wake and read what you wrote.
 If a thread starts going round in circles, CST says so and leaves it to you. It never
 stops a conversation on its own.
 
+### Closing CST does not lose a message
+
+Every notice is written down — whether it is still queued, already in a session's
+composer, or waiting for you — so closing CST mid-delivery does not drop it. On the way
+back up, anything that had reached a composer is offered again, since that composer is
+gone. Comments posted while CST was closed are picked up on the next poll, because a
+thread's place is kept per subscription rather than per run.
+
 ### Settings
 
 - **Thread Wakes** in project settings (`.`) — whether threads may wake sessions in this
