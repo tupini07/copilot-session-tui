@@ -341,6 +341,12 @@ impl Pane {
     /// arrows, a newline chord — leaves the draft standing, because the cost of the two
     /// mistakes is not symmetric. Believing in a draft that is not there delays a
     /// wake-up; believing there is none when there is loses the user's words.
+    ///
+    /// That asymmetry argues for *keeping* a draft, not for inventing one. Backspace and
+    /// delete can only ever take text away, so they leave the flag exactly as they found
+    /// it: they neither start a draft nor prove one has ended. Treating them as typing
+    /// meant one stray backspace on an empty composer marked the tab `✎` and held any
+    /// thread notice for that session until it timed out and went to the inbox instead.
     pub fn note_user_key(&mut self, key: &crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -355,7 +361,9 @@ impl Pane {
             KeyCode::Char(_) => !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-            KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete | KeyCode::Tab => true,
+            // Tab stays: Copilot completes on it, which puts text there.
+            KeyCode::Enter | KeyCode::Tab => true,
+            // Backspace, delete, arrows, everything else: no new text, so no change.
             _ => false,
         };
         if composes {
@@ -1553,6 +1561,17 @@ mod tests {
             "sleep 30"
         });
         let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+
+        // Backspace on an empty composer deleted nothing, so there is nothing to keep.
+        // It used to count as typing, which marked the tab and held that session's
+        // thread notices until they timed out into the inbox.
+        pane.note_user_key(&key(KeyCode::Backspace));
+        assert!(
+            !pane.has_draft(),
+            "backspace cannot put text into an empty composer"
+        );
+        pane.note_user_key(&key(KeyCode::Delete));
+        assert!(!pane.has_draft(), "nor can delete");
 
         pane.note_user_key(&key(KeyCode::Char('h')));
         pane.note_user_key(&key(KeyCode::Backspace));
