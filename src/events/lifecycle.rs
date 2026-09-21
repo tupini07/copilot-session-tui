@@ -13,12 +13,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 /// How long the event log must stay silent before the session counts as idle.
 ///
-/// Measured against real logs rather than guessed: while a turn is running, consecutive
-/// records land a few hundredths of a second apart, and the only long silences come from
-/// a tool call in flight — which is checked separately. Fifteen seconds is therefore
-/// orders of magnitude beyond anything a working session produces, while still correcting
-/// a wrong spinner soon enough to be believed.
-const QUIET_AFTER: Duration = Duration::from_secs(15);
+/// Measured rather than guessed, and the measurement was not what I first assumed. A
+/// working turn usually writes constantly — consecutive records land hundredths of a
+/// second apart — but not always: replaying 363 real turns from one session found 261
+/// silences of 15 seconds or more with no tool call in flight, the longest over ten
+/// minutes. Whatever those are, they are not idleness.
+///
+/// Sixty seconds cuts that to 40, and the cost of waiting is small: the bug this exists
+/// to correct held a spinner for 72 minutes, so a minute is still two orders of magnitude
+/// better while being far harder to trip by accident.
+const QUIET_AFTER: Duration = Duration::from_secs(60);
 const ANCHOR_LEN: u64 = 64;
 const MAX_RECORD_PREFIX: usize = 64 * 1024;
 const TOOL_START: &[u8] = b"tool.execution_start";

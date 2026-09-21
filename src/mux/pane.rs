@@ -102,6 +102,14 @@ pub struct Pane {
     /// working for as long as the shell lived. A belief held on this evidence alone is
     /// given up when the session event log proves nothing is running.
     working_from_raw_progress: bool,
+    /// Progress sequences have been caught claiming a turn the event log denies.
+    ///
+    /// Retiring the spinner once is not enough on its own: if the child re-emits its
+    /// progress sequence — and a spinner being animated is exactly the sort of thing that
+    /// does — the next one promotes the pane straight back to working, and the tab blinks
+    /// every quiet period instead of settling. Once the log has proved the session idle,
+    /// progress alone stops being grounds to start a turn until a hook vouches for one.
+    raw_progress_discredited: bool,
     raw_completion_pending: bool,
     hook_completion_window: bool,
     attention_resolved_at: u64,
@@ -306,6 +314,7 @@ impl Pane {
             hook_ready_pending: None,
             hook_ready_raw_generation: 0,
             working_from_raw_progress: false,
+            raw_progress_discredited: false,
             raw_completion_pending: false,
             hook_completion_window: false,
             attention_resolved_at: 0,
@@ -436,6 +445,7 @@ impl Pane {
         if (self.hook_ready_pending.is_none() || continuation_after_clear)
             && self.hook_state == Some(HookActivity::Idle)
             && compatible_working
+            && !self.raw_progress_discredited
         {
             self.hook_ready_pending = None;
             self.hook_state = Some(HookActivity::Working);
@@ -703,6 +713,9 @@ impl Pane {
             // working state resting on those sequences alone is given up: a hook said so
             // outranks this, which is what keeps a long silent build spinning.
             LifecycleEvent::Quiet => {
+                // Whatever the child is animating, it is not a turn. Progress alone stops
+                // being grounds to start one until a hook vouches for activity again.
+                self.raw_progress_discredited = true;
                 if self.working_from_raw_progress {
                     self.working_from_raw_progress = false;
                     self.hook_state = Some(HookActivity::Idle);
@@ -728,6 +741,7 @@ impl Pane {
         // This is what keeps a genuinely working session spinning through a long silent
         // tool call: `Quiet` only ever gives up a belief nothing but the animation backed.
         self.working_from_raw_progress = false;
+        self.raw_progress_discredited = false;
         match event {
             HookLifecycleEvent::SessionStarted { .. } => {
                 // Dropping to `None` here means "no lifecycle authority yet, fall back
@@ -2096,6 +2110,21 @@ mod tests {
             "a session writing nothing at all is not running a turn"
         );
         assert!(!pane.is_working());
+
+        // And it stays retired. Clearing once would not have been enough: the shell is
+        // still attached and the child goes on animating, so the next sequence would
+        // promote the pane straight back and the tab would blink once a minute forever.
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear,
+            "progress the log has already contradicted does not get a second hearing"
+        );
+
+        // A real turn starts. The hook is authority and restores normal service.
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 3 }, false);
+        assert!(pane.is_working(), "a hook is still believed immediately");
         pane.shutdown().unwrap();
     }
 
