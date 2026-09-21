@@ -10,6 +10,19 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// How long the event log must stay silent before the session counts as idle.
+///
+/// Measured rather than guessed, and the measurement was not what I first assumed. A
+/// working turn usually writes constantly — consecutive records land hundredths of a
+/// second apart — but not always: replaying 363 real turns from one session found 261
+/// silences of 15 seconds or more with no tool call in flight, the longest over ten
+/// minutes. Whatever those are, they are not idleness.
+///
+/// Sixty seconds cuts that to 40, and the cost of waiting is small: the bug this exists
+/// to correct held a spinner for 72 minutes, so a minute is still two orders of magnitude
+/// better while being far harder to trip by accident.
+const QUIET_AFTER: Duration = Duration::from_secs(60);
 const ANCHOR_LEN: u64 = 64;
 const MAX_RECORD_PREFIX: usize = 64 * 1024;
 const TOOL_START: &[u8] = b"tool.execution_start";
@@ -31,6 +44,16 @@ pub enum LifecycleEvent {
         tool_call_id: String,
         kind: InputKind,
     },
+    /// Copilot has written nothing for a while and has no tool call in flight.
+    ///
+    /// The evidence that a session is genuinely idle, as opposed to merely looking
+    /// idle. A working session writes to this log constantly — consecutive records are
+    /// hundredths of a second apart — so silence with nothing outstanding means no turn
+    /// is running, whatever the terminal's progress sequences claim.
+    ///
+    /// Repeated while the quiet lasts rather than sent once, because whoever needs it
+    /// may not have needed it yet when the quiet began.
+    Quiet,
     Reset,
 }
 
@@ -113,6 +136,8 @@ impl LifecycleMonitor {
         let worker_stop = Arc::clone(&stop);
         let mut tail = LifecycleTail::from_baseline(path.into(), baseline);
         let worker = thread::spawn(move || {
+            let mut last_growth = std::time::Instant::now();
+            let mut last_quiet = None::<std::time::Instant>;
             while !worker_stop.load(Ordering::Acquire) {
                 match tail.poll(&mut callback) {
                     Ok(true) => {}
@@ -120,6 +145,20 @@ impl LifecycleMonitor {
                     // A missing, concurrently replaced, or temporarily unreadable
                     // file is retried on the next poll.
                     Err(_) => {}
+                }
+
+                if tail.advanced {
+                    last_growth = std::time::Instant::now();
+                    last_quiet = None;
+                } else if should_report_quiet(
+                    tail.outstanding_tools,
+                    last_growth.elapsed(),
+                    last_quiet.map(|sent: std::time::Instant| sent.elapsed()),
+                ) {
+                    last_quiet = Some(std::time::Instant::now());
+                    if !callback(LifecycleEvent::Quiet) {
+                        break;
+                    }
                 }
 
                 if worker_stop.load(Ordering::Acquire) {
@@ -198,6 +237,18 @@ struct LifecycleTail {
     pending: HashMap<String, InputKind>,
     seen_starts: HashSet<String>,
     seen_completions: HashSet<String>,
+    /// Bytes arrived on the last poll, which is what "Copilot is doing something" means.
+    advanced: bool,
+    /// Tool calls started but not yet finished.
+    ///
+    /// A count rather than a set of ids: extracting every id would mean JSON-parsing
+    /// every record in a log that runs to six figures, which is exactly what
+    /// `candidate_kind` exists to avoid. Counting needs only the leading `type`, which
+    /// is already read for every line.
+    ///
+    /// Signed, because a log CST started reading partway through can complete a tool it
+    /// never saw start. Going negative is harmless — it means the same thing as zero.
+    outstanding_tools: i64,
 }
 
 impl LifecycleTail {
@@ -223,6 +274,8 @@ impl LifecycleTail {
             pending: HashMap::new(),
             seen_starts: HashSet::new(),
             seen_completions: HashSet::new(),
+            advanced: false,
+            outstanding_tools: 0,
         }
     }
 
@@ -230,6 +283,9 @@ impl LifecycleTail {
     where
         F: FnMut(LifecycleEvent) -> bool,
     {
+        // Cleared here rather than by the caller, so the flag always describes this poll
+        // and cannot be left set by whoever looked last.
+        self.advanced = false;
         let mut file = match File::open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -241,6 +297,7 @@ impl LifecycleTail {
                     self.pending.clear();
                     self.seen_starts.clear();
                     self.seen_completions.clear();
+                    self.outstanding_tools = 0;
                     return Ok(callback(LifecycleEvent::Reset));
                 }
                 return Ok(true);
@@ -256,12 +313,14 @@ impl LifecycleTail {
             self.pending.clear();
             self.seen_starts.clear();
             self.seen_completions.clear();
+            self.outstanding_tools = 0;
             self.reset_to_end(&mut file, len, identity)?;
             return Ok(callback(LifecycleEvent::Reset));
         }
         self.identity = Some(identity);
 
         if len > self.offset {
+            self.advanced = true;
             file.seek(SeekFrom::Start(self.offset))?;
             let mut remaining = len - self.offset;
             let mut chunk = [0_u8; 64 * 1024];
@@ -297,6 +356,7 @@ impl LifecycleTail {
                     &mut self.pending,
                     &mut self.seen_starts,
                     &mut self.seen_completions,
+                    &mut self.outstanding_tools,
                     callback,
                 ) {
                     return false;
@@ -318,6 +378,7 @@ impl LifecycleTail {
                         &mut self.pending,
                         &mut self.seen_starts,
                         &mut self.seen_completions,
+                        &mut self.outstanding_tools,
                         callback,
                     ) {
                         return false;
@@ -329,6 +390,7 @@ impl LifecycleTail {
                         &mut self.pending,
                         &mut self.seen_starts,
                         &mut self.seen_completions,
+                        &mut self.outstanding_tools,
                         callback,
                     ) {
                         return false;
@@ -400,11 +462,13 @@ fn record_line<F>(
     pending: &mut HashMap<String, InputKind>,
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
+    outstanding_tools: &mut i64,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
+    count_tool(line, outstanding_tools);
     if candidate_kind(line, pending).is_none() {
         return true;
     }
@@ -427,11 +491,13 @@ fn record_oversized_prefix<F>(
     pending: &mut HashMap<String, InputKind>,
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
+    outstanding_tools: &mut i64,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
+    count_tool(prefix, outstanding_tools);
     if candidate_kind(prefix, pending).is_none() {
         return true;
     }
@@ -498,6 +564,38 @@ where
 enum CandidateKind {
     Start,
     Complete,
+}
+
+/// Whether the session has been quiet long enough to say so, and is due another reminder.
+///
+/// Split out from the worker loop so the rule can be tested without waiting real seconds
+/// for it. Re-reports rather than firing once, because the state this corrects may only
+/// be entered *after* the quiet began: a progress sequence arriving a minute into the
+/// silence would otherwise pin the pane to working with no further quiet ever announced.
+fn should_report_quiet(
+    outstanding_tools: i64,
+    since_growth: Duration,
+    since_last_report: Option<Duration>,
+) -> bool {
+    // A tool call in flight explains any amount of silence. Builds and test runs write
+    // nothing for minutes at a time, and that is a working session, not an idle one.
+    if outstanding_tools > 0 {
+        return false;
+    }
+    since_growth >= QUIET_AFTER && since_last_report.is_none_or(|sent| sent >= QUIET_AFTER)
+}
+
+/// Keep a running count of tool calls in flight, reading only the leading `type`.
+///
+/// Deliberately blind to which tool it is. The question being answered is "could this
+/// session be busy in a way that writes nothing?", and a long build is exactly as silent
+/// as a long test run.
+fn count_tool(line: &[u8], outstanding_tools: &mut i64) {
+    match leading_event_type(line) {
+        Some(TOOL_START) => *outstanding_tools += 1,
+        Some(TOOL_COMPLETE) => *outstanding_tools -= 1,
+        _ => {}
+    }
 }
 
 fn candidate_kind(line: &[u8], pending: &HashMap<String, InputKind>) -> Option<CandidateKind> {
@@ -626,6 +724,62 @@ mod tests {
             })
             .unwrap());
         events
+    }
+
+    /// Tool calls are counted whatever tool they are, not just the ones that block.
+    ///
+    /// The count is what stops a long build being mistaken for an idle session, so it has
+    /// to include the tools nothing else here cares about — `candidate_kind` filters those
+    /// out before any JSON is parsed, and the count has to survive that filter.
+    #[test]
+    fn every_tool_counts_towards_being_busy_not_only_the_blocking_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append(&path, "{\"type\":\"session.start\"}\n");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+        poll(&mut tail);
+        assert_eq!(tail.outstanding_tools, 0);
+
+        append(&path, &(start("build-1", "bash") + "\n"));
+        poll(&mut tail);
+        assert_eq!(
+            tail.outstanding_tools, 1,
+            "a shell command is not a question, and still means the session is busy"
+        );
+        assert!(tail.advanced, "bytes arrived");
+
+        append(&path, &(complete("build-1") + "\n"));
+        poll(&mut tail);
+        assert_eq!(tail.outstanding_tools, 0);
+
+        poll(&mut tail);
+        assert!(!tail.advanced, "nothing new was written");
+    }
+
+    /// The rule that decides a session is idle, without waiting real seconds for it.
+    #[test]
+    fn quiet_needs_silence_and_nothing_in_flight_and_then_repeats() {
+        let long = QUIET_AFTER + Duration::from_secs(1);
+        let short = QUIET_AFTER / 2;
+
+        assert!(!should_report_quiet(0, short, None), "barely quiet yet");
+        assert!(should_report_quiet(0, long, None), "silent and idle");
+        assert!(
+            !should_report_quiet(1, long, None),
+            "a tool in flight explains any silence; builds write nothing for minutes"
+        );
+        assert!(
+            should_report_quiet(-1, long, None),
+            "a log joined mid-run can complete a tool it never saw start"
+        );
+        assert!(
+            !should_report_quiet(0, long, Some(short)),
+            "already said so recently"
+        );
+        assert!(
+            should_report_quiet(0, long, Some(long)),
+            "said again, because whoever needs it may have only just started needing it"
+        );
     }
 
     #[test]

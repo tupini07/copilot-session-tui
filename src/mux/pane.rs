@@ -95,6 +95,21 @@ pub struct Pane {
     hook_timestamp: u64,
     hook_ready_pending: Option<u64>,
     hook_ready_raw_generation: u64,
+    /// The working state came from progress sequences alone, with no hook to back it.
+    ///
+    /// Copilot animates its own progress for reasons that are not a turn — waiting on an
+    /// attached background shell, most visibly — and that animation used to pin a pane to
+    /// working for as long as the shell lived. A belief held on this evidence alone is
+    /// given up when the session event log proves nothing is running.
+    working_from_raw_progress: bool,
+    /// Progress sequences have been caught claiming a turn the event log denies.
+    ///
+    /// Retiring the spinner once is not enough on its own: if the child re-emits its
+    /// progress sequence — and a spinner being animated is exactly the sort of thing that
+    /// does — the next one promotes the pane straight back to working, and the tab blinks
+    /// every quiet period instead of settling. Once the log has proved the session idle,
+    /// progress alone stops being grounds to start a turn until a hook vouches for one.
+    raw_progress_discredited: bool,
     raw_completion_pending: bool,
     hook_completion_window: bool,
     attention_resolved_at: u64,
@@ -298,6 +313,8 @@ impl Pane {
             hook_timestamp: 0,
             hook_ready_pending: None,
             hook_ready_raw_generation: 0,
+            working_from_raw_progress: false,
+            raw_progress_discredited: false,
             raw_completion_pending: false,
             hook_completion_window: false,
             attention_resolved_at: 0,
@@ -428,6 +445,7 @@ impl Pane {
         if (self.hook_ready_pending.is_none() || continuation_after_clear)
             && self.hook_state == Some(HookActivity::Idle)
             && compatible_working
+            && !self.raw_progress_discredited
         {
             self.hook_ready_pending = None;
             self.hook_state = Some(HookActivity::Working);
@@ -437,6 +455,10 @@ impl Pane {
             self.error_sent_in_cycle = false;
             self.raw_completion_pending = false;
             self.hook_completion_window = false;
+            // Remembered as unconfirmed. The hooks have already called this turn over,
+            // so the only thing saying otherwise is the child's own animation — which it
+            // also runs while waiting on a background shell that may never exit.
+            self.working_from_raw_progress = true;
             cycle_started = true;
         }
         self.progress_state = state;
@@ -686,6 +708,25 @@ impl Pane {
                 }
                 None
             }
+            // Copilot has written nothing for a while and has no tool call running, so
+            // whatever its progress sequences are animating, it is not a turn. Only a
+            // working state resting on those sequences alone is given up: a hook said so
+            // outranks this, which is what keeps a long silent build spinning.
+            LifecycleEvent::Quiet => {
+                // Whatever the child is animating, it is not a turn. Progress alone stops
+                // being grounds to start one until a hook vouches for activity again.
+                self.raw_progress_discredited = true;
+                if self.working_from_raw_progress {
+                    self.working_from_raw_progress = false;
+                    self.hook_state = Some(HookActivity::Idle);
+                    self.working = false;
+                    self.progress_state = crate::host_terminal::ProgressState::Clear;
+                    self.hook_ready_pending = None;
+                    self.hook_completion_window = false;
+                    self.raw_completion_pending = false;
+                }
+                None
+            }
         }
     }
 
@@ -696,6 +737,11 @@ impl Pane {
             return PaneHookOutcome::default();
         }
         self.hook_timestamp = timestamp;
+        // A hook has spoken, so the state no longer rests on progress sequences alone.
+        // This is what keeps a genuinely working session spinning through a long silent
+        // tool call: `Quiet` only ever gives up a belief nothing but the animation backed.
+        self.working_from_raw_progress = false;
+        self.raw_progress_discredited = false;
         match event {
             HookLifecycleEvent::SessionStarted { .. } => {
                 // Dropping to `None` here means "no lifecycle authority yet, fall back
@@ -2017,6 +2063,108 @@ mod tests {
         assert_eq!(
             pane.effective_progress_state(),
             crate::host_terminal::ProgressState::Clear
+        );
+        pane.shutdown().unwrap();
+    }
+
+    /// The reported bug: a spinner that outlived its turn by over an hour.
+    ///
+    /// Copilot finished, `agentStop` fired, and CST went idle — and then Copilot went on
+    /// animating progress because an attached background shell (a web server, in the
+    /// report) was still alive. That animation flipped the pane back to working, where it
+    /// stayed for 72 minutes: nothing returns a pane to idle except another ready hook,
+    /// and no further hook fires when no turn is running.
+    #[test]
+    fn a_background_shell_animating_progress_does_not_pin_the_pane_to_working() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(53, program, args), 24, 80, tx).unwrap();
+
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        pane.confirm_hook_ready(2, false);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear,
+            "the turn is over"
+        );
+
+        // The shell is still attached, so Copilot keeps drawing its spinner.
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate,
+            "progress after a stop is still taken as a turn resuming, which it may be"
+        );
+
+        // The event log settles it: Copilot has written nothing and is running no tool.
+        pane.apply_lifecycle(LifecycleEvent::Quiet);
+
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear,
+            "a session writing nothing at all is not running a turn"
+        );
+        assert!(!pane.is_working());
+
+        // And it stays retired. Clearing once would not have been enough: the shell is
+        // still attached and the child goes on animating, so the next sequence would
+        // promote the pane straight back and the tab would blink once a minute forever.
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear,
+            "progress the log has already contradicted does not get a second hearing"
+        );
+
+        // A real turn starts. The hook is authority and restores normal service.
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 3 }, false);
+        assert!(pane.is_working(), "a hook is still believed immediately");
+        pane.shutdown().unwrap();
+    }
+
+    /// The guard on the fix: silence is not idleness while a tool is running.
+    ///
+    /// A build or a test run writes nothing to the event log for minutes — I measured
+    /// gaps up to 52 minutes with a tool call outstanding — so quiet must never cancel a
+    /// working state that a hook put there. Only a belief resting on progress sequences
+    /// alone is given up.
+    #[test]
+    fn quiet_does_not_stop_the_spinner_on_a_turn_the_hooks_vouched_for() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(54, program, args), 24, 80, tx).unwrap();
+
+        // Get the pane into the state the fix targets first, so the clear is what is
+        // under test and not merely the initial value of the flag.
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        pane.confirm_hook_ready(2, false);
+        pane.record_progress_state(crate::host_terminal::ProgressState::Indeterminate);
+
+        // Now a real turn starts. The hook is authority, and it outranks the guess the
+        // progress sequence produced a moment ago.
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 3 }, false);
+        assert!(pane.is_working());
+
+        pane.apply_lifecycle(LifecycleEvent::Quiet);
+
+        assert!(
+            pane.is_working(),
+            "a long silent tool call is still a running turn"
+        );
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate
         );
         pane.shutdown().unwrap();
     }
