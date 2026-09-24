@@ -3,6 +3,13 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.33.0 - 2026-09-24
+
+- Note: a turn that finishes while you are watching its pane no longer sends a notification.
+- A tab no longer keeps spinning after its turn ended while a background shell is still running.
+- A stray backspace with nothing typed no longer marks a tab as having an unsent draft.
+- A thread notice now survives restarting CST instead of being lost with the comment that caused it.
+
 ## v0.32.1 - 2026-09-16
 
 - Thread notices arrive one at a time, instead of several stacked into a single message.
