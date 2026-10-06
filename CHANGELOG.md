@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.34.0 - 2026-10-06
+
+- Sessions can run inside tmux and keep working after CST exits or SSH drops (Linux and macOS).
+- Resume a session persistently with t, start one with m, or one in a fresh worktree with M.
+- Closing a tmux-backed tab only detaches it; X ends the session for good after a confirmation.
+- Restart a crashed or exited session in place by pressing r in its pane.
+- Pressing n now asks whether the session should run in the project as-is or in an isolated worktree.
+- The footer only shows keys that can do something right now.
+- cst doctor reports whether tmux is available for persistent sessions.
+
 ## v0.33.1 - 2026-10-02
 
 - Ctrl+click a link in a session to open it, including links that show text instead of an address.
