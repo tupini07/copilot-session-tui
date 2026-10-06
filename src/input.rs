@@ -1,12 +1,13 @@
 #[cfg(test)]
 use crate::app::SettingsSection;
 use crate::app::{
-    App, DeleteTarget, Mode, NewSessionRequest, PendingWorktree, SettingsEditField, TakeoverTarget,
-    View,
+    App, DeleteTarget, Mode, NewSessionRequest, PendingTmuxLaunch, PendingWorktree,
+    SettingsEditField, TakeoverTarget, View, WorktreeLaunchTarget,
 };
 use crate::config;
 use crate::session::loader;
 use crate::session::manager;
+use crate::session::tmux;
 use crate::session::worktree;
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -23,11 +24,89 @@ pub fn handle_input(app: &mut App) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+pub(crate) fn handle_end_tmux_confirm(app: &mut App, key: KeyCode) {
+    let Some(reference) = app.confirm_end_tmux.clone() else {
+        return;
+    };
+    if !matches!(
+        key,
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+    ) {
+        app.confirm_end_tmux = None;
+        app.status_message = Some("Persistent session kept running".to_string());
+        return;
+    }
+
+    let pane_id = app
+        .mux
+        .as_ref()
+        .and_then(|mux| mux.pane_for_session(&reference.session_id));
+    // Kill first: tearing the workspace panels down before a kill that then fails
+    // would discard them for a session that is still running.
+    match tmux::kill(&reference) {
+        Ok(()) => {
+            app.forget_tmux_session(&reference.session_id);
+            if let Some(session) = app
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == reference.session_id)
+            {
+                session.is_active = false;
+            }
+            let panels_cleared = match pane_id {
+                Some(pane_id) => app.forget_workspace_panels(pane_id),
+                None => true,
+            };
+            if panels_cleared {
+                if let (Some(mux), Some(pane_id)) = (app.mux.as_mut(), pane_id) {
+                    mux.remove(pane_id);
+                }
+                app.status_message = Some(format!(
+                    "Ended persistent tmux session '{}'",
+                    reference.tmux_session
+                ));
+            }
+            // On a failed scratchpad save the pane stays, showing the exited session,
+            // and the save error already on the status line explains why.
+            crate::mux_input::sync_workspace_panels(app);
+            crate::mux_input::sync_view(app);
+        }
+        Err(error) => {
+            app.confirm_end_tmux = None;
+            app.status_message = Some(format!("Cannot end persistent tmux session: {error}"));
+        }
+    }
+}
+
+pub(crate) fn request_end_tmux_session(app: &mut App, session_id: &str) {
+    let Some(reference) = app.tmux_session_for(session_id).cloned() else {
+        app.status_message = Some("This session is not backed by tmux".to_string());
+        return;
+    };
+    app.confirm_end_tmux = Some(reference);
+}
+
+fn request_end_selected_tmux_session(app: &mut App) {
+    let Some(session_id) = app.selected_session().map(|session| session.id.clone()) else {
+        return;
+    };
+    request_end_tmux_session(app, &session_id);
+}
+
 /// Apply an already-read terminal event to the session list UI.
 ///
 /// Split out from `handle_input` so the multiplexer's event thread — which owns the
 /// only reader of the terminal — can route events here instead of polling separately.
 pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    if app.confirm_end_tmux.is_some() {
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                handle_end_tmux_confirm(app, key.code);
+            }
+        }
+        return Ok(());
+    }
+
     if app.confirm_update_restart {
         if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Press {
@@ -387,11 +466,11 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('x') => {
             let index = app.pane_selected.min(count - 1);
-            let (id, title) = app
+            let (id, title, persistent) = app
                 .mux
                 .as_ref()
                 .and_then(|mux| mux.panes.get(index))
-                .map(|pane| (pane.id, pane.title.clone()))
+                .map(|pane| (pane.id, pane.title.clone(), app.pane_is_tmux_backed(pane)))
                 .expect("pane index checked above");
             if !app.forget_workspace_panels(id) {
                 return;
@@ -403,14 +482,43 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
                 app.mode = Mode::Normal;
             }
             app.view = View::List;
-            app.status_message = Some(format!("Ended '{title}'"));
+            app.status_message = Some(if persistent {
+                format!("Detached '{title}'; tmux session is still running")
+            } else {
+                format!("Ended '{title}'")
+            });
         }
         KeyCode::Esc | KeyCode::Char('q') => {
             app.mode = Mode::Normal;
         }
+        // Last on purpose, so a configured end key can never shadow a built-in.
+        key if app.tmux_support.is_available() && app.config.tmux_keys.matches_end_session(key) => {
+            let index = app.pane_selected.min(count - 1);
+            let session_id = app
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.panes.get(index))
+                .map(|pane| pane.session_id.clone())
+                .expect("pane index checked above");
+            request_end_tmux_session(app, &session_id);
+        }
         _ => {}
     }
 }
+
+/// Every character `handle_pane_list` above claims. The configured tmux end key — the
+/// one tmux shortcut that also fires in the pane switcher — is validated against this
+/// and matched after these, so drift here makes a configured key inert, never hijacked.
+pub(crate) const PANE_LIST_COMMAND_KEYS: &[char] = &[
+    'k', 'j', 'x', 'q', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+];
+
+/// Every character `handle_normal` below claims in list mode. All four configured tmux
+/// shortcuts are validated against this and matched after these.
+pub(crate) const LIST_COMMAND_KEYS: &[char] = &[
+    'q', 'k', 'j', '/', 'r', 'e', 'g', 'T', ' ', 'd', 'f', 'p', 's', 'H', 'c', 'n', 'N', '?', ',',
+    '.', 'u',
+];
 
 fn handle_normal(app: &mut App, key: KeyCode) {
     // A grabbed favorite takes over the arrow keys, so this runs first.
@@ -523,7 +631,27 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('.') => begin_project_settings(app),
         KeyCode::Char('u') => app.request_update(),
-        _ => {}
+        // Configured tmux shortcuts come last on purpose: whatever validation let
+        // through, a configured key can shadow nothing — at worst it is inert.
+        _ => handle_tmux_shortcut(app, key),
+    }
+}
+
+/// The session-list tmux shortcuts, reachable only for keys no built-in command claims.
+fn handle_tmux_shortcut(app: &mut App, key: KeyCode) {
+    if !app.tmux_support.is_available() {
+        // Where tmux cannot work these keys stay exactly as inert as they are on a
+        // build without the feature, rather than answering every press with an error.
+        return;
+    }
+    if app.config.tmux_keys.matches_new_session(key) {
+        start_tmux_session(app);
+    } else if app.config.tmux_keys.matches_resume_session(key) {
+        resume_selected_in_tmux(app);
+    } else if app.config.tmux_keys.matches_new_worktree(key) {
+        begin_tmux_worktree_session(app);
+    } else if app.config.tmux_keys.matches_end_session(key) {
+        request_end_selected_tmux_session(app);
     }
 }
 
@@ -532,6 +660,25 @@ pub(crate) fn execute_palette_list_command(
     command: crate::command_palette::CommandId,
 ) {
     use crate::command_palette::CommandId;
+    match command {
+        CommandId::NewTmuxSession => {
+            start_tmux_session(app);
+            return;
+        }
+        CommandId::ResumeSelectedInTmux => {
+            resume_selected_in_tmux(app);
+            return;
+        }
+        CommandId::NewTmuxWorktreeSession => {
+            begin_tmux_worktree_session(app);
+            return;
+        }
+        CommandId::EndPersistentSession => {
+            request_end_selected_tmux_session(app);
+            return;
+        }
+        _ => {}
+    }
     let key = match command {
         CommandId::ResumeSelected => KeyCode::Enter,
         CommandId::NewSession => KeyCode::Char('n'),
@@ -599,6 +746,18 @@ pub(crate) fn handle_favorite_open(app: &mut App, key: KeyCode) {
 }
 
 fn resume_selected(app: &mut App) {
+    resume_selected_with_host(app, false);
+}
+
+fn resume_selected_in_tmux(app: &mut App) {
+    if let Some(reason) = app.tmux_support.unavailable_reason() {
+        app.status_message = Some(format!("Cannot resume in tmux: {reason}"));
+        return;
+    }
+    resume_selected_with_host(app, true);
+}
+
+fn resume_selected_with_host(app: &mut App, resume_in_tmux: bool) {
     let Some(session) = app.selected_session() else {
         return;
     };
@@ -612,7 +771,33 @@ fn resume_selected(app: &mut App) {
     if app.mux_enabled() {
         // A pane we own is not "busy elsewhere" — re-focus it instead of refusing.
         if app.pane_for_session(&id).is_some() {
+            if resume_in_tmux && !app.session_is_tmux_backed(&id) {
+                app.status_message =
+                    Some("Close the direct session tab before resuming it in tmux".to_string());
+                return;
+            }
             resume_target(app, id, cwd, title);
+            return;
+        }
+    }
+
+    match tmux::find_live(&id) {
+        Ok(Some(reference)) => {
+            if app.mux_enabled() {
+                match app.attach_tmux_session(reference, title) {
+                    Ok(()) => crate::mux_input::sync_workspace_panels(app),
+                    Err(error) => {
+                        app.status_message = Some(format!("Cannot attach tmux session: {error}"))
+                    }
+                }
+            } else {
+                app.should_attach_tmux = Some(reference);
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            app.status_message = Some(format!("Cannot inspect tmux session ownership: {error}"));
             return;
         }
     }
@@ -625,12 +810,17 @@ fn resume_selected(app: &mut App) {
             title,
             dir_path,
             pids,
+            resume_in_tmux,
         });
         app.mode = Mode::ConfirmTakeover;
         return;
     }
     mark_session_inactive(app, &id);
-    resume_target(app, id, cwd, title);
+    if resume_in_tmux {
+        resume_target_in_tmux(app, id, cwd, title);
+    } else {
+        resume_target(app, id, cwd, title);
+    }
 }
 
 fn resume_target(app: &mut App, id: String, cwd: String, title: String) {
@@ -641,6 +831,24 @@ fn resume_target(app: &mut App, id: String, cwd: String, title: String) {
         }
     } else {
         app.should_resume = Some((id, cwd));
+    }
+}
+
+fn resume_target_in_tmux(app: &mut App, id: String, cwd: String, title: String) {
+    if app.mux_enabled() {
+        // Handed to the main loop so the notice is painted before the launch blocks.
+        app.status_message = Some(format!("Resuming '{title}' in a tmux session…"));
+        app.pending_tmux_launch = Some(PendingTmuxLaunch::Resume {
+            session_id: id,
+            cwd,
+            title,
+        });
+    } else {
+        app.should_new_session = Some(NewSessionRequest::TmuxResume {
+            session_id: id,
+            cwd,
+            title,
+        });
     }
 }
 
@@ -661,7 +869,11 @@ fn handle_confirm_takeover(app: &mut App, key: KeyCode) {
             match crate::session::process::terminate_session(&target.dir_path, &target.pids) {
                 Ok(_) if !loader::session_is_active(&target.dir_path) => {
                     mark_session_inactive(app, &target.id);
-                    resume_target(app, target.id, target.cwd, target.title);
+                    if target.resume_in_tmux {
+                        resume_target_in_tmux(app, target.id, target.cwd, target.title);
+                    } else {
+                        resume_target(app, target.id, target.cwd, target.title);
+                    }
                 }
                 Ok(_) => {
                     app.status_message = Some(
@@ -695,6 +907,11 @@ fn begin_delete(app: &mut App) {
     let Some(session) = app.selected_session() else {
         return;
     };
+    if app.session_is_tmux_backed(&session.id) {
+        app.status_message =
+            Some("End the persistent tmux session first with X, then delete it".to_string());
+        return;
+    }
     if session.is_active || loader::session_is_active(&session.dir_path) {
         app.status_message = Some("Cannot delete: session is currently active".to_string());
         return;
@@ -758,6 +975,64 @@ fn handle_scratchpad(app: &mut App, event: Event) {
     }
 }
 
+pub(crate) fn start_tmux_session(app: &mut App) {
+    if let Some(reason) = app.tmux_support.unavailable_reason() {
+        app.status_message = Some(format!("Cannot start tmux session: {reason}"));
+        return;
+    }
+    let Some(cwd) = app.new_session_dir() else {
+        app.status_message =
+            Some("Filter by a project first (f) to start a tmux session".to_string());
+        return;
+    };
+    let title = project_title(&cwd);
+    if !app.mux_enabled() {
+        app.should_new_session = Some(NewSessionRequest::Tmux { cwd, title });
+        return;
+    }
+    // Starting a tmux server, Copilot and the startup grace takes ~half a second, so
+    // hand it to the main loop; the notice is painted before anything blocks.
+    app.status_message = Some(format!("Starting tmux session for '{title}'…"));
+    app.pending_tmux_launch = Some(PendingTmuxLaunch::New { cwd, title });
+}
+
+/// Run a deferred tmux launch from the main loop, after its notice was painted.
+pub fn run_pending_tmux_launch(app: &mut App, pending: PendingTmuxLaunch) {
+    let message = match pending {
+        PendingTmuxLaunch::New { cwd, title } => {
+            match manager::start_tmux_session(Path::new(&cwd), &title, &app.config) {
+                Ok(launched) => complete_tmux_launch(app, launched, title, "Started new session"),
+                Err(error) => format!("Cannot start tmux session: {error}"),
+            }
+        }
+        PendingTmuxLaunch::Resume {
+            session_id,
+            cwd,
+            title,
+        } => {
+            match manager::resume_tmux_session(&session_id, Path::new(&cwd), &title, &app.config) {
+                Ok(launched) => complete_tmux_launch(app, launched, title, "Resumed session"),
+                Err(error) => format!("Cannot resume in tmux: {error}"),
+            }
+        }
+    };
+    app.status_message = Some(message);
+}
+
+fn complete_tmux_launch(
+    app: &mut App,
+    launched: manager::TmuxSessionRef,
+    title: String,
+    description: &str,
+) -> String {
+    app.track_external_session(launched.session_id.clone());
+    let base = format!("{description} in tmux '{}'", launched.tmux_session);
+    match app.attach_tmux_session(launched, title) {
+        Ok(()) => format!("{base}; opened as a CST tab"),
+        Err(error) => format!("{base}; could not open CST tab: {error}"),
+    }
+}
+
 /// Ask whether the new session should live in the project as-is or in a worktree.
 ///
 /// `N` used to carry the worktree variant on its own, but a second, shift-modified key
@@ -808,6 +1083,18 @@ fn start_plain_new_session(app: &mut App) {
 }
 
 pub(crate) fn begin_worktree_session(app: &mut App) {
+    begin_worktree_session_for(app, WorktreeLaunchTarget::Standard);
+}
+
+pub(crate) fn begin_tmux_worktree_session(app: &mut App) {
+    if let Some(reason) = app.tmux_support.unavailable_reason() {
+        app.status_message = Some(format!("Cannot start tmux session: {reason}"));
+        return;
+    }
+    begin_worktree_session_for(app, WorktreeLaunchTarget::Tmux);
+}
+
+fn begin_worktree_session_for(app: &mut App, target: WorktreeLaunchTarget) {
     let Some(project) = app.command_project() else {
         app.status_message =
             Some("Filter by a project first (f) to create an isolated session".to_string());
@@ -831,6 +1118,7 @@ pub(crate) fn begin_worktree_session(app: &mut App) {
 
     app.branch_input = worktree::generated_branch_name(&effective.branch_prefix);
     app.branch_config = Some(effective);
+    app.worktree_launch_target = target;
     app.mode = Mode::BranchName;
 }
 
@@ -890,14 +1178,37 @@ fn handle_rename(app: &mut App, key: KeyCode) {
         KeyCode::Enter => {
             if let Some(idx) = app.selected_real_index() {
                 let dir = app.sessions[idx].dir_path.clone();
+                let session_id = app.sessions[idx].id.clone();
                 let new_name = app.rename_input.clone();
+                let renamed_tmux = match app.tmux_session_for(&session_id).cloned() {
+                    Some(reference) => match tmux::rename(&reference, &new_name) {
+                        Ok(renamed) => Some((reference, renamed)),
+                        Err(error) => {
+                            app.status_message = Some(format!("Rename failed: {error}"));
+                            app.mode = Mode::Normal;
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 match manager::rename_session(&dir, &new_name) {
                     Ok(()) => {
                         app.sessions[idx].summary = Some(new_name);
+                        if let Some((_, renamed)) = renamed_tmux {
+                            app.replace_tmux_session(renamed);
+                        }
                         app.status_message = Some("Session renamed".to_string());
                     }
                     Err(error) => {
-                        app.status_message = Some(format!("Rename failed: {error}"));
+                        let rollback_error = renamed_tmux.and_then(|(original, renamed)| {
+                            tmux::restore_name(&renamed, &original).err()
+                        });
+                        app.status_message = Some(match rollback_error {
+                            Some(rollback) => format!(
+                                "Rename failed: {error}; tmux rename rollback also failed: {rollback}"
+                            ),
+                            None => format!("Rename failed: {error}"),
+                        });
                     }
                 }
             }
@@ -939,6 +1250,13 @@ fn perform_delete(app: &mut App, force: bool) {
         cancel_delete(app);
         return;
     };
+    if app.session_is_tmux_backed(&app.sessions[idx].id) {
+        app.mode = Mode::Normal;
+        app.pending_delete = None;
+        app.status_message =
+            Some("Cannot delete while the persistent tmux session is running".to_string());
+        return;
+    }
     if app.sessions[idx].is_active || loader::session_is_active(&app.sessions[idx].dir_path) {
         app.mode = Mode::Normal;
         app.pending_delete = None;
@@ -1143,6 +1461,10 @@ fn handle_settings(app: &mut App, key: KeyCode) {
 
     match key {
         KeyCode::Esc | KeyCode::Char(',') => {
+            if let Err(error) = config::validate_tmux_keys(&app.config.tmux_keys) {
+                app.status_message = Some(error.to_string());
+                return;
+            }
             if let Err(error) = config::validate_user_notification_config(&app.config) {
                 app.status_message = Some(error.to_string());
                 return;
@@ -1603,7 +1925,7 @@ fn save_and_close_project_settings(app: &mut App) {
     }
 }
 
-/// Create the worktree and attach it as a pane, rolling back if the pane cannot start.
+/// Create the worktree and launch its session, rolling back if launch fails.
 ///
 /// Runs from the main loop rather than the key handler so the "creating…" notice is
 /// already on screen before this blocks.
@@ -1612,30 +1934,52 @@ pub fn run_pending_worktree(app: &mut App, pending: PendingWorktree) {
         project,
         branch,
         config,
+        target,
     } = pending;
     let created = match worktree::create_managed_worktree(Path::new(&project), &branch, &config) {
         Ok(created) => created,
         Err(error) => {
             app.branch_config = None;
+            app.worktree_launch_target = WorktreeLaunchTarget::Standard;
             app.status_message = Some(format!("Cannot create worktree: {error}"));
             return;
         }
     };
 
     let path = created.entry.path.clone();
-    let title = branch.clone();
-    match app.attach_new_session(&path.to_string_lossy(), title) {
-        Ok(()) => {
+    let result = match target {
+        WorktreeLaunchTarget::Standard => app
+            .attach_new_session(&path.to_string_lossy(), branch.clone())
+            .map(|_| match created.notice.as_deref() {
+                Some(notice) => format!("Isolated session on '{branch}' — {notice}"),
+                None => format!("Isolated session on '{branch}'"),
+            }),
+        WorktreeLaunchTarget::Tmux => {
+            manager::start_tmux_session(&path, &branch, &app.config).map(|launched| {
+                let mut message = complete_tmux_launch(
+                    app,
+                    launched,
+                    branch.clone(),
+                    &format!("Started '{branch}'"),
+                );
+                if let Some(notice) = created.notice.as_deref() {
+                    message.push_str(&format!(" — {notice}"));
+                }
+                message
+            })
+        }
+    };
+    match result {
+        Ok(message) => {
             app.branch_config = None;
-            app.status_message = match created.notice {
-                Some(notice) => Some(format!("Isolated session on '{branch}' — {notice}")),
-                None => Some(format!("Isolated session on '{branch}'")),
-            };
+            app.worktree_launch_target = WorktreeLaunchTarget::Standard;
+            app.status_message = Some(message);
         }
         Err(error) => {
             // The worktree exists but has no session; undo it rather than leaking one.
             let rollback = worktree::rollback_created_worktree(&created.entry);
             app.branch_config = None;
+            app.worktree_launch_target = WorktreeLaunchTarget::Standard;
             app.status_message = Some(match rollback {
                 Ok(()) => format!("Cannot start session: {error}; worktree rolled back"),
                 Err(rollback_error) => format!(
@@ -1650,11 +1994,13 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => {
             app.branch_config = None;
+            app.worktree_launch_target = WorktreeLaunchTarget::Standard;
             app.mode = Mode::Normal;
             app.status_message = Some("Isolated session cancelled".to_string());
         }
         KeyCode::Enter => {
             let Some(project) = app.command_project() else {
+                app.worktree_launch_target = WorktreeLaunchTarget::Standard;
                 app.mode = Mode::Normal;
                 app.status_message = Some("Project context is no longer available".to_string());
                 return;
@@ -1664,10 +2010,12 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
                 return;
             }
             let Some(config) = app.branch_config.clone() else {
+                app.worktree_launch_target = WorktreeLaunchTarget::Standard;
                 app.mode = Mode::Normal;
                 app.status_message = Some("Worktree configuration is unavailable".to_string());
                 return;
             };
+            let target = app.worktree_launch_target;
             if app.mux_enabled() {
                 // Creating a worktree copies files and talks to Git, which can take a
                 // few seconds. Hand it to the main loop so a progress notice is painted
@@ -1676,15 +2024,23 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
                     project,
                     branch: app.branch_input.clone(),
                     config,
+                    target,
                 });
                 app.mode = Mode::Normal;
                 app.status_message = Some(format!("Creating worktree for '{}'…", app.branch_input));
                 return;
             }
-            app.should_new_session = Some(NewSessionRequest::Worktree {
-                source_project: project,
-                branch: app.branch_input.clone(),
-                config,
+            app.should_new_session = Some(match target {
+                WorktreeLaunchTarget::Standard => NewSessionRequest::Worktree {
+                    source_project: project,
+                    branch: app.branch_input.clone(),
+                    config,
+                },
+                WorktreeLaunchTarget::Tmux => NewSessionRequest::TmuxWorktree {
+                    source_project: project,
+                    branch: app.branch_input.clone(),
+                    config,
+                },
             });
         }
         KeyCode::Backspace => {
@@ -1960,12 +2316,94 @@ mod tests {
     #[test]
     fn terminal_shortcut_is_inert_on_session_list() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
+        // t doubles as the tmux resume key where tmux works; this test states the
+        // behaviour everywhere else, so pin the answer instead of probing the machine.
+        app.tmux_support =
+            crate::session::tmux::TmuxSupport::Unavailable("not in this test".to_string());
 
         handle_normal(&mut app, KeyCode::Char('t'));
 
         assert!(app.terminal.active_session_id().is_none());
         assert!(!app.terminal.is_visible());
         assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn starting_a_tmux_session_in_mux_mode_defers_the_launch_behind_a_notice() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join(".git")).unwrap();
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        app.disable_workspace_state_persistence();
+        app.disable_config_persistence();
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+
+        handle_normal(&mut app, KeyCode::Char('m'));
+
+        // The key handler must not block on the tmux server start; the main loop
+        // runs the launch after this notice has been painted.
+        assert!(
+            matches!(app.pending_tmux_launch, Some(PendingTmuxLaunch::New { .. })),
+            "expected a deferred launch, got {:?} / status {:?}",
+            app.pending_tmux_launch,
+            app.status_message
+        );
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("tmux")));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_tmux_key_that_slips_past_validation_can_never_steal_a_built_in_command() {
+        let mut config = config::UserConfig::default();
+        // c clears the project filter; validation rejects this, so set it directly
+        // the way a future drift between the key tables would.
+        config.tmux_keys.end_session = "c".to_string();
+        let mut app = App::new(Vec::new(), config);
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+
+        handle_normal(&mut app, KeyCode::Char('c'));
+
+        assert_eq!(app.status_message.as_deref(), Some("Filter cleared"));
+        assert!(app.confirm_end_tmux.is_none());
+    }
+
+    #[test]
+    fn tmux_shortcuts_do_nothing_at_all_where_tmux_cannot_work() {
+        let session = crate::session::Session {
+            id: "plain-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            project_root: "/tmp/project".to_string(),
+            summary: Some("Plain".to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: false,
+            dir_path: PathBuf::from("/tmp/nonexistent-plain-session"),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        };
+        let mut app = App::new(vec![session], config::UserConfig::default());
+        app.tmux_support =
+            crate::session::tmux::TmuxSupport::Unavailable("no tmux here".to_string());
+
+        // m, M and X are unbound on a build without the feature; answering with an
+        // error on every press would make Windows noisier than main, not safer.
+        for key in ['m', 'M', 'X'] {
+            handle_normal(&mut app, KeyCode::Char(key));
+            assert!(app.status_message.is_none(), "{key} must stay silent");
+            assert_eq!(app.mode, Mode::Normal, "{key} must not open a flow");
+        }
+        assert!(app.should_new_session.is_none());
+        assert!(app.confirm_end_tmux.is_none());
     }
 
     #[test]
@@ -2105,6 +2543,131 @@ mod tests {
             }
             other => panic!("expected a normal new session request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn configured_resume_key_queues_existing_session_for_foreground_tmux() {
+        let session = crate::session::Session {
+            id: "existing-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            project_root: "/tmp/project".to_string(),
+            summary: Some("Existing".to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: false,
+            dir_path: PathBuf::from("/tmp/nonexistent-existing-session"),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        };
+        let mut config = config::UserConfig::default();
+        config.tmux_keys.resume_session = "a".to_string();
+        let mut app = App::new(vec![session], config);
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+
+        handle_normal(&mut app, KeyCode::Char('a'));
+
+        match app.should_new_session.as_ref() {
+            Some(NewSessionRequest::TmuxResume {
+                session_id,
+                cwd,
+                title,
+            }) => {
+                assert_eq!(session_id, "existing-session");
+                assert_eq!(cwd, "/tmp/project");
+                assert_eq!(title, "Existing");
+            }
+            other => panic!("expected a tmux resume request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uppercase_m_queues_a_foreground_tmux_worktree_launch_without_mux() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        let mut config = config::UserConfig::default();
+        config.worktree.root = temp.path().join("worktrees");
+        let mut app = App::new(Vec::new(), config);
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+
+        handle_normal(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.mode, Mode::BranchName);
+        assert_eq!(app.worktree_launch_target, WorktreeLaunchTarget::Tmux);
+
+        app.branch_input = "copilot/tmux-probe".to_string();
+        handle_branch_name(&mut app, KeyCode::Enter);
+
+        match app.should_new_session.as_ref() {
+            Some(NewSessionRequest::TmuxWorktree {
+                source_project,
+                branch,
+                ..
+            }) => {
+                assert_eq!(source_project, &temp.path().to_string_lossy());
+                assert_eq!(branch, "copilot/tmux-probe");
+            }
+            other => panic!("expected a tmux worktree request, got {other:?}"),
+        }
+        assert!(app.pending_worktree.is_none());
+    }
+
+    #[test]
+    fn lowercase_m_without_a_project_reports_what_is_missing() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+
+        handle_normal(&mut app, KeyCode::Char('m'));
+
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("project")));
+    }
+
+    #[test]
+    fn configured_end_key_targets_the_selected_tmux_session() {
+        let session = crate::session::Session {
+            id: "tmux-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            project_root: "/tmp/project".to_string(),
+            summary: Some("Persistent".to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: true,
+            dir_path: PathBuf::from("/tmp/session"),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        };
+        let mut config = config::UserConfig::default();
+        config.tmux_keys.end_session = "!".to_string();
+        let mut app = App::new(vec![session], config);
+        app.tmux_support = crate::session::tmux::TmuxSupport::Available;
+        app.replace_tmux_session(crate::session::tmux::TmuxSessionRef {
+            session_id: "tmux-session".to_string(),
+            tmux_session: "cst-persistent-tmux-sess".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            server_socket: None,
+        });
+
+        handle_normal(&mut app, KeyCode::Char('!'));
+
+        assert_eq!(
+            app.confirm_end_tmux
+                .as_ref()
+                .map(|reference| reference.session_id.as_str()),
+            Some("tmux-session")
+        );
     }
 
     #[test]

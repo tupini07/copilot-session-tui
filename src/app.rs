@@ -4,6 +4,7 @@ use crate::mux::{KeyChord, MuxState, Pane, PaneSpec, PrefixState};
 use crate::notifications::{NotificationKind, NotificationRequest, NotificationWorker};
 use crate::scratchpad::Scratchpad;
 use crate::session::manager;
+use crate::session::tmux::{self, TmuxSessionRef, TmuxSupport};
 use crate::session::worktree::ManagedWorktree;
 use crate::session::Session;
 use crate::snippets::{SnippetModal, SnippetUpdate};
@@ -106,11 +107,32 @@ pub enum NewSessionRequest {
     Normal {
         cwd: String,
     },
+    Tmux {
+        cwd: String,
+        title: String,
+    },
+    TmuxResume {
+        session_id: String,
+        cwd: String,
+        title: String,
+    },
     Worktree {
         source_project: String,
         branch: String,
         config: EffectiveWorktreeConfig,
     },
+    TmuxWorktree {
+        source_project: String,
+        branch: String,
+        config: EffectiveWorktreeConfig,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorktreeLaunchTarget {
+    #[default]
+    Standard,
+    Tmux,
 }
 
 /// A worktree creation deferred to the main loop so a progress notice can be drawn first.
@@ -119,6 +141,23 @@ pub struct PendingWorktree {
     pub project: String,
     pub branch: String,
     pub config: EffectiveWorktreeConfig,
+    pub target: WorktreeLaunchTarget,
+}
+
+/// A tmux launch deferred to the main loop for the same reason as [`PendingWorktree`]:
+/// starting a tmux server and waiting out the startup grace takes long enough that the
+/// key handler must not block on it before anything is painted.
+#[derive(Debug, Clone)]
+pub enum PendingTmuxLaunch {
+    New {
+        cwd: String,
+        title: String,
+    },
+    Resume {
+        session_id: String,
+        cwd: String,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -150,6 +189,7 @@ pub struct TakeoverTarget {
     pub title: String,
     pub dir_path: PathBuf,
     pub pids: Vec<u32>,
+    pub resume_in_tmux: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -574,6 +614,15 @@ struct ResolvedReferences {
     periodic_batch_len: usize,
     generations: HashMap<u64, u64>,
 }
+
+struct PendingExternalSession {
+    next_attempt: Instant,
+    deadline: Instant,
+    /// What was selected when the launch started; focus only moves to the new
+    /// session if the user has not selected something else in the meantime.
+    selection_at_launch: Option<String>,
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
     pub filtered_indices: Vec<usize>,
@@ -607,6 +656,7 @@ pub struct App {
     /// First visible line of the help popup, which is taller than it can draw.
     pub help_scroll: usize,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
+    pub should_attach_tmux: Option<TmuxSessionRef>,
     pub should_new_session: Option<NewSessionRequest>,
     pub status_message: Option<String>,
     pub visible_rows: usize,
@@ -693,10 +743,18 @@ pub struct App {
     pub project_settings_input: String,
     pub branch_input: String,
     pub branch_config: Option<EffectiveWorktreeConfig>,
+    pub worktree_launch_target: WorktreeLaunchTarget,
     pub pending_delete: Option<DeleteTarget>,
     pub pending_takeover: Option<TakeoverTarget>,
     /// Present only when multiplexing is enabled; owns every live pane.
     pub mux: Option<MuxState>,
+    tmux_sessions: HashMap<String, TmuxSessionRef>,
+    /// Decided once at startup; every surface that offers a tmux action consults this
+    /// instead of probing the system, so tests can state either answer anywhere.
+    pub tmux_support: TmuxSupport,
+    next_tmux_refresh: Instant,
+    last_tmux_refresh_error: Option<String>,
+    pub confirm_end_tmux: Option<TmuxSessionRef>,
     pub view: View,
     /// Rows/cols available to a pane, kept in sync with the terminal size.
     pub pane_size: (u16, u16),
@@ -713,6 +771,7 @@ pub struct App {
     pub exit_dir: Option<String>,
     /// A worktree the main loop should create on its next iteration.
     pub pending_worktree: Option<PendingWorktree>,
+    pub pending_tmux_launch: Option<PendingTmuxLaunch>,
     pub scratchpad: Option<Scratchpad>,
     pub scratchpad_owner: Option<crate::mux::PaneId>,
     pub scratchpad_open: HashSet<crate::mux::PaneId>,
@@ -756,6 +815,7 @@ pub struct App {
     /// Most recently viewed items, newest last.
     github_cache: Vec<CachedGithubItem>,
     next_github_request_id: u64,
+    pending_external_sessions: HashMap<String, PendingExternalSession>,
     workspace_state_enabled: bool,
     /// Disabled in tests so reordering favorites never rewrites the real user config.
     config_persistence_enabled: bool,
@@ -800,6 +860,7 @@ impl App {
             should_quit: false,
             help_scroll: 0,
             should_resume: None,
+            should_attach_tmux: None,
             should_new_session: None,
             status_message: None,
             visible_rows: 20,
@@ -852,9 +913,15 @@ impl App {
             project_settings_input: String::new(),
             branch_input: String::new(),
             branch_config: None,
+            worktree_launch_target: WorktreeLaunchTarget::Standard,
             pending_delete: None,
             pending_takeover: None,
             mux,
+            tmux_sessions: HashMap::new(),
+            tmux_support: TmuxSupport::detect(),
+            next_tmux_refresh: Instant::now(),
+            last_tmux_refresh_error: None,
+            confirm_end_tmux: None,
             view: View::List,
             pane_size: (24, 80),
             pane_origin: (0, 0),
@@ -863,6 +930,7 @@ impl App {
             mux_on_disk,
             exit_dir: None,
             pending_worktree: None,
+            pending_tmux_launch: None,
             scratchpad: None,
             scratchpad_owner: None,
             scratchpad_open: HashSet::new(),
@@ -900,6 +968,7 @@ impl App {
             github_reference_periodic_remaining: HashMap::new(),
             github_cache: Vec::new(),
             next_github_request_id: 1,
+            pending_external_sessions: HashMap::new(),
             workspace_state_enabled: true,
             config_persistence_enabled: true,
             workspace_state_root: workspace_state::workspace_root(),
@@ -941,6 +1010,73 @@ impl App {
 
     pub fn mux_enabled(&self) -> bool {
         self.mux.is_some()
+    }
+
+    pub fn pane_is_tmux_backed(&self, pane: &Pane) -> bool {
+        self.tmux_sessions.contains_key(&pane.session_id)
+    }
+
+    pub fn tmux_session_for(&self, session_id: &str) -> Option<&TmuxSessionRef> {
+        self.tmux_sessions.get(session_id)
+    }
+
+    pub fn session_is_tmux_backed(&self, session_id: &str) -> bool {
+        self.tmux_sessions.contains_key(session_id)
+    }
+
+    pub fn forget_tmux_session(&mut self, session_id: &str) {
+        self.tmux_sessions.remove(session_id);
+        if self
+            .confirm_end_tmux
+            .as_ref()
+            .is_some_and(|reference| reference.session_id == session_id)
+        {
+            self.confirm_end_tmux = None;
+        }
+    }
+
+    pub fn replace_tmux_session(&mut self, reference: TmuxSessionRef) {
+        self.tmux_sessions
+            .insert(reference.session_id.clone(), reference);
+    }
+
+    pub fn refresh_tmux_sessions(&mut self) -> bool {
+        if !self.tmux_support.is_available() {
+            return false;
+        }
+        let now = Instant::now();
+        if now < self.next_tmux_refresh {
+            return false;
+        }
+        self.next_tmux_refresh = now + Duration::from_secs(2);
+        match tmux::list_live() {
+            Ok(references) => {
+                self.last_tmux_refresh_error = None;
+                let next: HashMap<_, _> = references
+                    .into_iter()
+                    .map(|reference| (reference.session_id.clone(), reference))
+                    .collect();
+                if next == self.tmux_sessions {
+                    false
+                } else {
+                    self.tmux_sessions = next;
+                    true
+                }
+            }
+            Err(error) => {
+                // A persistent failure (held lock, broken tmux) would otherwise
+                // repaint this same message every two seconds forever, burying every
+                // other notice. Mention each distinct failure once and slow down;
+                // the next success resets both.
+                self.next_tmux_refresh = now + Duration::from_secs(30);
+                let message = error.to_string();
+                if self.last_tmux_refresh_error.as_deref() != Some(message.as_str()) {
+                    self.status_message = Some(format!("Cannot refresh tmux sessions: {message}"));
+                    self.last_tmux_refresh_error = Some(message);
+                }
+                false
+            }
+        }
     }
 
     pub fn open_snippets(&mut self) {
@@ -2618,10 +2754,71 @@ impl App {
                 self.sessions.push(session);
             }
         }
+
         self.rebuild_unique_projects();
         self.sort_sessions();
         if let Some(session_id) = selected_id {
             self.focus_session(&session_id);
+        }
+    }
+
+    pub fn track_external_session(&mut self, session_id: String) {
+        let now = Instant::now();
+        let selection_at_launch = self.selected_session().map(|session| session.id.clone());
+        self.pending_external_sessions.insert(
+            session_id,
+            PendingExternalSession {
+                next_attempt: now,
+                deadline: now + Duration::from_secs(60),
+                selection_at_launch,
+            },
+        );
+    }
+
+    pub fn poll_external_sessions(&mut self) {
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .pending_external_sessions
+            .iter()
+            .filter(|(_, pending)| pending.next_attempt <= now)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in due {
+            match crate::session::loader::load_session(&self.copilot_home, &session_id) {
+                Ok(Some(session)) => {
+                    let pending = self.pending_external_sessions.remove(&session_id);
+                    // Copilot can take many seconds to write its metadata. If the user
+                    // has moved on in the meantime, yanking the selection back to the
+                    // launched session would undo what they just did.
+                    let selection_untouched = pending.is_some_and(|pending| {
+                        self.selected_session().map(|session| session.id.as_str())
+                            == pending.selection_at_launch.as_deref()
+                    });
+                    self.merge_session_metadata(vec![session]);
+                    if selection_untouched {
+                        self.focus_session(&session_id);
+                    }
+                }
+                Ok(None) => {
+                    let expired = self
+                        .pending_external_sessions
+                        .get(&session_id)
+                        .is_some_and(|pending| pending.deadline <= now);
+                    if expired {
+                        self.pending_external_sessions.remove(&session_id);
+                    } else if let Some(pending) =
+                        self.pending_external_sessions.get_mut(&session_id)
+                    {
+                        pending.next_attempt = now + Duration::from_millis(500);
+                    }
+                }
+                Err(error) => {
+                    self.pending_external_sessions.remove(&session_id);
+                    self.status_message = Some(format!(
+                        "Cannot load new tmux session {session_id}: {error}"
+                    ));
+                }
+            }
         }
     }
 
@@ -3289,6 +3486,10 @@ impl App {
                 mux.remove(existing);
             }
         }
+        if let Some(reference) = tmux::find_live(session_id)? {
+            return self.attach_tmux_session(reference, title);
+        }
+        self.tmux_sessions.remove(session_id);
         let (program, args) = manager::resume_command(session_id, &self.config, Path::new(cwd))?;
         self.spawn_pane(
             title,
@@ -3363,6 +3564,20 @@ impl App {
         self.spawn_pane(title, PathBuf::from(cwd), session_id, program, args)
     }
 
+    pub fn attach_tmux_session(&mut self, reference: TmuxSessionRef, title: String) -> Result<()> {
+        let (program, args) = tmux::attach_command(&reference);
+        let session_id = reference.session_id.clone();
+        self.spawn_pane(
+            title,
+            reference.cwd.clone(),
+            session_id.clone(),
+            program,
+            args,
+        )?;
+        self.tmux_sessions.insert(session_id, reference);
+        Ok(())
+    }
+
     fn spawn_pane(
         &mut self,
         title: String,
@@ -3428,7 +3643,7 @@ impl App {
         self.refresh_live_pane_sessions();
     }
 
-    /// `prefix q` — end the focused session and CST in one step.
+    /// `prefix q` — quit CST, ending direct panes and detaching tmux-backed panes.
     ///
     /// A live focused session may still be working, so quitting always confirms when
     /// any pane would be terminated. Exited panes can be dismissed immediately.
@@ -4008,7 +4223,9 @@ impl App {
             || self.workspace_focus == WorkspaceFocus::Scratchpad
             || self.snippet_modal.is_some()
             || self.command_palette.is_some()
+            || self.confirm_end_tmux.is_some()
             || self.pending_worktree.is_some()
+            || self.pending_tmux_launch.is_some()
             || self.github_inspector.as_ref().is_some_and(|inspector| {
                 matches!(
                     &inspector.screen,
@@ -4988,6 +5205,89 @@ mod tests {
             .unique_projects
             .iter()
             .any(|project| project == "project-b"));
+    }
+
+    #[test]
+    fn tmux_refresh_is_skipped_entirely_where_tmux_cannot_work() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.tmux_support = TmuxSupport::Unavailable("not here".to_string());
+
+        assert!(!app.refresh_tmux_sessions());
+        assert!(
+            app.status_message.is_none(),
+            "an impossible feature must not produce periodic errors"
+        );
+    }
+
+    #[test]
+    fn externally_launched_tmux_session_is_added_and_selected_when_metadata_appears() {
+        let home = tempfile::tempdir().unwrap();
+        let session_dir = home.path().join("session-state").join("external-session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("workspace.yaml"),
+            format!(
+                "id: external-session\ncwd: {}\nname: External tmux session\n",
+                home.path().display()
+            ),
+        )
+        .unwrap();
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.copilot_home = home.path().to_path_buf();
+        app.track_external_session("external-session".to_string());
+        app.poll_external_sessions();
+
+        assert!(app.pending_external_sessions.is_empty());
+        assert_eq!(app.selected_session().unwrap().id, "external-session");
+        assert_eq!(
+            app.selected_session().unwrap().display_name(),
+            "External tmux session"
+        );
+    }
+
+    #[test]
+    fn a_slow_tmux_launch_does_not_steal_a_selection_the_user_has_since_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let session_dir = home.path().join("session-state").join("external-session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("workspace.yaml"),
+            format!(
+                "id: external-session\ncwd: {}\nname: External tmux session\n",
+                home.path().display()
+            ),
+        )
+        .unwrap();
+
+        let mut app = App::new(
+            vec![
+                session("first-session", "project-a", "2026-08-21T12:00:00Z"),
+                session("other-session", "project-b", "2026-08-21T13:00:00Z"),
+            ],
+            UserConfig::default(),
+        );
+        app.copilot_home = home.path().to_path_buf();
+        app.focus_session("first-session");
+        app.track_external_session("external-session".to_string());
+        // Copilot can take many seconds to write its metadata; meanwhile the user
+        // selects something else.
+        app.focus_session("other-session");
+
+        app.poll_external_sessions();
+
+        assert!(app.pending_external_sessions.is_empty());
+        assert_eq!(
+            app.selected_session().unwrap().id,
+            "other-session",
+            "the user's selection must survive the late metadata arrival"
+        );
+        assert!(
+            app.sessions
+                .iter()
+                .any(|session| session.id == "external-session"),
+            "the new session is still merged into the list"
+        );
     }
 
     #[test]
