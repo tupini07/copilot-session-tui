@@ -11,85 +11,66 @@ if the section is missing the release fails, so the writing is not optional.
 
 There are two points where you stop and ask. Everything else is yours to do.
 
+The mechanical steps are scripts in `scripts/` next to this file. Run them with the Bash
+tool and read their summaries instead of running the underlying commands one by one —
+every raw command output you read costs context, and the judgment this skill actually
+needs from you is in steps 3, 4 and 6, not in shepherding git.
+
 ## 1. Preflight — abort before creating anything
 
-Run all of these first. If any fails, stop and report; nothing has been created yet, so
-there is nothing to unwind.
-
 ```bash
-git rev-parse --abbrev-ref HEAD                  # must be main
-git status --porcelain --untracked-files=no      # must be empty - modified tracked files
-git status --porcelain                           # untracked files: report, do not block
-git fetch origin
-git rev-list --count origin/main..HEAD   # must be 0 - unpushed commits
-git rev-list --count HEAD..origin/main   # must be 0 - unpulled commits
+bash .claude/skills/release/scripts/preflight.sh
 ```
 
-**Be precise about what "dirty" means.** Only *modified tracked* files block a release:
-they are changes the tag will not contain, so what CI builds is not what the working tree
-says. Untracked files cannot end up in the tag either way, so they are not a problem —
-mention them and carry on. A check that a repository can never satisfy is one people
-learn to step over, which is worse than no check.
+One verdict line per check; `BLOCK` lines mean a release cannot be cut yet, and the last
+two lines give you the previous tag and the size of the span. If everything passes,
+nothing was created and you move on. If something blocks, the script has told you *what*;
+here is what to do about it:
 
-If there *are* modified tracked files, do not silently work around them and do not just
-give up. Show the user what is modified and offer to stash it:
-
-```bash
-git stash push --include-untracked --message "parked for the vX.Y.Z release" -- <paths>
-```
-
-**Ask before stashing** — it moves the user's work out of the tree, and a stash is not a
-commit: it survives neither a fresh clone nor `git stash clear`. Say so, and say
-`git stash pop` brings it back.
-
-Local `main` must equal `origin/main` **in both directions**. Unpushed commits would be
-in the tag but not in what others see; unpulled ones mean you write the changelog against
-the wrong span — and the release would be built from a tree missing whatever landed on
-origin while you worked. Check this even when you are sure nothing has changed.
-
-When origin *has* moved, integrating it is the fix, not a reason to abort. Preview it
-read-only first, so a conflicted merge is something you report rather than something you
-are halfway through:
-
-```bash
-git merge-tree --write-tree HEAD origin/main   # exit 0 means it merges cleanly
-```
-
-Clean means *textually* clean. Two branches that both added a variant to the same enum
-or a field to the same struct will merge without complaint and still need the full
-`cargo build`, `cargo test` and `cargo clippy` run afterwards, because the thing being
-released is the combination and nobody has ever compiled it before. If it conflicts,
-stop and show the user; do not resolve a contributor's feature on their behalf without
-asking. Whatever arrived also needs its own changelog bullet, and a first-time outside
-contributor gets the thanks line.
-
-Then find the previous release:
-
-```bash
-git tag --sort=-v:refname | head -1
-```
-
-Use this, **not** `git describe --tags --abbrev=0`. PRs are merged with merge commits, and
-`describe` follows first-parent history, which can silently pick the wrong tag.
+- **Modified tracked files.** They are changes the tag will not contain, so what CI builds
+  is not what the working tree says. Untracked files are reported but never block — they
+  cannot end up in the tag either way; a check a repository can never satisfy is one
+  people learn to step over, which is worse than no check. Do not silently work around
+  modified files and do not just give up: show the user what is modified and offer to
+  stash it with
+  `git stash push --include-untracked --message "parked for the vX.Y.Z release" -- <paths>`.
+  **Ask before stashing** — it moves the user's work out of the tree, and a stash is not
+  a commit: it survives neither a fresh clone nor `git stash clear`. Say so, and say
+  `git stash pop` brings it back.
+- **Out of sync with origin.** Unpushed commits would be in the tag but not in what others
+  see; unpulled ones mean the changelog span is wrong and the release would miss whatever
+  landed on origin. When origin has moved, integrating it is the fix, not a reason to
+  abort — the script already previewed the merge read-only. "Merges cleanly" means
+  *textually* clean: two branches that both added a variant to the same enum will merge
+  without complaint and still need the full verify run, because the thing being released
+  is the combination and nobody has ever compiled it before. If it conflicts, stop and
+  show the user; do not resolve a contributor's feature on their behalf. Whatever arrived
+  also needs its own changelog bullet, and a first-time outside contributor gets the
+  thanks line.
 
 ## 2. Gather the material
 
-```bash
-git log --no-merges <last-tag>..HEAD --pretty=format:'%h %s%n%b%n---'
-```
-
-**`--no-merges` is mandatory.** Without it the span is full of
-`Merge pull request #3 from fork/branch` subjects, which say nothing. The contributors'
-real commits are still there — that is exactly why this repo merges instead of squashing.
-
-Also check who contributed, for a possible thanks bullet:
+Subjects first — do not pull full bodies for the whole span. This repo's commit messages
+are deliberately long, and most subjects already state the user-visible effect:
 
 ```bash
-git log --merges <last-tag>..HEAD --pretty='%s | %an'
+git log --no-merges <last-tag>..HEAD --pretty='%h %s'
+git log --merges    <last-tag>..HEAD --pretty='%s | %an'   # contributors, for a thanks bullet
 ```
 
-Never take bullet text from a merge subject. If a commit's user-visible effect is not
-clear from its message, read its diff (`git show <hash>`) or leave it out.
+**`--no-merges` is mandatory.** Merge subjects like `Merge pull request #3 from
+fork/branch` say nothing; the contributors' real commits are still in the span — that is
+exactly why this repo merges instead of squashing. Never take bullet text from a merge
+subject.
+
+Only when a subject leaves the user-visible effect unclear, read that one commit:
+
+```bash
+git show -s --format=%B <hash>     # its message body
+git show --stat <hash>             # or, failing that, what it touched
+```
+
+If the effect is still unclear, leave it out of the notes rather than guessing.
 
 ## 3. Propose the version — **stop and ask**
 
@@ -161,32 +142,36 @@ become:
 
 ## 5. Bump and verify
 
-```bash
-# edit version in Cargo.toml
-cargo build      # NOT cargo update - Cargo.lock is committed and must move with it
-cargo fmt --check
-cargo clippy --all-targets
-cargo test
-```
-
-`cargo test` matters here specifically: `the_changelog_has_a_section_for_the_version_being_built`
-reads both the bumped `Cargo.toml` and your new section, so it fails if they disagree.
-
-Confirm the diff touches exactly three files:
+Edit the version in `Cargo.toml`, then:
 
 ```bash
-git diff --stat     # Cargo.toml, Cargo.lock, CHANGELOG.md
+cargo build     # NOT cargo update - Cargo.lock is committed and must move with it
+bash .claude/skills/release/scripts/verify.sh
 ```
+
+The script runs `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`, but
+prints verdicts and summaries on success and full detail only for failures — do not run
+those commands separately and re-read their raw output. `cargo test` matters here
+specifically: `the_changelog_has_a_section_for_the_version_being_built` reads both the
+bumped `Cargo.toml` and your new section, so it fails if they disagree. The script ends
+with `git diff --stat`; confirm it touches exactly `Cargo.toml`, `Cargo.lock` and
+`CHANGELOG.md`.
+
+If a single test fails once under build load, rerun the script before concluding
+anything — but report a flake to the user rather than silently absorbing it.
 
 ## 6. Show the notes — **stop and ask**
 
 Show the user the rendered section and the diff, and **wait for approval**. This is the
 text that becomes the public release page; it is worth ten seconds of a human's time.
 
-## 7. Commit, tag, push
+## 7. Commit, tag, push, watch
+
+These four stay as explicit commands on purpose: they are the only irreversible part of
+the flow, and each one should be visible in the transcript as itself.
 
 ```bash
-git commit -m "chore: release X.Y.Z"     # no leading v, matching every previous one
+git commit -am "chore: release X.Y.Z"    # no leading v, matching every previous one
 git tag vX.Y.Z                           # lightweight, matching every previous one
 git push origin main                     # branch first
 git push origin vX.Y.Z                   # then the tag
@@ -195,11 +180,16 @@ git push origin vX.Y.Z                   # then the tag
 **Branch before tag.** The workflow checks out the tag; pushing the tag first can race a
 commit that is not on the remote yet.
 
-Then watch it and report the release URL:
+Then watch the build **in the background** (the Bash tool's `run_in_background`) and
+report the release URL when it finishes:
 
 ```bash
-gh run watch
+bash .claude/skills/release/scripts/watch-release.sh vX.Y.Z
 ```
+
+It blocks until the workflow completes and prints one line of conclusion plus the
+published release and assets — or the failing job's log tail if it did not succeed. Do
+not use `gh run watch`; it repaints the whole job tree every few seconds.
 
 ## Recovery
 
