@@ -530,9 +530,14 @@ fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::Split
         KeyCode::Down | KeyCode::Char('j') => {
             app.pane_selected = (app.pane_selected + 1).min(count - 1);
         }
+        // The rows are labelled with their tab numbers, so a digit means that tab.
         KeyCode::Char(digit @ '1'..='9') => {
-            let index = digit as usize - '1' as usize;
-            if index < count {
+            let number = digit as usize - '0' as usize;
+            let mux = app.mux.as_ref().expect("mux checked by the caller");
+            if let Some(index) = candidates
+                .iter()
+                .position(|id| mux.tab_number(*id) == Some(number))
+            {
                 app.pane_selected = index;
             }
         }
@@ -548,6 +553,7 @@ fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::Split
                 app.workspace_focus = WorkspaceFocus::Chat;
                 crate::mux_input::sync_workspace_panels(app);
                 crate::mux_input::sync_view(app);
+                app.refresh_workspace_areas();
             }
         }
         KeyCode::Esc | KeyCode::Char('q') => {

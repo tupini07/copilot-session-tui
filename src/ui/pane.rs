@@ -80,9 +80,31 @@ fn chat_border_color(app: &App, id: PaneId, in_split: bool, theme: Theme) -> Opt
         return (app.workspace_focus == crate::app::WorkspaceFocus::Chat)
             .then_some(theme.accent_alt);
     }
-    // Only a split shows an unfocused chat at all; there, a session that wants the
-    // user says so with its border, since it raises no notification while visible.
-    (in_split && mux.pane(id).is_some_and(|pane| pane.needs_attention())).then_some(theme.warning)
+    if !in_split {
+        return None;
+    }
+    // Only a split shows an unfocused chat at all. There the status bar describes
+    // someone else, so the border is what says this session has died or wants the
+    // user — it raises no notification while visible.
+    let pane = mux.pane(id)?;
+    if !pane.is_running() {
+        Some(theme.error)
+    } else {
+        pane.needs_attention().then_some(theme.warning)
+    }
+}
+
+/// What a split's border is titled with.
+///
+/// The tab number leads because titles alone do not tell sessions apart: several
+/// started in one project all carry its name until Copilot renames them.
+fn split_title(mux: &crate::mux::MuxState, pane: &crate::mux::Pane) -> String {
+    let number = mux
+        .tab_number(pane.id)
+        .map(|number| format!("{number} "))
+        .unwrap_or_default();
+    let state = if pane.is_running() { "" } else { " · exited" };
+    format!(" {number}{}{state} ", pane.title)
 }
 
 /// A slot's frame including the trailing edge its neighbour draws.
@@ -197,7 +219,7 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     // Each split is titled with its session, since there is no single "the chat" to
     // name any more and the tab strip only marks one of them.
     let title = if in_split {
-        format!(" {} ", pane.title)
+        split_title(mux, pane)
     } else {
         " Chat ".to_string()
     };
@@ -1796,8 +1818,26 @@ mod tests {
         let buffer = render_buffer(&mut app, 100, 30);
         assert_eq!(buffer[(slots[0].area.x, top + 1)].style().fg, Some(accent));
         assert_eq!(buffer[(divider, top + 1)].style().fg, Some(accent));
-        assert!(row(&buffer, top, 100).contains("left"));
-        assert!(row(&buffer, top, 100).contains("right"));
+        assert!(
+            row(&buffer, top, 100).contains(" 1 left "),
+            "titled with the tab number, since sessions in one project share a name"
+        );
+        assert!(row(&buffer, top, 100).contains(" 2 right "));
+
+        // A watched split that dies says so itself: the status bar is describing the
+        // focused one.
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .pane_mut(2)
+            .expect("pane")
+            .mark_exited(Some(1));
+        let buffer = render_buffer(&mut app, 100, 30);
+        assert!(row(&buffer, top, 100).contains(" 2 right · exited "));
+        assert_eq!(
+            buffer[(slots[1].area.right() - 1, top + 1)].style().fg,
+            Some(app.theme().error)
+        );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

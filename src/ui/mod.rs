@@ -115,6 +115,8 @@ pub struct AttachedLayout {
     /// A split exists but the window is too small to show it, so only the focused
     /// session is drawn.
     pub split_collapsed: bool,
+    /// The whole screen this was laid out for.
+    pub screen: Rect,
 }
 
 impl AttachedLayout {
@@ -184,8 +186,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let focused_title = app
             .mux
             .as_ref()
-            .and_then(|mux| mux.focused_pane())
-            .map(|pane| pane.title.clone())
+            .and_then(|mux| {
+                let pane = mux.focused_pane()?;
+                Some(format!("{} {}", mux.tab_number(pane.id)?, pane.title))
+            })
             .unwrap_or_default();
         let own_scratchpad = app.attached_scratchpad_visible();
         if let Some(area) = layout.scratchpad {
@@ -512,6 +516,7 @@ pub fn attached_layout_sized(
         terminal,
         status,
         split_collapsed: false,
+        screen: area,
     }
 }
 

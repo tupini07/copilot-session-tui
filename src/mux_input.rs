@@ -2219,6 +2219,7 @@ fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row
             app.dock_sizes.terminal_rows = Some(rows);
         }
     }
+    app.refresh_workspace_areas();
 }
 
 /// Chat sizes along the split's direction, plus that direction's minimum, read from
@@ -2254,6 +2255,7 @@ fn set_split_sizes(app: &mut App, sizes: Vec<u16>) {
             split.weights = sizes;
         }
     }
+    app.refresh_workspace_areas();
 }
 
 fn drag_split_divider(app: &mut App, index: usize, column: u16, row: u16) {
@@ -2349,6 +2351,7 @@ fn run_split_command(app: &mut App, command: PrefixCommand) {
         _ => {}
     }
     sync_view(app);
+    app.refresh_workspace_areas();
 }
 
 /// Bring the focused pane back on screen after the list changed it.
@@ -3109,6 +3112,48 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
         assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Keys arrive faster than frames. Found running CST for real: three presses before
+    /// the next draw each started from the same stale sizes, and moved one step.
+    #[test]
+    fn resize_steps_that_arrive_before_the_next_frame_still_add_up() {
+        let mut app = split_app(2);
+        let before = chat_widths(&app);
+        app.mux.as_mut().unwrap().prefix_state = PrefixState::Transient(TransientMode::ResizeSplit);
+        for _ in 0..3 {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(chat_widths(&app), vec![before[0] - 6, before[1] + 6]);
+        record_frame(&mut app);
+        assert_eq!(chat_widths(&app), vec![before[0] - 6, before[1] + 6]);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_split_picker_labels_and_selects_sessions_by_their_tab_number() {
+        let mut app = split_app(4);
+        app.open_split_picker(crate::mux::SplitDirection::Columns);
+        assert_eq!(app.pane_list_ids(), vec![3, 4]);
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
+        );
+        assert_eq!(app.pane_selected, 1, "4 is tab 4, the second row");
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+        );
+        assert_eq!(app.pane_selected, 1, "tab 1 is on screen, so not on offer");
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

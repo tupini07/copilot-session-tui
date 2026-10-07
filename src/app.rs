@@ -75,6 +75,9 @@ pub struct WorkspaceAreas {
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
     pub split_collapsed: bool,
+    /// The screen the areas were laid out for, so they can be laid out again between
+    /// frames.
+    pub screen: Rect,
 }
 
 /// A border on the attached screen that can be dragged.
@@ -97,6 +100,7 @@ impl WorkspaceAreas {
             scratchpad: layout.scratchpad,
             terminal: layout.terminal,
             split_collapsed: layout.split_collapsed,
+            screen: layout.screen,
         }
     }
 
@@ -2683,6 +2687,20 @@ impl App {
             }];
         }
         layout
+    }
+
+    /// Lay the attached screen out again now rather than at the next frame.
+    ///
+    /// Anything that reads geometry back — a resize step, a click — sees the last
+    /// frame's. Several keys can arrive before that frame is drawn, and each would
+    /// then start from the same stale sizes and undo the one before it; three presses
+    /// of a resize key moved a divider one step. Calling this after changing the
+    /// layout keeps the record current between frames.
+    pub fn refresh_workspace_areas(&mut self) {
+        let screen = self.workspace_areas.screen;
+        if matches!(self.view, View::Attached(_)) && !screen.is_empty() {
+            self.workspace_areas = WorkspaceAreas::from_layout(&self.attached_layout(screen));
+        }
     }
 
     /// Whether the user can see this session right now — the attached one, or any

@@ -366,7 +366,9 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {} ", index + 1),
+                    // The tab's own number, which only differs from the row's when the
+                    // split picker leaves out the sessions already on screen.
+                    format!(" {} ", mux.tab_number(pane.id).unwrap_or(index + 1)),
                     if selected {
                         base
                     } else {

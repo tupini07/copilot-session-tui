@@ -447,6 +447,14 @@ impl MuxState {
         self.pane_mut(id)
     }
 
+    /// The number this pane's tab is labelled with, counting from 1 as the strip does.
+    pub fn tab_number(&self, id: PaneId) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|pane| pane.id == id)
+            .map(|index| index + 1)
+    }
+
     /// Existing pane for a Copilot session id, so Enter re-focuses instead of duplicating.
     pub fn pane_for_session(&self, session_id: &str) -> Option<PaneId> {
         self.panes
