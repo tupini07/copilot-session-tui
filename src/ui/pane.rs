@@ -246,11 +246,31 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     let cursor = Cursor::default().visibility(
         focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
     );
-    pane.with_screen(|screen| {
-        let widget = PseudoTerminal::new(screen).cursor(cursor);
-        f.render_widget(widget, terminal_area);
-        apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
-    });
+    let scrolled_back = pane
+        .with_screen(|screen| {
+            let widget = PseudoTerminal::new(screen).cursor(cursor);
+            f.render_widget(widget, terminal_area);
+            apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
+            screen.scrollback()
+        })
+        .unwrap_or_default();
+    // A view scrolled into history looks exactly like a session that has stopped
+    // producing output, which is what it was taken for in testing. Say so on the
+    // border, where it cannot cover the history being read.
+    if scrolled_back > 0 && area.height > 0 {
+        let label = format!(" ↑ {scrolled_back} lines back · type to return ");
+        let width = (text::display_width(&label) as u16).min(area.width.saturating_sub(4));
+        let label_area = Rect {
+            x: area.right().saturating_sub(width + 2),
+            y: area.y,
+            width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(label, Style::default().fg(theme.warning))),
+            label_area,
+        );
+    }
     // Reference statuses are resolved against the focused session's repository. Another
     // split may be in a different one, where the same number is a different item, so
     // its references stay plain rather than risk a wrong colour.
@@ -389,10 +409,18 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             let PrefixState::Transient(mode) = mux.prefix_state else {
                 unreachable!("guarded by the arm above")
             };
-            vec![
+            let mut spans = vec![
                 Span::styled(mode.badge(), badge_style(theme, theme.accent_alt)),
                 Span::raw(mode.hint()),
-            ]
+            ];
+            // Why the last step did nothing, e.g. a split already at its minimum.
+            if let Some(message) = app.status_message.as_deref() {
+                spans.push(Span::styled(
+                    format!(" {message} "),
+                    Style::default().fg(theme.warning),
+                ));
+            }
+            spans
         }
         PaneStatus::Running if mux.prefix_state == PrefixState::Help => vec![
             Span::styled(" Help ", badge_style(theme, theme.warning)),
@@ -406,6 +434,23 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!(" {prefix} "), badge_style(theme, theme.warning)),
             Span::raw(format!(" choose a command · {prefix} search · Esc close ")),
         ],
+        // The answer to the last command — "nothing to zoom", a bell in another tab —
+        // until the next key. This bar used to show none of them, so a command that
+        // could not act looked like a key that had not registered.
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && app.status_message.is_some() =>
+        {
+            vec![Span::styled(
+                format!(
+                    " {} ",
+                    text::truncate_to_width(
+                        app.status_message.as_deref().unwrap_or_default(),
+                        area.width.saturating_sub(2) as usize,
+                    )
+                ),
+                Style::default().fg(theme.warning),
+            )]
+        }
         PaneStatus::Running
             if mux.prefix_state == PrefixState::Idle && app.update_notice.is_some() =>
         {
@@ -1696,6 +1741,33 @@ mod tests {
             events,
         )
         .expect("pane spawns")
+    }
+
+    #[test]
+    fn the_attached_status_bar_answers_a_command_that_could_not_act_until_the_next_key() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.status_message = Some("Nothing to zoom: only one session is on screen".to_string());
+
+        assert!(
+            render(&mut app).contains("Nothing to zoom"),
+            "without this a refused command looks like a key that did not register"
+        );
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(!render(&mut app).contains("Nothing to zoom"));
+        assert!(render(&mut app).contains("for commands"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 
     #[test]

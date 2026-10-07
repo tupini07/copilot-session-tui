@@ -24,6 +24,12 @@ const HOOK_READY_GRACE: std::time::Duration = std::time::Duration::from_millis(7
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    // A message in the attached status bar answers the last thing the user did, so
+    // the next keystroke retires it — whatever that keystroke goes on to set is the
+    // new answer. Without this a message would sit over the prefix reminder forever.
+    if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press) {
+        app.status_message = None;
+    }
     if app.confirm_end_tmux.is_some() {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
@@ -46,9 +52,8 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
                 handle_quit_confirm(app, key.code);
-                // The attached status bar has nowhere to show the shared "Quit
-                // cancelled" notice, and leaving it set would surface it stale on a
-                // later detach.
+                // Cancelling is answer enough on the attached screen, where the
+                // shared "Quit cancelled" notice would only cover the prefix reminder.
                 if !app.should_quit {
                     app.status_message = None;
                 }
@@ -2529,12 +2534,11 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 }
             }
             if outcome.bell {
-                if let Some(title) = app
-                    .mux
-                    .as_ref()
-                    .and_then(|mux| mux.pane(id))
-                    .map(|pane| pane.title.clone())
-                {
+                // Numbered like its tab, since several sessions often share a title.
+                if let Some(title) = app.mux.as_ref().and_then(|mux| {
+                    let pane = mux.pane(id)?;
+                    Some(format!("{} {}", mux.tab_number(id)?, pane.title))
+                }) {
                     app.status_message = Some(format!("🔔 {title}"));
                 }
             }

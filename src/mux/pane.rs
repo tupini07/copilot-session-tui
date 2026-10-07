@@ -74,6 +74,9 @@ pub struct Pane {
     _hook_monitor: Option<HookMonitor>,
     pty: PtySession,
     mouse_captured: bool,
+    /// The view is scrolled up into history. Tracked here so a keystroke can tell
+    /// without taking the parser lock, which the reader thread holds while parsing.
+    scrolled_back: bool,
     viewport: Viewport,
     /// Whether this pane's composer holds text that has not been consumed.
     ///
@@ -309,6 +312,7 @@ impl Pane {
             _hook_monitor: hook_monitor,
             pty,
             mouse_captured: false,
+            scrolled_back: false,
             viewport: Viewport {
                 x: 0,
                 y: 0,
@@ -1039,6 +1043,7 @@ impl Pane {
         if !self.is_running() {
             return Ok(());
         }
+        self.return_to_live_screen();
         // DECCKM only changes cursor/navigation key encodings. Reading it for every
         // ordinary character needlessly contended with the parser thread that is
         // producing Copilot's echo.
@@ -1065,6 +1070,7 @@ impl Pane {
         if !self.is_running() {
             return Ok(());
         }
+        self.return_to_live_screen();
         let bytes = keys::encode_paste(text, self.bracketed_paste());
         self.pty.write(&bytes)
     }
@@ -1074,6 +1080,7 @@ impl Pane {
         if !self.is_running() {
             anyhow::bail!("the focused session is no longer running");
         }
+        self.return_to_live_screen();
         if text.is_empty() {
             anyhow::bail!("the snippet prompt is empty");
         }
@@ -1150,7 +1157,22 @@ impl Pane {
             current.saturating_add(rows as usize)
         };
         parser.screen_mut().set_scrollback(next);
+        self.scrolled_back = parser.screen().scrollback() > 0;
         Ok(())
+    }
+
+    /// Back to the live screen if the view is scrolled up into history.
+    ///
+    /// Typing into a session whose view is somewhere in its past would send keys to a
+    /// prompt the user cannot see, so input brings the view back first, as terminals do.
+    fn return_to_live_screen(&mut self) {
+        if !self.scrolled_back {
+            return;
+        }
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.screen_mut().set_scrollback(0);
+        }
+        self.scrolled_back = false;
     }
 
     #[cfg(test)]
@@ -1521,6 +1543,44 @@ mod tests {
             }
         );
         assert!(pane.shutdown().unwrap());
+    }
+
+    #[test]
+    fn typing_into_a_view_scrolled_back_into_history_returns_it_to_the_live_screen() {
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "(for /L %i in (1,1,60) do @echo line %i) & ping -n 30 127.0.0.1 >nul"
+        } else {
+            "i=1; while [ $i -le 60 ]; do echo line $i; i=$((i+1)); done; sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(1, program, args), 24, 80, tx).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !pane
+            .with_screen(|screen| screen.contents().contains("line 60"))
+            .unwrap_or(false)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the child never printed its lines"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let scrollback = |pane: &Pane| pane.with_screen(|screen| screen.scrollback()).unwrap();
+
+        // The child does not capture the mouse, so the wheel scrolls CST's own history.
+        pane.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        })
+        .unwrap();
+        assert!(scrollback(&pane) > 0);
+
+        pane.send_key(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(scrollback(&pane), 0);
+        let _ = pane.shutdown();
     }
 
     #[test]
