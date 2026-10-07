@@ -1588,8 +1588,16 @@ fn prioritize_explicit_exit(app: &mut App) -> bool {
 }
 
 fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> bool {
+    // Anything CST draws over the session takes the key itself, so the child will not
+    // echo it and nothing else would trigger the frame. The split picker found this:
+    // it stays on the attached screen, and its selection did not move until the
+    // session happened to print.
     if !matches!(app.view, app::View::Attached(_))
         || app.workspace_focus != app::WorkspaceFocus::Chat
+        || app.mode != app::Mode::Normal
+        || app.confirm_end_tmux.is_some()
+        || crate::input::thread_inbox_active(app)
+        || crate::input::whats_new_active(app)
         || app.confirm_quit
         || app.confirm_update_restart
         || app.command_palette.is_some()
@@ -2299,6 +2307,16 @@ mod tests {
             &app,
             &crossterm::event::Event::Paste("large prompt".to_string())
         ));
+
+        // A modal over the session takes the key, so no echo will repaint for it.
+        app.mode = app::Mode::PaneList;
+        app.split_picker = Some(mux::SplitDirection::Columns);
+        assert!(
+            terminal_event_needs_repaint(&app, &character),
+            "the split picker would sit unchanged until the session printed"
+        );
+        app.mode = app::Mode::Normal;
+        app.split_picker = None;
 
         let prefix = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('b'),

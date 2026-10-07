@@ -549,6 +549,47 @@ pub fn attached_split_layout(
     Some(layout)
 }
 
+/// Dock sizes shrunk, as far as their minimums, so that `split` fits beside them.
+///
+/// Docks give way before sessions do. Opening the terminal under three stacked
+/// sessions at its usual height left them too few rows, and the whole split vanished
+/// the moment the terminal appeared. These sizes are only for laying this screen out;
+/// the ones the user dragged to are kept, and come back when there is room.
+pub fn docks_fitted_to_split(
+    area: Rect,
+    tabs_visible: bool,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+    sizes: DockSizes,
+    split: &SplitLayout,
+) -> DockSizes {
+    let count = split.slots.len() as u16;
+    let (needed_cols, needed_rows) = match split.direction {
+        SplitDirection::Columns => (count * MIN_SPLIT_COLS + count + 1, MIN_SPLIT_ROWS + 2),
+        SplitDirection::Rows => (MIN_SPLIT_COLS + 2, count * MIN_SPLIT_ROWS + count + 1),
+    };
+    let mut fitted = sizes;
+    if terminal_visible {
+        let tab_height = if tabs_visible { TAB_BAR_HEIGHT } else { 0 };
+        let content = area.height.saturating_sub(tab_height + 1);
+        let current = sizes
+            .terminal_rows
+            .unwrap_or_else(|| terminal_panel_height(content));
+        let room = content.saturating_sub(needed_rows);
+        fitted.terminal_rows = Some(current.min(room).max(MIN_TERMINAL_ROWS));
+    }
+    if scratchpad_visible && area.width > 0 {
+        let room = area.width.saturating_sub(needed_cols);
+        // A percent short of the exact fit, because the layout rounds.
+        let cap = (u32::from(room) * 100 / u32::from(area.width)) as u16;
+        fitted.scratchpad_percent = sizes
+            .scratchpad_percent
+            .min(cap.saturating_sub(1))
+            .max(*SCRATCHPAD_PERCENT_RANGE.start());
+    }
+    fitted
+}
+
 /// Divide `area` among the split's sessions by weight, neighbours sharing a border.
 fn split_slots(area: Rect, split: &SplitLayout) -> Option<Vec<ChatSlot>> {
     let count = u16::try_from(split.slots.len()).ok()?;
@@ -846,6 +887,33 @@ mod tests {
             },
         );
         assert_eq!(greedy.chat.height, MIN_ROWS_ABOVE_TERMINAL);
+    }
+
+    #[test]
+    fn docks_shrink_to_keep_a_split_on_screen_before_the_split_gives_way() {
+        let area = Rect::new(0, 0, 160, 45);
+        let mut stacked = SplitLayout::new(SplitDirection::Rows, 1, 2);
+        stacked.insert_after(2, 3);
+        let sizes = DockSizes::default();
+        assert!(
+            attached_split_layout(area, false, true, true, sizes, &stacked, 1).is_none(),
+            "the terminal at its usual height leaves three rows too little room"
+        );
+        let fitted = docks_fitted_to_split(area, true, false, true, sizes, &stacked);
+        let layout = attached_split_layout(area, false, true, true, fitted, &stacked, 1)
+            .expect("a shorter terminal makes room");
+        assert!(layout.terminal.unwrap().height >= MIN_TERMINAL_ROWS);
+
+        let mut four = three_columns();
+        four.insert_after(3, 4);
+        assert!(attached_split_layout(area, true, false, true, sizes, &four, 1).is_none());
+        let fitted = docks_fitted_to_split(area, true, true, false, sizes, &four);
+        assert!(attached_split_layout(area, true, false, true, fitted, &four, 1).is_some());
+
+        // Too small even with both docks at their minimum: the split still gives way.
+        let tiny = Rect::new(0, 0, 80, 20);
+        let fitted = docks_fitted_to_split(tiny, true, false, true, sizes, &stacked);
+        assert!(attached_split_layout(tiny, false, true, true, fitted, &stacked, 1).is_none());
     }
 
     #[test]

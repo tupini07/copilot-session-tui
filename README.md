@@ -393,7 +393,8 @@ Several sessions can share the screen, so you can watch long-running ones withou
 flipping between tabs. `prefix` `|` puts another session in a column beside the focused
 one and `prefix` `-` puts it in a row below; either opens the session switcher with only
 the sessions not already on screen. Splits are flat: asking for a stacked split in a row
-of columns turns the whole row into a stack.
+of columns turns the whole row into a stack, and when every session is already on screen
+that is all it does.
 
 Every split is a live, interactive chat. Typing goes to the focused one; click another,
 or use `prefix` and an arrow, to move. The wheel scrolls whichever split it is over
@@ -422,10 +423,11 @@ chat.
 
 `prefix` `z` gives the focused split the whole screen and puts the split back.
 `prefix` `b` takes the focused session out of the split, leaving its tab; ending a
-session with `prefix` `x` does the same. When the window is too small to give every
-split a usable chat, CST shows only the focused one and says so in the status bar until
-there is room again. A split survives CST restarting itself for an update, but like
-tabs it is not kept after quitting.
+session with `prefix` `x` does the same. When space runs short, the scratchpad and
+terminal shrink first, down to their minimums, so opening one never hides the split.
+Only when the window is too small even then does CST show just the focused session,
+saying so in the status bar until there is room again. A split survives CST restarting
+itself for an update, but like tabs it is not kept after quitting.
 
 ### Prompt snippets
 

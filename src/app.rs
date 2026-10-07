@@ -1109,13 +1109,28 @@ impl App {
     /// resize every session to the list's full width and back again, making each one
     /// on screen reflow twice just to open a menu.
     pub fn open_split_picker(&mut self, direction: crate::mux::SplitDirection) {
-        let Some(mux) = self.mux.as_ref() else {
-            return;
-        };
-        if !matches!(self.view, View::Attached(_)) {
+        if self.mux.is_none() || !matches!(self.view, View::Attached(_)) {
             return;
         }
         if self.split_candidates().is_empty() {
+            // Nothing left to add, so the other direction can only mean "turn the
+            // split". Without this, a split holding every session could never go
+            // from side by side to stacked.
+            if let Some(split) = self
+                .mux
+                .as_mut()
+                .and_then(|mux| mux.split.as_mut())
+                .filter(|split| split.direction != direction)
+            {
+                split.direction = direction;
+                split.zoomed = false;
+                self.status_message = Some(format!("Sessions now {}", direction.label()));
+                self.refresh_workspace_areas();
+                return;
+            }
+            let Some(mux) = self.mux.as_ref() else {
+                return;
+            };
             self.status_message = Some(if mux.panes.len() < 2 {
                 "Open another session to split with".to_string()
             } else {
@@ -2657,16 +2672,22 @@ impl App {
             .as_ref()
             .and_then(crate::mux::MuxState::visible_split);
         if let (Some(split), Some(focused)) = (split, focused) {
-            if let Some(layout) = crate::ui::attached_split_layout(
+            let (scratchpad, terminal) =
+                (self.scratchpad_dock_visible(), self.terminal_dock_visible());
+            let fitted = crate::ui::docks_fitted_to_split(
                 area,
-                self.scratchpad_dock_visible(),
-                self.terminal_dock_visible(),
                 tabs,
+                scratchpad,
+                terminal,
                 self.dock_sizes,
                 split,
-                focused,
-            ) {
-                return layout;
+            );
+            for sizes in [self.dock_sizes, fitted] {
+                if let Some(layout) = crate::ui::attached_split_layout(
+                    area, scratchpad, terminal, tabs, sizes, split, focused,
+                ) {
+                    return layout;
+                }
             }
         }
         // No split, or one the window is too small for. Either way only the focused

@@ -98,13 +98,25 @@ fn chat_border_color(app: &App, id: PaneId, in_split: bool, theme: Theme) -> Opt
 ///
 /// The tab number leads because titles alone do not tell sessions apart: several
 /// started in one project all carry its name until Copilot renames them.
-fn split_title(mux: &crate::mux::MuxState, pane: &crate::mux::Pane) -> String {
+///
+/// Fitted to the border's `width`: Copilot names sessions after their task, often at
+/// sentence length, and left alone the name ran into the corner with no sign it was
+/// cut — and pushed "exited" off the end, which is the part that matters.
+fn split_title(mux: &crate::mux::MuxState, pane: &crate::mux::Pane, width: u16) -> String {
     let number = mux
         .tab_number(pane.id)
         .map(|number| format!("{number} "))
         .unwrap_or_default();
     let state = if pane.is_running() { "" } else { " · exited" };
-    format!(" {number}{}{state} ", pane.title)
+    // Both corners, the padding space either side, and one column of border showing
+    // after the title so it does not butt against the corner.
+    let room = usize::from(width)
+        .saturating_sub(5)
+        .saturating_sub(text::display_width(&number) + text::display_width(state));
+    format!(
+        " {number}{}{state} ",
+        text::truncate_to_width(&pane.title, room)
+    )
 }
 
 /// A slot's frame including the trailing edge its neighbour draws.
@@ -219,7 +231,7 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     // Each split is titled with its session, since there is no single "the chat" to
     // name any more and the tab strip only marks one of them.
     let title = if in_split {
-        split_title(mux, pane)
+        split_title(mux, pane, slot.area.width)
     } else {
         " Chat ".to_string()
     };
@@ -481,7 +493,9 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         {
             vec![
                 Span::styled(" Split hidden ", badge_style(theme, theme.warning)),
-                Span::raw(" the window is too small for every session; widen it to see them "),
+                Span::raw(
+                    " too little room for every session; enlarge the window or close a panel ",
+                ),
             ]
         }
         PaneStatus::Running => vec![
@@ -1909,6 +1923,44 @@ mod tests {
         assert_eq!(
             buffer[(slots[1].area.right() - 1, top + 1)].style().fg,
             Some(app.theme().error)
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_long_split_title_is_cut_with_an_ellipsis_and_never_hides_that_it_exited() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "short"));
+        app.mux.as_mut().expect("mux").push(named_pane(
+            events,
+            2,
+            "Refactor the authentication middleware to support OAuth device flow",
+        ));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .pane_mut(2)
+            .expect("pane")
+            .mark_exited(Some(1));
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let slot = app.workspace_areas.chats[1];
+        let top = row(&buffer, slot.area.y, 100);
+        assert!(top.contains("… · exited "), "{top}");
+        assert_eq!(
+            buffer[(slot.area.right() - 2, slot.area.y)].symbol(),
+            "─",
+            "the title stops short of the corner: {top}"
         );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }

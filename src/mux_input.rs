@@ -2209,22 +2209,53 @@ fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row
             }
             let width = dock.right().saturating_sub(column);
             let percent = (u32::from(width) * 100 / u32::from(total)) as u16;
+            // One percent short of the exact limit, because the layout rounds and a
+            // cell too many would hide the split after all.
+            let room = total.saturating_sub(split_needs(app).0);
+            let cap = (u32::from(room) * 100 / u32::from(total)) as u16;
             let range = crate::ui::SCRATCHPAD_PERCENT_RANGE;
-            app.dock_sizes.scratchpad_percent = percent.clamp(*range.start(), *range.end());
+            app.dock_sizes.scratchpad_percent = percent
+                .min(cap.saturating_sub(1))
+                .clamp(*range.start(), *range.end());
         }
         Divider::TerminalDock => {
-            let Some(dock) = app.workspace_areas.terminal else {
+            let areas = &app.workspace_areas;
+            let (Some(dock), Some(first)) = (areas.terminal, areas.chats.first()) else {
                 return;
             };
-            // The layout caps this so the chats keep some rows; only the floor is ours.
+            let room = dock
+                .bottom()
+                .saturating_sub(first.area.y)
+                .saturating_sub(split_needs(app).1);
+            // The layout also caps this so a lone chat keeps some rows.
             let rows = dock
                 .bottom()
                 .saturating_sub(row)
+                .min(room)
                 .max(crate::ui::MIN_TERMINAL_ROWS);
             app.dock_sizes.terminal_rows = Some(rows);
         }
     }
     app.refresh_workspace_areas();
+}
+
+/// Columns and rows the split on screen needs to stay on screen, borders included.
+///
+/// A dock dragged past this would make every split vanish under the pointer, which
+/// reads as the sessions closing; the drag stops here instead, the way a divider
+/// between two splits stops at their minimum.
+fn split_needs(app: &App) -> (u16, u16) {
+    let chats = &app.workspace_areas.chats;
+    let (Some(first), Some(second)) = (chats.first(), chats.get(1)) else {
+        return (0, 0);
+    };
+    let count = chats.len() as u16;
+    let (cols, rows) = (crate::ui::MIN_SPLIT_COLS, crate::ui::MIN_SPLIT_ROWS);
+    if first.area.y == second.area.y {
+        (count * cols + count + 1, rows + 2)
+    } else {
+        (cols + 2, count * rows + count + 1)
+    }
 }
 
 /// Chat sizes along the split's direction, plus that direction's minimum, read from
@@ -2965,6 +2996,27 @@ mod tests {
     }
 
     #[test]
+    fn splitting_the_other_way_with_every_session_on_screen_turns_the_split() {
+        let mut app = split_app(2);
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(app.mode, Mode::Normal, "nothing to pick, so no picker");
+        let split = app.mux.as_ref().unwrap().split.clone().unwrap();
+        assert_eq!(split.direction, crate::mux::SplitDirection::Rows);
+        assert_eq!(split.slots, vec![1, 2]);
+        assert_eq!(
+            app.workspace_areas.chats[0].area.x, app.workspace_areas.chats[1].area.x,
+            "laid out stacked straight away"
+        );
+
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Every session is already on screen")
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
     fn the_split_prefix_keys_open_the_picker_and_move_focus_between_splits() {
         let mut app = split_app(3);
         let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
@@ -3063,13 +3115,23 @@ mod tests {
         );
         assert_eq!(app.dock_sizes.scratchpad_percent, 45);
 
+        // All the way to the left edge: the dock stops where both splits still fit,
+        // short of its own maximum, rather than hiding them under the pointer.
         handle_attached_event(
             &mut app,
             mouse(MouseEventKind::Drag(MouseButton::Left), 0, row),
         );
-        assert_eq!(
-            app.dock_sizes.scratchpad_percent,
-            *crate::ui::SCRATCHPAD_PERCENT_RANGE.end()
+        record_frame(&mut app);
+        assert!(app.dock_sizes.scratchpad_percent < *crate::ui::SCRATCHPAD_PERCENT_RANGE.end());
+        assert!(!app.workspace_areas.split_collapsed);
+        assert_eq!(app.workspace_areas.chats.len(), 2);
+        assert!(
+            app.workspace_areas
+                .chats
+                .iter()
+                .all(|slot| slot.pane_area().width >= crate::ui::MIN_SPLIT_COLS),
+            "{:?}",
+            chat_widths(&app)
         );
         handle_attached_event(
             &mut app,
