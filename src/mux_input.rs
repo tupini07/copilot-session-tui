@@ -2581,17 +2581,21 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         }
         MuxEvent::Exited(id, code) => {
             let was_focused = app.mux.as_ref().is_some_and(|mux| mux.focused == Some(id));
-            if let Some(mux) = app.mux.as_mut() {
-                if let Some(pane) = mux.pane_mut(id) {
-                    pane.mark_exited(code);
-                }
-            }
-            let title = app
+            // A tab the user just closed reports its process exiting a moment later.
+            // There is nothing to say about it, and saying "Session '' exited" would
+            // replace the message that closing it left, such as that a tmux session
+            // is still running.
+            let Some(title) = app
                 .mux
-                .as_ref()
-                .and_then(|mux| mux.pane(id))
-                .map(|pane| pane.title.clone())
-                .unwrap_or_default();
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .map(|pane| {
+                    pane.mark_exited(code);
+                    pane.title.clone()
+                })
+            else {
+                return false;
+            };
             app.status_message = Some(match code {
                 Some(0) | None => format!("Session '{title}' finished"),
                 Some(code) => format!("Session '{title}' exited with code {code}"),
@@ -2992,6 +2996,30 @@ mod tests {
         assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 2, 4]);
         assert_eq!(mux.focused, Some(4));
         assert_eq!(app.view, View::Attached(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found once messages could be seen while attached: closing a tab printed what it
+    /// meant to, and the exit of its process a moment later replaced it with
+    /// "Session '' exited with code 1".
+    #[test]
+    fn the_exit_of_a_session_whose_tab_was_just_closed_says_nothing() {
+        let mut app = split_app(2);
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        );
+        let closed = app.status_message.clone();
+        assert!(closed
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Ended")));
+
+        assert!(!handle_mux_event(&mut app, MuxEvent::Exited(2, Some(1))));
+        assert_eq!(app.status_message, closed);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

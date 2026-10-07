@@ -507,6 +507,12 @@ impl MuxState {
                         .get(slot)
                         .or_else(|| split.slots.last())
                         .copied();
+                    // The zoom was on the session that left. Staying zoomed would put
+                    // a different one full screen in its place, so the split comes
+                    // back instead, as tmux does when a zoomed pane closes.
+                    if self.focused == Some(id) {
+                        split.zoomed = false;
+                    }
                 }
                 if split.is_degenerate() {
                     self.split = None;
@@ -590,6 +596,8 @@ impl MuxState {
             .get(slot)
             .or_else(|| split.slots.last())
             .copied();
+        // The focused session was the zoomed one; see `remove`.
+        split.zoomed = false;
         if split.is_degenerate() {
             self.split = None;
         }
@@ -863,6 +871,36 @@ mod tests {
         assert!(mux.unsplit_focused());
         assert!(mux.split.is_none());
         assert!(!mux.unsplit_focused(), "nothing left to break out of");
+        let _ = mux.shutdown();
+    }
+
+    #[test]
+    fn closing_the_zoomed_session_brings_the_split_back_instead_of_zooming_another() {
+        let mut mux = mux_with_panes(4);
+        mux.split_with(SplitDirection::Columns, 2);
+        mux.split_with(SplitDirection::Columns, 3);
+        mux.toggle_split_zoom();
+        mux.remove(3);
+        assert!(
+            mux.visible_split().is_some(),
+            "1 and 2 are back side by side"
+        );
+
+        // A session leaving that was not the zoomed one leaves the zoom alone.
+        mux.split_with(SplitDirection::Columns, 4);
+        mux.focused = Some(1);
+        mux.toggle_split_zoom();
+        mux.remove(4);
+        assert!(mux.split.as_ref().unwrap().zoomed);
+
+        // Taking the zoomed session out of the split brings the rest back too.
+        let _ = mux.shutdown();
+        let mut mux = mux_with_panes(3);
+        mux.split_with(SplitDirection::Columns, 2);
+        mux.split_with(SplitDirection::Columns, 3);
+        mux.toggle_split_zoom();
+        mux.unsplit_focused();
+        assert!(mux.visible_split().is_some());
         let _ = mux.shutdown();
     }
 
