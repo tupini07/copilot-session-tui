@@ -1171,56 +1171,11 @@ fn run_app(
         }
 
         let size = terminal.size()?;
-        let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
-            app.attached_layout(ratatui::layout::Rect::new(0, 0, size.width, size.height))
-        });
         update_layout_metrics(app, size.height);
-
-        if let Some(layout) = attached_layout {
-            app.workspace_areas = app::WorkspaceAreas::from_layout(&layout);
-            if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut())
-            {
-                if let Err(error) = terminal_pane.resize(
-                    area.x.saturating_add(1),
-                    area.y.saturating_add(1),
-                    area.height.saturating_sub(2),
-                    area.width.saturating_sub(2),
-                ) {
-                    app.status_message = Some(format!("Terminal resize failed: {error}"));
-                }
-            }
-
-            let chat = layout.chat_pane();
-            let rows = chat.height.max(1);
-            let cols = chat.width.max(1);
-            app.pane_size = (rows, cols);
-            app.pane_origin = (chat.x, chat.y);
-            if let Some(mux) = app.mux.as_mut() {
-                // Sessions off screen take the focused chat's size: that is the slot
-                // any of them lands in when picked, so it arrives already laid out.
-                for pane in &mut mux.panes {
-                    let area = layout
-                        .chats
-                        .iter()
-                        .find(|slot| slot.pane == pane.id)
-                        .map_or(chat, ui::ChatSlot::pane_area);
-                    let _ =
-                        pane.ensure_size_at(area.x, area.y, area.height.max(1), area.width.max(1));
-                }
-            }
-        } else {
-            if app.mux.is_some() {
-                let rows = size.height.saturating_sub(1).max(1);
-                let cols = size.width.max(1);
-                if app.pane_size != (rows, cols) || app.pane_origin != (0, 0) {
-                    app.pane_size = (rows, cols);
-                    app.pane_origin = (0, 0);
-                    if let Some(mux) = app.mux.as_mut() {
-                        mux.resize_all(rows, cols);
-                    }
-                }
-            }
-        }
+        size_sessions_for_frame(
+            app,
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+        );
 
         input::maybe_load_details(app);
         app.poll_session_load();
@@ -1407,6 +1362,63 @@ fn run_app(
     }
 
     Ok(prepared_restart)
+}
+
+/// Give every session the size it is drawn at, ahead of this frame.
+fn size_sessions_for_frame(app: &mut App, screen: ratatui::layout::Rect) {
+    if !matches!(app.view, app::View::Attached(_)) {
+        // The list draws no session, so none is resized: each keeps the size it was
+        // last shown at, and going to the list and back costs nothing. This used to
+        // resize them all to the full window, a leftover from when sessions were drawn
+        // full screen - Copilot reflowed on the way out and again on the way back,
+        // twice per visible session once splits existed.
+        //
+        // A session started from here is spawned at the chat size it will be shown
+        // at, so it does not reflow the moment it appears either. Once it exists
+        // there are at least two tabs, hence the strip.
+        if app.mux.is_some() {
+            let chat = ui::attached_layout_sized(
+                screen,
+                false,
+                false,
+                app.mux.as_ref().is_some_and(|mux| !mux.panes.is_empty()),
+                app.dock_sizes,
+            )
+            .chat_pane();
+            app.pane_size = (chat.height.max(1), chat.width.max(1));
+            app.pane_origin = (chat.x, chat.y);
+        }
+        return;
+    }
+
+    let layout = app.attached_layout(screen);
+    app.workspace_areas = app::WorkspaceAreas::from_layout(&layout);
+    if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut()) {
+        if let Err(error) = terminal_pane.resize(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.height.saturating_sub(2),
+            area.width.saturating_sub(2),
+        ) {
+            app.status_message = Some(format!("Terminal resize failed: {error}"));
+        }
+    }
+
+    let chat = layout.chat_pane();
+    app.pane_size = (chat.height.max(1), chat.width.max(1));
+    app.pane_origin = (chat.x, chat.y);
+    if let Some(mux) = app.mux.as_mut() {
+        // Sessions off screen take the focused chat's size: that is the slot any of
+        // them lands in when picked, so it arrives already laid out.
+        for pane in &mut mux.panes {
+            let area = layout
+                .chats
+                .iter()
+                .find(|slot| slot.pane == pane.id)
+                .map_or(chat, ui::ChatSlot::pane_area);
+            let _ = pane.ensure_size_at(area.x, area.y, area.height.max(1), area.width.max(1));
+        }
+    }
 }
 
 fn update_layout_metrics(app: &mut App, height: u16) {
@@ -2160,6 +2172,82 @@ mod tests {
             std::time::Instant::now() - std::time::Duration::from_millis(150)
         ));
         assert!(mux_paint_due(&app, true, std::time::Instant::now()));
+    }
+
+    #[test]
+    fn going_to_the_session_list_and_back_resizes_no_session() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "Listed".to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: "listed".to_string(),
+                program,
+                args,
+                events_path: None,
+                terminal_light_mode: Some(false),
+                hooks_active: false,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        let screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+
+        app.view = app::View::Attached(1);
+        size_sessions_for_frame(&mut app, screen);
+        let shown = app.pane_size;
+        let chat = app.workspace_areas.chats[0].pane_area();
+
+        // Checked while on the list: coming back would put any size right again, which
+        // is exactly the second reflow this is about.
+        app.view = app::View::List;
+        size_sessions_for_frame(&mut app, screen);
+        let pane = app.mux.as_mut().unwrap().pane_mut(1).unwrap();
+        assert!(
+            !pane
+                .ensure_size_at(chat.x, chat.y, chat.height, chat.width)
+                .unwrap(),
+            "still exactly where it was shown, so Copilot never reflowed"
+        );
+
+        app.view = app::View::Attached(1);
+        size_sessions_for_frame(&mut app, screen);
+        assert_eq!(app.pane_size, shown);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_session_started_from_the_list_is_spawned_at_the_size_it_will_be_shown_at() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        app.view = app::View::List;
+        let screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        size_sessions_for_frame(&mut app, screen);
+        let chat = ui::attached_layout(screen, false, false, false).chat_pane();
+        assert_eq!(app.pane_size, (chat.height, chat.width));
     }
 
     #[test]

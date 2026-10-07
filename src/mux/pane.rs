@@ -1153,6 +1153,7 @@ impl Pane {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         self.resize_at(0, 0, rows, cols)
     }

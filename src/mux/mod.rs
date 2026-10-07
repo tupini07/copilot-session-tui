@@ -732,12 +732,6 @@ impl MuxState {
         self.focused_pane().map(|pane| pane.cwd.clone())
     }
 
-    pub fn resize_all(&mut self, rows: u16, cols: u16) {
-        for pane in &mut self.panes {
-            let _ = pane.resize(rows, cols);
-        }
-    }
-
     #[cfg(test)]
     pub fn resize_all_at(&mut self, x: u16, y: u16, rows: u16, cols: u16) {
         for pane in &mut self.panes {
