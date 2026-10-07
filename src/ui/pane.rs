@@ -228,10 +228,29 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     let focused = mux.focused == Some(slot.pane);
 
     let border_color = chat_border_color(app, slot.pane, in_split, theme).unwrap_or(theme.inactive);
+    // A view scrolled into history looks exactly like a session that has stopped
+    // producing output, which is what it was taken for in testing. Say so on the
+    // border, where it cannot cover the history being read. Worked out before the
+    // title, which gets whatever room the label leaves rather than being drawn over.
+    let scrolled_back = pane
+        .with_screen(|screen| screen.scrollback())
+        .unwrap_or_default();
+    let label = (scrolled_back > 0).then(|| {
+        let full = format!(" ↑ {scrolled_back} lines back · type to return ");
+        // Long enough to explain itself only when that still leaves the title room.
+        if text::display_width(&full) + 24 <= usize::from(slot.area.width) {
+            full
+        } else {
+            format!(" ↑ {scrolled_back} back ")
+        }
+    });
+    let label_width = label
+        .as_deref()
+        .map_or(0, |label| text::display_width(label) as u16);
     // Each split is titled with its session, since there is no single "the chat" to
     // name any more and the tab strip only marks one of them.
     let title = if in_split {
-        split_title(mux, pane, slot.area.width)
+        split_title(mux, pane, slot.area.width.saturating_sub(label_width))
     } else {
         " Chat ".to_string()
     };
@@ -258,20 +277,13 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     let cursor = Cursor::default().visibility(
         focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
     );
-    let scrolled_back = pane
-        .with_screen(|screen| {
-            let widget = PseudoTerminal::new(screen).cursor(cursor);
-            f.render_widget(widget, terminal_area);
-            apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
-            screen.scrollback()
-        })
-        .unwrap_or_default();
-    // A view scrolled into history looks exactly like a session that has stopped
-    // producing output, which is what it was taken for in testing. Say so on the
-    // border, where it cannot cover the history being read.
-    if scrolled_back > 0 && area.height > 0 {
-        let label = format!(" ↑ {scrolled_back} lines back · type to return ");
-        let width = (text::display_width(&label) as u16).min(area.width.saturating_sub(4));
+    pane.with_screen(|screen| {
+        let widget = PseudoTerminal::new(screen).cursor(cursor);
+        f.render_widget(widget, terminal_area);
+        apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
+    });
+    if let Some(label) = label.filter(|_| area.height > 0) {
+        let width = label_width.min(area.width.saturating_sub(4));
         let label_area = Rect {
             x: area.right().saturating_sub(width + 2),
             y: area.y,
@@ -1924,6 +1936,56 @@ mod tests {
             buffer[(slots[1].area.right() - 1, top + 1)].style().fg,
             Some(app.theme().error)
         );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// Found by running CST: the label was drawn over the end of a long title, which
+    /// then read "1 Refactor the a ↑ 3 lines back".
+    #[test]
+    fn a_scrolled_back_split_shows_its_label_beside_the_title_rather_than_over_it() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux.as_mut().expect("mux").push(named_pane(
+            events.clone(),
+            1,
+            "Refactor the authentication middleware to support OAuth device flow",
+        ));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 2, "two"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 3, "three"));
+        app.mux.as_mut().expect("mux").focus(1);
+        for id in [2, 3] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .split_with(crate::mux::SplitDirection::Columns, id);
+        }
+        app.view = crate::app::View::Attached(3);
+        let history: String = (1..=100).map(|line| format!("line {line}\r\n")).collect();
+        let pane = app.mux.as_mut().expect("mux").pane_mut(1).expect("pane");
+        pane.feed(history.as_bytes());
+        pane.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .expect("scrolls");
+
+        let buffer = render_buffer(&mut app, 160, 30);
+        let slot = app.workspace_areas.chats[0];
+        let top: String = (slot.area.x..slot.area.right())
+            .map(|x| buffer[(x, slot.area.y)].symbol().to_string())
+            .collect();
+        let label = top.find('↑').expect("the label is there");
+        let ellipsis = top.find('…').expect("the title is cut to fit");
+        assert!(ellipsis < label, "{top}");
+        assert!(top.contains(" 1 Refactor"), "{top}");
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

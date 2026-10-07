@@ -1175,6 +1175,15 @@ impl Pane {
         self.scrolled_back = false;
     }
 
+    /// Output as if the child had printed it, for tests that need a screen in a known
+    /// state without depending on a real program's timing.
+    #[cfg(test)]
+    pub fn feed(&self, bytes: &[u8]) {
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.process(bytes);
+        }
+    }
+
     #[cfg(test)]
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         self.resize_at(0, 0, rows, cols)
