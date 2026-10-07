@@ -1800,4 +1800,52 @@ mod tests {
         assert!(row(&buffer, top, 100).contains("right"));
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
+
+    #[test]
+    fn stacked_sessions_share_a_titled_divider_lit_down_to_it_for_the_upper_one() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "upper"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "lower"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Rows, 2);
+        app.mux.as_mut().expect("mux").focus(1);
+        app.view = crate::app::View::Attached(1);
+
+        let buffer = render_buffer(&mut app, 100, 40);
+        let slots = app.workspace_areas.chats.clone();
+        let divider = slots[1].area.y;
+        let (left, right) = (slots[1].area.x, slots[1].area.right() - 1);
+        assert_eq!(buffer[(left, divider)].symbol(), "├");
+        assert_eq!(buffer[(right, divider)].symbol(), "┤");
+        assert!(
+            row(&buffer, divider, 100).contains("lower"),
+            "the shared line carries the lower session's title"
+        );
+        assert_eq!(
+            buffer[(left + 1, divider - 1)].symbol(),
+            " ",
+            "one row between the two chats, not two"
+        );
+
+        // The upper split is focused, so its frame is lit down to the shared line,
+        // while the lower one's own bottom edge stays at rest.
+        let accent = app.theme().accent_alt;
+        assert_eq!(buffer[(left, divider)].style().fg, Some(accent));
+        assert_eq!(buffer[(left, divider - 1)].style().fg, Some(accent));
+        assert_ne!(
+            buffer[(left, slots[1].area.bottom() - 1)].style().fg,
+            Some(accent)
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
 }
