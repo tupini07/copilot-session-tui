@@ -354,6 +354,10 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `m` | Move this tab: `←`/`→` slide it, `Esc` when done |
 | `prefix` `1`–`9` | Jump to a session by number |
+| `prefix` `\|` / `-` | Show another session beside / below this one |
+| `prefix` `←` `↑` `→` `↓` | Move to the neighbouring split |
+| `prefix` `z` | Give this split the whole screen, or put the split back |
+| `prefix` `b` | Take this session out of the split; its tab stays |
 | `prefix` `x` | End a CST-owned session or detach a tmux-backed tab |
 | `prefix` `X` | End the persistent tmux session and stop Copilot |
 | `prefix` `q` | Quit CST; direct sessions end and tmux-backed sessions detach |
@@ -381,6 +385,39 @@ this is a nudge against the edge rather than a hold. For a long trip the keyboar
 is the calmer option.
 
 Tabs live as long as CST does, so the order is not written to disk.
+
+### Splits
+
+Several sessions can share the screen, so you can watch long-running ones without
+flipping between tabs. `prefix` `|` puts another session in a column beside the focused
+one and `prefix` `-` puts it in a row below; either opens the session switcher with only
+the sessions not already on screen. Splits are flat: asking for a stacked split in a row
+of columns turns the whole row into a stack.
+
+Every split is a live, interactive chat. Typing goes to the focused one; click another,
+or use `prefix` and an arrow, to move. The wheel scrolls whichever split it is over
+without taking focus, and Ctrl+click opens a link in any of them.
+
+Tabs stay one per session. Picking a session that is not on screen — by tab, number,
+`prefix` `n`/`p` or the switcher — swaps it into the focused split. The strip marks the
+sessions that are on screen.
+
+The scratchpad and terminal are shared: one column on the right and one strip along the
+bottom, always showing the focused session's. Once any session in the split has one open
+it stays on screen, with a placeholder for sessions that have none, so moving between
+splits never makes the others reflow to a new width.
+
+A turn finishing in a split you are not typing into sends no notification while the CST
+window has focus, because you watched it finish; its border turns to the attention colour
+instead, and its tab keeps its marker until you focus it. Questions, plan approvals and
+errors still notify, just as they do for the focused session.
+
+`prefix` `z` gives the focused split the whole screen and puts the split back.
+`prefix` `b` takes the focused session out of the split, leaving its tab; ending a
+session with `prefix` `x` does the same. When the window is too small to give every
+split a usable chat, CST shows only the focused one and says so in the status bar until
+there is room again. A split survives CST restarting itself for an update, but like
+tabs it is not kept after quitting.
 
 ### Prompt snippets
 

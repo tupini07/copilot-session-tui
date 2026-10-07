@@ -1162,14 +1162,31 @@ impl Pane {
         if let Ok(mut parser) = self.parser.lock() {
             parser.screen_mut().set_size(size.rows, size.cols);
         }
-        self.pty.resize(size)?;
+        // Recorded before the PTY is told, so a PTY that refuses (a child that has
+        // already exited) still leaves the viewport describing where the screen is
+        // drawn — and `ensure_size_at` does not retry it every frame.
         self.viewport = Viewport {
             x,
             y,
             rows: size.rows,
             cols: size.cols,
         };
+        self.pty.resize(size)?;
         Ok(())
+    }
+
+    /// [`Self::resize_at`], skipped when the pane is already exactly there.
+    ///
+    /// Called for every pane on every frame, so it must cost nothing when nothing
+    /// moved: a PTY resize makes Copilot redraw its whole screen.
+    pub fn ensure_size_at(&mut self, x: u16, y: u16, rows: u16, cols: u16) -> Result<bool> {
+        let size = pty_size(rows, cols);
+        let current = self.viewport;
+        if (current.x, current.y, current.rows, current.cols) == (x, y, size.rows, size.cols) {
+            return Ok(false);
+        }
+        self.resize_at(x, y, rows, cols)?;
+        Ok(true)
     }
 
     pub fn kill(&self) -> Result<()> {

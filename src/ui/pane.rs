@@ -7,10 +7,10 @@ use std::time::Duration;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::app::App;
-use crate::mux::{PaneStatus, PrefixState};
+use crate::mux::{PaneId, PaneStatus, PrefixState};
 use crate::text;
 use crate::theme::{apply_terminal_theme, fill_area, Theme, ThemeName};
-use crate::ui::tabs;
+use crate::ui::{tabs, ChatSlot};
 
 /// Frames of the startup spinner. Braille dots read as motion even in a plain terminal.
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -47,25 +47,166 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration, theme: Theme) {
     f.render_widget(Paragraph::new(lines), box_area);
 }
 
-pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+/// Draw every session on screen, then settle the borders they share.
+pub fn draw_chats(f: &mut Frame, app: &App, slots: &[ChatSlot]) {
+    let in_split = slots.len() > 1;
+    for slot in slots {
+        draw_chat(f, app, slot, in_split);
+    }
+    if !in_split {
+        return;
+    }
+    join_shared_borders(f.buffer_mut(), slots);
+    // A boundary belongs to the later slot, so a slot's trailing edge is drawn in its
+    // neighbour's colour. Recolouring afterwards gives each highlighted slot its whole
+    // frame; the focused one goes last so it wins the edge it shares with a slot that
+    // is asking for attention.
+    let theme = app.theme();
+    let focused = app.mux.as_ref().and_then(|mux| mux.focused);
+    let mut highlighted: Vec<(&ChatSlot, Color)> = slots
+        .iter()
+        .filter_map(|slot| chat_border_color(app, slot.pane, in_split, theme).map(|c| (slot, c)))
+        .collect();
+    highlighted.sort_by_key(|(slot, _)| Some(slot.pane) == focused);
+    for (slot, color) in highlighted {
+        recolor_frame(f.buffer_mut(), full_frame(slot), color);
+    }
+}
+
+/// The colour a chat's border stands out in, or `None` for the resting colour.
+fn chat_border_color(app: &App, id: PaneId, in_split: bool, theme: Theme) -> Option<Color> {
+    let mux = app.mux.as_ref()?;
+    if mux.focused == Some(id) {
+        return (app.workspace_focus == crate::app::WorkspaceFocus::Chat)
+            .then_some(theme.accent_alt);
+    }
+    // Only a split shows an unfocused chat at all; there, a session that wants the
+    // user says so with its border, since it raises no notification while visible.
+    (in_split && mux.pane(id).is_some_and(|pane| pane.needs_attention())).then_some(theme.warning)
+}
+
+/// A slot's frame including the trailing edge its neighbour draws.
+fn full_frame(slot: &ChatSlot) -> Rect {
+    let mut area = slot.area;
+    if !slot.borders.contains(Borders::RIGHT) {
+        area.width += 1;
+    }
+    if !slot.borders.contains(Borders::BOTTOM) {
+        area.height += 1;
+    }
+    area
+}
+
+fn is_border_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "─" | "│" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+    )
+}
+
+/// Recolour the box-drawing cells around `area`, leaving any title text alone.
+fn recolor_frame(buffer: &mut ratatui::buffer::Buffer, area: Rect, color: Color) {
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let (left, right, top, bottom) = (area.left(), area.right() - 1, area.top(), area.bottom() - 1);
+    for x in left..=right {
+        for y in [top, bottom] {
+            recolor_border_cell(buffer, x, y, color);
+        }
+    }
+    for y in top..=bottom {
+        for x in [left, right] {
+            recolor_border_cell(buffer, x, y, color);
+        }
+    }
+}
+
+fn recolor_border_cell(buffer: &mut ratatui::buffer::Buffer, x: u16, y: u16, color: Color) {
+    if let Some(cell) = buffer.cell_mut((x, y)) {
+        if is_border_symbol(cell.symbol()) {
+            cell.set_fg(color);
+        }
+    }
+}
+
+/// Turn the corners where one slot's border meets the next into tees, so the
+/// boundary reads as one divider rather than a box butted against a line.
+fn join_shared_borders(buffer: &mut ratatui::buffer::Buffer, slots: &[ChatSlot]) {
+    for slot in slots.iter().skip(1) {
+        let area = slot.area;
+        if area.is_empty() {
+            continue;
+        }
+        let joins = if slot.area.y == slots[0].area.y {
+            // Side by side: the shared edge is this slot's left column.
+            [
+                (area.left(), area.top(), "┌", "┬"),
+                (area.left(), area.bottom() - 1, "└", "┴"),
+            ]
+        } else {
+            // Stacked: the shared edge is this slot's top row.
+            [
+                (area.left(), area.top(), "┌", "├"),
+                (area.right() - 1, area.top(), "┐", "┤"),
+            ]
+        };
+        for (x, y, from, to) in joins {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                if cell.symbol() == from {
+                    cell.set_symbol(to);
+                }
+            }
+        }
+    }
+}
+
+/// The scratchpad or terminal dock in a split, when the focused session has none of
+/// its own. Kept on screen rather than removed so the other sessions keep their size.
+pub fn draw_empty_dock(f: &mut Frame, area: Rect, title: &str, message: &str, theme: Theme) {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(panel_style(theme))
+        .border_style(Style::default().fg(theme.inactive));
+    let inner = block.inner(area);
+    fill_area(f.buffer_mut(), area, theme.background);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            message.to_string(),
+            Style::default().fg(theme.muted),
+        )))
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     let theme = app.theme();
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
-    let Some(pane) = mux.focused_pane() else {
+    let Some(pane) = mux.pane(slot.pane) else {
         return;
     };
+    let focused = mux.focused == Some(slot.pane);
 
-    let border_color = if app.workspace_focus == crate::app::WorkspaceFocus::Chat {
-        theme.accent_alt
+    let border_color = chat_border_color(app, slot.pane, in_split, theme).unwrap_or(theme.inactive);
+    // Each split is titled with its session, since there is no single "the chat" to
+    // name any more and the tab strip only marks one of them.
+    let title = if in_split {
+        format!(" {} ", pane.title)
     } else {
-        theme.inactive
+        " Chat ".to_string()
     };
     let block = Block::default()
-        .title(" Chat ")
-        .borders(Borders::ALL)
+        .title(title)
+        .borders(slot.borders)
         .style(panel_style(theme))
         .border_style(Style::default().fg(border_color));
+    let area = slot.area;
     let terminal_area = block.inner(area);
     fill_area(f.buffer_mut(), area, theme.background);
     f.render_widget(block, area);
@@ -80,14 +221,20 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // the write traded that for a cursor that was hidden more often than not. A painted
     // cursor is just part of the frame, which is how the terminal and scratchpad panes
     // have always drawn theirs.
-    let cursor = Cursor::default()
-        .visibility(app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting);
+    let cursor = Cursor::default().visibility(
+        focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
+    );
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen).cursor(cursor);
         f.render_widget(widget, terminal_area);
         apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
     });
-    decorate_references(f, app, terminal_area, theme);
+    // Reference statuses are resolved against the focused session's repository. Another
+    // split may be in a different one, where the same number is a different item, so
+    // its references stay plain rather than risk a wrong colour.
+    if focused {
+        decorate_references(f, app, terminal_area, theme);
+    }
 
     if starting {
         draw_starting(f, terminal_area, pane.started_at.elapsed(), theme);
@@ -249,6 +396,25 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                         area.width.saturating_sub(11) as usize,
                     )
                 )),
+            ]
+        }
+        // A split that is not being drawn is otherwise indistinguishable from no split,
+        // and the user would have no idea why the other sessions vanished.
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle
+                && mux.split.as_ref().is_some_and(|split| split.zoomed) =>
+        {
+            vec![
+                Span::styled(" Zoomed ", badge_style(theme, theme.accent_alt)),
+                Span::raw(format!(" {prefix} z shows the split again ")),
+            ]
+        }
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && app.workspace_areas.split_collapsed =>
+        {
+            vec![
+                Span::styled(" Split hidden ", badge_style(theme, theme.warning)),
+                Span::raw(" the window is too small for every session; widen it to see them "),
             ]
         }
         PaneStatus::Running => vec![
@@ -452,6 +618,18 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
                 Style::default().fg(theme.accent_alt),
                 "━",
+            )
+        } else if mux
+            .panes
+            .get(start + offset)
+            .is_some_and(|pane| app.pane_on_screen(pane.id))
+        {
+            // On screen in a split but without the keyboard: the focused tab's colour
+            // at an ordinary tab's weight, so the strip shows which sessions are up.
+            (
+                Style::default().fg(theme.accent_alt),
+                Style::default().fg(theme.accent_alt),
+                "─",
             )
         } else if tab.running {
             (
@@ -1564,6 +1742,62 @@ mod tests {
             "━",
             "which is a different glyph from merely being focused"
         );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn side_by_side_sessions_share_one_divider_lit_for_whichever_has_focus() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "left"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "right"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let slots = app.workspace_areas.chats.clone();
+        assert_eq!(slots.len(), 2);
+        let divider = slots[1].area.x;
+        let (top, bottom) = (slots[1].area.y, slots[1].area.bottom() - 1);
+        assert_eq!(
+            buffer[(divider, top)].symbol(),
+            "┬",
+            "{}",
+            row(&buffer, top, 100)
+        );
+        assert_eq!(buffer[(divider, bottom)].symbol(), "┴");
+        assert_eq!(
+            buffer[(divider - 1, top + 1)].symbol(),
+            " ",
+            "one column between the two chats, not two"
+        );
+
+        let accent = app.theme().accent_alt;
+        assert_eq!(buffer[(divider, top + 1)].style().fg, Some(accent));
+        assert_ne!(
+            buffer[(slots[0].area.x, top + 1)].style().fg,
+            Some(accent),
+            "the unfocused split's own edge stays at rest"
+        );
+
+        // Focusing the left session moves the lit frame, divider included.
+        app.mux.as_mut().expect("mux").focus(1);
+        app.view = crate::app::View::Attached(1);
+        let buffer = render_buffer(&mut app, 100, 30);
+        assert_eq!(buffer[(slots[0].area.x, top + 1)].style().fg, Some(accent));
+        assert_eq!(buffer[(divider, top + 1)].style().fg, Some(accent));
+        assert!(row(&buffer, top, 100).contains("left"));
+        assert!(row(&buffer, top, 100).contains("right"));
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 }

@@ -2,7 +2,7 @@
 use crate::app::SettingsSection;
 use crate::app::{
     App, DeleteTarget, Mode, NewSessionRequest, PendingTmuxLaunch, PendingWorktree,
-    SettingsEditField, TakeoverTarget, View, WorktreeLaunchTarget,
+    SettingsEditField, TakeoverTarget, View, WorkspaceFocus, WorktreeLaunchTarget,
 };
 use crate::config;
 use crate::session::loader;
@@ -433,10 +433,15 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
 
 /// Pane switcher: attach, kill, or dismiss without touching the underlying session list.
 fn handle_pane_list(app: &mut App, key: KeyCode) {
-    let Some(count) = app.mux.as_ref().map(|mux| mux.panes.len()) else {
+    if app.mux.is_none() {
         app.mode = Mode::Normal;
         return;
-    };
+    }
+    if let Some(direction) = app.split_picker {
+        handle_split_picker(app, key, direction);
+        return;
+    }
+    let count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
     if count == 0 {
         app.mode = Mode::Normal;
         return;
@@ -501,6 +506,53 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
                 .map(|pane| pane.session_id.clone())
                 .expect("pane index checked above");
             request_end_tmux_session(app, &session_id);
+        }
+        _ => {}
+    }
+}
+
+/// The pane switcher choosing a session to show beside the focused one.
+///
+/// Only navigation and choosing: closing or ending a session from here would remove
+/// it from a list that exists to add one, which is not what anyone opening it meant.
+fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::SplitDirection) {
+    let candidates = app.pane_list_ids();
+    if candidates.is_empty() {
+        app.split_picker = None;
+        app.mode = Mode::Normal;
+        return;
+    }
+    let count = candidates.len();
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.pane_selected = app.pane_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.pane_selected = (app.pane_selected + 1).min(count - 1);
+        }
+        KeyCode::Char(digit @ '1'..='9') => {
+            let index = digit as usize - '1' as usize;
+            if index < count {
+                app.pane_selected = index;
+            }
+        }
+        KeyCode::Enter => {
+            let id = candidates[app.pane_selected.min(count - 1)];
+            app.split_picker = None;
+            app.mode = Mode::Normal;
+            if app
+                .mux
+                .as_mut()
+                .is_some_and(|mux| mux.split_with(direction, id))
+            {
+                app.workspace_focus = WorkspaceFocus::Chat;
+                crate::mux_input::sync_workspace_panels(app);
+                crate::mux_input::sync_view(app);
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.split_picker = None;
+            app.mode = Mode::Normal;
         }
         _ => {}
     }

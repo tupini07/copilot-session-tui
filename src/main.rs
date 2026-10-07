@@ -217,6 +217,9 @@ enum HookPluginCommand {
 struct RestartManifest {
     panes: Vec<RestartManifestPane>,
     focused_session_id: Option<String>,
+    /// Defaulted so a manifest from a CST that predates splits still loads.
+    #[serde(default)]
+    split: Option<mux::split::SavedSplit>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -545,10 +548,14 @@ fn main() -> Result<()> {
                 .and_then(|mux| mux.pane_for_session(session_id))
             {
                 if let Some(mux) = app.mux.as_mut() {
-                    mux.focused = Some(pane_id);
+                    mux.focus(pane_id);
                 }
                 app.view = app::View::Attached(pane_id);
             }
+        }
+        if let (Some(split), Some(mux)) = (restart_manifest.split.as_ref(), app.mux.as_mut()) {
+            mux.restore_split(split);
+            mux_input::sync_view(&mut app);
         }
         mux_input::sync_workspace_panels(&mut app);
     }
@@ -807,6 +814,15 @@ impl PreparedRestart {
                     .panes
                     .iter()
                     .any(|pane| pane.copilot_running && &pane.session_id == session_id)
+            }),
+            // Only sessions that are reopened can take a slot again.
+            split: request.split.clone().and_then(|split| {
+                split.retain_sessions(|session_id| {
+                    request
+                        .panes
+                        .iter()
+                        .any(|pane| pane.copilot_running && pane.session_id == session_id)
+                })
             }),
         };
         let path = restart_gate_path(self.gate.path(), "manifest");
@@ -1156,22 +1172,12 @@ fn run_app(
 
         let size = terminal.size()?;
         let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
-            ui::attached_layout(
-                ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                app.attached_scratchpad_visible(),
-                app.attached_terminal_visible(),
-                app.tab_bar_visible(),
-            )
+            app.attached_layout(ratatui::layout::Rect::new(0, 0, size.width, size.height))
         });
         update_layout_metrics(app, size.height);
 
         if let Some(layout) = attached_layout {
-            app.workspace_areas = app::WorkspaceAreas {
-                chat: layout.chat,
-                tabs: layout.tabs,
-                scratchpad: layout.scratchpad,
-                terminal: layout.terminal,
-            };
+            app.workspace_areas = app::WorkspaceAreas::from_layout(&layout);
             if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut())
             {
                 if let Err(error) = terminal_pane.resize(
@@ -1187,11 +1193,19 @@ fn run_app(
             let chat = layout.chat_pane();
             let rows = chat.height.max(1);
             let cols = chat.width.max(1);
-            if app.pane_size != (rows, cols) || app.pane_origin != (chat.x, chat.y) {
-                app.pane_size = (rows, cols);
-                app.pane_origin = (chat.x, chat.y);
-                if let Some(mux) = app.mux.as_mut() {
-                    mux.resize_all_at(chat.x, chat.y, rows, cols);
+            app.pane_size = (rows, cols);
+            app.pane_origin = (chat.x, chat.y);
+            if let Some(mux) = app.mux.as_mut() {
+                // Sessions off screen take the focused chat's size: that is the slot
+                // any of them lands in when picked, so it arrives already laid out.
+                for pane in &mut mux.panes {
+                    let area = layout
+                        .chats
+                        .iter()
+                        .find(|slot| slot.pane == pane.id)
+                        .map_or(chat, ui::ChatSlot::pane_area);
+                    let _ =
+                        pane.ensure_size_at(area.x, area.y, area.height.max(1), area.width.max(1));
                 }
             }
         } else {
@@ -1877,6 +1891,7 @@ mod tests {
                 },
             ],
             focused_session_id: Some("session-2".to_string()),
+            split: None,
         };
 
         let args = restart_arguments(&cli, Path::new(r"C:\copilot-home"), true);
@@ -1914,6 +1929,53 @@ mod tests {
             ["session-2", "session-1"]
         );
         assert_eq!(manifest.focused_session_id.as_deref(), Some("session-2"));
+    }
+
+    #[test]
+    fn a_split_survives_the_update_restart_minus_sessions_that_are_not_reopened() {
+        let pane = |session_id: &str, copilot_running: bool| app::UpdateRestartPane {
+            pane_id: None,
+            copilot_running,
+            terminal_generation: None,
+            session_id: session_id.to_string(),
+            cwd: PathBuf::from("work"),
+            title: session_id.to_string(),
+        };
+        let request = app::UpdateRestartRequest {
+            panes: vec![pane("a", true), pane("b", true), pane("c", false)],
+            focused_session_id: Some("a".to_string()),
+            split: Some(mux::split::SavedSplit {
+                direction: mux::SplitDirection::Rows,
+                session_ids: vec!["a".to_string(), "c".to_string(), "b".to_string()],
+                weights: vec![100, 50, 150],
+                zoomed: false,
+            }),
+        };
+        let prepared = PreparedRestart {
+            child: None,
+            gate: tempfile::tempdir().unwrap(),
+            released: false,
+        };
+        prepared.write_manifest(&request).unwrap();
+        let manifest: RestartManifest = serde_json::from_slice(
+            &std::fs::read(restart_gate_path(prepared.gate.path(), "manifest")).unwrap(),
+        )
+        .unwrap();
+        let split = manifest.split.expect("two sessions still make a split");
+        assert_eq!(split.session_ids, ["a", "b"]);
+        assert_eq!(
+            split.weights,
+            [100, 150],
+            "each weight stays with its session"
+        );
+        assert_eq!(split.direction, mux::SplitDirection::Rows);
+    }
+
+    #[test]
+    fn a_restart_manifest_from_before_splits_still_loads() {
+        let manifest: RestartManifest =
+            serde_json::from_str(r#"{"panes":[],"focused_session_id":null}"#).unwrap();
+        assert!(manifest.split.is_none());
     }
 
     #[test]
@@ -1971,6 +2033,7 @@ mod tests {
                 title: "Shell".to_string(),
             }],
             focused_session_id: Some("stopped-chat".to_string()),
+            split: None,
         };
 
         let prepared = PreparedRestart {

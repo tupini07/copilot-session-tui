@@ -314,13 +314,18 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
     };
     let theme = app.theme();
 
-    let height = (mux.panes.len() + 5).min(20) as u16;
+    let ids = app.pane_list_ids();
+    let height = (ids.len() + 5).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
     prepare_popup(f, area, theme);
 
+    let title = match app.split_picker {
+        Some(direction) => format!(" Show beside this session ({}) ", direction.label()),
+        None => " Sessions ".to_string(),
+    };
     let block = Block::default()
-        .title(" Sessions ")
+        .title(title)
         .borders(Borders::ALL)
         .style(surface_style(theme))
         .border_style(Style::default().fg(theme.accent));
@@ -332,9 +337,9 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem> = mux
-        .panes
+    let items: Vec<ListItem> = ids
         .iter()
+        .filter_map(|id| mux.pane(*id))
         .enumerate()
         .map(|(index, pane)| {
             let title = app.pane_session_title(&pane.session_id, &pane.title);
@@ -388,6 +393,19 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
 
     f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
 
+    if app.split_picker.is_some() {
+        let hint = Line::from(vec![
+            Span::raw(" "),
+            Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
+            Span::raw(" select  "),
+            Span::styled("Enter", Style::default().fg(theme.accent_alt)),
+            Span::raw(" split  "),
+            Span::styled("Esc", Style::default().fg(theme.accent_alt)),
+            Span::raw(" cancel"),
+        ]);
+        f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
+        return;
+    }
     let mut hint_spans = vec![
         Span::raw(" "),
         Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
@@ -900,6 +918,21 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
             theme,
             &format!("{prefix} 1-9"),
             "Jump to session by number",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} | / -"),
+            "Show another session beside / below this one",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} ←↑→↓"),
+            "Move to the neighbouring split",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} z / b"),
+            "Zoom this split / take it out of the split",
         ));
         if app.tmux_support.is_available() {
             text.push(help_line(

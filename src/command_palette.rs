@@ -14,6 +14,10 @@ pub enum CommandId {
     BackToSessionList,
     SwitchSession,
     MoveTab,
+    SplitSideBySide,
+    SplitStacked,
+    ZoomSplit,
+    UnsplitSession,
     NextSession,
     PreviousSession,
     ResumeSelected,
@@ -173,6 +177,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
         .and_then(|mux| mux.focused_pane())
         .is_some_and(|pane| pane.status == PaneStatus::Running);
     let has_panes = app.mux.as_ref().is_some_and(|mux| !mux.panes.is_empty());
+    let pane_count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
+    let in_split = app.mux.as_ref().is_some_and(|mux| mux.split.is_some());
     let selected = app.selected_session().is_some();
     let favorite_selected = app
         .selected_session()
@@ -275,6 +281,42 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "C-b m",
             attached && has_panes,
             "Requires an attached session",
+        ),
+        entry(
+            Id::SplitSideBySide,
+            Group::View,
+            "Split side by side",
+            "Show another session in a column beside this one",
+            "C-b |",
+            attached && pane_count > 1,
+            "Requires an attached session and another one to show",
+        ),
+        entry(
+            Id::SplitStacked,
+            Group::View,
+            "Split stacked",
+            "Show another session in a row below this one",
+            "C-b -",
+            attached && pane_count > 1,
+            "Requires an attached session and another one to show",
+        ),
+        entry(
+            Id::ZoomSplit,
+            Group::View,
+            "Zoom split",
+            "Give this split the whole screen, or put the split back",
+            "C-b z",
+            attached && in_split,
+            "Requires sessions shown side by side or stacked",
+        ),
+        entry(
+            Id::UnsplitSession,
+            Group::View,
+            "Remove from split",
+            "Take this session out of the split; its tab stays",
+            "C-b b",
+            attached && in_split,
+            "Requires sessions shown side by side or stacked",
         ),
         entry(
             Id::NextSession,
@@ -605,6 +647,9 @@ fn command_keywords(id: CommandId) -> &'static str {
         BackToSessionList => "detach picker catalog",
         SwitchSession | NextSession | PreviousSession => "pane tab mux",
         MoveTab => "reorder move tab drag arrange",
+        SplitSideBySide | SplitStacked => "split pane side by side column row stack watch several",
+        ZoomSplit => "split pane maximise maximize fullscreen",
+        UnsplitSession => "split pane break out close remove",
         ResumeSelected => "attach open",
         ResumeSelectedInTmux => "attach open persistent tmux tab",
         NewSession => "create copilot",
