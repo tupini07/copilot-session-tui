@@ -358,6 +358,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `←` `↑` `→` `↓` | Move to the neighbouring split |
 | `prefix` `z` | Give this split the whole screen, or put the split back |
 | `prefix` `b` | Take this session out of the split; its tab stays |
+| `prefix` `r` | Resize this split: `←`/`↑` shrink, `→`/`↓` grow, `Esc` when done |
 | `prefix` `x` | End a CST-owned session or detach a tmux-backed tab |
 | `prefix` `X` | End the persistent tmux session and stop Copilot |
 | `prefix` `q` | Quit CST; direct sessions end and tmux-backed sessions detach |
@@ -411,6 +412,13 @@ A turn finishing in a split you are not typing into sends no notification while 
 window has focus, because you watched it finish; its border turns to the attention colour
 instead, and its tab keeps its marker until you focus it. Questions, plan approvals and
 errors still notify, just as they do for the focused session.
+
+Drag the line between two splits to resize them; the sessions on either side reflow as
+you go and the rest stay put. The scratchpad's left edge and the terminal's top edge
+drag the same way, with or without a split, and the sizes last until CST quits.
+`prefix` `r` does it from the keyboard: the arrows shrink and grow the focused split two
+cells at a time against its neighbour, and `Esc` leaves. No split shrinks below a usable
+chat.
 
 `prefix` `z` gives the focused split the whole screen and puts the split back.
 `prefix` `b` takes the focused session out of the split, leaving its tab; ending a

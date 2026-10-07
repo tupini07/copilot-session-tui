@@ -77,6 +77,17 @@ pub struct WorkspaceAreas {
     pub split_collapsed: bool,
 }
 
+/// A border on the attached screen that can be dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    /// The boundary in front of this split slot, shared with the slot before it.
+    Split(usize),
+    /// The scratchpad column's left edge.
+    ScratchpadDock,
+    /// The terminal strip's top edge.
+    TerminalDock,
+}
+
 impl WorkspaceAreas {
     pub fn from_layout(layout: &crate::ui::AttachedLayout) -> Self {
         Self {
@@ -87,6 +98,39 @@ impl WorkspaceAreas {
             terminal: layout.terminal,
             split_collapsed: layout.split_collapsed,
         }
+    }
+
+    /// The border under the pointer that can be dragged to resize what is either side.
+    pub fn divider_at(&self, column: u16, row: u16) -> Option<Divider> {
+        let along = |area: Rect| column >= area.x && column < area.right();
+        let down = |area: Rect| row >= area.y && row < area.bottom();
+        // Each boundary between splits is the later slot's leading edge.
+        let side_by_side = self
+            .chats
+            .get(1)
+            .zip(self.chats.first())
+            .is_some_and(|(second, first)| second.area.y == first.area.y);
+        for (index, slot) in self.chats.iter().enumerate().skip(1) {
+            let hit = if side_by_side {
+                column == slot.area.x && down(slot.area)
+            } else {
+                row == slot.area.y && along(slot.area)
+            };
+            if hit {
+                return Some(Divider::Split(index));
+            }
+        }
+        if let Some(area) = self.scratchpad {
+            if column == area.x && down(area) {
+                return Some(Divider::ScratchpadDock);
+            }
+        }
+        if let Some(area) = self.terminal {
+            if row == area.y && along(area) {
+                return Some(Divider::TerminalDock);
+            }
+        }
+        None
     }
 
     /// The session whose chat box is under the pointer, border included.
@@ -801,6 +845,10 @@ pub struct App {
     /// A click that only moved focus to another split owns the rest of its gesture,
     /// so the session it landed in never sees a release without a press.
     pub swallow_mouse_until_up: bool,
+    /// Dock sizes the user has dragged to. Kept for as long as CST runs.
+    pub dock_sizes: crate::ui::DockSizes,
+    /// The border being dragged, which owns the gesture until the button comes up.
+    pub dragging_divider: Option<Divider>,
     /// The `mux` value stored on disk, so a `--mux` / `--no-mux` override for this
     /// invocation is never accidentally persisted by the settings popup.
     pub mux_on_disk: bool,
@@ -967,6 +1015,8 @@ impl App {
             pane_selected: 0,
             split_picker: None,
             swallow_mouse_until_up: false,
+            dock_sizes: crate::ui::DockSizes::default(),
+            dragging_divider: None,
             mux_on_disk,
             exit_dir: None,
             pending_worktree: None,
@@ -2608,6 +2658,7 @@ impl App {
                 self.scratchpad_dock_visible(),
                 self.terminal_dock_visible(),
                 tabs,
+                self.dock_sizes,
                 split,
                 focused,
             ) {
@@ -2616,11 +2667,12 @@ impl App {
         }
         // No split, or one the window is too small for. Either way only the focused
         // session is drawn, with only its own panels.
-        let mut layout = crate::ui::attached_layout(
+        let mut layout = crate::ui::attached_layout_sized(
             area,
             self.attached_scratchpad_visible(),
             self.attached_terminal_visible(),
             tabs,
+            self.dock_sizes,
         );
         layout.split_collapsed = split.is_some();
         if let Some(focused) = focused {

@@ -409,11 +409,53 @@ pub fn terminal_panel_height(content_height: u16) -> u16 {
     }
 }
 
+#[cfg(test)]
 pub fn attached_layout(
     area: Rect,
     scratchpad_visible: bool,
     terminal_visible: bool,
     tabs_visible: bool,
+) -> AttachedLayout {
+    attached_layout_sized(
+        area,
+        scratchpad_visible,
+        terminal_visible,
+        tabs_visible,
+        DockSizes::default(),
+    )
+}
+
+/// How much room the docks take. Starts at the built-in proportions; dragging a
+/// dock's edge changes it for as long as CST runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DockSizes {
+    pub scratchpad_percent: u16,
+    /// `None` until someone drags it, so until then the height follows the window.
+    pub terminal_rows: Option<u16>,
+}
+
+impl Default for DockSizes {
+    fn default() -> Self {
+        Self {
+            scratchpad_percent: 35,
+            terminal_rows: None,
+        }
+    }
+}
+
+/// How far the scratchpad column can be dragged: never so narrow it is lost under the
+/// pointer, never so wide the chats get less than a third.
+pub const SCRATCHPAD_PERCENT_RANGE: std::ops::RangeInclusive<u16> = 15..=65;
+pub const MIN_TERMINAL_ROWS: u16 = 4;
+/// The chats keep at least this many rows above the terminal, however far it is dragged.
+const MIN_ROWS_ABOVE_TERMINAL: u16 = 5;
+
+pub fn attached_layout_sized(
+    area: Rect,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+    tabs_visible: bool,
+    sizes: DockSizes,
 ) -> AttachedLayout {
     // A lone session has nothing to switch to, so the strip collapses to nothing rather
     // than spending two rows of Copilot's output on a single tab.
@@ -434,8 +476,13 @@ pub fn attached_layout(
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),
-                Constraint::Length(terminal_panel_height(content.height)),
+                Constraint::Min(MIN_ROWS_ABOVE_TERMINAL),
+                Constraint::Length(
+                    sizes
+                        .terminal_rows
+                        .unwrap_or_else(|| terminal_panel_height(content.height))
+                        .min(content.height.saturating_sub(MIN_ROWS_ABOVE_TERMINAL)),
+                ),
             ])
             .split(content);
         (sections[0], Some(sections[1]))
@@ -446,7 +493,10 @@ pub fn attached_layout(
     let (chat, scratchpad) = if scratchpad_visible {
         let sections = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .constraints([
+                Constraint::Percentage(100 - sizes.scratchpad_percent),
+                Constraint::Percentage(sizes.scratchpad_percent),
+            ])
             .split(top);
         (sections[0], Some(sections[1]))
     } else {
@@ -475,10 +525,17 @@ pub fn attached_split_layout(
     scratchpad_visible: bool,
     terminal_visible: bool,
     tabs_visible: bool,
+    sizes: DockSizes,
     split: &SplitLayout,
     focused: PaneId,
 ) -> Option<AttachedLayout> {
-    let mut layout = attached_layout(area, scratchpad_visible, terminal_visible, tabs_visible);
+    let mut layout = attached_layout_sized(
+        area,
+        scratchpad_visible,
+        terminal_visible,
+        tabs_visible,
+        sizes,
+    );
     let chats = split_slots(layout.chat, split)?;
     let focused = chats.iter().find(|slot| slot.pane == focused)?;
     layout.chat = focused.area;
@@ -634,8 +691,16 @@ mod tests {
     #[test]
     fn three_columns_tile_the_chat_area_sharing_one_border_column_per_boundary() {
         let area = Rect::new(0, 0, 120, 40);
-        let layout = attached_split_layout(area, false, false, true, &three_columns(), 2)
-            .expect("three columns fit on 120");
+        let layout = attached_split_layout(
+            area,
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            2,
+        )
+        .expect("three columns fit on 120");
         let chats = &layout.chats;
 
         assert_eq!(chats.len(), 3);
@@ -670,6 +735,7 @@ mod tests {
             false,
             false,
             true,
+            DockSizes::default(),
             &three_columns(),
             3,
         )
@@ -687,6 +753,7 @@ mod tests {
             false,
             false,
             true,
+            DockSizes::default(),
             &three_columns(),
             1
         )
@@ -696,6 +763,7 @@ mod tests {
             false,
             false,
             true,
+            DockSizes::default(),
             &three_columns(),
             1
         )
@@ -706,7 +774,16 @@ mod tests {
     fn the_docks_keep_their_size_whatever_the_split_so_moving_focus_reflows_nothing() {
         let area = Rect::new(0, 0, 200, 50);
         let single = attached_layout(area, true, true, true);
-        let split = attached_split_layout(area, true, true, true, &three_columns(), 1).unwrap();
+        let split = attached_split_layout(
+            area,
+            true,
+            true,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            1,
+        )
+        .unwrap();
         assert_eq!(split.scratchpad, single.scratchpad);
         assert_eq!(split.terminal, single.terminal);
         assert_eq!(
@@ -720,13 +797,50 @@ mod tests {
     fn stacked_splits_keep_each_top_edge_so_every_session_has_its_title() {
         let mut split = SplitLayout::new(SplitDirection::Rows, 1, 2);
         split.insert_after(2, 3);
-        let layout =
-            attached_split_layout(Rect::new(0, 0, 100, 50), false, false, true, &split, 1).unwrap();
+        let layout = attached_split_layout(
+            Rect::new(0, 0, 100, 50),
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &split,
+            1,
+        )
+        .unwrap();
         for pair in layout.chats.windows(2) {
             assert_eq!(pair[0].area.bottom(), pair[1].area.y);
             assert!(!pair[0].borders.contains(Borders::BOTTOM));
             assert!(pair[1].borders.contains(Borders::TOP));
         }
+    }
+
+    #[test]
+    fn dragged_dock_sizes_are_used_but_the_terminal_never_takes_the_chats_last_rows() {
+        let area = Rect::new(0, 0, 100, 40);
+        let wide = attached_layout_sized(
+            area,
+            true,
+            true,
+            true,
+            DockSizes {
+                scratchpad_percent: 50,
+                terminal_rows: Some(10),
+            },
+        );
+        assert_eq!(wide.scratchpad.unwrap().width, 50);
+        assert_eq!(wide.terminal.unwrap().height, 10);
+
+        let greedy = attached_layout_sized(
+            area,
+            false,
+            true,
+            true,
+            DockSizes {
+                terminal_rows: Some(500),
+                ..DockSizes::default()
+            },
+        );
+        assert_eq!(greedy.chat.height, MIN_ROWS_ABOVE_TERMINAL);
     }
 
     #[test]

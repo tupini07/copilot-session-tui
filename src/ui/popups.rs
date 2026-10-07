@@ -934,6 +934,11 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
             &format!("{prefix} z / b"),
             "Zoom this split / take it out of the split",
         ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} r"),
+            "Resize this split with the arrows (or drag a divider)",
+        ));
         if app.tmux_support.is_available() {
             text.push(help_line(
                 theme,
