@@ -102,17 +102,26 @@ fn chat_border_color(app: &App, id: PaneId, in_split: bool, theme: Theme) -> Opt
 /// Fitted to the border's `width`: Copilot names sessions after their task, often at
 /// sentence length, and left alone the name ran into the corner with no sign it was
 /// cut — and pushed "exited" off the end, which is the part that matters.
-fn split_title(mux: &crate::mux::MuxState, pane: &crate::mux::Pane, width: u16) -> String {
+fn split_title(
+    mux: &crate::mux::MuxState,
+    pane: &crate::mux::Pane,
+    width: u16,
+    zoomed: bool,
+) -> String {
     let number = mux
         .tab_number(pane.id)
         .map(|number| format!("{number} "))
         .unwrap_or_default();
-    let state = if pane.is_running() { "" } else { " · exited" };
+    let state = format!(
+        "{}{}",
+        if pane.is_running() { "" } else { " · exited" },
+        if zoomed { " · zoomed" } else { "" }
+    );
     // Both corners, the padding space either side, and one column of border showing
     // after the title so it does not butt against the corner.
     let room = usize::from(width)
         .saturating_sub(5)
-        .saturating_sub(text::display_width(&number) + text::display_width(state));
+        .saturating_sub(text::display_width(&number) + text::display_width(&state));
     format!(
         " {number}{}{state} ",
         text::truncate_to_width(&pane.title, room)
@@ -249,13 +258,27 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
         .map_or(0, |label| text::display_width(label) as u16);
     // Each split is titled with its session, since there is no single "the chat" to
     // name any more and the tab strip only marks one of them.
-    let title = if in_split {
-        split_title(mux, pane, slot.area.width.saturating_sub(label_width))
+    // A zoomed chat fills the screen exactly as an unsplit one does, so it says so in
+    // a way that cannot be mistaken for the colours, which already mean focus,
+    // attention and exit: a heavier frame, and the word in the title.
+    let zoomed = focused && mux.split.as_ref().is_some_and(|split| split.zoomed);
+    let title = if in_split || zoomed {
+        split_title(
+            mux,
+            pane,
+            slot.area.width.saturating_sub(label_width),
+            zoomed,
+        )
     } else {
         " Chat ".to_string()
     };
     let block = Block::default()
         .title(title)
+        .border_type(if zoomed {
+            ratatui::widgets::BorderType::Thick
+        } else {
+            ratatui::widgets::BorderType::Plain
+        })
         .borders(slot.borders)
         .style(panel_style(theme))
         .border_style(Style::default().fg(border_color));
@@ -1990,6 +2013,41 @@ mod tests {
         let ellipsis = top.find('…').expect("the title is cut to fit");
         assert!(ellipsis < label, "{top}");
         assert!(top.contains(" 1 Refactor"), "{top}");
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// A zoomed split fills the screen like an unsplit chat; without a mark of its own
+    /// there was no telling the other sessions were still there.
+    #[test]
+    fn a_zoomed_split_has_a_heavier_frame_and_says_zoomed() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "left"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "right"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.mux.as_mut().expect("mux").toggle_split_zoom();
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let chat = app.workspace_areas.chat;
+        assert_eq!(buffer[(chat.x, chat.y)].symbol(), "┏");
+        assert!(row(&buffer, chat.y, 100).contains("right · zoomed"));
+
+        app.mux.as_mut().expect("mux").toggle_split_zoom();
+        let buffer = render_buffer(&mut app, 100, 30);
+        let chat = app.workspace_areas.chats[0].area;
+        assert_eq!(buffer[(chat.x, chat.y)].symbol(), "┌");
+        assert!(!row(&buffer, chat.y, 100).contains("zoomed"));
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

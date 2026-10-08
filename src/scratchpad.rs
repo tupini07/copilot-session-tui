@@ -40,7 +40,7 @@ impl Scratchpad {
         Self::open_in(root, session_id)
     }
 
-    fn open_in(root: &Path, session_id: &str) -> Result<Self> {
+    pub(crate) fn open_in(root: &Path, session_id: &str) -> Result<Self> {
         let path = scratchpad_path_in(root, session_id);
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,

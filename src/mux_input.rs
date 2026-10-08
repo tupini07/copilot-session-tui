@@ -1710,6 +1710,28 @@ fn focus_chat(app: &mut App) {
     app.terminal.unfocus();
 }
 
+/// The other sessions sharing the screen, with their session ids.
+///
+/// In a split the scratchpad and terminal are one dock, kept open while any session
+/// on screen has that panel. Closing it therefore closes it for all of them: closing
+/// only the focused session's left the dock up with a placeholder in it, and there
+/// was no way to make it go away short of visiting every session in turn.
+fn other_sessions_on_screen(
+    app: &App,
+    except: crate::mux::PaneId,
+) -> Vec<(crate::mux::PaneId, String)> {
+    let Some(mux) = app.mux.as_ref() else {
+        return Vec::new();
+    };
+    app.workspace_areas
+        .chats
+        .iter()
+        .filter(|slot| slot.pane != except)
+        .filter_map(|slot| mux.pane(slot.pane))
+        .map(|pane| (pane.id, pane.session_id.clone()))
+        .collect()
+}
+
 fn toggle_attached_scratchpad(app: &mut App) {
     let Some((pane_id, session_id, _, _)) = focused_workspace_context(app) else {
         return;
@@ -1725,6 +1747,11 @@ fn toggle_attached_scratchpad(app: &mut App) {
             app.scratchpad = None;
             app.scratchpad_owner = None;
             app.remember_scratchpad_panel(pane_id, &session_id, false);
+            for (id, session_id) in other_sessions_on_screen(app, pane_id) {
+                if app.scratchpad_open.contains(&id) {
+                    app.remember_scratchpad_panel(id, &session_id, false);
+                }
+            }
             app.workspace_focus = WorkspaceFocus::Chat;
         } else {
             app.workspace_focus = WorkspaceFocus::Scratchpad;
@@ -1761,6 +1788,12 @@ fn toggle_attached_terminal(app: &mut App) {
         app.terminal.hide();
         app.terminal_owner = None;
         app.remember_terminal_panel(pane_id, &session_id, false);
+        // Shells keep running; only the dock goes, as for the focused session.
+        for (id, session_id) in other_sessions_on_screen(app, pane_id) {
+            if app.terminal_open.contains(&id) {
+                app.remember_terminal_panel(id, &session_id, false);
+            }
+        }
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     }
@@ -3340,6 +3373,28 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         );
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found by using it: the dock stayed while any session on screen had a scratchpad,
+    /// so closing the focused one left a placeholder and the dock could not be shut.
+    #[test]
+    fn closing_the_scratchpad_in_a_split_closes_the_shared_dock_for_every_session() {
+        let mut app = split_app(2);
+        let temp = tempfile::tempdir().unwrap();
+        app.scratchpad =
+            Some(crate::scratchpad::Scratchpad::open_in(temp.path(), "split-2").unwrap());
+        app.scratchpad_owner = Some(2);
+        app.scratchpad_open.insert(1);
+        app.scratchpad_open.insert(2);
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        assert!(app.scratchpad_dock_visible());
+
+        toggle_attached_scratchpad(&mut app);
+
+        assert!(app.scratchpad_open.is_empty());
+        assert!(!app.scratchpad_dock_visible());
+        assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
