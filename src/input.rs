@@ -516,19 +516,15 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
 /// Only navigation and choosing: closing or ending a session from here would remove
 /// it from a list that exists to add one, which is not what anyone opening it meant.
 fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::SplitDirection) {
+    // Row 0 starts a brand-new session; the sessions in other tabs follow it.
     let candidates = app.pane_list_ids();
-    if candidates.is_empty() {
-        app.split_picker = None;
-        app.mode = Mode::Normal;
-        return;
-    }
-    let count = candidates.len();
+    let rows = candidates.len() + 1;
     match key {
         KeyCode::Up | KeyCode::Char('k') => {
             app.pane_selected = app.pane_selected.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.pane_selected = (app.pane_selected + 1).min(count - 1);
+            app.pane_selected = (app.pane_selected + 1).min(rows - 1);
         }
         // The rows are labelled with their tab numbers, so a digit means that tab.
         KeyCode::Char(digit @ '1'..='9') => {
@@ -538,13 +534,18 @@ fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::Split
                 .iter()
                 .position(|id| mux.tab_number(*id) == Some(number))
             {
-                app.pane_selected = index;
+                app.pane_selected = index + 1;
             }
         }
         KeyCode::Enter => {
-            let id = candidates[app.pane_selected.min(count - 1)];
+            let selected = app.pane_selected.min(rows - 1);
             app.split_picker = None;
             app.mode = Mode::Normal;
+            if selected == 0 {
+                app.begin_new_split_session(direction);
+                return;
+            }
+            let id = candidates[selected - 1];
             if app
                 .mux
                 .as_mut()
@@ -1111,12 +1112,20 @@ pub(crate) fn handle_new_session_kind(app: &mut App, key: KeyCode) {
         KeyCode::Char('n') | KeyCode::Enter => {
             app.mode = Mode::Normal;
             start_plain_new_session(app);
+            // Spawning took it if it worked. If not, it must not linger and pull the
+            // next, unrelated new session into a split.
+            app.new_split = None;
         }
         KeyCode::Char('w') | KeyCode::Char('W') => {
             app.mode = Mode::Normal;
             begin_worktree_session(app);
+            // Kept only while the branch name is being asked for.
+            if app.mode != Mode::BranchName {
+                app.new_split = None;
+            }
         }
         KeyCode::Esc | KeyCode::Char('q') => {
+            app.new_split = None;
             app.mode = Mode::Normal;
         }
         _ => {}
@@ -1383,10 +1392,35 @@ fn cancel_delete(app: &mut App) {
     app.status_message = Some("Delete cancelled".to_string());
 }
 
-fn handle_filter_project(app: &mut App, key: KeyCode) {
+pub(crate) fn handle_filter_project(app: &mut App, key: KeyCode) {
     let filtered = app.filtered_project_indices();
-    let has_all_option = app.project_search_query.is_empty();
+    // Choosing where a new split session runs, "all projects" is not a place.
+    let choosing_for_split = app.new_split.is_some();
+    let has_all_option = app.project_search_query.is_empty() && !choosing_for_split;
     let total = filtered.len() + usize::from(has_all_option);
+
+    if choosing_for_split {
+        match key {
+            KeyCode::Esc => {
+                app.new_split = None;
+                app.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                let Some(&project_index) = filtered.get(app.project_selected) else {
+                    return;
+                };
+                let project = app.unique_projects[project_index].clone();
+                if let Some(new_split) = app.new_split.as_mut() {
+                    new_split.project = Some(project);
+                }
+                // Then the same question `n` asks: as-is, or in a new worktree.
+                app.mode = Mode::NewSessionKind;
+                return;
+            }
+            _ => {}
+        }
+    }
 
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
@@ -1988,6 +2022,13 @@ fn save_and_close_project_settings(app: &mut App) {
 /// Runs from the main loop rather than the key handler so the "creating…" notice is
 /// already on screen before this blocks.
 pub fn run_pending_worktree(app: &mut App, pending: PendingWorktree) {
+    run_worktree_launch(app, pending);
+    // A split this was started for has been joined by now, or the launch failed;
+    // either way it must not carry over to the next new session.
+    app.new_split = None;
+}
+
+fn run_worktree_launch(app: &mut App, pending: PendingWorktree) {
     let PendingWorktree {
         project,
         branch,
@@ -2053,6 +2094,7 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
         KeyCode::Esc => {
             app.branch_config = None;
             app.worktree_launch_target = WorktreeLaunchTarget::Standard;
+            app.new_split = None;
             app.mode = Mode::Normal;
             app.status_message = Some("Isolated session cancelled".to_string());
         }

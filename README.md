@@ -405,7 +405,11 @@ Doom Emacs's window commands; a popup lists them while it waits:
 leaves its tab, which closes if that leaves it empty. Splitting the way the focused
 session's own split already runs adds to it, and splitting across nests — so a session
 in a tall column can sit beside a stack of two. When every session is already in this
-tab, `v` and `s` just turn the focused session's split.
+tab, the other direction just turns the focused session's split.
+
+The switcher's first row, **+ New session…**, starts a session straight into the split:
+it asks which project — the focused session's own comes first — and then, as `n` does,
+whether to run it as-is or in a new isolated Git worktree.
 
 Every split is a live, interactive chat. Typing goes to the focused one; click another,
 or use `prefix` and an arrow, to move. The wheel scrolls whichever split it is over

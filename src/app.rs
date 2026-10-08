@@ -233,6 +233,16 @@ pub struct PendingWorktree {
 /// A tmux launch deferred to the main loop for the same reason as [`PendingWorktree`]:
 /// starting a tmux server and waiting out the startup grace takes long enough that the
 /// key handler must not block on it before anything is painted.
+/// Where a session started from the split picker goes once it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSplit {
+    pub direction: crate::mux::SplitDirection,
+    /// The session it is split beside.
+    pub anchor: crate::mux::PaneId,
+    /// Chosen in the project picker; until then, the flow is still choosing.
+    pub project: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PendingTmuxLaunch {
     New {
@@ -854,6 +864,9 @@ pub struct App {
     /// The pane switcher is choosing a session to split with, in this direction,
     /// rather than one to switch to.
     pub split_picker: Option<crate::mux::SplitDirection>,
+    /// A session being started from the split picker, to open beside `anchor`
+    /// rather than in a tab of its own. Cleared whenever that flow is left.
+    pub new_split: Option<NewSplit>,
     /// A click that only moved focus to another split owns the rest of its gesture,
     /// so the session it landed in never sees a release without a press.
     pub swallow_mouse_until_up: bool,
@@ -1026,6 +1039,7 @@ impl App {
             confirm_quit: false,
             pane_selected: 0,
             split_picker: None,
+            new_split: None,
             swallow_mouse_until_up: false,
             dock_sizes: crate::ui::DockSizes::default(),
             dragging_divider: None,
@@ -1120,32 +1134,25 @@ impl App {
         if self.mux.is_none() || !matches!(self.view, View::Attached(_)) {
             return;
         }
-        if self.split_candidates().is_empty() {
-            // Nothing left to add, so the other direction can only mean "turn the
-            // split". Without this, a tab holding every session could never go from
-            // side by side to stacked.
-            if self
+        let candidates = self.split_candidates();
+        // Nothing to bring in, so the other direction means "turn the split". Without
+        // this, a tab holding every session could never go from side by side to
+        // stacked. Starting a new session that way is still one key away: the same
+        // direction again opens the picker.
+        if candidates.is_empty()
+            && self
                 .mux
                 .as_mut()
                 .is_some_and(|mux| mux.turn_split(direction))
-            {
-                self.status_message = Some(format!("Sessions now {}", direction.label()));
-                self.refresh_workspace_areas();
-                return;
-            }
-            let Some(mux) = self.mux.as_ref() else {
-                return;
-            };
-            self.status_message = Some(if mux.panes.len() < 2 {
-                "Open another session to split with".to_string()
-            } else {
-                "Every session is already in this tab".to_string()
-            });
+        {
+            self.status_message = Some(format!("Sessions now {}", direction.label()));
+            self.refresh_workspace_areas();
             return;
         }
         self.refresh_live_pane_sessions();
         self.split_picker = Some(direction);
-        self.pane_selected = 0;
+        // On the first existing session when there is one; row 0 starts a new one.
+        self.pane_selected = usize::from(!candidates.is_empty());
         self.mode = Mode::PaneList;
     }
 
@@ -3763,6 +3770,9 @@ impl App {
     /// While attached, the focused pane is authoritative; the hidden session-list
     /// filter may still point at a different repository.
     pub fn command_project(&self) -> Option<String> {
+        if let Some(project) = self.new_split_project() {
+            return Some(project);
+        }
         match self.view {
             View::Attached(_) => self
                 .mux
@@ -3773,8 +3783,75 @@ impl App {
         }
     }
 
+    /// The project picked for a session being started into a split, which outranks
+    /// every other notion of "here" until that session exists or the flow is left.
+    fn new_split_project(&self) -> Option<String> {
+        self.new_split
+            .as_ref()
+            .and_then(|new_split| new_split.project.clone())
+    }
+
+    /// Start choosing a brand-new session to open beside the focused one: first its
+    /// project, then whether it runs as-is or in a worktree, both through the popups
+    /// `n` already uses.
+    pub fn begin_new_split_session(&mut self, direction: crate::mux::SplitDirection) {
+        let Some(anchor) = self.mux.as_ref().and_then(|mux| mux.focused) else {
+            return;
+        };
+        self.new_split = Some(NewSplit {
+            direction,
+            anchor,
+            project: None,
+        });
+        self.project_search_query.clear();
+        self.project_scroll_offset = 0;
+        // Start on the focused session's project, the likeliest choice — and make sure
+        // it is offered at all: a directory outside Git, or with no history yet, is in
+        // no list of known projects, and the picker would have nothing to pick.
+        let here = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| {
+                let cwd = pane.cwd.to_string_lossy().to_string();
+                crate::session::loader::detect_project_root(&cwd).unwrap_or(cwd)
+            });
+        if let Some(here) = here.as_ref() {
+            if !self
+                .unique_projects
+                .iter()
+                .any(|project| project.eq_ignore_ascii_case(here))
+            {
+                self.unique_projects.insert(0, here.clone());
+            }
+        }
+        self.project_selected = here
+            .and_then(|here| {
+                self.filtered_project_indices()
+                    .iter()
+                    .position(|index| self.unique_projects[*index].eq_ignore_ascii_case(&here))
+            })
+            .unwrap_or(0);
+        self.mode = Mode::FilterProject;
+    }
+
+    /// A session just opened from the split picker joins the tab it was asked for,
+    /// rather than keeping the tab of its own every new session opens in.
+    pub(crate) fn join_pending_split(&mut self, id: crate::mux::PaneId) {
+        let (Some(new_split), Some(mux)) = (self.new_split.take(), self.mux.as_mut()) else {
+            return;
+        };
+        if mux.pane(new_split.anchor).is_some() {
+            mux.focus(new_split.anchor);
+            mux.split_with(new_split.direction, id);
+        }
+    }
+
     /// Directory to start a plain new session in.
     pub fn new_session_dir(&self) -> Option<String> {
+        if let Some(project) = self.new_split_project() {
+            return Some(project);
+        }
         match self.view {
             View::Attached(_) => self
                 .mux
@@ -3961,6 +4038,7 @@ impl App {
             mux.events.clone(),
         )?;
         mux.push(pane);
+        self.join_pending_split(id);
         self.view = View::Attached(id);
         self.restore_workspace_panels(id, &workspace_session_id);
         Ok(())

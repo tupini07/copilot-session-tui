@@ -272,6 +272,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if app.mode == Mode::NewSessionKind {
             popups::draw_new_session_kind(f, app);
         }
+        // Asked while attached only when starting a new session into a split.
+        if app.mode == Mode::FilterProject {
+            popups::draw_project_filter(f, app);
+        }
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
         command_palette::draw_overlays(f, app);

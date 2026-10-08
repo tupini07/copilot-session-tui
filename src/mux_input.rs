@@ -87,6 +87,17 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Choosing the project for a new session started from the split picker. The list
+    // view's own project filter never opens here.
+    if app.mode == Mode::FilterProject {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press {
+                crate::input::handle_filter_project(app, key.code);
+            }
+        }
+        return;
+    }
+
     if let Event::Key(key) = &event {
         if key.kind == KeyEventKind::Press {
             let is_prefix = app.mux.as_ref().is_some_and(|mux| {
@@ -3183,11 +3194,12 @@ mod tests {
             "laid out stacked straight away"
         );
 
+        // Already that way: nothing to turn, so the picker opens, offering only a new
+        // session.
         app.open_split_picker(crate::mux::SplitDirection::Rows);
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Every session is already in this tab")
-        );
+        assert_eq!(app.mode, Mode::PaneList);
+        assert!(app.pane_list_ids().is_empty());
+        assert_eq!(app.pane_selected, 0, "on the new-session row");
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -3436,19 +3448,81 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
         );
         assert_eq!(
-            app.pane_selected, 1,
-            "session 4 is in tab 3, now that 1 and 2 share tab 1: the second row"
+            app.pane_selected, 2,
+            "session 4 is in tab 3, now that 1 and 2 share tab 1: the row after 3"
         );
         handle_attached_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
         );
-        assert_eq!(app.pane_selected, 1, "tab 1 is on screen, so not on offer");
+        assert_eq!(app.pane_selected, 2, "tab 1 is on screen, so not on offer");
         handle_attached_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         );
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    fn press_attached(app: &mut App, code: KeyCode) {
+        handle_attached_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn the_split_pickers_first_row_starts_a_new_session_by_asking_for_its_project_first() {
+        let mut app = split_app(3);
+        app.unique_projects = vec!["/work/alpha".to_string(), "/work/beta".to_string()];
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(app.pane_selected, 1, "an existing session is the default");
+        press_attached(&mut app, KeyCode::Up);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::FilterProject);
+        assert_eq!(
+            app.new_split.as_ref().map(|new_split| new_split.anchor),
+            Some(2)
+        );
+        // The focused session's own directory is offered first, and starts selected.
+        let here = app
+            .mux
+            .as_ref()
+            .unwrap()
+            .focused_pane()
+            .unwrap()
+            .cwd
+            .clone();
+        assert_eq!(app.unique_projects[0], here.to_string_lossy());
+        assert_eq!(app.project_selected, 0);
+
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::NewSessionKind, "then as-is or worktree");
+        assert_eq!(app.new_session_dir().as_deref(), Some("/work/beta"));
+        assert_eq!(app.command_project().as_deref(), Some("/work/beta"));
+        assert_eq!(app.project_filter, None, "the list filter is not touched");
+
+        press_attached(&mut app, KeyCode::Esc);
+        assert_eq!(app.new_split, None, "leaving the flow forgets the split");
+        assert_ne!(app.new_session_dir().as_deref(), Some("/work/beta"));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_session_opened_from_the_split_picker_joins_the_split_instead_of_a_new_tab() {
+        let mut app = split_app(3);
+        app.new_split = Some(crate::app::NewSplit {
+            direction: crate::mux::SplitDirection::Rows,
+            anchor: 2,
+            project: Some("/work".to_string()),
+        });
+        // Stands in for the freshly spawned session, which opened in a tab of its own.
+        app.mux.as_mut().unwrap().focus(3);
+        app.join_pending_split(3);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(mux.windows.len(), 1);
+        assert_eq!(mux.windows[0].layout.panes(), vec![1, 2, 3]);
+        assert_eq!(mux.focused, Some(3));
+        assert_eq!(app.new_split, None);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

@@ -315,7 +315,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let theme = app.theme();
 
     let ids = app.pane_list_ids();
-    let height = (ids.len() + 5).min(20) as u16;
+    let height = (ids.len() + 6).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
     prepare_popup(f, area, theme);
@@ -337,7 +337,9 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem> = ids
+    // The split picker opens with a row for starting a brand-new session.
+    let row_offset = usize::from(app.split_picker.is_some());
+    let mut items: Vec<ListItem> = ids
         .iter()
         .filter_map(|id| mux.pane(*id))
         .enumerate()
@@ -351,7 +353,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             if app.pane_is_tmux_backed(pane) {
                 title.push_str(" [tmux]");
             }
-            let selected = index == app.pane_selected;
+            let selected = index + row_offset == app.pane_selected;
             let base = if selected {
                 super::row_selection_style(theme)
             } else {
@@ -393,6 +395,20 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         })
         .collect();
 
+    if row_offset == 1 {
+        let style = if app.pane_selected == 0 {
+            super::row_selection_style(theme)
+        } else {
+            Style::default().fg(theme.accent_alt).bg(theme.surface)
+        };
+        items.insert(
+            0,
+            ListItem::new(Line::from(Span::styled(
+                " +   New session… (choose its project next)",
+                style,
+            ))),
+        );
+    }
     f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
 
     if app.split_picker.is_some() {
@@ -680,7 +696,11 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     prepare_popup(f, area, theme);
 
     let block = Block::default()
-        .title(" Select Project ")
+        .title(if app.new_split.is_some() {
+            " New session in which project? "
+        } else {
+            " Select Project "
+        })
         .borders(Borders::ALL)
         .style(surface_style(theme))
         .border_style(Style::default().fg(theme.accent_alt));
@@ -717,7 +737,8 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(sep).style(surface_style(theme)), chunks[1]);
 
     // Project list
-    let has_all_option = app.project_search_query.is_empty();
+    // Choosing where a new split session runs, "all projects" is not a place.
+    let has_all_option = app.project_search_query.is_empty() && app.new_split.is_none();
     let visible_rows = chunks[2].height as usize;
 
     // Build all logical items with their indices
