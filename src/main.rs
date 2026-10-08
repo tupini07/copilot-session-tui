@@ -219,7 +219,7 @@ struct RestartManifest {
     focused_session_id: Option<String>,
     /// Defaulted so a manifest from a CST that predates splits still loads.
     #[serde(default)]
-    split: Option<mux::split::SavedSplit>,
+    windows: Vec<mux::split::SavedWindow>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -553,8 +553,8 @@ fn main() -> Result<()> {
                 app.view = app::View::Attached(pane_id);
             }
         }
-        if let (Some(split), Some(mux)) = (restart_manifest.split.as_ref(), app.mux.as_mut()) {
-            mux.restore_split(split);
+        if let Some(mux) = app.mux.as_mut() {
+            mux.restore_windows(&restart_manifest.windows);
             mux_input::sync_view(&mut app);
         }
         mux_input::sync_workspace_panels(&mut app);
@@ -815,15 +815,25 @@ impl PreparedRestart {
                     .iter()
                     .any(|pane| pane.copilot_running && &pane.session_id == session_id)
             }),
-            // Only sessions that are reopened can take a slot again.
-            split: request.split.clone().and_then(|split| {
-                split.retain_sessions(|session_id| {
-                    request
-                        .panes
-                        .iter()
-                        .any(|pane| pane.copilot_running && pane.session_id == session_id)
+            // Only sessions that are reopened can take a place in a tab again.
+            windows: request
+                .windows
+                .iter()
+                .filter_map(|window| {
+                    let layout = window.layout.clone().retain(&|session_id: &str| {
+                        request
+                            .panes
+                            .iter()
+                            .any(|pane| pane.copilot_running && pane.session_id == session_id)
+                    })?;
+                    matches!(layout, mux::split::SavedNode::Split { .. }).then(|| {
+                        mux::split::SavedWindow {
+                            layout,
+                            ..window.clone()
+                        }
+                    })
                 })
-            }),
+                .collect(),
         };
         let path = restart_gate_path(self.gate.path(), "manifest");
         let temporary = restart_gate_path(self.gate.path(), "manifest.tmp");
@@ -1407,15 +1417,32 @@ fn size_sessions_for_frame(app: &mut App, screen: ratatui::layout::Rect) {
     let chat = layout.chat_pane();
     app.pane_size = (chat.height.max(1), chat.width.max(1));
     app.pane_origin = (chat.x, chat.y);
+    // Sessions on screen take the size they are drawn at. Every other one — in
+    // another tab, or behind a zoom — takes the size it will be drawn at when it
+    // comes back, so neither switching tabs nor unzooming makes Copilot reflow.
+    let mut areas: std::collections::HashMap<mux::PaneId, ratatui::layout::Rect> = layout
+        .chats
+        .iter()
+        .map(|slot| (slot.pane, slot.pane_area()))
+        .collect();
+    if let Some(mux) = app.mux.as_ref() {
+        for window in &mux.windows {
+            let members = window.layout.panes();
+            if members.iter().all(|id| areas.contains_key(id)) {
+                continue;
+            }
+            let background = app.background_layout(screen, window);
+            for slot in &background.chats {
+                areas.entry(slot.pane).or_insert_with(|| slot.pane_area());
+            }
+            for id in members {
+                areas.entry(id).or_insert_with(|| background.chat_pane());
+            }
+        }
+    }
     if let Some(mux) = app.mux.as_mut() {
-        // Sessions off screen take the focused chat's size: that is the slot any of
-        // them lands in when picked, so it arrives already laid out.
         for pane in &mut mux.panes {
-            let area = layout
-                .chats
-                .iter()
-                .find(|slot| slot.pane == pane.id)
-                .map_or(chat, ui::ChatSlot::pane_area);
+            let area = areas.get(&pane.id).copied().unwrap_or(chat);
             let _ = pane.ensure_size_at(area.x, area.y, area.height.max(1), area.width.max(1));
         }
     }
@@ -1911,7 +1938,7 @@ mod tests {
                 },
             ],
             focused_session_id: Some("session-2".to_string()),
-            split: None,
+            windows: Vec::new(),
         };
 
         let args = restart_arguments(&cli, Path::new(r"C:\copilot-home"), true);
@@ -1952,7 +1979,8 @@ mod tests {
     }
 
     #[test]
-    fn a_split_survives_the_update_restart_minus_sessions_that_are_not_reopened() {
+    fn a_tab_of_several_sessions_survives_the_update_restart_minus_those_not_reopened() {
+        use mux::split::{SavedNode, SavedWindow};
         let pane = |session_id: &str, copilot_running: bool| app::UpdateRestartPane {
             pane_id: None,
             copilot_running,
@@ -1961,15 +1989,44 @@ mod tests {
             cwd: PathBuf::from("work"),
             title: session_id.to_string(),
         };
+        let leaf = |session: &str| SavedNode::Pane(session.to_string());
         let request = app::UpdateRestartRequest {
-            panes: vec![pane("a", true), pane("b", true), pane("c", false)],
+            panes: vec![
+                pane("a", true),
+                pane("b", true),
+                pane("c", false),
+                pane("d", true),
+            ],
             focused_session_id: Some("a".to_string()),
-            split: Some(mux::split::SavedSplit {
-                direction: mux::SplitDirection::Rows,
-                session_ids: vec!["a".to_string(), "c".to_string(), "b".to_string()],
-                weights: vec![100, 50, 150],
-                zoomed: false,
-            }),
+            windows: vec![
+                // a beside a stack of c and b
+                SavedWindow {
+                    layout: SavedNode::Split {
+                        direction: mux::SplitDirection::Columns,
+                        children: vec![
+                            leaf("a"),
+                            SavedNode::Split {
+                                direction: mux::SplitDirection::Rows,
+                                children: vec![leaf("c"), leaf("b")],
+                                weights: vec![50, 150],
+                            },
+                        ],
+                        weights: vec![100, 100],
+                    },
+                    zoomed: false,
+                    focused_session_id: Some("b".to_string()),
+                },
+                // c and d: only d comes back, which is no longer a split
+                SavedWindow {
+                    layout: SavedNode::Split {
+                        direction: mux::SplitDirection::Rows,
+                        children: vec![leaf("c"), leaf("d")],
+                        weights: vec![100, 100],
+                    },
+                    zoomed: false,
+                    focused_session_id: None,
+                },
+            ],
         };
         let prepared = PreparedRestart {
             child: None,
@@ -1981,21 +2038,28 @@ mod tests {
             &std::fs::read(restart_gate_path(prepared.gate.path(), "manifest")).unwrap(),
         )
         .unwrap();
-        let split = manifest.split.expect("two sessions still make a split");
-        assert_eq!(split.session_ids, ["a", "b"]);
         assert_eq!(
-            split.weights,
-            [100, 150],
-            "each weight stays with its session"
+            manifest.windows.len(),
+            1,
+            "a tab left with one session needs no saving"
         );
-        assert_eq!(split.direction, mux::SplitDirection::Rows);
+        let window = &manifest.windows[0];
+        assert_eq!(window.layout.sessions(), ["a", "b"]);
+        assert_eq!(window.focused_session_id.as_deref(), Some("b"));
+        assert!(matches!(
+            window.layout,
+            SavedNode::Split {
+                direction: mux::SplitDirection::Columns,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn a_restart_manifest_from_before_splits_still_loads() {
         let manifest: RestartManifest =
             serde_json::from_str(r#"{"panes":[],"focused_session_id":null}"#).unwrap();
-        assert!(manifest.split.is_none());
+        assert!(manifest.windows.is_empty());
     }
 
     #[test]
@@ -2053,7 +2117,7 @@ mod tests {
                 title: "Shell".to_string(),
             }],
             focused_session_id: Some("stopped-chat".to_string()),
-            split: None,
+            windows: Vec::new(),
         };
 
         let prepared = PreparedRestart {

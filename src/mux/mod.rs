@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
 pub use pane::{Pane, PaneId, PaneSpec, PaneStatus};
-pub use split::{SplitDirection, SplitLayout, SplitStep};
+pub use split::{LayoutNode, SplitDirection, SplitStep, Window, WindowId};
 
 /// Events the UI loop must wake up for, from PTYs and from the terminal.
 pub enum MuxEvent {
@@ -362,7 +362,7 @@ impl TransientMode {
     pub fn hint(self) -> &'static str {
         match self {
             Self::MoveTab => " ←/→ move  Esc done ",
-            Self::ResizeSplit => " ←/↑ shrink  →/↓ grow  Esc done ",
+            Self::ResizeSplit => " ←/→ narrower/wider  ↑/↓ shorter/taller  Esc done ",
         }
     }
 }
@@ -372,6 +372,8 @@ impl TransientMode {
 pub enum TransientCommand {
     /// Act in the mode's own direction; `true` is rightwards/forwards.
     Step(bool),
+    /// Resize along this axis; `true` grows the focused split.
+    Resize(SplitDirection, bool),
     Leave,
     /// Not ours — leave the mode and let the key be handled normally.
     Passthrough,
@@ -396,10 +398,17 @@ pub fn resolve_transient_command(mode: TransientMode, key: &KeyEvent) -> Transie
         },
         // Both axes, so the same keys work whichever way the split runs.
         TransientMode::ResizeSplit => match key.code {
-            KeyCode::Left | KeyCode::Up => TransientCommand::Step(false),
-            KeyCode::Right | KeyCode::Down => TransientCommand::Step(true),
-            KeyCode::Char('h' | 'k') if plain => TransientCommand::Step(false),
-            KeyCode::Char('l' | 'j') if plain => TransientCommand::Step(true),
+            // Each pair of arrows works on its own axis, so in a column holding a
+            // stack the left and right arrows widen it and the up and down arrows
+            // trade height inside it.
+            KeyCode::Left => TransientCommand::Resize(SplitDirection::Columns, false),
+            KeyCode::Right => TransientCommand::Resize(SplitDirection::Columns, true),
+            KeyCode::Up => TransientCommand::Resize(SplitDirection::Rows, false),
+            KeyCode::Down => TransientCommand::Resize(SplitDirection::Rows, true),
+            KeyCode::Char('h') if plain => TransientCommand::Resize(SplitDirection::Columns, false),
+            KeyCode::Char('l') if plain => TransientCommand::Resize(SplitDirection::Columns, true),
+            KeyCode::Char('k') if plain => TransientCommand::Resize(SplitDirection::Rows, false),
+            KeyCode::Char('j') if plain => TransientCommand::Resize(SplitDirection::Rows, true),
             KeyCode::Esc | KeyCode::Enter => TransientCommand::Leave,
             _ => TransientCommand::Passthrough,
         },
@@ -420,11 +429,15 @@ pub enum PrefixState {
 
 /// All panes owned by this CST instance.
 pub struct MuxState {
+    /// Every session, kept in tab order and, within a tab, in reading order, so that
+    /// anything listing them meets them in the order the screen shows.
     pub panes: Vec<Pane>,
+    /// The session with the keyboard. The focused tab is whichever one holds it; no
+    /// second record of that exists to disagree with this one.
     pub focused: Option<PaneId>,
-    /// Sessions sharing the screen. While this is `Some`, `focused` is always one of
-    /// its slots; [`MuxState::focus`] is what keeps that true.
-    pub split: Option<SplitLayout>,
+    /// The tabs, in strip order. Every session is in exactly one.
+    pub windows: Vec<Window>,
+    next_window_id: WindowId,
     pub prefix: KeyChord,
     pub prefix_state: PrefixState,
     next_id: PaneId,
@@ -438,7 +451,8 @@ impl MuxState {
         Self {
             panes: Vec::new(),
             focused: None,
-            split: None,
+            windows: Vec::new(),
+            next_window_id: 1,
             prefix,
             prefix_state: PrefixState::Idle,
             next_id: 1,
@@ -470,11 +484,63 @@ impl MuxState {
         self.pane_mut(id)
     }
 
-    /// The number this pane's tab is labelled with, counting from 1 as the strip does.
-    pub fn tab_number(&self, id: PaneId) -> Option<usize> {
-        self.panes
+    pub fn window_index_of(&self, id: PaneId) -> Option<usize> {
+        self.windows
             .iter()
-            .position(|pane| pane.id == id)
+            .position(|window| window.layout.contains(id))
+    }
+
+    pub fn window_of(&self, id: PaneId) -> Option<&Window> {
+        self.windows
+            .iter()
+            .find(|window| window.layout.contains(id))
+    }
+
+    /// The tab on screen: the one holding the focused session.
+    pub fn current_window(&self) -> Option<&Window> {
+        self.window_of(self.focused?)
+    }
+
+    fn current_window_mut(&mut self) -> Option<&mut Window> {
+        let focused = self.focused?;
+        self.windows
+            .iter_mut()
+            .find(|window| window.layout.contains(focused))
+    }
+
+    /// The layout to draw: the current tab's, unless it holds one session or one of
+    /// them is zoomed, in which case only the focused session is drawn.
+    pub fn visible_layout(&self) -> Option<&LayoutNode> {
+        self.current_window()
+            .filter(|window| window.is_split() && !window.zoomed)
+            .map(|window| &window.layout)
+    }
+
+    /// Whether the current tab holds more than one session, zoomed or not.
+    pub fn in_split(&self) -> bool {
+        self.current_window().is_some_and(Window::is_split)
+    }
+
+    pub fn zoomed(&self) -> bool {
+        self.current_window()
+            .is_some_and(|window| window.is_split() && window.zoomed)
+    }
+
+    /// The number this session's tab is labelled with, counting from 1 as the strip does.
+    pub fn tab_number(&self, id: PaneId) -> Option<usize> {
+        self.window_index_of(id).map(|index| index + 1)
+    }
+
+    /// Where a session sits among those sharing its tab, from 1, or `None` when it
+    /// has the tab to itself. Splits are titled with this: several sessions started in
+    /// one project all carry its name, and the tab number is the same for all of them.
+    pub fn number_in_window(&self, id: PaneId) -> Option<usize> {
+        let window = self.window_of(id).filter(|window| window.is_split())?;
+        window
+            .layout
+            .panes()
+            .iter()
+            .position(|pane| *pane == id)
             .map(|index| index + 1)
     }
 
@@ -486,105 +552,110 @@ impl MuxState {
             .map(|pane| pane.id)
     }
 
+    /// A new session, in a tab of its own at the end of the strip.
     pub fn push(&mut self, pane: Pane) -> PaneId {
         let id = pane.id;
         self.panes.push(pane);
+        let window = self.new_window(id);
+        self.windows.push(window);
         self.focus(id);
         id
     }
 
-    /// Give `id` the keyboard.
-    ///
-    /// With a split on screen, a session that is not already in it takes the focused
-    /// slot's place, the way choosing a window in tmux swaps it into the active pane.
-    /// The alternative — focusing something off screen — would leave the user typing
-    /// into a session they cannot see.
+    fn new_window(&mut self, pane: PaneId) -> Window {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        Window::single(id, pane)
+    }
+
+    /// Give `id` the keyboard, which brings its tab on screen.
     pub fn focus(&mut self, id: PaneId) {
         if self.pane(id).is_none() {
             return;
         }
-        if let Some(split) = self.split.as_mut() {
-            if !split.contains(id) {
-                let swapped = self
-                    .focused
-                    .is_some_and(|current| split.replace(current, id));
-                if !swapped {
-                    self.split = None;
-                }
-            }
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.layout.contains(id))
+        {
+            window.last_focused = id;
         }
         self.focused = Some(id);
     }
 
     pub fn remove(&mut self, id: PaneId) {
-        if let Some(index) = self.panes.iter().position(|pane| pane.id == id) {
-            let pane = self.panes.remove(index);
-            let _ = pane.kill();
-            // A session leaving a split hands focus to the slot that closes over it,
-            // so the keyboard stays on something that is still on screen.
-            let mut successor = None;
-            if let Some(split) = self.split.as_mut() {
-                if let Some(slot) = split.remove(id) {
-                    successor = split
-                        .slots
-                        .get(slot)
-                        .or_else(|| split.slots.last())
-                        .copied();
+        let Some(index) = self.panes.iter().position(|pane| pane.id == id) else {
+            return;
+        };
+        let pane = self.panes.remove(index);
+        let _ = pane.kill();
+        let was_focused = self.focused == Some(id);
+        let mut successor = None;
+        if let Some(window_index) = self.window_index_of(id) {
+            let window = &mut self.windows[window_index];
+            match window.layout.remove(id) {
+                // Others share the tab: the one that closes over the gap takes over.
+                Some(next) => {
+                    if window.last_focused == id {
+                        window.last_focused = next;
+                    }
                     // The zoom was on the session that left. Staying zoomed would put
                     // a different one full screen in its place, so the split comes
                     // back instead, as tmux does when a zoomed pane closes.
-                    if self.focused == Some(id) {
-                        split.zoomed = false;
+                    if was_focused {
+                        window.zoomed = false;
                     }
+                    successor = Some(window.last_focused);
                 }
-                if split.is_degenerate() {
-                    self.split = None;
+                // It had the tab to itself, so the tab goes and the next one along
+                // comes on screen, as closing a tab always has.
+                None => {
+                    self.windows.remove(window_index);
+                    successor = self
+                        .windows
+                        .get(window_index)
+                        .or_else(|| self.windows.last())
+                        .map(|window| window.last_focused);
                 }
-            }
-            if self.focused == Some(id) {
-                self.focused = successor.or_else(|| {
-                    self.panes
-                        .get(index)
-                        .or_else(|| self.panes.last())
-                        .map(|pane| pane.id)
-                });
             }
         }
+        if was_focused {
+            self.focused = successor;
+        }
+        self.sort_panes();
     }
 
     pub fn cycle(&mut self, forward: bool) {
-        if self.panes.len() < 2 {
+        let len = self.windows.len();
+        if len < 2 {
             return;
         }
-        let Some(current) = self
-            .focused
-            .and_then(|id| self.panes.iter().position(|pane| pane.id == id))
-        else {
-            if let Some(first) = self.panes.first().map(|pane| pane.id) {
-                self.focus(first);
-            }
+        let Some(current) = self.focused.and_then(|id| self.window_index_of(id)) else {
+            let first = self.windows[0].last_focused;
+            self.focus(first);
             return;
         };
-        let len = self.panes.len();
         let next = if forward {
             (current + 1) % len
         } else {
             (current + len - 1) % len
         };
-        self.focus(self.panes[next].id);
+        let target = self.windows[next].last_focused;
+        self.focus(target);
     }
 
+    /// Bring tab `index` (from 0) on screen.
     pub fn select_index(&mut self, index: usize) {
-        if let Some(id) = self.panes.get(index).map(|pane| pane.id) {
-            self.focus(id);
+        if let Some(target) = self.windows.get(index).map(|window| window.last_focused) {
+            self.focus(target);
         }
     }
 
-    /// Put `id` on screen beside the focused session, starting a split if there is
-    /// none, and focus it.
+    /// Bring `id` into the current tab beside the focused session, and focus it.
     ///
-    /// The whole layout takes `direction`: splits are flat, so asking for a stacked
-    /// split in a row of columns turns the row into a stack rather than nesting one.
+    /// The session leaves the tab it was in, which closes if it is left empty — tmux's
+    /// join-pane. Splitting the way the focused session's own split already runs adds
+    /// to it; splitting across nests, which is how a column comes to hold a stack.
     pub fn split_with(&mut self, direction: SplitDirection, id: PaneId) -> bool {
         let Some(focused) = self.focused else {
             return false;
@@ -592,60 +663,106 @@ impl MuxState {
         if id == focused || self.pane(id).is_none() {
             return false;
         }
-        match self.split.as_mut() {
-            Some(split) if split.contains(id) => return false,
-            Some(split) => {
-                split.direction = direction;
-                split.zoomed = false;
-                split.insert_after(focused, id);
-            }
-            None => self.split = Some(SplitLayout::new(direction, focused, id)),
-        }
-        self.focused = Some(id);
-        true
-    }
-
-    /// Take the focused session out of the split. Its tab stays; focus moves to the
-    /// slot that closes over it, and a split down to one session stops being one.
-    pub fn unsplit_focused(&mut self) -> bool {
-        let (Some(focused), Some(split)) = (self.focused, self.split.as_mut()) else {
-            return false;
-        };
-        let Some(slot) = split.remove(focused) else {
-            return false;
-        };
-        let successor = split
-            .slots
-            .get(slot)
-            .or_else(|| split.slots.last())
-            .copied();
-        // The focused session was the zoomed one; see `remove`.
-        split.zoomed = false;
-        if split.is_degenerate() {
-            self.split = None;
-        }
-        self.focused = successor.or(Some(focused));
-        true
-    }
-
-    /// Move focus to the neighbouring slot. Returns whether it moved.
-    pub fn focus_split(&mut self, step: SplitStep) -> bool {
-        let Some(target) = self
-            .visible_split()
-            .zip(self.focused)
-            .and_then(|(split, focused)| split.neighbour(focused, step))
+        let (Some(target), Some(source)) =
+            (self.window_index_of(focused), self.window_index_of(id))
         else {
             return false;
         };
-        self.focused = Some(target);
+        if target == source {
+            return false;
+        }
+        if self.windows[source].layout.remove(id).is_none() {
+            // It had its tab to itself.
+            self.windows.remove(source);
+        } else {
+            let window = &mut self.windows[source];
+            if window.last_focused == id {
+                window.last_focused = window.layout.first_pane();
+            }
+        }
+        if let Some(window) = self.current_window_mut() {
+            window.layout.insert_beside(focused, id, direction);
+            window.zoomed = false;
+        }
+        self.focus(id);
+        self.sort_panes();
         true
     }
 
-    /// Undo any resizing: every split gets the same share again.
+    /// Move the focused session out into a tab of its own, placed right after this
+    /// one; focus stays in this tab on the session that closes over the gap. Returns
+    /// false when it already has a tab to itself.
+    pub fn unsplit_focused(&mut self) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        let Some(index) = self.window_index_of(focused) else {
+            return false;
+        };
+        let Some(next) = self.windows[index].layout.remove(focused) else {
+            return false;
+        };
+        let window = &mut self.windows[index];
+        window.zoomed = false;
+        window.last_focused = next;
+        let broken_out = self.new_window(focused);
+        self.windows.insert(index + 1, broken_out);
+        self.focused = Some(next);
+        self.sort_panes();
+        true
+    }
+
+    /// Put `new` — just opened in a tab of its own — exactly where `old` is, and close
+    /// `old`. Restarting a session that died in a split brings it back in its place
+    /// rather than in a new tab at the end of the strip.
+    pub fn replace_in_place(&mut self, old: PaneId, new: PaneId) -> bool {
+        if old == new || self.pane(old).is_none() || self.pane(new).is_none() {
+            return false;
+        }
+        let Some(own) = self.window_index_of(new) else {
+            return false;
+        };
+        if self.windows[own].is_split() {
+            return false;
+        }
+        self.windows.remove(own);
+        if let Some(window) = self
+            .windows
+            .iter_mut()
+            .find(|window| window.layout.contains(old))
+        {
+            window.layout.replace(old, new);
+            if window.last_focused == old {
+                window.last_focused = new;
+            }
+        }
+        if let Some(index) = self.panes.iter().position(|pane| pane.id == old) {
+            let _ = self.panes.remove(index).kill();
+        }
+        self.focus(new);
+        self.sort_panes();
+        true
+    }
+
+    /// Change the direction of the split the focused session sits directly in.
+    pub fn turn_split(&mut self, direction: SplitDirection) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        self.current_window_mut().is_some_and(|window| {
+            let turned = window.layout.turn_parent(focused, direction);
+            if turned {
+                window.zoomed = false;
+            }
+            turned
+        })
+    }
+
+    /// Undo any resizing in this tab: every split gets equal shares again.
     pub fn equalize_split(&mut self) -> bool {
-        match self.split.as_mut() {
-            Some(split) => {
-                split.weights = vec![split::DEFAULT_WEIGHT; split.slots.len()];
+        match self.current_window_mut().filter(|window| window.is_split()) {
+            Some(window) => {
+                window.layout.equalize();
                 true
             }
             None => false,
@@ -653,93 +770,104 @@ impl MuxState {
     }
 
     pub fn toggle_split_zoom(&mut self) -> bool {
-        match self.split.as_mut() {
-            Some(split) => {
-                split.zoomed = !split.zoomed;
+        match self.current_window_mut().filter(|window| window.is_split()) {
+            Some(window) => {
+                window.zoomed = !window.zoomed;
                 true
             }
             None => false,
         }
     }
 
-    pub fn save_split(&self) -> Option<split::SavedSplit> {
-        let split = self.split.as_ref()?;
-        Some(split::SavedSplit {
-            direction: split.direction,
-            session_ids: split
-                .slots
-                .iter()
-                .filter_map(|id| self.pane(*id).map(|pane| pane.session_id.clone()))
-                .collect(),
-            weights: split.weights.clone(),
-            zoomed: split.zoomed,
-        })
+    /// The current tab's layout, for resizing it.
+    pub fn current_layout_mut(&mut self) -> Option<&mut LayoutNode> {
+        self.current_window_mut().map(|window| &mut window.layout)
     }
 
-    /// Rebuild a saved split from whichever of its sessions are open now. Focus stays
-    /// where it is if that session is in the split, and otherwise lands on its first.
-    pub fn restore_split(&mut self, saved: &split::SavedSplit) {
-        let mut slots = Vec::new();
-        let mut weights = Vec::new();
-        for (index, session_id) in saved.session_ids.iter().enumerate() {
-            if let Some(id) = self.pane_for_session(session_id) {
-                if !slots.contains(&id) {
-                    slots.push(id);
-                    weights.push(
-                        saved
-                            .weights
-                            .get(index)
-                            .copied()
-                            .unwrap_or(split::DEFAULT_WEIGHT),
-                    );
+    /// Every tab with more than one session, by session id, for the update restart.
+    /// Tabs of one need nothing saying: that is what a reopened session gets anyway.
+    pub fn save_windows(&self) -> Vec<split::SavedWindow> {
+        let session_of = |id: PaneId| self.pane(id).map(|pane| pane.session_id.clone());
+        self.windows
+            .iter()
+            .filter(|window| window.is_split())
+            .filter_map(|window| {
+                Some(split::SavedWindow {
+                    layout: window.layout.save(&session_of)?,
+                    zoomed: window.zoomed,
+                    focused_session_id: session_of(window.last_focused),
+                })
+            })
+            .collect()
+    }
+
+    /// Regroup reopened sessions into the tabs they were saved in. Each saved tab
+    /// takes the place of its first session's tab; sessions that did not come back
+    /// are left out, and a tab left with one session is simply that session's tab.
+    pub fn restore_windows(&mut self, saved: &[split::SavedWindow]) {
+        for saved_window in saved {
+            let pane_of = |session: &str| self.pane_for_session(session);
+            let Some(layout) = saved_window.layout.restore(&pane_of) else {
+                continue;
+            };
+            let members = layout.panes();
+            if members.len() < 2 {
+                continue;
+            }
+            let Some(position) = self
+                .windows
+                .iter()
+                .position(|window| window.layout.contains(members[0]))
+            else {
+                continue;
+            };
+            let last_focused = saved_window
+                .focused_session_id
+                .as_deref()
+                .and_then(|session| self.pane_for_session(session))
+                .filter(|id| members.contains(id))
+                .unwrap_or(members[0]);
+            let id = self.windows[position].id;
+            self.windows[position] = Window {
+                id,
+                layout,
+                zoomed: saved_window.zoomed,
+                last_focused,
+            };
+            for member in &members[1..] {
+                if let Some(index) = self.windows.iter().enumerate().position(|(index, window)| {
+                    index != position && window.layout == LayoutNode::Pane(*member)
+                }) {
+                    self.windows.remove(index);
                 }
             }
         }
-        if slots.len() < 2 {
-            return;
-        }
-        if !self.focused.is_some_and(|id| slots.contains(&id)) {
-            self.focused = slots.first().copied();
-        }
-        self.split = Some(SplitLayout {
-            direction: saved.direction,
-            slots,
-            weights,
-            zoomed: saved.zoomed,
-        });
+        self.sort_panes();
     }
 
-    /// The split as it should be drawn: absent while zoomed, because then only the
-    /// focused session is on screen.
-    pub fn visible_split(&self) -> Option<&SplitLayout> {
-        self.split.as_ref().filter(|split| !split.zoomed)
-    }
-
-    /// Moves `id` to `index`, keeping every other pane in its relative order.
+    /// Moves the tab holding `id` to `index`, keeping every other tab in its order.
     ///
     /// Returns whether anything moved, so a caller can tell a no-op at the end of
     /// the strip apart from a real reorder and leave the user a hint either way.
     pub fn move_pane_to(&mut self, id: PaneId, index: usize) -> bool {
-        let Some(from) = self.panes.iter().position(|pane| pane.id == id) else {
+        let Some(from) = self.window_index_of(id) else {
             return false;
         };
-        let to = index.min(self.panes.len().saturating_sub(1));
+        let to = index.min(self.windows.len().saturating_sub(1));
         if from == to {
             return false;
         }
-        let pane = self.panes.remove(from);
-        self.panes.insert(to, pane);
+        let window = self.windows.remove(from);
+        self.windows.insert(to, window);
+        self.sort_panes();
         true
     }
 
-    /// Moves the focused pane one slot along the strip. Deliberately stops at the
+    /// Moves the focused tab one place along the strip. Deliberately stops at the
     /// ends rather than wrapping: dragging a tab off one edge and having it appear
     /// at the other is disorienting, and `cycle` already exists for going around.
     pub fn move_focused_pane(&mut self, forward: bool) -> bool {
-        let Some(id) = self.focused else {
-            return false;
-        };
-        let Some(from) = self.panes.iter().position(|pane| pane.id == id) else {
+        let Some(from) = self.focused.and_then(|id| self.window_index_of(id)) else {
             return false;
         };
         let to = if forward {
@@ -750,11 +878,27 @@ impl MuxState {
                 None => return false,
             }
         };
-        if to >= self.panes.len() {
+        if to >= self.windows.len() {
             return false;
         }
-        self.panes.swap(from, to);
+        self.windows.swap(from, to);
+        self.sort_panes();
         true
+    }
+
+    /// Put `panes` back in tab order, then reading order within each tab.
+    fn sort_panes(&mut self) {
+        let order: Vec<PaneId> = self
+            .windows
+            .iter()
+            .flat_map(|window| window.layout.panes())
+            .collect();
+        self.panes.sort_by_key(|pane| {
+            order
+                .iter()
+                .position(|id| *id == pane.id)
+                .unwrap_or(usize::MAX)
+        });
     }
 
     pub fn running_count(&self) -> usize {
@@ -800,7 +944,7 @@ impl MuxState {
         }
         self.panes.clear();
         self.focused = None;
-        self.split = None;
+        self.windows.clear();
         Ok(terminated)
     }
 }
@@ -845,66 +989,140 @@ mod tests {
                 mux.events.clone(),
             )
             .unwrap();
-            mux.panes.push(pane);
+            mux.push(pane);
         }
-        mux.focused = Some(1);
+        mux.focus(1);
         mux
     }
 
+    fn tabs(mux: &MuxState) -> Vec<Vec<PaneId>> {
+        mux.windows
+            .iter()
+            .map(|window| window.layout.panes())
+            .collect()
+    }
+
+    /// The reason for windows: before them, starting a session while a split was on
+    /// screen put it in the focused split's place.
     #[test]
-    fn focusing_a_session_off_screen_swaps_it_into_the_focused_split_so_typing_stays_visible() {
+    fn a_new_session_opens_in_a_tab_of_its_own_whatever_is_on_screen() {
+        let mut mux = mux_with_panes(2);
+        mux.split_with(SplitDirection::Columns, 2);
+        assert_eq!(tabs(&mux), vec![vec![1, 2]]);
+
+        let _ = mux.shutdown();
         let mut mux = mux_with_panes(3);
-        assert!(mux.split_with(SplitDirection::Columns, 2));
-        assert_eq!(mux.focused, Some(2));
-
+        mux.split_with(SplitDirection::Columns, 2);
+        assert_eq!(tabs(&mux), vec![vec![1, 2], vec![3]]);
         mux.focus(3);
-        assert_eq!(mux.focused, Some(3));
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 3]);
-
-        // Focusing one already on screen only moves focus.
-        mux.focus(1);
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 3]);
-        assert_eq!(mux.focused, Some(1));
-
-        // Cycling and jumping by number go the same way.
-        mux.select_index(1);
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![2, 3]);
+        assert_eq!(
+            tabs(&mux),
+            vec![vec![1, 2], vec![3]],
+            "focusing another tab's session switches tabs and leaves the split alone"
+        );
         let _ = mux.shutdown();
     }
 
     #[test]
-    fn ending_a_split_session_hands_focus_to_the_slot_that_closes_over_it() {
+    fn splitting_pulls_a_session_out_of_its_tab_and_a_tab_left_empty_closes() {
+        let mut mux = mux_with_panes(3);
+        assert!(mux.split_with(SplitDirection::Columns, 3));
+        assert_eq!(tabs(&mux), vec![vec![1, 3], vec![2]]);
+        assert_eq!(mux.focused, Some(3));
+        assert!(
+            !mux.split_with(SplitDirection::Columns, 1),
+            "already in this tab"
+        );
+        assert_eq!(
+            mux.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
+        let _ = mux.shutdown();
+    }
+
+    #[test]
+    fn splitting_across_the_focused_sessions_split_nests_so_a_column_can_hold_a_stack() {
+        let mut mux = mux_with_panes(3);
+        mux.split_with(SplitDirection::Columns, 2);
+        mux.split_with(SplitDirection::Rows, 3);
+        let LayoutNode::Split {
+            direction,
+            children,
+            ..
+        } = &mux.windows[0].layout
+        else {
+            panic!("a split");
+        };
+        assert_eq!(*direction, SplitDirection::Columns);
+        assert_eq!(children[0], LayoutNode::Pane(1));
+        assert_eq!(children[1].panes(), vec![2, 3]);
+        let _ = mux.shutdown();
+    }
+
+    #[test]
+    fn ending_a_split_session_hands_focus_to_the_one_that_closes_over_it() {
         let mut mux = mux_with_panes(3);
         mux.split_with(SplitDirection::Columns, 2);
         mux.split_with(SplitDirection::Columns, 3);
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 2, 3]);
-
-        mux.focused = Some(2);
+        mux.focus(2);
         mux.remove(2);
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 3]);
+        assert_eq!(tabs(&mux), vec![vec![1, 3]]);
         assert_eq!(mux.focused, Some(3));
 
         mux.remove(3);
-        assert!(mux.split.is_none(), "one session left is not a split");
+        assert_eq!(tabs(&mux), vec![vec![1]]);
         assert_eq!(mux.focused, Some(1));
         let _ = mux.shutdown();
     }
 
     #[test]
-    fn breaking_a_session_out_of_a_split_keeps_its_tab_and_focuses_a_neighbour() {
-        let mut mux = mux_with_panes(3);
+    fn taking_a_session_out_gives_it_the_next_tab_and_keeps_the_keyboard_here() {
+        let mut mux = mux_with_panes(4);
         mux.split_with(SplitDirection::Rows, 2);
         mux.split_with(SplitDirection::Rows, 3);
-        mux.focused = Some(2);
+        mux.focus(2);
 
         assert!(mux.unsplit_focused());
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 3]);
+        assert_eq!(tabs(&mux), vec![vec![1, 3], vec![2], vec![4]]);
         assert_eq!(mux.focused, Some(3));
-        assert!(mux.pane(2).is_some(), "the session itself is untouched");
 
         assert!(mux.unsplit_focused());
-        assert!(mux.split.is_none());
-        assert!(!mux.unsplit_focused(), "nothing left to break out of");
+        assert_eq!(tabs(&mux), vec![vec![1], vec![3], vec![2], vec![4]]);
+        assert!(
+            !mux.unsplit_focused(),
+            "a tab of one has nothing to take out"
+        );
+        let _ = mux.shutdown();
+    }
+
+    #[test]
+    fn a_restarted_session_takes_the_dead_ones_place_in_its_split() {
+        let mut mux = mux_with_panes(4);
+        mux.split_with(SplitDirection::Columns, 2);
+        mux.split_with(SplitDirection::Rows, 3);
+        // 4 stands in for the restarted session, opened in a tab of its own.
+        mux.focus(4);
+        assert!(mux.replace_in_place(2, 4));
+        assert_eq!(tabs(&mux), vec![vec![1, 4, 3]]);
+        assert!(mux.pane(2).is_none());
+        assert_eq!(mux.focused, Some(4));
+        let _ = mux.shutdown();
+    }
+
+    #[test]
+    fn tabs_are_cycled_and_numbered_whole_and_return_to_whoever_had_focus() {
+        let mut mux = mux_with_panes(3);
+        mux.split_with(SplitDirection::Columns, 2);
+        mux.focus(1);
+        assert_eq!(mux.tab_number(2), Some(1));
+        assert_eq!(mux.tab_number(3), Some(2));
+        assert_eq!(mux.number_in_window(2), Some(2));
+        assert_eq!(mux.number_in_window(3), None);
+
+        mux.cycle(true);
+        assert_eq!(mux.focused, Some(3));
+        mux.select_index(0);
+        assert_eq!(mux.focused, Some(1), "the session last focused in that tab");
         let _ = mux.shutdown();
     }
 
@@ -916,79 +1134,48 @@ mod tests {
         mux.toggle_split_zoom();
         mux.remove(3);
         assert!(
-            mux.visible_split().is_some(),
+            mux.visible_layout().is_some(),
             "1 and 2 are back side by side"
         );
 
         // A session leaving that was not the zoomed one leaves the zoom alone.
         mux.split_with(SplitDirection::Columns, 4);
-        mux.focused = Some(1);
+        mux.focus(1);
         mux.toggle_split_zoom();
         mux.remove(4);
-        assert!(mux.split.as_ref().unwrap().zoomed);
+        assert!(mux.zoomed());
 
         // Taking the zoomed session out of the split brings the rest back too.
-        let _ = mux.shutdown();
-        let mut mux = mux_with_panes(3);
-        mux.split_with(SplitDirection::Columns, 2);
-        mux.split_with(SplitDirection::Columns, 3);
+        mux.toggle_split_zoom();
+        mux.focus(2);
         mux.toggle_split_zoom();
         mux.unsplit_focused();
-        assert!(mux.visible_split().is_some());
+        assert!(!mux.zoomed());
         let _ = mux.shutdown();
     }
 
     #[test]
-    fn splitting_the_other_way_turns_the_whole_layout_rather_than_nesting() {
-        let mut mux = mux_with_panes(3);
-        mux.split_with(SplitDirection::Columns, 2);
-        mux.split_with(SplitDirection::Rows, 3);
-        let split = mux.split.as_ref().unwrap();
-        assert_eq!(split.direction, SplitDirection::Rows);
-        assert_eq!(split.slots, vec![1, 2, 3]);
-        assert!(
-            !mux.split_with(SplitDirection::Rows, 1),
-            "already on screen"
-        );
-        let _ = mux.shutdown();
-    }
-
-    #[test]
-    fn arrows_move_between_splits_but_not_while_one_is_zoomed() {
-        let mut mux = mux_with_panes(2);
-        mux.split_with(SplitDirection::Columns, 2);
-        assert!(mux.focus_split(SplitStep::Left));
-        assert_eq!(mux.focused, Some(1));
-        assert!(
-            !mux.focus_split(SplitStep::Left),
-            "no wrapping off the edge"
-        );
-
-        assert!(mux.toggle_split_zoom());
-        assert!(mux.visible_split().is_none());
-        assert!(
-            !mux.focus_split(SplitStep::Right),
-            "moving into a split nobody can see would type blind"
-        );
-        let _ = mux.shutdown();
-    }
-
-    #[test]
-    fn a_saved_split_comes_back_by_session_even_though_pane_ids_change() {
+    fn a_saved_tab_comes_back_by_session_even_though_pane_ids_change() {
         let mut before = mux_with_panes(3);
         before.split_with(SplitDirection::Columns, 3);
-        before.split.as_mut().unwrap().weights = vec![150, 50];
-        let saved = before.save_split().unwrap();
-        assert_eq!(saved.session_ids, vec!["session-1", "session-3"]);
+        before.split_with(SplitDirection::Rows, 2);
+        before.focus(3);
+        let saved = before.save_windows();
+        assert_eq!(
+            saved.len(),
+            1,
+            "only tabs holding several sessions need saving"
+        );
+        assert_eq!(
+            saved[0].layout.sessions(),
+            vec!["session-1", "session-3", "session-2"]
+        );
         let _ = before.shutdown();
 
         let mut after = mux_with_panes(3);
-        after.focused = Some(2);
-        after.restore_split(&saved);
-        let split = after.split.as_ref().unwrap();
-        assert_eq!(split.slots, vec![1, 3]);
-        assert_eq!(split.weights, vec![150, 50]);
-        assert_eq!(after.focused, Some(1), "focus has to land inside the split");
+        after.restore_windows(&saved);
+        assert_eq!(tabs(&after), vec![vec![1, 3, 2]]);
+        assert_eq!(after.windows[0].last_focused, 3);
         let _ = after.shutdown();
     }
 

@@ -109,7 +109,7 @@ fn split_title(
     zoomed: bool,
 ) -> String {
     let number = mux
-        .tab_number(pane.id)
+        .number_in_window(pane.id)
         .map(|number| format!("{number} "))
         .unwrap_or_default();
     let state = format!(
@@ -174,34 +174,87 @@ fn recolor_border_cell(buffer: &mut ratatui::buffer::Buffer, x: u16, y: u16, col
     }
 }
 
-/// Turn the corners where one slot's border meets the next into tees, so the
+/// Turn the corners and edges where borders meet into tees and crosses, so each
 /// boundary reads as one divider rather than a box butted against a line.
+///
+/// Worked out per cell from its neighbours — which of them have a line reaching
+/// towards it — rather than from where splits are, so it is right at any depth of
+/// nesting: a stack inside a column meets the column's edge with ├ and ┤, and a
+/// boundary running into another meets it with ┬ or ┴.
 fn join_shared_borders(buffer: &mut ratatui::buffer::Buffer, slots: &[ChatSlot]) {
-    for slot in slots.iter().skip(1) {
-        let area = slot.area;
-        if area.is_empty() {
+    // Arms as up, down, left, right.
+    fn arms(symbol: &str) -> Option<[bool; 4]> {
+        Some(match symbol {
+            "─" => [false, false, true, true],
+            "│" => [true, true, false, false],
+            "┌" => [false, true, false, true],
+            "┐" => [false, true, true, false],
+            "└" => [true, false, false, true],
+            "┘" => [true, false, true, false],
+            "├" => [true, true, false, true],
+            "┤" => [true, true, true, false],
+            "┬" => [false, true, true, true],
+            "┴" => [true, false, true, true],
+            "┼" => [true, true, true, true],
+            _ => return None,
+        })
+    }
+    fn symbol(arms: [bool; 4]) -> Option<&'static str> {
+        Some(match arms {
+            [true, true, false, true] => "├",
+            [true, true, true, false] => "┤",
+            [false, true, true, true] => "┬",
+            [true, false, true, true] => "┴",
+            [true, true, true, true] => "┼",
+            _ => return None,
+        })
+    }
+    // Only the frames' own cells count, on both sides. Copilot draws boxes and rules
+    // of its own inside a chat, and a rule running up to the border would otherwise
+    // join it and put a tee in the middle of a plain edge.
+    let mut frame_cells = std::collections::HashSet::new();
+    for frame in slots.iter().map(full_frame) {
+        let frame = frame.intersection(buffer.area);
+        if frame.is_empty() {
             continue;
         }
-        let joins = if slot.area.y == slots[0].area.y {
-            // Side by side: the shared edge is this slot's left column.
-            [
-                (area.left(), area.top(), "┌", "┬"),
-                (area.left(), area.bottom() - 1, "└", "┴"),
-            ]
-        } else {
-            // Stacked: the shared edge is this slot's top row.
-            [
-                (area.left(), area.top(), "┌", "├"),
-                (area.right() - 1, area.top(), "┐", "┤"),
-            ]
+        for x in frame.left()..frame.right() {
+            frame_cells.insert((x, frame.top()));
+            frame_cells.insert((x, frame.bottom() - 1));
+        }
+        for y in frame.top()..frame.bottom() {
+            frame_cells.insert((frame.left(), y));
+            frame_cells.insert((frame.right() - 1, y));
+        }
+    }
+    let mut joins = Vec::new();
+    for &(x, y) in &frame_cells {
+        let Some(own) = arms(buffer[(x, y)].symbol()) else {
+            continue;
         };
-        for (x, y, from, to) in joins {
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                if cell.symbol() == from {
-                    cell.set_symbol(to);
-                }
+        let reaches = |dx: i32, dy: i32, arm: usize| {
+            let (nx, ny) = (i32::from(x) + dx, i32::from(y) + dy);
+            let (Ok(nx), Ok(ny)) = (u16::try_from(nx), u16::try_from(ny)) else {
+                return false;
+            };
+            frame_cells.contains(&(nx, ny))
+                && arms(buffer[(nx, ny)].symbol()).is_some_and(|a| a[arm])
+        };
+        // A neighbour reaching towards this cell: up's down arm, and so on.
+        let joined = [
+            own[0] || reaches(0, -1, 1),
+            own[1] || reaches(0, 1, 0),
+            own[2] || reaches(-1, 0, 3),
+            own[3] || reaches(1, 0, 2),
+        ];
+        if joined != own {
+            if let Some(junction) = symbol(joined) {
+                joins.push((x, y, junction));
             }
         }
+    }
+    for (x, y, junction) in joins {
+        buffer[(x, y)].set_symbol(junction);
     }
 }
 
@@ -261,7 +314,7 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     // A zoomed chat fills the screen exactly as an unsplit one does, so it says so in
     // a way that cannot be mistaken for the colours, which already mean focus,
     // attention and exit: a heavier frame, and the word in the title.
-    let zoomed = focused && mux.split.as_ref().is_some_and(|split| split.zoomed);
+    let zoomed = focused && mux.zoomed();
     let title = if in_split || zoomed {
         split_title(
             mux,
@@ -518,10 +571,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         // A split that is not being drawn is otherwise indistinguishable from no split,
         // and the user would have no idea why the other sessions vanished.
-        PaneStatus::Running
-            if mux.prefix_state == PrefixState::Idle
-                && mux.split.as_ref().is_some_and(|split| split.zoomed) =>
-        {
+        PaneStatus::Running if mux.prefix_state == PrefixState::Idle && mux.zoomed() => {
             vec![
                 Span::styled(" Zoomed ", badge_style(theme, theme.accent_alt)),
                 Span::raw(format!(" {prefix} l z shows the split again ")),
@@ -594,33 +644,73 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
     }
 }
 
-/// Tab titles exactly as the bar draws them.
+/// Tab titles exactly as the bar draws them, one per tab.
 ///
 /// Shared with click hit-testing so the two can never disagree about where a tab starts
 /// and ends.
 pub fn tab_sources(mux: &crate::mux::MuxState) -> Vec<tabs::TabSource> {
-    mux.panes
+    mux.windows
         .iter()
-        .map(|pane| tabs::TabSource {
-            marker: tab_marker(pane),
-            title: pane.title.clone(),
-            running: pane.is_running(),
+        .filter_map(|window| {
+            let shown = mux.pane(window.last_focused)?;
+            let members: Vec<&crate::mux::Pane> = window
+                .layout
+                .panes()
+                .into_iter()
+                .filter_map(|id| mux.pane(id))
+                .collect();
+            // A tab of several sessions is titled by the one last focused there, marked
+            // as holding more. Every title would be legible only one at a time: the
+            // strip gives a tab a couple of dozen columns, and Copilot names sessions
+            // with whole sentences.
+            let title = if window.is_split() {
+                format!("⧉ {}", shown.title)
+            } else {
+                shown.title.clone()
+            };
+            Some(tabs::TabSource {
+                marker: window_marker(&members),
+                title,
+                running: members.iter().any(|pane| pane.is_running()),
+            })
         })
         .collect()
 }
 
-/// The pane whose tab covers `column`, for click-to-switch.
+/// The marker for a tab: whichever of its sessions most wants the user. A question in
+/// one session of three must not hide behind a spinner in another.
+fn window_marker(members: &[&crate::mux::Pane]) -> String {
+    let markers: Vec<String> = members.iter().map(|pane| tab_marker(pane)).collect();
+    let rank = |marker: &str| match marker {
+        "? " => 0,
+        "● " => 1,
+        "! " => 2,
+        "▲ " => 3,
+        "✎ " => 5,
+        "× " => 6,
+        "  " => 7,
+        // Anything else is a spinner frame: a turn in progress.
+        _ => 4,
+    };
+    markers
+        .into_iter()
+        .min_by_key(|marker| rank(marker))
+        .unwrap_or_else(|| "  ".to_string())
+}
+
+/// The session a click on the tab covering `column` brings back: whichever had the
+/// keyboard last in that tab.
 pub fn tab_at(
     mux: &crate::mux::MuxState,
     area: Rect,
     column: u16,
     row: u16,
 ) -> Option<crate::mux::PaneId> {
-    tab_index_at(mux, area, column, row).map(|index| mux.panes[index].id)
+    tab_index_at(mux, area, column, row).map(|index| mux.windows[index].last_focused)
 }
 
-/// Position in `mux.panes` of the tab covering `column`, for a drag that has to know
-/// where it is going rather than only which pane it is over.
+/// Position in the strip of the tab covering `column`, for a drag that has to know
+/// where it is going rather than only which tab it is over.
 ///
 /// Strict about the strip's empty tail: a click out there is not a click on the last
 /// tab. A drag that wants to treat an overshoot as "park it at the end" applies that
@@ -639,7 +729,7 @@ pub fn tab_index_at(
     for (offset, width) in widths.iter().enumerate() {
         if column >= x && column < x + width {
             let index = start + offset;
-            return (index < mux.panes.len()).then_some(index);
+            return (index < mux.windows.len()).then_some(index);
         }
         x += width;
     }
@@ -657,18 +747,18 @@ pub fn visible_tab_bounds(mux: &crate::mux::MuxState, area: Rect) -> Option<(usi
     }
     let (start, widths) = strip(mux, area);
     let last = start + widths.len().checked_sub(1)?;
-    Some((start, last.min(mux.panes.len().saturating_sub(1))))
+    Some((start, last.min(mux.windows.len().saturating_sub(1))))
 }
 
 /// The rendered strip as `(index of the first tab, width of each tab)`.
 ///
 /// The strip is windowed around the focused tab when it overflows, so every caller
-/// mapping a column back to a pane has to apply that same offset. Sharing one
+/// mapping a column back to a tab has to apply that same offset. Sharing one
 /// computation keeps hit-testing from drifting away from what was drawn.
 fn strip(mux: &crate::mux::MuxState, area: Rect) -> (usize, Vec<u16>) {
     let focused_index = mux
-        .focused_pane()
-        .and_then(|pane| mux.panes.iter().position(|other| other.id == pane.id))
+        .focused
+        .and_then(|id| mux.window_index_of(id))
         .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, _) = tabs::layout(&sessions, focused_index, area.width as usize);
@@ -696,15 +786,9 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
-    let Some(pane) = mux.focused_pane() else {
+    let Some(focused_index) = mux.focused.and_then(|id| mux.window_index_of(id)) else {
         return;
     };
-
-    let focused_index = mux
-        .panes
-        .iter()
-        .position(|candidate| candidate.id == pane.id)
-        .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, hidden) = tabs::layout(&sessions, focused_index, area.width as usize);
     let start = tabs::window_start_for(sessions.len(), tab_list.len(), focused_index);
@@ -717,8 +801,11 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         let width = text::display_width(&tab.label);
         // A drag reorders as the pointer moves, so without this the strip would
         // rearrange itself under a pointer with nothing to show it is the cause.
-        let held = app.dragging_tab.is_some()
-            && mux.panes.get(start + offset).map(|pane| pane.id) == app.dragging_tab;
+        let held = app.dragging_tab.is_some_and(|dragged| {
+            mux.windows
+                .get(start + offset)
+                .is_some_and(|window| window.layout.contains(dragged))
+        });
         let (label_style, rule_style, glyph) = if held {
             (
                 // Filled rather than merely recoloured: the tab should read as picked
@@ -738,18 +825,6 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
                 Style::default().fg(theme.accent_alt),
                 "━",
-            )
-        } else if mux
-            .panes
-            .get(start + offset)
-            .is_some_and(|pane| app.pane_on_screen(pane.id))
-        {
-            // On screen in a split but without the keyboard: the focused tab's colour
-            // at an ordinary tab's weight, so the strip shows which sessions are up.
-            (
-                Style::default().fg(theme.accent_alt),
-                Style::default().fg(theme.accent_alt),
-                "─",
             )
         } else if tab.running {
             (
@@ -2086,6 +2161,48 @@ mod tests {
             "─",
             "the title stops short of the corner: {top}"
         );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_stack_inside_a_column_joins_the_borders_around_it_with_tees() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1, "tall"), (2, "upper"), (3, "lower"), (4, "elsewhere")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        let mux = app.mux.as_mut().expect("mux");
+        mux.focus(1);
+        mux.split_with(crate::mux::SplitDirection::Columns, 2);
+        mux.split_with(crate::mux::SplitDirection::Rows, 3);
+        app.view = crate::app::View::Attached(3);
+
+        let buffer = render_buffer(&mut app, 120, 36);
+        let areas = app.workspace_areas.clone();
+        let find = |id| {
+            areas
+                .chats
+                .iter()
+                .find(|slot| slot.pane == id)
+                .unwrap()
+                .area
+        };
+        let (tall, upper, lower) = (find(1), find(2), find(3));
+        // The column boundary runs the full height; the stack's boundary meets it.
+        assert_eq!(buffer[(upper.x, tall.y)].symbol(), "┬");
+        assert_eq!(buffer[(upper.x, tall.bottom() - 1)].symbol(), "┴");
+        assert_eq!(buffer[(lower.x, lower.y)].symbol(), "├");
+        assert_eq!(buffer[(lower.right() - 1, lower.y)].symbol(), "┤");
+        assert_eq!(upper.x, lower.x);
+
+        // One tab for the three, marked as holding more than one, and one for the rest.
+        let strip = row(&buffer, areas.tabs.y + 1, 120);
+        assert!(strip.contains("⧉ lower"), "{strip}");
+        assert!(strip.contains("elsewhere"), "{strip}");
+        assert!(!strip.contains(" tall"), "{strip}");
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }
 

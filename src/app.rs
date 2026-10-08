@@ -71,6 +71,8 @@ pub struct WorkspaceAreas {
     /// Every session on screen. Also the record of what the user can see, which is
     /// what decides whether a session's output repaints and whether it notifies.
     pub chats: Vec<crate::ui::ChatSlot>,
+    /// Where each split put its members, for dragging and resizing.
+    pub splits: Vec<crate::ui::SplitGeometry>,
     pub tabs: Rect,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
@@ -81,10 +83,11 @@ pub struct WorkspaceAreas {
 }
 
 /// A border on the attached screen that can be dragged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Divider {
-    /// The boundary in front of this split slot, shared with the slot before it.
-    Split(usize),
+    /// The boundary in front of member `index` of the split at `path` in the tab's
+    /// layout, shared with the member before it.
+    Split { path: Vec<usize>, index: usize },
     /// The scratchpad column's left edge.
     ScratchpadDock,
     /// The terminal strip's top edge.
@@ -96,6 +99,7 @@ impl WorkspaceAreas {
         Self {
             chat: layout.chat,
             chats: layout.chats.clone(),
+            splits: layout.splits.clone(),
             tabs: layout.tabs,
             scratchpad: layout.scratchpad,
             terminal: layout.terminal,
@@ -108,20 +112,23 @@ impl WorkspaceAreas {
     pub fn divider_at(&self, column: u16, row: u16) -> Option<Divider> {
         let along = |area: Rect| column >= area.x && column < area.right();
         let down = |area: Rect| row >= area.y && row < area.bottom();
-        // Each boundary between splits is the later slot's leading edge.
-        let side_by_side = self
-            .chats
-            .get(1)
-            .zip(self.chats.first())
-            .is_some_and(|(second, first)| second.area.y == first.area.y);
-        for (index, slot) in self.chats.iter().enumerate().skip(1) {
-            let hit = if side_by_side {
-                column == slot.area.x && down(slot.area)
-            } else {
-                row == slot.area.y && along(slot.area)
-            };
-            if hit {
-                return Some(Divider::Split(index));
+        // Each boundary is the later member's leading edge. Inner splits are listed
+        // first, so a click where a nested boundary meets an outer one picks the
+        // nested one — the shorter line, which is the one aimed at.
+        for split in &self.splits {
+            let (across_start, across_length) = split.across;
+            let within = |at: u16| at >= across_start && at < across_start + across_length;
+            for (index, start) in split.starts.iter().enumerate().skip(1) {
+                let hit = match split.direction {
+                    crate::mux::SplitDirection::Columns => column == *start && within(row),
+                    crate::mux::SplitDirection::Rows => row == *start && within(column),
+                };
+                if hit {
+                    return Some(Divider::Split {
+                        path: split.path.clone(),
+                        index,
+                    });
+                }
             }
         }
         if let Some(area) = self.scratchpad {
@@ -243,7 +250,8 @@ pub enum PendingTmuxLaunch {
 pub struct UpdateRestartRequest {
     pub panes: Vec<UpdateRestartPane>,
     pub focused_session_id: Option<String>,
-    pub split: Option<crate::mux::split::SavedSplit>,
+    /// Tabs holding more than one session, so they come back that way.
+    pub windows: Vec<crate::mux::split::SavedWindow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1114,16 +1122,13 @@ impl App {
         }
         if self.split_candidates().is_empty() {
             // Nothing left to add, so the other direction can only mean "turn the
-            // split". Without this, a split holding every session could never go
-            // from side by side to stacked.
-            if let Some(split) = self
+            // split". Without this, a tab holding every session could never go from
+            // side by side to stacked.
+            if self
                 .mux
                 .as_mut()
-                .and_then(|mux| mux.split.as_mut())
-                .filter(|split| split.direction != direction)
+                .is_some_and(|mux| mux.turn_split(direction))
             {
-                split.direction = direction;
-                split.zoomed = false;
                 self.status_message = Some(format!("Sessions now {}", direction.label()));
                 self.refresh_workspace_areas();
                 return;
@@ -1134,7 +1139,7 @@ impl App {
             self.status_message = Some(if mux.panes.len() < 2 {
                 "Open another session to split with".to_string()
             } else {
-                "Every session is already on screen".to_string()
+                "Every session is already in this tab".to_string()
             });
             return;
         }
@@ -1160,11 +1165,15 @@ impl App {
         let Some(mux) = self.mux.as_ref() else {
             return Vec::new();
         };
+        // Every session in another tab; picking one brings it into this one.
         mux.panes
             .iter()
             .map(|pane| pane.id)
             .filter(|id| {
-                mux.focused != Some(*id) && !mux.split.as_ref().is_some_and(|s| s.contains(*id))
+                mux.focused != Some(*id)
+                    && !mux
+                        .current_window()
+                        .is_some_and(|window| window.layout.contains(*id))
             })
             .collect()
     }
@@ -2664,48 +2673,83 @@ impl App {
             && self
                 .mux
                 .as_ref()
-                .and_then(crate::mux::MuxState::visible_split)
-                .is_some_and(|split| split.slots.iter().any(|id| open.contains(id)))
+                .and_then(crate::mux::MuxState::visible_layout)
+                .is_some_and(|layout| layout.panes().iter().any(|id| open.contains(id)))
     }
 
     /// Where everything goes while attached. The one place this is decided, so the
     /// frame that is drawn and the sizes the sessions are given cannot disagree.
     pub fn attached_layout(&self, area: Rect) -> crate::ui::AttachedLayout {
+        let mux = self.mux.as_ref();
+        self.layout_for(
+            area,
+            mux.and_then(crate::mux::MuxState::visible_layout),
+            mux.and_then(|mux| mux.focused),
+            (self.scratchpad_dock_visible(), self.terminal_dock_visible()),
+            (
+                self.attached_scratchpad_visible(),
+                self.attached_terminal_visible(),
+            ),
+        )
+    }
+
+    /// How a tab would be laid out if it were brought on screen now, zoom aside, for
+    /// sizing the sessions in it. Sized in advance, switching to a tab — or unzooming
+    /// one — never makes Copilot reflow.
+    pub fn background_layout(
+        &self,
+        area: Rect,
+        window: &crate::mux::Window,
+    ) -> crate::ui::AttachedLayout {
+        let panes = window.layout.panes();
+        let docks = (
+            panes.iter().any(|id| self.scratchpad_open.contains(id)),
+            panes.iter().any(|id| self.terminal_open.contains(id)),
+        );
+        self.layout_for(
+            area,
+            window.is_split().then_some(&window.layout),
+            Some(window.last_focused),
+            docks,
+            docks,
+        )
+    }
+
+    /// `split_docks` apply while `layout` fits, `own_docks` if it falls back to the
+    /// focused session alone — a lone chat shows only its own panels.
+    fn layout_for(
+        &self,
+        area: Rect,
+        layout: Option<&crate::mux::LayoutNode>,
+        focused: Option<crate::mux::PaneId>,
+        split_docks: (bool, bool),
+        own_docks: (bool, bool),
+    ) -> crate::ui::AttachedLayout {
         let tabs = self.tab_bar_visible();
-        let focused = self.mux.as_ref().and_then(|mux| mux.focused);
-        let split = self
-            .mux
-            .as_ref()
-            .and_then(crate::mux::MuxState::visible_split);
-        if let (Some(split), Some(focused)) = (split, focused) {
-            let (scratchpad, terminal) =
-                (self.scratchpad_dock_visible(), self.terminal_dock_visible());
+        let collapsed = layout.is_some();
+        if let (Some(layout), Some(focused)) = (layout, focused) {
+            let (scratchpad, terminal) = split_docks;
             let fitted = crate::ui::docks_fitted_to_split(
                 area,
                 tabs,
                 scratchpad,
                 terminal,
                 self.dock_sizes,
-                split,
+                layout,
             );
             for sizes in [self.dock_sizes, fitted] {
-                if let Some(layout) = crate::ui::attached_split_layout(
-                    area, scratchpad, terminal, tabs, sizes, split, focused,
+                if let Some(attached) = crate::ui::attached_split_layout(
+                    area, scratchpad, terminal, tabs, sizes, layout, focused,
                 ) {
-                    return layout;
+                    return attached;
                 }
             }
         }
         // No split, or one the window is too small for. Either way only the focused
         // session is drawn, with only its own panels.
-        let mut layout = crate::ui::attached_layout_sized(
-            area,
-            self.attached_scratchpad_visible(),
-            self.attached_terminal_visible(),
-            tabs,
-            self.dock_sizes,
-        );
-        layout.split_collapsed = split.is_some();
+        let mut layout =
+            crate::ui::attached_layout_sized(area, own_docks.0, own_docks.1, tabs, self.dock_sizes);
+        layout.split_collapsed = collapsed;
         if let Some(focused) = focused {
             layout.chats = vec![crate::ui::ChatSlot {
                 pane: focused,
@@ -3743,6 +3787,28 @@ impl App {
 
     /// Attach an existing Copilot session as a pane, or focus it if already attached.
     pub fn attach_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
+        self.attach_session_replacing(session_id, cwd, title, None)
+    }
+
+    /// [`Self::attach_session`], putting the new pane exactly where `replacing` is —
+    /// its slot in a split, or its place in the strip — and closing `replacing`.
+    pub fn attach_session_replacing(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        title: String,
+        replacing: Option<crate::mux::PaneId>,
+    ) -> Result<()> {
+        if let Some(old) = replacing {
+            self.reopen_session(session_id, cwd, title)?;
+            if let Some(mux) = self.mux.as_mut() {
+                if let Some(new) = mux.focused {
+                    mux.replace_in_place(old, new);
+                    self.view = View::Attached(new);
+                }
+            }
+            return Ok(());
+        }
         // A pane that already exited is not worth re-focusing; drop it and resume afresh.
         if let Some(mux) = self.mux.as_mut() {
             if let Some(existing) = mux.pane_for_session(session_id) {
@@ -3755,6 +3821,12 @@ impl App {
                 mux.remove(existing);
             }
         }
+        self.reopen_session(session_id, cwd, title)
+    }
+
+    /// Open `session_id` in a new tab: through tmux if it is still alive there,
+    /// otherwise by resuming it.
+    fn reopen_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
         if let Some(reference) = tmux::find_live(session_id)? {
             return self.attach_tmux_session(reference, title);
         }
@@ -3771,7 +3843,7 @@ impl App {
 
     /// The tab strip only earns its two rows once there is something to switch between.
     pub fn tab_bar_visible(&self) -> bool {
-        self.mux.as_ref().is_some_and(|mux| mux.panes.len() > 1)
+        self.mux.as_ref().is_some_and(|mux| mux.windows.len() > 1)
     }
 
     /// Open every inactive favorite as a pane, in the user's configured order.
@@ -4403,11 +4475,15 @@ impl App {
                     .filter(|session_id| panes.iter().any(|pane| pane.session_id == *session_id))
             })
             .map(str::to_string);
-        let split = self.mux.as_ref().and_then(crate::mux::MuxState::save_split);
+        let windows = self
+            .mux
+            .as_ref()
+            .map(crate::mux::MuxState::save_windows)
+            .unwrap_or_default();
         UpdateRestartRequest {
             panes,
             focused_session_id,
-            split,
+            windows,
         }
     }
 
@@ -4592,8 +4668,8 @@ impl App {
                 self.view = View::Attached(pane_id);
             }
         }
-        if let (Some(split), Some(mux)) = (request.split.as_ref(), self.mux.as_mut()) {
-            mux.restore_split(split);
+        if let Some(mux) = self.mux.as_mut() {
+            mux.restore_windows(&request.windows);
             crate::mux_input::sync_view(self);
         }
         let message = if recovery_errors.is_empty() {
@@ -7064,7 +7140,7 @@ mod tests {
                 },
             ],
             focused_session_id: Some("finished-naturally".to_string()),
-            split: None,
+            windows: Vec::new(),
         });
 
         app.retain_terminated_restart_panes(&[2]);

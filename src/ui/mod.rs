@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus, WorkspaceHelp};
-use crate::mux::{PaneId, SplitDirection, SplitLayout};
+use crate::mux::{LayoutNode, PaneId, SplitDirection};
 use crate::theme::{fill_area, Theme, ThemeName};
 
 const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -109,6 +109,8 @@ pub struct AttachedLayout {
     pub chat_borders: Borders,
     /// Every session on screen, in split order. Exactly one outside a split.
     pub chats: Vec<ChatSlot>,
+    /// Where each split's members went, outermost first.
+    pub splits: Vec<SplitGeometry>,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
     pub status: Rect,
@@ -117,6 +119,23 @@ pub struct AttachedLayout {
     pub split_collapsed: bool,
     /// The whole screen this was laid out for.
     pub screen: Rect,
+}
+
+/// Where one split in a tab's layout put its members, kept for dragging the borders
+/// between them and resizing from the keyboard — both need the cells as drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitGeometry {
+    /// Child indices from the root of the layout to this split.
+    pub path: Vec<usize>,
+    pub direction: SplitDirection,
+    /// Where each member starts along the split's direction.
+    pub starts: Vec<u16>,
+    /// Each member's length along it, borders included.
+    pub lengths: Vec<u16>,
+    /// The least each member can be along it.
+    pub minimums: Vec<u16>,
+    /// Where the split starts across its direction, and how far it reaches.
+    pub across: (u16, u16),
 }
 
 impl AttachedLayout {
@@ -188,7 +207,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .as_ref()
             .and_then(|mux| {
                 let pane = mux.focused_pane()?;
-                Some(format!("{} {}", mux.tab_number(pane.id)?, pane.title))
+                Some(match mux.number_in_window(pane.id) {
+                    Some(number) => format!("{number} {}", pane.title),
+                    None => pane.title.clone(),
+                })
             })
             .unwrap_or_default();
         let own_scratchpad = app.attached_scratchpad_visible();
@@ -512,6 +534,7 @@ pub fn attached_layout_sized(
         chat,
         chat_borders: Borders::ALL,
         chats: Vec::new(),
+        splits: Vec::new(),
         scratchpad,
         terminal,
         status,
@@ -520,10 +543,10 @@ pub fn attached_layout_sized(
     }
 }
 
-/// The attached layout with `split`'s sessions sharing the chat area, or `None` when
-/// the window is too small to give each of them a usable chat.
+/// The attached layout with a tab's sessions sharing the chat area by `layout`, or
+/// `None` when the window is too small to give each of them a usable chat.
 ///
-/// The docks are laid out first and the split gets what is left, so the scratchpad
+/// The docks are laid out first and the sessions get what is left, so the scratchpad
 /// and terminal are the same size however many sessions share the screen.
 pub fn attached_split_layout(
     area: Rect,
@@ -531,25 +554,155 @@ pub fn attached_split_layout(
     terminal_visible: bool,
     tabs_visible: bool,
     sizes: DockSizes,
-    split: &SplitLayout,
+    layout: &LayoutNode,
     focused: PaneId,
 ) -> Option<AttachedLayout> {
-    let mut layout = attached_layout_sized(
+    let mut attached = attached_layout_sized(
         area,
         scratchpad_visible,
         terminal_visible,
         tabs_visible,
         sizes,
     );
-    let chats = split_slots(layout.chat, split)?;
+    let mut chats = Vec::new();
+    let mut splits = Vec::new();
+    lay_out(
+        layout,
+        attached.chat,
+        (false, false),
+        &mut Vec::new(),
+        &mut chats,
+        &mut splits,
+    )?;
     let focused = chats.iter().find(|slot| slot.pane == focused)?;
-    layout.chat = focused.area;
-    layout.chat_borders = focused.borders;
-    layout.chats = chats;
-    Some(layout)
+    attached.chat = focused.area;
+    attached.chat_borders = focused.borders;
+    attached.chats = chats;
+    attached.splits = splits;
+    Some(attached)
 }
 
-/// Dock sizes shrunk, as far as their minimums, so that `split` fits beside them.
+/// The inner length a chat needs along `axis`: width for columns, height for rows.
+fn chat_minimum(axis: SplitDirection) -> u16 {
+    match axis {
+        SplitDirection::Columns => MIN_SPLIT_COLS,
+        SplitDirection::Rows => MIN_SPLIT_ROWS,
+    }
+}
+
+/// The least room `node` needs along `axis`, borders included.
+///
+/// `drop_trailing` is whether its trailing edge on that axis is drawn by a neighbour:
+/// a boundary between two members is drawn once, by the later one, so everything but
+/// the last member of a split saves a line.
+pub fn minimum_extent(node: &LayoutNode, axis: SplitDirection, drop_trailing: bool) -> u16 {
+    match node {
+        LayoutNode::Pane(_) => chat_minimum(axis) + 1 + u16::from(!drop_trailing),
+        LayoutNode::Split {
+            direction,
+            children,
+            ..
+        } if *direction == axis => {
+            let last = children.len().saturating_sub(1);
+            children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| minimum_extent(child, axis, index < last || drop_trailing))
+                .sum()
+        }
+        LayoutNode::Split { children, .. } => children
+            .iter()
+            .map(|child| minimum_extent(child, axis, drop_trailing))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// Lay `node` out in `area`. `drops` says whether its right and bottom edges belong
+/// to a neighbour; see [`minimum_extent`]. The rule holds at every depth only because
+/// a split never sits directly inside one running the same way.
+fn lay_out(
+    node: &LayoutNode,
+    area: Rect,
+    drops: (bool, bool),
+    path: &mut Vec<usize>,
+    chats: &mut Vec<ChatSlot>,
+    splits: &mut Vec<SplitGeometry>,
+) -> Option<()> {
+    let (drop_right, drop_bottom) = drops;
+    match node {
+        LayoutNode::Pane(pane) => {
+            let mut borders = Borders::ALL;
+            if drop_right {
+                borders -= Borders::RIGHT;
+            }
+            if drop_bottom {
+                borders -= Borders::BOTTOM;
+            }
+            let inner = Block::default().borders(borders).inner(area);
+            if inner.width < MIN_SPLIT_COLS || inner.height < MIN_SPLIT_ROWS {
+                return None;
+            }
+            chats.push(ChatSlot {
+                pane: *pane,
+                area,
+                borders,
+            });
+            Some(())
+        }
+        LayoutNode::Split {
+            direction,
+            children,
+            weights,
+        } => {
+            let (length, start, drop_along, across) = match direction {
+                SplitDirection::Columns => (area.width, area.x, drop_right, (area.y, area.height)),
+                SplitDirection::Rows => (area.height, area.y, drop_bottom, (area.x, area.width)),
+            };
+            let last = children.len().saturating_sub(1);
+            let drops_along: Vec<bool> = (0..children.len())
+                .map(|index| index < last || drop_along)
+                .collect();
+            let minimums: Vec<u16> = children
+                .iter()
+                .zip(&drops_along)
+                .map(|(child, drop)| minimum_extent(child, *direction, *drop))
+                .collect();
+            let lengths = share_with_minimums(length, weights, &minimums)?;
+            let mut starts = Vec::with_capacity(children.len());
+            let mut offset = start;
+            for (index, child) in children.iter().enumerate() {
+                starts.push(offset);
+                let (child_area, child_drops) = match direction {
+                    SplitDirection::Columns => (
+                        Rect::new(offset, area.y, lengths[index], area.height),
+                        (drops_along[index], drop_bottom),
+                    ),
+                    SplitDirection::Rows => (
+                        Rect::new(area.x, offset, area.width, lengths[index]),
+                        (drop_right, drops_along[index]),
+                    ),
+                };
+                path.push(index);
+                let placed = lay_out(child, child_area, child_drops, path, chats, splits);
+                path.pop();
+                placed?;
+                offset += lengths[index];
+            }
+            splits.push(SplitGeometry {
+                path: path.clone(),
+                direction: *direction,
+                starts,
+                lengths,
+                minimums,
+                across,
+            });
+            Some(())
+        }
+    }
+}
+
+/// Dock sizes shrunk, as far as their minimums, so that `layout` fits beside them.
 ///
 /// Docks give way before sessions do. Opening the terminal under three stacked
 /// sessions at its usual height left them too few rows, and the whole split vanished
@@ -561,13 +714,10 @@ pub fn docks_fitted_to_split(
     scratchpad_visible: bool,
     terminal_visible: bool,
     sizes: DockSizes,
-    split: &SplitLayout,
+    layout: &LayoutNode,
 ) -> DockSizes {
-    let count = split.slots.len() as u16;
-    let (needed_cols, needed_rows) = match split.direction {
-        SplitDirection::Columns => (count * MIN_SPLIT_COLS + count + 1, MIN_SPLIT_ROWS + 2),
-        SplitDirection::Rows => (MIN_SPLIT_COLS + 2, count * MIN_SPLIT_ROWS + count + 1),
-    };
+    let needed_cols = minimum_extent(layout, SplitDirection::Columns, false);
+    let needed_rows = minimum_extent(layout, SplitDirection::Rows, false);
     let mut fitted = sizes;
     if terminal_visible {
         let tab_height = if tabs_visible { TAB_BAR_HEIGHT } else { 0 };
@@ -590,68 +740,27 @@ pub fn docks_fitted_to_split(
     fitted
 }
 
-/// Divide `area` among the split's sessions by weight, neighbours sharing a border.
-fn split_slots(area: Rect, split: &SplitLayout) -> Option<Vec<ChatSlot>> {
-    let count = u16::try_from(split.slots.len()).ok()?;
-    let (length, across, min_length, min_across) = match split.direction {
-        SplitDirection::Columns => (area.width, area.height, MIN_SPLIT_COLS, MIN_SPLIT_ROWS),
-        SplitDirection::Rows => (area.height, area.width, MIN_SPLIT_ROWS, MIN_SPLIT_COLS),
-    };
-    if across.saturating_sub(2) < min_across {
-        return None;
-    }
-    // One border line per boundary plus the two outer edges.
-    let inner = length.checked_sub(count + 1)?;
-    let sizes = share_cells(inner, &split.weights, min_length)?;
-
-    let mut offset = 0;
-    let slots = split
-        .slots
-        .iter()
-        .zip(sizes)
-        .enumerate()
-        .map(|(index, (&pane, size))| {
-            let last = index + 1 == split.slots.len();
-            let outer = size + 1 + u16::from(last);
-            let (area, borders) = match split.direction {
-                SplitDirection::Columns => (
-                    Rect::new(area.x + offset, area.y, outer, area.height),
-                    if last {
-                        Borders::ALL
-                    } else {
-                        Borders::ALL - Borders::RIGHT
-                    },
-                ),
-                // The top edge is the one kept, because it carries the title.
-                SplitDirection::Rows => (
-                    Rect::new(area.x, area.y + offset, area.width, outer),
-                    if last {
-                        Borders::ALL
-                    } else {
-                        Borders::ALL - Borders::BOTTOM
-                    },
-                ),
-            };
-            offset += outer;
-            ChatSlot {
-                pane,
-                area,
-                borders,
-            }
-        })
-        .collect();
-    Some(slots)
-}
-
 /// Split `total` cells in proportion to `weights`, giving every share at least
 /// `minimum`. `None` when there are not enough cells for that.
+#[cfg(test)]
+pub(crate) fn share_cells(total: u16, weights: &[u16], minimum: u16) -> Option<Vec<u16>> {
+    share_with_minimums(total, weights, &vec![minimum; weights.len()])
+}
+
+/// Split `total` cells in proportion to `weights`, giving share `i` at least
+/// `minimums[i]`. `None` when there are not enough cells for that.
 ///
 /// Rounding can leave each share a cell short, and those cells go to the leading
 /// shares so the sizes always add up to exactly `total` — a gap would show the
 /// background through between two chats.
-pub(crate) fn share_cells(total: u16, weights: &[u16], minimum: u16) -> Option<Vec<u16>> {
+pub(crate) fn share_with_minimums(
+    total: u16,
+    weights: &[u16],
+    minimums: &[u16],
+) -> Option<Vec<u16>> {
     let count = weights.len();
-    if count == 0 || usize::from(total) < count * usize::from(minimum) {
+    let needed: u32 = minimums.iter().map(|minimum| u32::from(*minimum)).sum();
+    if count == 0 || minimums.len() != count || u32::from(total) < needed {
         return None;
     }
     let sum: u32 = weights
@@ -670,11 +779,11 @@ pub(crate) fn share_cells(total: u16, weights: &[u16], minimum: u16) -> Option<V
         *size += 1;
         remainder -= 1;
     }
-    // Lift anything under the minimum, taking from whichever share has most to spare.
-    while let Some(short) = sizes.iter().position(|size| *size < minimum) {
-        let donor = (0..count).max_by_key(|&index| sizes[index])?;
-        let spare = sizes[donor].saturating_sub(minimum);
-        let take = (minimum - sizes[short]).min(spare);
+    // Lift anything under its minimum, taking from whichever share has most to spare.
+    while let Some(short) = (0..count).find(|&index| sizes[index] < minimums[index]) {
+        let donor = (0..count).max_by_key(|&index| sizes[index].saturating_sub(minimums[index]))?;
+        let spare = sizes[donor].saturating_sub(minimums[donor]);
+        let take = (minimums[short] - sizes[short]).min(spare);
         if take == 0 {
             return None;
         }
@@ -728,10 +837,16 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
-    fn three_columns() -> SplitLayout {
-        let mut split = SplitLayout::new(SplitDirection::Columns, 1, 2);
-        split.insert_after(2, 3);
-        split
+    fn split_of(direction: SplitDirection, panes: &[PaneId]) -> LayoutNode {
+        LayoutNode::Split {
+            direction,
+            children: panes.iter().map(|id| LayoutNode::Pane(*id)).collect(),
+            weights: vec![crate::mux::split::DEFAULT_WEIGHT; panes.len()],
+        }
+    }
+
+    fn three_columns() -> LayoutNode {
+        split_of(SplitDirection::Columns, &[1, 2, 3])
     }
 
     #[test]
@@ -841,8 +956,7 @@ mod tests {
 
     #[test]
     fn stacked_splits_keep_each_top_edge_so_every_session_has_its_title() {
-        let mut split = SplitLayout::new(SplitDirection::Rows, 1, 2);
-        split.insert_after(2, 3);
+        let split = split_of(SplitDirection::Rows, &[1, 2, 3]);
         let layout = attached_split_layout(
             Rect::new(0, 0, 100, 50),
             false,
@@ -892,8 +1006,7 @@ mod tests {
     #[test]
     fn docks_shrink_to_keep_a_split_on_screen_before_the_split_gives_way() {
         let area = Rect::new(0, 0, 160, 45);
-        let mut stacked = SplitLayout::new(SplitDirection::Rows, 1, 2);
-        stacked.insert_after(2, 3);
+        let stacked = split_of(SplitDirection::Rows, &[1, 2, 3]);
         let sizes = DockSizes::default();
         assert!(
             attached_split_layout(area, false, true, true, sizes, &stacked, 1).is_none(),
@@ -904,8 +1017,7 @@ mod tests {
             .expect("a shorter terminal makes room");
         assert!(layout.terminal.unwrap().height >= MIN_TERMINAL_ROWS);
 
-        let mut four = three_columns();
-        four.insert_after(3, 4);
+        let four = split_of(SplitDirection::Columns, &[1, 2, 3, 4]);
         assert!(attached_split_layout(area, true, false, true, sizes, &four, 1).is_none());
         let fitted = docks_fitted_to_split(area, true, true, false, sizes, &four);
         assert!(attached_split_layout(area, true, false, true, fitted, &four, 1).is_some());

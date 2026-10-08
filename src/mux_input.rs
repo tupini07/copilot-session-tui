@@ -233,7 +233,7 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         }
         // Same rule as a tab drag: once a border is picked up, the whole gesture is
         // the resize's, or the pointer passing over a chat would select text in it.
-        if let Some(divider) = app.dragging_divider {
+        if let Some(divider) = app.dragging_divider.clone() {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     drag_divider_to(app, divider, mouse.column, mouse.row);
@@ -939,6 +939,17 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         match resolve_transient_command(mode, &key) {
             TransientCommand::Step(forward) => {
                 step_transient_mode(app, mode, forward);
+                return;
+            }
+            TransientCommand::Resize(axis, grow) => {
+                app.status_message = (!resize_focused_split(app, axis, grow)).then(|| {
+                    if grow {
+                        "No room left to grow this split that way"
+                    } else {
+                        "This split cannot shrink that way"
+                    }
+                    .to_string()
+                });
                 return;
             }
             TransientCommand::Leave => {
@@ -1953,16 +1964,8 @@ fn step_transient_mode(app: &mut App, mode: TransientMode, forward: bool) {
                 app.status_message = None;
             }
         }
-        TransientMode::ResizeSplit => {
-            app.status_message = (!resize_focused_split(app, forward)).then(|| {
-                if forward {
-                    "No room left to grow this split"
-                } else {
-                    "This split is as small as it can be"
-                }
-                .to_string()
-            });
-        }
+        // Its keys resolve to `Resize`, which carries the axis a plain step cannot.
+        TransientMode::ResizeSplit => {}
     }
 }
 
@@ -2029,10 +2032,10 @@ fn drag_tab_to(app: &mut App, column: u16, row: u16) {
     if area.height == 0 || row < area.y || row >= area.bottom() {
         return;
     }
-    let Some(from) = mux.panes.iter().position(|pane| pane.id == id) else {
+    let Some(from) = mux.window_index_of(id) else {
         return;
     };
-    let last = mux.panes.len().saturating_sub(1);
+    let last = mux.windows.len().saturating_sub(1);
     let under = crate::ui::pane::tab_index_at(mux, area, column, row);
     let (first_shown, last_shown) =
         crate::ui::pane::visible_tab_bounds(mux, area).unwrap_or((0, 0));
@@ -2272,13 +2275,19 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
 fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row: u16) {
     use crate::app::Divider;
     match divider {
-        Divider::Split(index) => drag_split_divider(app, index, column, row),
+        Divider::Split { path, index } => drag_split_divider(app, &path, index, column, row),
         Divider::ScratchpadDock => {
             let areas = &app.workspace_areas;
             let (Some(dock), Some(first)) = (areas.scratchpad, areas.chats.first()) else {
                 return;
             };
-            let total = dock.right().saturating_sub(first.area.x);
+            let left = areas
+                .chats
+                .iter()
+                .map(|slot| slot.area.x)
+                .min()
+                .unwrap_or(first.area.x);
+            let total = dock.right().saturating_sub(left);
             if total == 0 {
                 return;
             }
@@ -2295,12 +2304,15 @@ fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row
         }
         Divider::TerminalDock => {
             let areas = &app.workspace_areas;
-            let (Some(dock), Some(first)) = (areas.terminal, areas.chats.first()) else {
+            let (Some(dock), Some(top)) = (
+                areas.terminal,
+                areas.chats.iter().map(|slot| slot.area.y).min(),
+            ) else {
                 return;
             };
             let room = dock
                 .bottom()
-                .saturating_sub(first.area.y)
+                .saturating_sub(top)
                 .saturating_sub(split_needs(app).1);
             // The layout also caps this so a lone chat keeps some rows.
             let rows = dock
@@ -2314,105 +2326,102 @@ fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row
     app.refresh_workspace_areas();
 }
 
-/// Columns and rows the split on screen needs to stay on screen, borders included.
+/// Columns and rows the sessions on screen need to stay on screen, borders included.
 ///
 /// A dock dragged past this would make every split vanish under the pointer, which
 /// reads as the sessions closing; the drag stops here instead, the way a divider
 /// between two splits stops at their minimum.
 fn split_needs(app: &App) -> (u16, u16) {
-    let chats = &app.workspace_areas.chats;
-    let (Some(first), Some(second)) = (chats.first(), chats.get(1)) else {
+    let Some(layout) = app
+        .mux
+        .as_ref()
+        .and_then(MuxState::visible_layout)
+        .filter(|_| app.workspace_areas.chats.len() > 1)
+    else {
         return (0, 0);
     };
-    let count = chats.len() as u16;
-    let (cols, rows) = (crate::ui::MIN_SPLIT_COLS, crate::ui::MIN_SPLIT_ROWS);
-    if first.area.y == second.area.y {
-        (count * cols + count + 1, rows + 2)
-    } else {
-        (cols + 2, count * rows + count + 1)
-    }
+    (
+        crate::ui::minimum_extent(layout, crate::mux::SplitDirection::Columns, false),
+        crate::ui::minimum_extent(layout, crate::mux::SplitDirection::Rows, false),
+    )
 }
 
-/// Chat sizes along the split's direction, plus that direction's minimum, read from
-/// what the last frame actually drew.
-fn split_extents(app: &App) -> Option<(Vec<u16>, u16)> {
-    let chats = &app.workspace_areas.chats;
-    let (first, second) = (chats.first()?, chats.get(1)?);
-    let side_by_side = first.area.y == second.area.y;
-    let sizes = chats
-        .iter()
-        .map(|slot| {
-            let area = slot.pane_area();
-            if side_by_side {
-                area.width
-            } else {
-                area.height
-            }
-        })
-        .collect();
-    let minimum = if side_by_side {
-        crate::ui::MIN_SPLIT_COLS
-    } else {
-        crate::ui::MIN_SPLIT_ROWS
-    };
-    Some((sizes, minimum))
-}
-
-/// Give the split these chat sizes. Weights in cells reproduce the frame exactly,
-/// so the slots not being resized do not shift by a rounding cell.
-fn set_split_sizes(app: &mut App, sizes: Vec<u16>) {
-    if let Some(split) = app.mux.as_mut().and_then(|mux| mux.split.as_mut()) {
-        if split.slots.len() == sizes.len() {
-            split.weights = sizes;
+/// Give the split at `path` these member lengths. Weights in cells reproduce the frame
+/// exactly, so nothing outside the two members being resized shifts by a rounding cell.
+fn set_split_lengths(app: &mut App, path: &[usize], lengths: Vec<u16>) {
+    if let Some(crate::mux::LayoutNode::Split { weights, .. }) = app
+        .mux
+        .as_mut()
+        .and_then(MuxState::current_layout_mut)
+        .and_then(|layout| layout.node_at_mut(path))
+    {
+        if weights.len() == lengths.len() {
+            *weights = lengths;
         }
     }
     app.refresh_workspace_areas();
 }
 
-fn drag_split_divider(app: &mut App, index: usize, column: u16, row: u16) {
-    let Some((mut sizes, minimum)) = split_extents(app) else {
+fn drag_split_divider(app: &mut App, path: &[usize], index: usize, column: u16, row: u16) {
+    let Some(split) = app
+        .workspace_areas
+        .splits
+        .iter()
+        .find(|split| split.path == path)
+        .cloned()
+    else {
         return;
     };
-    let chats = &app.workspace_areas.chats;
-    let (Some(before), Some(after)) = (
-        index.checked_sub(1).and_then(|i| chats.get(i)),
-        chats.get(index),
-    ) else {
+    let Some(before) = index.checked_sub(1) else {
         return;
     };
-    let side_by_side = before.area.y == after.area.y;
-    let (start, at) = if side_by_side {
-        (before.pane_area().x, column)
-    } else {
-        (before.pane_area().y, row)
-    };
-    let pair = sizes[index - 1] + sizes[index];
-    if pair < minimum * 2 {
+    if index >= split.lengths.len() {
         return;
     }
-    let first = at.saturating_sub(start).clamp(minimum, pair - minimum);
-    sizes[index - 1] = first;
-    sizes[index] = pair - first;
-    set_split_sizes(app, sizes);
+    let at = match split.direction {
+        crate::mux::SplitDirection::Columns => column,
+        crate::mux::SplitDirection::Rows => row,
+    };
+    let pair = split.lengths[before] + split.lengths[index];
+    let (low, high) = (
+        split.minimums[before],
+        pair.saturating_sub(split.minimums[index]),
+    );
+    if low > high {
+        return;
+    }
+    let first = at.saturating_sub(split.starts[before]).clamp(low, high);
+    let mut lengths = split.lengths;
+    lengths[before] = first;
+    lengths[index] = pair - first;
+    set_split_lengths(app, &split.path, lengths);
 }
 
-/// One keyboard step of resizing: the focused split takes cells from, or gives them
-/// to, the neighbour after it — or before it, for the last one.
-fn resize_focused_split(app: &mut App, grow: bool) -> bool {
+/// One keyboard step of resizing along `axis`: the focused session's member of the
+/// nearest split running that way takes cells from, or gives them to, the member
+/// after it — or before it, for the last one. Left and right act on columns, up and
+/// down on rows, so in a column holding a stack every arrow does something.
+fn resize_focused_split(app: &mut App, axis: crate::mux::SplitDirection, grow: bool) -> bool {
     const STEP: u16 = 2;
-    let Some((mut sizes, minimum)) = split_extents(app) else {
+    let Some(path) = app.mux.as_ref().and_then(|mux| {
+        let focused = mux.focused?;
+        mux.current_window()?.layout.path_to(focused)
+    }) else {
         return false;
     };
-    let focused = app.mux.as_ref().and_then(|mux| mux.focused);
-    let Some(index) = app
+    // The deepest split on the way to the focused session that runs along `axis`.
+    let Some(split) = app
         .workspace_areas
-        .chats
+        .splits
         .iter()
-        .position(|slot| Some(slot.pane) == focused)
+        .filter(|split| split.direction == axis && path.starts_with(&split.path))
+        .max_by_key(|split| split.path.len())
+        .cloned()
     else {
         return false;
     };
-    let neighbour = if index + 1 < sizes.len() {
+    let index = path[split.path.len()];
+    let neighbour = if index + 1 < split.lengths.len() {
         index + 1
     } else {
         index - 1
@@ -2422,14 +2431,59 @@ fn resize_focused_split(app: &mut App, grow: bool) -> bool {
     } else {
         (index, neighbour)
     };
-    let moved = sizes[from].saturating_sub(minimum).min(STEP);
+    let moved = split.lengths[from]
+        .saturating_sub(split.minimums[from])
+        .min(STEP);
     if moved == 0 {
         return false;
     }
-    sizes[from] -= moved;
-    sizes[to] += moved;
-    set_split_sizes(app, sizes);
+    let mut lengths = split.lengths;
+    lengths[from] -= moved;
+    lengths[to] += moved;
+    set_split_lengths(app, &split.path, lengths);
     true
+}
+
+/// The session on screen next to the focused one in `step`'s direction: of those
+/// lying wholly that way and overlapping it across, the nearest, then the one sharing
+/// most of its edge. Found from what is drawn rather than the layout tree, because
+/// "left" means left on the screen however the splits happen to be nested.
+fn split_neighbour(app: &App, step: crate::mux::SplitStep) -> Option<crate::mux::PaneId> {
+    use crate::mux::SplitStep;
+    let focused = app.mux.as_ref()?.focused?;
+    let chats = &app.workspace_areas.chats;
+    let current = chats.iter().find(|slot| slot.pane == focused)?.area;
+    let overlap = |a: (u16, u16), b: (u16, u16)| a.1.min(b.1).saturating_sub(a.0.max(b.0));
+    chats
+        .iter()
+        .filter(|slot| slot.pane != focused)
+        .filter_map(|slot| {
+            let area = slot.area;
+            let horizontal = (area.x, area.right());
+            let vertical = (area.y, area.bottom());
+            let (distance, shared) = match step {
+                SplitStep::Left if area.right() <= current.x => (
+                    current.x - area.right(),
+                    overlap(vertical, (current.y, current.bottom())),
+                ),
+                SplitStep::Right if area.x >= current.right() => (
+                    area.x - current.right(),
+                    overlap(vertical, (current.y, current.bottom())),
+                ),
+                SplitStep::Up if area.bottom() <= current.y => (
+                    current.y - area.bottom(),
+                    overlap(horizontal, (current.x, current.right())),
+                ),
+                SplitStep::Down if area.y >= current.bottom() => (
+                    area.y - current.bottom(),
+                    overlap(horizontal, (current.x, current.right())),
+                ),
+                _ => return None,
+            };
+            (shared > 0).then_some((distance, std::cmp::Reverse(shared), slot.pane))
+        })
+        .min()
+        .map(|(_, _, pane)| pane)
 }
 
 /// The split commands, which behave the same from the list and from a session.
@@ -2441,7 +2495,10 @@ fn run_split_command(app: &mut App, command: PrefixCommand) {
             return;
         }
         PrefixCommand::FocusSplit(step) => {
-            if app.mux.as_mut().is_some_and(|mux| mux.focus_split(step)) {
+            if let Some(target) = split_neighbour(app, step) {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.focus(target);
+                }
                 app.workspace_focus = WorkspaceFocus::Chat;
                 sync_workspace_panels(app);
             }
@@ -2520,8 +2577,6 @@ struct RestartTarget {
     session_id: String,
     cwd: String,
     title: String,
-    /// Slot in the tab strip, so the restarted pane lands where the dead one sat.
-    index: usize,
 }
 
 /// Restart is only offered on a pane whose session has exited: while the child is
@@ -2532,13 +2587,11 @@ fn restart_target(app: &App) -> Option<RestartTarget> {
     if pane.is_running() {
         return None;
     }
-    let index = mux.panes.iter().position(|entry| entry.id == pane.id)?;
     Some(RestartTarget {
         pane_id: pane.id,
         session_id: pane.session_id.clone(),
         cwd: pane.cwd.to_string_lossy().into_owned(),
         title: pane.title.clone(),
-        index,
     })
 }
 
@@ -2552,15 +2605,15 @@ fn restart_focused(app: &mut App) {
     if !app.forget_workspace_panels(target.pane_id) {
         return;
     }
-    match app.attach_session(&target.session_id, &target.cwd, target.title) {
+    // In the dead pane's place — its slot in a split, or its tab — so nothing
+    // reshuffles under the user.
+    match app.attach_session_replacing(
+        &target.session_id,
+        &target.cwd,
+        target.title,
+        Some(target.pane_id),
+    ) {
         Ok(()) => {
-            // attach_session drops the dead pane and appends the new one; put it back
-            // in the old slot so the tab strip does not reshuffle under the user.
-            if let Some(mux) = app.mux.as_mut() {
-                if let Some(id) = mux.focused {
-                    mux.move_pane_to(id, target.index);
-                }
-            }
             sync_workspace_panels(app);
         }
         Err(error) => {
@@ -3074,7 +3127,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.split_picker, None);
         let mux = app.mux.as_ref().unwrap();
-        assert_eq!(mux.split.as_ref().unwrap().slots, vec![1, 2, 4]);
+        assert_eq!(mux.current_window().unwrap().layout.panes(), vec![1, 2, 4]);
         assert_eq!(mux.focused, Some(4));
         assert_eq!(app.view, View::Attached(4));
         let _ = app.mux.as_mut().unwrap().shutdown();
@@ -3109,9 +3162,22 @@ mod tests {
         let mut app = split_app(2);
         app.open_split_picker(crate::mux::SplitDirection::Rows);
         assert_eq!(app.mode, Mode::Normal, "nothing to pick, so no picker");
-        let split = app.mux.as_ref().unwrap().split.clone().unwrap();
-        assert_eq!(split.direction, crate::mux::SplitDirection::Rows);
-        assert_eq!(split.slots, vec![1, 2]);
+        let layout = app
+            .mux
+            .as_ref()
+            .unwrap()
+            .current_window()
+            .unwrap()
+            .layout
+            .clone();
+        assert!(matches!(
+            layout,
+            crate::mux::LayoutNode::Split {
+                direction: crate::mux::SplitDirection::Rows,
+                ..
+            }
+        ));
+        assert_eq!(layout.panes(), vec![1, 2]);
         assert_eq!(
             app.workspace_areas.chats[0].area.x, app.workspace_areas.chats[1].area.x,
             "laid out stacked straight away"
@@ -3120,7 +3186,7 @@ mod tests {
         app.open_split_picker(crate::mux::SplitDirection::Rows);
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Every session is already on screen")
+            Some("Every session is already in this tab")
         );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
@@ -3161,7 +3227,11 @@ mod tests {
     fn layout_equalize_undoes_resizing_and_esc_leaves_the_menu_without_acting() {
         let mut app = split_app(2);
         let before = chat_widths(&app);
-        app.mux.as_mut().unwrap().split.as_mut().unwrap().weights = vec![300, 100];
+        if let Some(crate::mux::LayoutNode::Split { weights, .. }) =
+            app.mux.as_mut().unwrap().current_layout_mut()
+        {
+            *weights = vec![300, 100];
+        }
         app.refresh_workspace_areas();
         assert_ne!(chat_widths(&app), before);
 
@@ -3210,7 +3280,10 @@ mod tests {
         let row = divider.y + 3;
         assert_eq!(
             app.workspace_areas.divider_at(divider.x, row),
-            Some(crate::app::Divider::Split(1))
+            Some(crate::app::Divider::Split {
+                path: Vec::new(),
+                index: 1
+            })
         );
 
         handle_attached_event(
@@ -3360,9 +3433,12 @@ mod tests {
         assert_eq!(app.pane_list_ids(), vec![3, 4]);
         handle_attached_event(
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
         );
-        assert_eq!(app.pane_selected, 1, "4 is tab 4, the second row");
+        assert_eq!(
+            app.pane_selected, 1,
+            "session 4 is in tab 3, now that 1 and 2 share tab 1: the second row"
+        );
         handle_attached_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
@@ -3373,6 +3449,117 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         );
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Session 1 in a tall column beside a stack of 2 over 3, focused on 3.
+    fn nested_app() -> App {
+        let mut app = split_app(3);
+        assert!(app
+            .mux
+            .as_mut()
+            .unwrap()
+            .split_with(crate::mux::SplitDirection::Rows, 3));
+        record_frame(&mut app);
+        app
+    }
+
+    fn slot(app: &App, id: u64) -> Rect {
+        app.workspace_areas
+            .chats
+            .iter()
+            .find(|slot| slot.pane == id)
+            .expect("on screen")
+            .area
+    }
+
+    #[test]
+    fn a_column_can_hold_a_stack_beside_one_tall_session() {
+        let mut app = nested_app();
+        let (one, two, three) = (slot(&app, 1), slot(&app, 2), slot(&app, 3));
+        assert_eq!(
+            one.height,
+            two.height + three.height,
+            "1 is as tall as the stack"
+        );
+        assert_eq!(two.x, three.x);
+        assert_eq!(two.bottom(), three.y);
+        assert!(one.right() <= two.x);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn arrows_move_to_whatever_is_that_way_on_screen_however_the_splits_nest() {
+        let mut app = nested_app();
+        let step = |app: &mut App, step| {
+            run_split_command(app, PrefixCommand::FocusSplit(step));
+            app.mux.as_ref().unwrap().focused
+        };
+        use crate::mux::SplitStep::{Down, Left, Right, Up};
+        assert_eq!(step(&mut app, Up), Some(2));
+        assert_eq!(step(&mut app, Left), Some(1));
+        assert_eq!(step(&mut app, Left), Some(1), "nothing further left");
+        assert!(matches!(step(&mut app, Right), Some(2 | 3)));
+        assert_eq!(step(&mut app, Down), Some(3));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn dragging_the_border_inside_a_stack_trades_height_between_its_two_sessions_only() {
+        let mut app = nested_app();
+        let (one, three) = (slot(&app, 1), slot(&app, 3));
+        let (column, row) = (three.x + 5, three.y);
+        assert_eq!(
+            app.workspace_areas.divider_at(column, row),
+            Some(crate::app::Divider::Split {
+                path: vec![1],
+                index: 1
+            })
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), column, row - 4),
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, row - 4),
+        );
+        assert_eq!(slot(&app, 3).y, three.y - 4);
+        assert_eq!(slot(&app, 3).height, three.height + 4);
+        assert_eq!(slot(&app, 1), one, "the tall session is untouched");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn resize_arrows_work_on_their_own_axis_in_a_column_holding_a_stack() {
+        let mut app = nested_app();
+        let (one, three) = (slot(&app, 1), slot(&app, 3));
+        assert!(resize_focused_split(
+            &mut app,
+            crate::mux::SplitDirection::Rows,
+            true
+        ));
+        assert_eq!(
+            slot(&app, 3).height,
+            three.height + 2,
+            "down makes it taller"
+        );
+        assert_eq!(slot(&app, 1), one);
+        assert!(resize_focused_split(
+            &mut app,
+            crate::mux::SplitDirection::Columns,
+            true
+        ));
+        assert_eq!(
+            slot(&app, 3).width,
+            three.width + 2,
+            "right widens the column"
+        );
+        assert_eq!(slot(&app, 1).width, one.width - 2);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -6733,8 +6920,8 @@ fn main() {
         assert_eq!(target.session_id, "crashed");
         assert_eq!(target.title, "Test session 2");
         assert_eq!(
-            target.index, 1,
-            "the restarted pane must land back where the dead one sat, not at the end"
+            target.pane_id, 2,
+            "the dead pane is the one replaced, so the new one takes its place"
         );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }

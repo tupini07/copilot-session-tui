@@ -367,7 +367,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             ListItem::new(Line::from(vec![
                 Span::styled(
                     // The tab's own number, which only differs from the row's when the
-                    // split picker leaves out the sessions already on screen.
+                    // split picker leaves out the sessions already in this tab.
                     format!(" {} ", mux.tab_number(pane.id).unwrap_or(index + 1)),
                     if selected {
                         base
@@ -929,7 +929,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(help_line(
             theme,
             &format!("{prefix} l v / l s"),
-            "Show another session beside / below this one",
+            "Bring another session in beside / below this one",
         ));
         text.push(help_line(
             theme,

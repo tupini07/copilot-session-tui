@@ -180,7 +180,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
         .is_some_and(|pane| pane.status == PaneStatus::Running);
     let has_panes = app.mux.as_ref().is_some_and(|mux| !mux.panes.is_empty());
     let pane_count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
-    let in_split = app.mux.as_ref().is_some_and(|mux| mux.split.is_some());
+    let in_split = app.mux.as_ref().is_some_and(crate::mux::MuxState::in_split);
     let selected = app.selected_session().is_some();
     let favorite_selected = app
         .selected_session()
@@ -288,7 +288,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             Id::SplitSideBySide,
             Group::View,
             "Split side by side",
-            "Show another session in a column beside this one",
+            "Bring a session from another tab in beside this one",
             "C-b l v",
             attached && pane_count > 1,
             "Requires an attached session and another one to show",
@@ -297,7 +297,7 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             Id::SplitStacked,
             Group::View,
             "Split stacked",
-            "Show another session in a row below this one",
+            "Bring a session from another tab in below this one",
             "C-b l s",
             attached && pane_count > 1,
             "Requires an attached session and another one to show",
@@ -314,8 +314,8 @@ fn commands(app: &App) -> Vec<CommandEntry> {
         entry(
             Id::UnsplitSession,
             Group::View,
-            "Remove from split",
-            "Take this session out of the split; its tab stays",
+            "Take out of split",
+            "Move this session into a tab of its own, next to this one",
             "C-b l d",
             attached && in_split,
             "Requires sessions shown side by side or stacked",
