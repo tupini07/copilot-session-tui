@@ -923,23 +923,23 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         ));
         text.push(help_line(
             theme,
-            &format!("{prefix} | / -"),
+            &format!("{prefix} ←↑→↓"),
+            "Move to the neighbouring split (or click it)",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} l v / l s"),
             "Show another session beside / below this one",
         ));
         text.push(help_line(
             theme,
-            &format!("{prefix} ←↑→↓"),
-            "Move to the neighbouring split",
-        ));
-        text.push(help_line(
-            theme,
-            &format!("{prefix} z / b"),
+            &format!("{prefix} l z / l d"),
             "Zoom this split / take it out of the split",
         ));
         text.push(help_line(
             theme,
-            &format!("{prefix} r"),
-            "Resize this split with the arrows (or drag a divider)",
+            &format!("{prefix} l r / l ="),
+            "Resize this split (or drag a divider) / make all equal",
         ));
         if app.tmux_support.is_available() {
             text.push(help_line(

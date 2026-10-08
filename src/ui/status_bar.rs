@@ -86,6 +86,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                             .bg(theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ));
+                } else if app.layout_prefix_pending() {
+                    spans.push(Span::styled(
+                        format!("Layout: {}", crate::mux::LAYOUT_HINT),
+                        Style::default()
+                            .fg(super::badge_foreground(theme, theme.accent))
+                            .bg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ));
                 } else if app.prefix_pending() {
                     spans.push(Span::styled(
                         format!("{prefix} …"),

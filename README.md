@@ -354,11 +354,8 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `n` / `p` | Next / previous session |
 | `prefix` `m` | Move this tab: `←`/`→` slide it, `Esc` when done |
 | `prefix` `1`–`9` | Jump to a session by number |
-| `prefix` `\|` / `-` | Show another session beside / below this one |
 | `prefix` `←` `↑` `→` `↓` | Move to the neighbouring split |
-| `prefix` `z` | Give this split the whole screen, or put the split back |
-| `prefix` `b` | Take this session out of the split; its tab stays |
-| `prefix` `r` | Resize this split: `←`/`↑` shrink, `→`/`↓` grow, `Esc` when done |
+| `prefix` `l` | Splits and layout; see below |
 | `prefix` `x` | End a CST-owned session or detach a tmux-backed tab |
 | `prefix` `X` | End the persistent tmux session and stop Copilot |
 | `prefix` `q` | Quit CST; direct sessions end and tmux-backed sessions detach |
@@ -390,11 +387,22 @@ Tabs live as long as CST does, so the order is not written to disk.
 ### Splits
 
 Several sessions can share the screen, so you can watch long-running ones without
-flipping between tabs. `prefix` `|` puts another session in a column beside the focused
-one and `prefix` `-` puts it in a row below; either opens the session switcher with only
-the sessions not already on screen. Splits are flat: asking for a stacked split in a row
-of columns turns the whole row into a stack, and when every session is already on screen
-that is all it does.
+flipping between tabs. Everything about them except moving between them is under
+`prefix` `l`, with keys borrowed from Doom Emacs's window commands; the status bar lists
+them while it waits:
+
+| `prefix` `l` then | Action |
+|-----|--------|
+| `v` or `\|` | Show another session beside this one |
+| `s` or `-` | Show another session below this one |
+| `z` | Give this split the whole screen, or put the split back |
+| `d` | Take this session out of the split; its tab stays |
+| `r` | Resize: `←`/`↑` shrink, `→`/`↓` grow, `Esc` when done |
+| `=` | Give every split the same share again |
+
+`v` and `s` open the session switcher with only the sessions not already on screen.
+Splits are flat: asking for a stacked split in a row of columns turns the whole row into
+a stack, and when every session is already on screen that is all it does.
 
 Every split is a live, interactive chat. Typing goes to the focused one; click another,
 or use `prefix` and an arrow, to move. The wheel scrolls whichever split it is over
@@ -417,13 +425,11 @@ errors still notify, just as they do for the focused session.
 Drag the line between two splits to resize them; the sessions on either side reflow as
 you go and the rest stay put. The scratchpad's left edge and the terminal's top edge
 drag the same way, with or without a split, and the sizes last until CST quits.
-`prefix` `r` does it from the keyboard: the arrows shrink and grow the focused split two
-cells at a time against its neighbour, and `Esc` leaves. No split shrinks below a usable
-chat.
+`prefix` `l` `r` does it from the keyboard: the arrows shrink and grow the focused split
+two cells at a time against its neighbour, and `Esc` leaves. No split shrinks below a
+usable chat, and `prefix` `l` `=` undoes all of it.
 
-`prefix` `z` gives the focused split the whole screen and puts the split back.
-`prefix` `b` takes the focused session out of the split, leaving its tab; ending a
-session with `prefix` `x` does the same. When space runs short, the scratchpad and
+Ending a session with `prefix` `x` takes it out of the split too. When space runs short, the scratchpad and
 terminal shrink first, down to their minimums, so opening one never hides the split.
 Only when the window is too small even then does CST show just the focused session,
 saying so in the status bar until there is room again. A split survives CST restarting

@@ -6,9 +6,9 @@ use crate::input::{
 };
 use crate::mux::pane::PaneNotification;
 use crate::mux::{
-    resolve_github_command, resolve_help_command, resolve_prefix_command_with_tmux_keys,
-    resolve_transient_command, GithubCommand, HelpCommand, MuxEvent, MuxState, PrefixCommand,
-    PrefixState, TransientCommand, TransientMode,
+    resolve_github_command, resolve_help_command, resolve_layout_command,
+    resolve_prefix_command_with_tmux_keys, resolve_transient_command, GithubCommand, HelpCommand,
+    MuxEvent, MuxState, PrefixCommand, PrefixState, TransientCommand, TransientMode,
 };
 use crate::notifications::NotificationKind;
 use crate::snippets::{SnippetEditorField, SnippetModal, SnippetScope, SnippetScreen};
@@ -783,7 +783,8 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             close_context_overlays(app);
             enter_transient_mode(app, TransientMode::MoveTab);
         }
-        SplitSideBySide | SplitStacked | ZoomSplit | UnsplitSession | ResizeSplit => {
+        SplitSideBySide | SplitStacked | ZoomSplit | UnsplitSession | ResizeSplit
+        | EqualizeSplits => {
             close_context_overlays(app);
             run_split_command(
                 app,
@@ -792,6 +793,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
                     SplitStacked => PrefixCommand::Split(crate::mux::SplitDirection::Rows),
                     ZoomSplit => PrefixCommand::ZoomSplit,
                     ResizeSplit => PrefixCommand::ResizeSplit,
+                    EqualizeSplits => PrefixCommand::EqualizeSplits,
                     _ => PrefixCommand::UnsplitFocused,
                 },
             );
@@ -920,6 +922,17 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    if prefix_state == PrefixState::Layout {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if let Some(command) = resolve_layout_command(&key) {
+            close_context_overlays(app);
+            run_split_command(app, command);
+        }
+        return;
+    }
+
     // A transient mode keeps acting until it is dismissed, so it is checked before
     // the one-shot menus and only leaves on its own terms.
     if let PrefixState::Transient(mode) = prefix_state {
@@ -1005,6 +1018,11 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                     mux.prefix_state = PrefixState::Help;
                 }
             }
+            Some(PrefixCommand::Layout) => {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.prefix_state = PrefixState::Layout;
+                }
+            }
             Some(PrefixCommand::Github) => {
                 if let Some(mux) = app.mux.as_mut() {
                     mux.prefix_state = PrefixState::Github;
@@ -1028,7 +1046,8 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 | PrefixCommand::FocusSplit(_)
                 | PrefixCommand::ZoomSplit
                 | PrefixCommand::UnsplitFocused
-                | PrefixCommand::ResizeSplit),
+                | PrefixCommand::ResizeSplit
+                | PrefixCommand::EqualizeSplits),
             ) => {
                 close_context_overlays(app);
                 run_split_command(app, command);
@@ -2070,6 +2089,23 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         return true;
     }
 
+    // Splits only exist on the attached screen, so a layout command goes there first,
+    // the same way `prefix c` and `prefix e` do.
+    if state == PrefixState::Layout {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if let Some(command) = resolve_layout_command(&key) {
+            if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
+                app.status_message = Some("No sessions are running".to_string());
+            } else {
+                attach_focused(app);
+                run_split_command(app, command);
+            }
+        }
+        return true;
+    }
+
     if state == PrefixState::Idle {
         if prefix.matches(&key) {
             if let Some(mux) = app.mux.as_mut() {
@@ -2183,10 +2219,16 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             | PrefixCommand::FocusSplit(_)
             | PrefixCommand::ZoomSplit
             | PrefixCommand::UnsplitFocused
-            | PrefixCommand::ResizeSplit),
+            | PrefixCommand::ResizeSplit
+            | PrefixCommand::EqualizeSplits),
         ) => {
             attach_focused(app);
             run_split_command(app, command);
+        }
+        Some(PrefixCommand::Layout) => {
+            if let Some(mux) = app.mux.as_mut() {
+                mux.prefix_state = PrefixState::Layout;
+            }
         }
         Some(PrefixCommand::Cancel) | None => {}
     }
@@ -2369,6 +2411,12 @@ fn run_split_command(app: &mut App, command: PrefixCommand) {
             if app.mux.as_mut().is_some_and(|mux| mux.focus_split(step)) {
                 app.workspace_focus = WorkspaceFocus::Chat;
                 sync_workspace_panels(app);
+            }
+        }
+        PrefixCommand::EqualizeSplits => {
+            if !app.mux.as_mut().is_some_and(MuxState::equalize_split) {
+                app.status_message =
+                    Some("Nothing to equalize: only one session is on screen".to_string());
             }
         }
         PrefixCommand::ZoomSplit => {
@@ -3059,10 +3107,52 @@ mod tests {
         handle_attached_event(&mut app, Event::Key(prefix));
         handle_attached_event(
             &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix_state,
+            PrefixState::Layout,
+            "waiting for a layout key, which the status bar lists"
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
         );
         assert_eq!(app.mode, Mode::PaneList);
         assert_eq!(app.split_picker, Some(crate::mux::SplitDirection::Rows));
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn layout_equalize_undoes_resizing_and_esc_leaves_the_menu_without_acting() {
+        let mut app = split_app(2);
+        let before = chat_widths(&app);
+        app.mux.as_mut().unwrap().split.as_mut().unwrap().weights = vec![300, 100];
+        app.refresh_workspace_areas();
+        assert_ne!(chat_widths(&app), before);
+
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        for code in [KeyCode::Char('l'), KeyCode::Esc] {
+            handle_attached_event(&mut app, Event::Key(prefix));
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        assert_ne!(chat_widths(&app), before);
+
+        for code in [KeyCode::Char('l'), KeyCode::Char('=')] {
+            if code == KeyCode::Char('l') {
+                handle_attached_event(&mut app, Event::Key(prefix));
+            }
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(chat_widths(&app), before);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -3174,10 +3264,12 @@ mod tests {
         let before = chat_widths(&app);
         let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         handle_attached_event(&mut app, Event::Key(prefix));
-        handle_attached_event(
-            &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
-        );
+        for code in [KeyCode::Char('l'), KeyCode::Char('r')] {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
         assert_eq!(
             app.mux.as_ref().unwrap().prefix_state,
             PrefixState::Transient(TransientMode::ResizeSplit)

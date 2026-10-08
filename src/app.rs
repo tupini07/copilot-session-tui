@@ -1590,6 +1590,12 @@ impl App {
             .is_some_and(|mux| mux.prefix_state == PrefixState::Help)
     }
 
+    pub fn layout_prefix_pending(&self) -> bool {
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.prefix_state == PrefixState::Layout)
+    }
+
     pub fn github_prefix_pending(&self) -> bool {
         self.mux
             .as_ref()

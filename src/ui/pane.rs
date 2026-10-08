@@ -454,6 +454,10 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" GitHub ", badge_style(theme, theme.accent)),
             Span::raw(" i inspect  Esc cancel "),
         ],
+        PaneStatus::Running if mux.prefix_state == PrefixState::Layout => vec![
+            Span::styled(" Layout ", badge_style(theme, theme.accent_alt)),
+            Span::raw(format!(" {} ", crate::mux::LAYOUT_HINT)),
+        ],
         PaneStatus::Running if mux.prefix_state == PrefixState::Root => vec![
             Span::styled(format!(" {prefix} "), badge_style(theme, theme.warning)),
             Span::raw(format!(" choose a command · {prefix} search · Esc close ")),
@@ -497,7 +501,7 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         {
             vec![
                 Span::styled(" Zoomed ", badge_style(theme, theme.accent_alt)),
-                Span::raw(format!(" {prefix} z shows the split again ")),
+                Span::raw(format!(" {prefix} l z shows the split again ")),
             ]
         }
         PaneStatus::Running

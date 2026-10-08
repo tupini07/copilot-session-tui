@@ -193,16 +193,22 @@ pub enum PrefixCommand {
     /// `prefix m` — enter the sticky mode that slides the focused tab.
     MoveTab,
     SelectIndex(usize),
-    /// `prefix |` and `prefix -` — pick a session to show beside the focused one.
-    Split(SplitDirection),
-    /// `prefix` then an arrow — move to the neighbouring split.
+    /// `prefix l` — the layout menu; see [`LayoutCommand`].
+    Layout,
+    /// `prefix` then an arrow — move to the neighbouring split. Kept at the top level
+    /// rather than in the layout menu because it is by far the most frequent.
     FocusSplit(SplitStep),
-    /// `prefix z` — give the focused split the whole screen, or put the split back.
+    // What the layout menu's keys resolve to; never produced by the top level.
+    /// Pick a session to show beside or below the focused one.
+    Split(SplitDirection),
+    /// Give the focused split the whole screen, or put the split back.
     ZoomSplit,
-    /// `prefix b` — break the focused session out of the split, keeping its tab.
+    /// Take the focused session out of the split, keeping its tab.
     UnsplitFocused,
-    /// `prefix r` — enter the sticky mode that resizes the focused split.
+    /// Enter the sticky mode that resizes the focused split.
     ResizeSplit,
+    /// Give every split the same share again.
+    EqualizeSplits,
     /// `prefix prefix` — search every CST command.
     CommandPalette,
     Cancel,
@@ -218,8 +224,8 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
 /// validated against this and only consulted after the built-ins, so drift here makes
 /// a configured key inert — it can never steal a multiplexer command.
 pub(crate) const PREFIX_COMMAND_KEYS: &[char] = &[
-    'd', 'n', 'p', 'x', 'w', 'c', 'e', 't', 's', 'u', 'q', 'm', 'h', 'g', 'z', '|', '-', 'b', 'r',
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'd', 'n', 'p', 'x', 'w', 'c', 'e', 't', 's', 'u', 'q', 'm', 'h', 'g', 'l', '0', '1', '2', '3',
+    '4', '5', '6', '7', '8', '9',
 ];
 
 /// `tmux_keys` is `None` when tmux-backed sessions cannot work here, which keeps the
@@ -248,11 +254,7 @@ pub fn resolve_prefix_command_with_tmux_keys(
         KeyCode::Char('m') => Some(PrefixCommand::MoveTab),
         KeyCode::Char('h') => Some(PrefixCommand::Help),
         KeyCode::Char('g') => Some(PrefixCommand::Github),
-        KeyCode::Char('|') => Some(PrefixCommand::Split(SplitDirection::Columns)),
-        KeyCode::Char('-') => Some(PrefixCommand::Split(SplitDirection::Rows)),
-        KeyCode::Char('z') => Some(PrefixCommand::ZoomSplit),
-        KeyCode::Char('b') => Some(PrefixCommand::UnsplitFocused),
-        KeyCode::Char('r') => Some(PrefixCommand::ResizeSplit),
+        KeyCode::Char('l') => Some(PrefixCommand::Layout),
         KeyCode::Left => Some(PrefixCommand::FocusSplit(SplitStep::Left)),
         KeyCode::Right => Some(PrefixCommand::FocusSplit(SplitStep::Right)),
         KeyCode::Up => Some(PrefixCommand::FocusSplit(SplitStep::Up)),
@@ -311,6 +313,25 @@ pub fn resolve_github_command(key: &KeyEvent) -> Option<GithubCommand> {
     match key.code {
         KeyCode::Char('i') => Some(GithubCommand::Inspect),
         KeyCode::Esc => Some(GithubCommand::Cancel),
+        _ => None,
+    }
+}
+
+/// What the layout menu offers, for the status bar while it waits for a key.
+pub const LAYOUT_HINT: &str =
+    "v beside · s below · z zoom · d remove · r resize · = equal · Esc cancel";
+
+/// `prefix l`: everything about splits except moving between them, grouped so the
+/// top level of the prefix stays small. The letters follow Doom Emacs's window keys;
+/// the tmux-style `|` and `-` work too.
+pub fn resolve_layout_command(key: &KeyEvent) -> Option<PrefixCommand> {
+    match key.code {
+        KeyCode::Char('v' | '|') => Some(PrefixCommand::Split(SplitDirection::Columns)),
+        KeyCode::Char('s' | '-') => Some(PrefixCommand::Split(SplitDirection::Rows)),
+        KeyCode::Char('z') => Some(PrefixCommand::ZoomSplit),
+        KeyCode::Char('d') => Some(PrefixCommand::UnsplitFocused),
+        KeyCode::Char('r') => Some(PrefixCommand::ResizeSplit),
+        KeyCode::Char('=') => Some(PrefixCommand::EqualizeSplits),
         _ => None,
     }
 }
@@ -391,6 +412,8 @@ pub enum PrefixState {
     Root,
     Help,
     Github,
+    /// `prefix l`, waiting for a key from [`resolve_layout_command`].
+    Layout,
     /// A sticky mode; see [`TransientMode`].
     Transient(TransientMode),
 }
@@ -616,6 +639,17 @@ impl MuxState {
         };
         self.focused = Some(target);
         true
+    }
+
+    /// Undo any resizing: every split gets the same share again.
+    pub fn equalize_split(&mut self) -> bool {
+        match self.split.as_mut() {
+            Some(split) => {
+                split.weights = vec![split::DEFAULT_WEIGHT; split.slots.len()];
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn toggle_split_zoom(&mut self) -> bool {
@@ -959,38 +993,51 @@ mod tests {
     }
 
     #[test]
-    fn split_keys_resolve_and_are_all_reserved_from_the_configurable_tmux_key() {
+    fn split_keys_live_under_l_except_the_arrows_which_stay_one_key_away() {
         let chord = KeyChord::parse("C-b").unwrap();
         let none = KeyModifiers::NONE;
-        let cases = [
-            (
-                KeyCode::Char('|'),
-                PrefixCommand::Split(SplitDirection::Columns),
-            ),
-            (
-                KeyCode::Char('-'),
-                PrefixCommand::Split(SplitDirection::Rows),
-            ),
-            (KeyCode::Char('z'), PrefixCommand::ZoomSplit),
-            (KeyCode::Char('b'), PrefixCommand::UnsplitFocused),
-            (KeyCode::Char('r'), PrefixCommand::ResizeSplit),
-            (KeyCode::Left, PrefixCommand::FocusSplit(SplitStep::Left)),
-            (KeyCode::Down, PrefixCommand::FocusSplit(SplitStep::Down)),
-        ];
-        for (code, command) in cases {
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('l'), none), &chord),
+            Some(PrefixCommand::Layout)
+        );
+        assert!(PREFIX_COMMAND_KEYS.contains(&'l'));
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Left, none), &chord),
+            Some(PrefixCommand::FocusSplit(SplitStep::Left))
+        );
+        // The old top-level keys are free again for the configurable tmux end key.
+        for free in ['|', '-', 'z', 'b', 'r'] {
             assert_eq!(
-                resolve_prefix_command(&key(code, none), &chord),
-                Some(command)
+                resolve_prefix_command(&key(KeyCode::Char(free), none), &chord),
+                None,
+                "{free}"
             );
-            if let KeyCode::Char(character) = code {
-                assert!(PREFIX_COMMAND_KEYS.contains(&character), "{character}");
-            }
+            assert!(!PREFIX_COMMAND_KEYS.contains(&free), "{free}");
+        }
+
+        let cases = [
+            ('v', PrefixCommand::Split(SplitDirection::Columns)),
+            ('|', PrefixCommand::Split(SplitDirection::Columns)),
+            ('s', PrefixCommand::Split(SplitDirection::Rows)),
+            ('-', PrefixCommand::Split(SplitDirection::Rows)),
+            ('z', PrefixCommand::ZoomSplit),
+            ('d', PrefixCommand::UnsplitFocused),
+            ('r', PrefixCommand::ResizeSplit),
+            ('=', PrefixCommand::EqualizeSplits),
+        ];
+        for (character, command) in cases {
+            assert_eq!(
+                resolve_layout_command(&key(KeyCode::Char(character), none)),
+                Some(command),
+                "{character}"
+            );
         }
         // `|` usually needs Shift; the terminal reporting it must not stop it matching.
         assert_eq!(
-            resolve_prefix_command(&key(KeyCode::Char('|'), KeyModifiers::SHIFT), &chord),
+            resolve_layout_command(&key(KeyCode::Char('|'), KeyModifiers::SHIFT)),
             Some(PrefixCommand::Split(SplitDirection::Columns))
         );
+        assert_eq!(resolve_layout_command(&key(KeyCode::Esc, none)), None);
     }
 
     #[test]

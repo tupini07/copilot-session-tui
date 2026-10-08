@@ -81,8 +81,10 @@ fn draw_prefix_menu(f: &mut Frame, app: &App) {
                 ("g i", "GitHub inspector"),
                 ("h e", "Scratchpad help"),
                 ("u", "Update CST"),
-                ("", ""),
-                ("", ""),
+                // The layout keys themselves are listed once `l` is pressed; here it
+                // only has to be findable.
+                ("l", "Splits & layout"),
+                ("←↑→↓", "Move between splits"),
             ],
         ),
         (
@@ -353,6 +355,9 @@ mod tests {
         }
         assert!(text.contains("Command search"), "got:\n{text}");
         assert!(text.contains("GitHub inspector"), "got:\n{text}");
+        // Splits were left off this sheet once, and could only be found by searching.
+        assert!(text.contains("Splits & layout"), "got:\n{text}");
+        assert!(text.contains("Move between splits"), "got:\n{text}");
     }
 
     #[test]
