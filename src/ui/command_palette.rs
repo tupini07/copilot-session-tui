@@ -18,7 +18,82 @@ pub fn draw_overlays(f: &mut Frame, app: &mut App) {
         .is_some_and(|mux| mux.prefix_state == PrefixState::Root)
     {
         draw_prefix_menu(f, app);
+    } else if app
+        .mux
+        .as_ref()
+        .is_some_and(|mux| mux.prefix_state == PrefixState::Layout)
+    {
+        draw_layout_menu(f, app);
     }
+}
+
+/// What `prefix l` offers, in the same place and style as the prefix menu it was
+/// opened from. Listed only in the status bar at first, it was taken for a key that
+/// had done nothing: the eye was still on the popup that had just closed.
+fn draw_layout_menu(f: &mut Frame, app: &App) {
+    let theme = app.theme();
+    let area = bottom_overlay(f.area(), 84, 9);
+    prepare(f, area, theme);
+    let prefix = app
+        .mux
+        .as_ref()
+        .map(|mux| mux.prefix.label())
+        .unwrap_or_else(|| "C-b".to_string());
+    let block = Block::default()
+        .title(format!(" {prefix} l · Layout "))
+        .borders(Borders::ALL)
+        .style(surface(theme))
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(sections[0]);
+    let groups = [
+        (
+            "Split",
+            vec![("v  |", "Beside"), ("s  -", "Below"), ("d", "Take out")],
+        ),
+        ("View", vec![("z", "Zoom / back"), ("Esc", "Cancel")]),
+        ("Size", vec![("r", "Resize mode"), ("=", "Make equal")]),
+    ];
+    for (column, (title, commands)) in columns.iter().zip(groups) {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                format!(" {title}"),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+        lines.extend(
+            commands
+                .into_iter()
+                .map(|(key, label)| command_hint(key, label, theme)),
+        );
+        f.render_widget(Paragraph::new(lines).style(surface(theme)), *column);
+    }
+    // Moving is not in this menu, which is exactly why it is worth saying where it is.
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" Move between splits: "),
+            Span::styled(format!("{prefix} ←↑→↓"), key_style(theme)),
+            Span::raw(" or click one"),
+        ]))
+        .style(surface(theme).fg(theme.muted)),
+        sections[1],
+    );
 }
 
 fn draw_prefix_menu(f: &mut Frame, app: &App) {
@@ -357,6 +432,35 @@ mod tests {
         assert!(text.contains("GitHub inspector"), "got:\n{text}");
         // Splits were left off this sheet once, and could only be found by searching.
         assert!(text.contains("Splits & layout"), "got:\n{text}");
+        assert!(text.contains("Move between splits"), "got:\n{text}");
+    }
+
+    /// The keys after `prefix l` were first only in the status bar, and with the
+    /// prefix menu gone from where the user was looking, `l` seemed to do nothing.
+    #[test]
+    fn the_layout_menu_opens_as_a_popup_like_the_prefix_menu_it_came_from() {
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                mux: true,
+                ..UserConfig::default()
+            },
+        );
+        app.mux.as_mut().unwrap().prefix_state = PrefixState::Layout;
+
+        let text = render(&mut app);
+
+        assert!(text.contains("C-b l · Layout"), "got:\n{text}");
+        for label in [
+            "Beside",
+            "Below",
+            "Take out",
+            "Zoom / back",
+            "Resize mode",
+            "Make equal",
+        ] {
+            assert!(text.contains(label), "missing {label}:\n{text}");
+        }
         assert!(text.contains("Move between splits"), "got:\n{text}");
     }
 
