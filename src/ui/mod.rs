@@ -3,6 +3,7 @@ pub mod diff;
 pub mod file_tree;
 pub mod github_inspector;
 pub mod hyperlinks;
+pub mod markdown;
 pub mod pane;
 pub mod popups;
 pub mod scratchpad;

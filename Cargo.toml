@@ -40,6 +40,11 @@ arboard = { version = "3.6.1", default-features = false }
 portable-pty = "0.9"
 vt100 = "0.16"
 tui-term = "0.3"
+# GitHub bodies are markdown. Syntax highlighting is left off: its themes are its own and
+# would clash with the CST theme the diff view already highlights with.
+tui-markdown = { version = "0.3", default-features = false }
+# Already pulled in by tui-markdown; named directly to find HTML comments to drop.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Checking whether a PID is alive by shelling out to tasklist costs ~250 ms per call,

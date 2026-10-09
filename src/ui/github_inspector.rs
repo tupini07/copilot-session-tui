@@ -6,6 +6,7 @@ use crate::github::{DiscussionKind, GithubItem};
 use crate::text;
 use crate::theme::Theme;
 use crate::ui::file_tree;
+use crate::ui::markdown;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -938,17 +939,36 @@ fn overview_lines(item: &GithubItem, width: usize, theme: Theme) -> Vec<Line<'st
     lines.push(Line::from(""));
     lines.push(section("Description", theme));
     lines.push(Line::from(""));
-    let body = if common.body.trim().is_empty() {
-        "(no description)"
-    } else {
-        common.body.as_str()
-    };
-    lines.extend(
-        text::wrap_text(body, width.saturating_sub(2).max(1))
-            .into_iter()
-            .map(|line| Line::from(format!(" {line}"))),
-    );
+    lines.extend(body_lines(
+        &common.body,
+        "(no description)",
+        " ",
+        width.saturating_sub(1),
+        theme,
+    ));
     lines
+}
+
+/// A markdown body rendered under `indent`, or `fallback` when the body is empty.
+fn body_lines(
+    body: &str,
+    fallback: &str,
+    indent: &str,
+    width: usize,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    if body.trim().is_empty() {
+        return vec![Line::from(format!("{indent}{fallback}"))];
+    }
+    let available = width.saturating_sub(text::display_width(indent)).max(1);
+    markdown::render(body, available, theme)
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(indent.to_string())];
+            spans.extend(line.spans);
+            Line::from(spans).style(line.style)
+        })
+        .collect()
 }
 
 fn comment_lines(
@@ -1012,16 +1032,13 @@ fn comment_lines(
                 .fg(context_color)
                 .add_modifier(Modifier::BOLD),
         )));
-        let body = if entry.body.trim().is_empty() {
-            "(no comment body)"
-        } else {
-            entry.body.as_str()
-        };
-        lines.extend(
-            text::wrap_text(body, width.saturating_sub(3).max(1))
-                .into_iter()
-                .map(|line| Line::from(format!("   {line}"))),
-        );
+        lines.extend(body_lines(
+            &entry.body,
+            "(no comment body)",
+            "   ",
+            width,
+            theme,
+        ));
         lines.push(Line::from(Span::styled(
             "─".repeat(width.max(1)),
             Style::default().fg(theme.inactive),
@@ -1083,22 +1100,13 @@ fn push_discussion_comment(
             })
             .add_modifier(Modifier::BOLD),
     )));
-    let body = if comment.body.trim().is_empty() {
-        "(no comment body)"
-    } else {
-        comment.body.as_str()
-    };
-    let body_indent = "  ".repeat(depth + 2);
-    lines.extend(
-        text::wrap_text(
-            body,
-            width
-                .saturating_sub(text::display_width(&body_indent))
-                .max(1),
-        )
-        .into_iter()
-        .map(|line| Line::from(format!("{body_indent}{line}"))),
-    );
+    lines.extend(body_lines(
+        &comment.body,
+        "(no comment body)",
+        &"  ".repeat(depth + 2),
+        width,
+        theme,
+    ));
     for reply in &comment.replies {
         push_discussion_comment(lines, reply, depth + 1, width, theme);
     }
