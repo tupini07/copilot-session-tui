@@ -107,6 +107,16 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 handle_attached_key(app, *key);
                 return;
             }
+            // Browser-style: whichever panel has the keyboard, these switch tabs.
+            if let Some(forward) = tab_switch_key(key) {
+                close_context_overlays(app);
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.cycle(forward);
+                }
+                sync_workspace_panels(app);
+                sync_view(app);
+                return;
+            }
         }
     }
 
@@ -1730,6 +1740,27 @@ fn handle_terminal_event(app: &mut App, event: Event) {
 fn focus_chat(app: &mut App) {
     app.workspace_focus = WorkspaceFocus::Chat;
     app.terminal.unfocus();
+}
+
+/// Ctrl+Tab and Ctrl+Shift+Tab, and Ctrl+PageDown and Ctrl+PageUp, as in a browser:
+/// `Some(true)` for the next tab, `Some(false)` for the previous one.
+///
+/// Both pairs, because Windows Terminal claims Ctrl+Tab for its own tabs unless the
+/// binding is removed, while the page keys reach the application there. Copilot uses
+/// neither, so taking them costs it nothing.
+pub(crate) fn tab_switch_key(key: &KeyEvent) -> Option<bool> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Tab => Some(!shift),
+        // Terminals report Shift+Tab as its own key, with or without the modifier.
+        KeyCode::BackTab => Some(false),
+        KeyCode::PageDown if !shift => Some(true),
+        KeyCode::PageUp if !shift => Some(false),
+        _ => None,
+    }
 }
 
 /// The other sessions sharing the screen, with their session ids.
@@ -3461,6 +3492,43 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         );
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn ctrl_tab_and_ctrl_page_keys_switch_tabs_like_a_browser_from_any_panel() {
+        let mut app = split_app(3);
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+
+        handle_attached_event(&mut app, key(KeyCode::Tab, ctrl));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(3), "next tab");
+        handle_attached_event(&mut app, key(KeyCode::BackTab, ctrl | KeyModifiers::SHIFT));
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "back, to who had focus"
+        );
+        handle_attached_event(&mut app, key(KeyCode::PageDown, ctrl));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(3));
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        handle_attached_event(&mut app, key(KeyCode::PageUp, ctrl));
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "even from the scratchpad"
+        );
+
+        // Plain Tab still belongs to Copilot.
+        assert_eq!(
+            tab_switch_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            tab_switch_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            None
+        );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 

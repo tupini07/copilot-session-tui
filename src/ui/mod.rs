@@ -339,16 +339,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .bg(theme.accent),
         ),
         Span::raw(format!("  {} sessions", app.filtered_indices.len())),
-        Span::styled(
-            if app.sessions_loading() {
-                format!(" · {} loading remaining sessions…", spinner_frame())
-            } else {
-                String::new()
-            },
-            Style::default()
-                .fg(semantic_foreground_on(theme, theme.info, theme.background))
-                .add_modifier(Modifier::BOLD),
-        ),
     ]))
     .style(Style::default().fg(theme.text).bg(theme.background));
 
@@ -1082,8 +1072,10 @@ mod tests {
         assert!(layout.tabs.bottom() <= layout.chat.y);
     }
 
+    /// Said once, in the list being filled. It used to sit in the header while the
+    /// list itself said "No sessions found", which read as a contradiction.
     #[test]
-    fn first_frame_says_the_rest_of_the_catalog_is_loading() {
+    fn first_frame_says_the_list_is_loading_instead_of_that_there_are_no_sessions() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         let (_sender, receiver) = std::sync::mpsc::channel();
         app.begin_session_load(receiver);
@@ -1098,8 +1090,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("0 sessions"), "got:\n{text}");
-        assert!(text.contains("loading remaining sessions…"), "got:\n{text}");
+        assert!(text.contains("Loading sessions…"), "got:\n{text}");
+        assert!(!text.contains("No sessions found"), "got:\n{text}");
+        assert_eq!(text.matches("oading").count(), 1, "said once:\n{text}");
         assert!(
             SPINNER_FRAMES.iter().any(|frame| text.contains(frame)),
             "got:\n{text}"

@@ -311,10 +311,12 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
         .map_or(0, |label| text::display_width(label) as u16);
     // Each split is titled with its session, since there is no single "the chat" to
     // name any more and the tab strip only marks one of them.
-    // A zoomed chat fills the screen exactly as an unsplit one does, so it says so in
-    // a way that cannot be mistaken for the colours, which already mean focus,
-    // attention and exit: a heavier frame, and the word in the title.
+    // A zoomed chat fills the screen exactly as an unsplit one does, so it says so
+    // three ways: a heavier frame, the word in the title, and a colour of its own —
+    // the theme's other accent, since the usual one means focus and yellow and red
+    // already mean attention and exit.
     let zoomed = focused && mux.zoomed();
+    let border_color = if zoomed { theme.accent } else { border_color };
     let title = if in_split || zoomed {
         split_title(
             mux,
@@ -2116,6 +2118,12 @@ mod tests {
         let buffer = render_buffer(&mut app, 100, 30);
         let chat = app.workspace_areas.chat;
         assert_eq!(buffer[(chat.x, chat.y)].symbol(), "┏");
+        assert_eq!(
+            buffer[(chat.x, chat.y + 1)].style().fg,
+            Some(app.theme().accent),
+            "a colour of its own, not the focus accent"
+        );
+        assert_ne!(app.theme().accent, app.theme().accent_alt);
         assert!(row(&buffer, chat.y, 100).contains("right · zoomed"));
 
         app.mux.as_mut().expect("mux").toggle_split_zoom();

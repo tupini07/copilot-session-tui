@@ -935,7 +935,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(help_line(
             theme,
             &format!("{prefix} n/p"),
-            "Next / previous session",
+            "Next / previous tab (also Ctrl+Tab, Ctrl+PageDown/Up)",
         ));
         text.push(help_line(
             theme,

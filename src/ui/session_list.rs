@@ -11,8 +11,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let selection_style = super::row_selection_style(theme);
     let selection_fg = selection_style.fg.unwrap_or(theme.selection_fg);
+    // Loading is said here and only here: this is the list it is filling. Said in the
+    // header as well, it ran alongside "No sessions found" for a list that simply had
+    // not arrived yet.
+    let loading = app.sessions_loading();
+    let mut title = vec![Span::raw(" Sessions ")];
+    if loading && !app.filtered_indices.is_empty() {
+        title.push(Span::styled(
+            format!("{} loading more… ", super::spinner_frame()),
+            Style::default()
+                .fg(super::semantic_foreground_on(
+                    theme,
+                    theme.info,
+                    theme.background,
+                ))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     let block = Block::default()
-        .title(" Sessions ")
+        .title(Line::from(title))
         .borders(Borders::ALL)
         .style(Style::default().fg(theme.text).bg(theme.background))
         .border_style(Style::default().fg(theme.muted));
@@ -21,10 +38,17 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     if app.filtered_indices.is_empty() {
-        let hint = if app.new_session_dir().is_some() {
-            "  No sessions found\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
+        let headline = if loading {
+            format!("  {} Loading sessions…", super::spinner_frame())
         } else {
-            "  No sessions found"
+            "  No sessions found".to_string()
+        };
+        let hint = if app.new_session_dir().is_some() {
+            format!(
+                "{headline}\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
+            )
+        } else {
+            headline
         };
         let empty = ratatui::widgets::Paragraph::new(hint).style(
             Style::default()

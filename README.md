@@ -351,7 +351,9 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `u` | Install an update without stopping running sessions |
 | `prefix` `h` `e` | Open scratchpad shortcut help |
 | `prefix` `g` `i` | Inspect a GitHub issue, pull request, or discussion |
-| `prefix` `n` / `p` | Next / previous session |
+| `prefix` `n` / `p` | Next / previous tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, as in a browser — from any panel, no prefix. Windows Terminal keeps these for its own tabs unless you unbind them there |
+| `Ctrl+PageDown` / `Ctrl+PageUp` | The same, and these reach CST in Windows Terminal as it comes |
 | `prefix` `m` | Move this tab: `←`/`→` slide it, `Esc` when done |
 | `prefix` `1`–`9` | Jump to a session by number |
 | `prefix` `←` `↑` `→` `↓` | Move to the neighbouring split |

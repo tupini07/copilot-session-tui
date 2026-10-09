@@ -1652,6 +1652,8 @@ fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> b
             app.update_notice.is_some()
                 || mux.prefix_state != mux::PrefixState::Idle
                 || mux.prefix.matches(key)
+                // Switches tabs itself; no session will echo it.
+                || mux_input::tab_switch_key(key).is_some()
         }
         crossterm::event::Event::Key(_) => false,
         _ => true,
