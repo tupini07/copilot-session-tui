@@ -10,7 +10,7 @@ use crate::session::manager;
 use crate::session::tmux;
 use crate::session::worktree;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use std::path::{Path, PathBuf};
 
@@ -213,7 +213,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::Settings => handle_settings(app, key.code),
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
-        Mode::PaneList => handle_pane_list(app, key.code),
+        Mode::PaneList => handle_pane_list(app, key),
         Mode::RecoverWorkspace => handle_recover_workspace(app, key.code),
         Mode::Scratchpad => unreachable!(),
     }
@@ -411,6 +411,7 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
                 app.project_settings_input.push_str(&text);
             }
             Mode::BranchName => app.branch_input.push_str(&text),
+            Mode::PaneList => app.set_pane_filter(format!("{}{text}", app.pane_filter)),
             _ => {}
         }
         return;
@@ -427,78 +428,104 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
         Mode::Settings => handle_settings(app, key.code),
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
-        Mode::PaneList => handle_pane_list(app, key.code),
+        Mode::PaneList => handle_pane_list(app, key),
         _ => {}
     }
 }
 
-/// Pane switcher: attach, kill, or dismiss without touching the underlying session list.
-fn handle_pane_list(app: &mut App, key: KeyCode) {
+/// Pane switcher: attach, close, or dismiss without touching the underlying session list.
+///
+/// Every printable key narrows the rows, so nothing here is bound to a bare letter or
+/// digit: closing used to be `x`, and with a filter it would have ended a session the
+/// moment its name was typed with an x in it.
+fn handle_pane_list(app: &mut App, key: KeyEvent) {
     if app.mux.is_none() {
         app.mode = Mode::Normal;
         return;
     }
+    match key.code {
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.set_pane_filter(format!("{}{character}", app.pane_filter));
+            return;
+        }
+        KeyCode::Backspace => {
+            let mut filter = app.pane_filter.clone();
+            filter.pop();
+            app.set_pane_filter(filter);
+            return;
+        }
+        _ => {}
+    }
     if let Some(direction) = app.split_picker {
-        handle_split_picker(app, key, direction);
+        handle_split_picker(app, key.code, direction);
         return;
     }
-    let count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
-    if count == 0 {
+    if app.mux.as_ref().is_some_and(|mux| mux.panes.is_empty()) {
         app.mode = Mode::Normal;
         return;
     }
+    // Empty when nothing matches the filter, which keeps the switcher open so the
+    // query can be corrected rather than retyped.
+    let ids = app.pane_list_ids();
+    let selected = ids.get(app.pane_selected).copied();
 
-    match key {
-        KeyCode::Up | KeyCode::Char('k') => {
+    match key.code {
+        KeyCode::Up => {
             app.pane_selected = app.pane_selected.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.pane_selected = (app.pane_selected + 1).min(count - 1);
-        }
-        // Rows are labelled with their tab's number, and a tab can hold several
-        // sessions, so a digit goes to the first session in that tab.
-        KeyCode::Char(digit @ '1'..='9') => {
-            let number = digit as usize - '0' as usize;
-            let mux = app.mux.as_ref().expect("mux checked above");
-            if let Some(index) = mux
-                .panes
-                .iter()
-                .position(|pane| mux.tab_number(pane.id) == Some(number))
-            {
-                app.pane_selected = index;
-            }
+        KeyCode::Down => {
+            app.pane_selected = (app.pane_selected + 1).min(ids.len().saturating_sub(1));
         }
         // The session itself gets the keyboard: its tab comes on screen with it, and
         // in a split it is that session's split that is focused, not whichever one the
         // tab last had. Choosing by tab position instead went to the wrong split, or
         // nowhere once a tab held several sessions.
         KeyCode::Enter => {
-            let index = app.pane_selected.min(count - 1);
+            let Some(id) = selected else {
+                return;
+            };
             let mux = app.mux.as_mut().expect("mux checked above");
-            let id = mux.panes[index].id;
             mux.focus(id);
             app.mode = Mode::Normal;
             app.view = View::Attached(id);
             app.workspace_focus = WorkspaceFocus::Chat;
             crate::mux_input::sync_workspace_panels(app);
         }
-        KeyCode::Char('x') => {
-            let index = app.pane_selected.min(count - 1);
-            let (id, title, persistent) = app
-                .mux
-                .as_ref()
-                .and_then(|mux| mux.panes.get(index))
+        // Shift+Delete is the permanent delete, as it is in a file manager: the tmux
+        // session goes too, where plain Delete only lets go of it.
+        KeyCode::Delete
+            if key.modifiers.contains(KeyModifiers::SHIFT) && app.tmux_support.is_available() =>
+        {
+            let Some(session_id) = selected
+                .and_then(|id| app.mux.as_ref().and_then(|mux| mux.pane(id)))
+                .map(|pane| pane.session_id.clone())
+            else {
+                return;
+            };
+            request_end_tmux_session(app, &session_id);
+        }
+        KeyCode::Delete => {
+            let Some((id, title, persistent)) = selected
+                .and_then(|id| app.mux.as_ref().and_then(|mux| mux.pane(id)))
                 .map(|pane| (pane.id, pane.title.clone(), app.pane_is_tmux_backed(pane)))
-                .expect("pane index checked above");
+            else {
+                return;
+            };
             if !app.forget_workspace_panels(id) {
                 return;
             }
             let mux = app.mux.as_mut().expect("mux checked above");
             mux.remove(id);
-            app.pane_selected = app.pane_selected.min(mux.panes.len().saturating_sub(1));
             if mux.panes.is_empty() {
                 app.mode = Mode::Normal;
             }
+            app.pane_selected = app
+                .pane_selected
+                .min(app.pane_list_ids().len().saturating_sub(1));
             app.view = View::List;
             app.status_message = Some(if persistent {
                 format!("Detached '{title}'; tmux session is still running")
@@ -506,19 +533,8 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
                 format!("Ended '{title}'")
             });
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             app.mode = Mode::Normal;
-        }
-        // Last on purpose, so a configured end key can never shadow a built-in.
-        key if app.tmux_support.is_available() && app.config.tmux_keys.matches_end_session(key) => {
-            let index = app.pane_selected.min(count - 1);
-            let session_id = app
-                .mux
-                .as_ref()
-                .and_then(|mux| mux.panes.get(index))
-                .map(|pane| pane.session_id.clone())
-                .expect("pane index checked above");
-            request_end_tmux_session(app, &session_id);
         }
         _ => {}
     }
@@ -529,26 +545,16 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
 /// Only navigation and choosing: closing or ending a session from here would remove
 /// it from a list that exists to add one, which is not what anyone opening it meant.
 fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::SplitDirection) {
-    // Row 0 starts a brand-new session; the sessions in other tabs follow it.
+    // Row 0 starts a brand-new session and stays whatever the filter, since a new
+    // session is the one thing typing a name cannot find.
     let candidates = app.pane_list_ids();
     let rows = candidates.len() + 1;
     match key {
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.pane_selected = app.pane_selected.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             app.pane_selected = (app.pane_selected + 1).min(rows - 1);
-        }
-        // The rows are labelled with their tab numbers, so a digit means that tab.
-        KeyCode::Char(digit @ '1'..='9') => {
-            let number = digit as usize - '0' as usize;
-            let mux = app.mux.as_ref().expect("mux checked by the caller");
-            if let Some(index) = candidates
-                .iter()
-                .position(|id| mux.tab_number(*id) == Some(number))
-            {
-                app.pane_selected = index + 1;
-            }
         }
         KeyCode::Enter => {
             let selected = app.pane_selected.min(rows - 1);
@@ -570,7 +576,7 @@ fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::Split
                 app.refresh_workspace_areas();
             }
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             app.split_picker = None;
             app.mode = Mode::Normal;
         }
@@ -605,13 +611,6 @@ fn handle_recover_workspace(app: &mut App, key: KeyCode) {
         _ => {}
     }
 }
-
-/// Every character `handle_pane_list` above claims. The configured tmux end key — the
-/// one tmux shortcut that also fires in the pane switcher — is validated against this
-/// and matched after these, so drift here makes a configured key inert, never hijacked.
-pub(crate) const PANE_LIST_COMMAND_KEYS: &[char] = &[
-    'k', 'j', 'x', 'q', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-];
 
 /// Every character `handle_normal` below claims in list mode. All four configured tmux
 /// shortcuts are validated against this and matched after these.

@@ -863,6 +863,8 @@ pub struct App {
     pub confirm_quit: bool,
     /// Highlighted row in the pane switcher.
     pub pane_selected: usize,
+    /// What has been typed into the pane switcher to narrow its rows.
+    pub pane_filter: String,
     /// The pane switcher is choosing a session to split with, in this direction,
     /// rather than one to switch to.
     pub split_picker: Option<crate::mux::SplitDirection>,
@@ -1050,6 +1052,7 @@ impl App {
             pane_origin: (0, 0),
             confirm_quit: false,
             pane_selected: 0,
+            pane_filter: String::new(),
             split_picker: None,
             new_split: None,
             instance_started_at: chrono::Utc::now(),
@@ -1132,6 +1135,7 @@ impl App {
         // only the live pane ids here: walking the user's entire Copilot history would
         // make opening this tiny switcher noticeably slow.
         self.refresh_live_pane_sessions();
+        self.pane_filter.clear();
         let mux = self.mux.as_ref().expect("multiplexer checked above");
         self.pane_selected = mux
             .focused
@@ -1170,21 +1174,63 @@ impl App {
         }
         self.refresh_live_pane_sessions();
         self.split_picker = Some(direction);
-        // On the first existing session when there is one; row 0 starts a new one.
-        self.pane_selected = usize::from(!candidates.is_empty());
+        self.pane_filter.clear();
+        self.reset_pane_selection();
         self.mode = Mode::PaneList;
     }
 
+    /// Narrow the pane switcher to what has been typed so far.
+    pub fn set_pane_filter(&mut self, filter: String) {
+        self.pane_filter = filter;
+        self.reset_pane_selection();
+    }
+
+    /// Put the pane switcher's highlight on its first session. In the split picker
+    /// row 0 starts a new session, so it is only chosen when nothing else matches.
+    fn reset_pane_selection(&mut self) {
+        self.pane_selected =
+            usize::from(self.split_picker.is_some() && !self.pane_list_ids().is_empty());
+    }
+
     /// The rows the pane switcher shows: every session, or when picking a split only
-    /// those not already on screen.
+    /// those not already on screen, narrowed to what has been typed.
+    ///
+    /// Matches stay in tab order rather than by score: every row is labelled with its
+    /// tab number, and a list that reshuffles on each keystroke is harder to read
+    /// than one that only loses rows.
     pub fn pane_list_ids(&self) -> Vec<crate::mux::PaneId> {
-        if self.split_picker.is_some() {
-            return self.split_candidates();
-        }
-        self.mux
-            .as_ref()
-            .map(|mux| mux.panes.iter().map(|pane| pane.id).collect())
-            .unwrap_or_default()
+        let ids = if self.split_picker.is_some() {
+            self.split_candidates()
+        } else {
+            self.mux
+                .as_ref()
+                .map(|mux| mux.panes.iter().map(|pane| pane.id).collect())
+                .unwrap_or_default()
+        };
+        let query = self.pane_filter.trim();
+        let Some(mux) = self.mux.as_ref().filter(|_| !query.is_empty()) else {
+            return ids;
+        };
+        let matcher = SkimMatcherV2::default();
+        ids.into_iter()
+            .filter(|id| {
+                let Some(pane) = mux.pane(*id) else {
+                    return false;
+                };
+                // Everything the row shows, so whatever can be read there can be typed.
+                let project = pane
+                    .cwd
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_default();
+                let haystack = format!(
+                    "{} {} {project}",
+                    mux.tab_number(*id).unwrap_or_default(),
+                    self.pane_session_title(&pane.session_id, &pane.title),
+                );
+                matcher.fuzzy_match(&haystack, query).is_some()
+            })
+            .collect()
     }
 
     fn split_candidates(&self) -> Vec<crate::mux::PaneId> {

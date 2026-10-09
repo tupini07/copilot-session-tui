@@ -925,11 +925,10 @@ pub fn validate_user_notification_config(config: &UserConfig) -> Result<()> {
 }
 
 /// The conflict sets come from the key tables next to the real matches
-/// (`input::LIST_COMMAND_KEYS`, `input::PANE_LIST_COMMAND_KEYS`,
-/// `mux::PREFIX_COMMAND_KEYS`) instead of a copy here, which has already drifted
-/// once. The handlers also match configured shortcuts only after their built-ins,
-/// so a conflict that slips past this check makes the shortcut inert — it can
-/// never steal an existing command.
+/// (`input::LIST_COMMAND_KEYS`, `mux::PREFIX_COMMAND_KEYS`) instead of a copy here,
+/// which has already drifted once. The handlers also match configured shortcuts only
+/// after their built-ins, so a conflict that slips past this check makes the shortcut
+/// inert — it can never steal an existing command.
 pub fn validate_tmux_keys(keys: &TmuxKeyConfig) -> Result<()> {
     let configured = [
         ("resume_session", keys.resume_session.as_str(), false),
@@ -954,8 +953,9 @@ pub fn validate_tmux_keys(keys: &TmuxKeyConfig) -> Result<()> {
             anyhow::bail!("tmux shortcut '{character}' is assigned more than once");
         }
         // Every configured shortcut fires in the session list, so all four are
-        // checked against it; only the end key also fires after the prefix and in
-        // the pane switcher.
+        // checked against it; only the end key also fires after the prefix. The pane
+        // switcher ends a tmux session with Shift+Delete, since there every character
+        // is filter text.
         if crate::input::LIST_COMMAND_KEYS.contains(&character) {
             anyhow::bail!(
                 "tmux shortcut '{character}' conflicts with an existing session-list command"
@@ -964,11 +964,6 @@ pub fn validate_tmux_keys(keys: &TmuxKeyConfig) -> Result<()> {
         if used_after_prefix && crate::mux::PREFIX_COMMAND_KEYS.contains(&character) {
             anyhow::bail!(
                 "tmux shortcut '{character}' conflicts with an existing multiplexer command"
-            );
-        }
-        if used_after_prefix && crate::input::PANE_LIST_COMMAND_KEYS.contains(&character) {
-            anyhow::bail!(
-                "tmux shortcut '{character}' conflicts with an existing pane-switcher command"
             );
         }
     }
@@ -1464,9 +1459,9 @@ mod tests {
 
     #[test]
     fn tmux_shortcut_conflicts_are_checked_against_every_surface_the_key_fires_in() {
-        // k navigates both the session list and the pane switcher. A hand-kept copy
-        // of the bindings once let it through for end_session because end_session was
-        // only compared against the prefix commands.
+        // k navigates the session list. A hand-kept copy of the bindings once let it
+        // through for end_session because end_session was only compared against the
+        // prefix commands.
         let end_steals_navigation = TmuxKeyConfig {
             end_session: "k".to_string(),
             ..TmuxKeyConfig::default()
