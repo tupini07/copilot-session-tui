@@ -16,6 +16,7 @@ mod mux;
 mod mux_input;
 mod notifications;
 mod paste;
+mod recovery;
 mod scratchpad;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -1101,6 +1102,9 @@ impl Drop for TerminalEventReader {
     }
 }
 
+/// How often the session list looks again for workspaces of CSTs closed meanwhile.
+const RECOVERY_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -1110,6 +1114,8 @@ fn run_app(
     // The watcher compares against the revision actually applied by App, so a quick
     // A -> B -> A reversion cannot be hidden by a stale watcher-local baseline.
     app.request_config_reload();
+    app.refresh_recoverable();
+    let mut last_recovery_scan = std::time::Instant::now();
     let _config_watcher = app.mux.as_ref().map(|mux| {
         ConfigWatcher::start(
             mux.events.clone(),
@@ -1247,6 +1253,14 @@ fn run_app(
             input::handle_input(app)?;
             repaint = true;
         }
+        // Before the exit checks below, so a quit still writes the workspace it is
+        // leaving: the sessions are only shut down after this.
+        app.save_workspace_record();
+        if last_recovery_scan.elapsed() >= RECOVERY_SCAN_INTERVAL {
+            // Another CST closing while this one is open has a workspace to offer.
+            last_recovery_scan = std::time::Instant::now();
+            app.refresh_recoverable();
+        }
 
         if exit_waits_for_update(app) {
             app.status_message =
@@ -1321,6 +1335,8 @@ fn run_app(
                 mux_input::sync_workspace_panels(app);
                 continue;
             }
+            // The new CST reopens these sessions from the manifest; they are not lost.
+            app.forget_own_workspace_record();
             prepared_restart = Some(prepared);
             break;
         }

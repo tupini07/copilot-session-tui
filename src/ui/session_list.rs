@@ -28,6 +28,20 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    // Where to find a closed CST's workspace, whenever there is one to bring back.
+    if !app.recoverable.is_empty() {
+        title.push(Span::styled(
+            " R ",
+            Style::default()
+                .fg(super::badge_foreground(theme, theme.accent))
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        title.push(Span::styled(
+            " ↻ recover workspace ",
+            Style::default().fg(theme.accent),
+        ));
+    }
     let block = Block::default()
         .title(Line::from(title))
         .borders(Borders::ALL)
@@ -43,13 +57,20 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         } else {
             "  No sessions found".to_string()
         };
-        let hint = if app.new_session_dir().is_some() {
+        let mut hint = if app.new_session_dir().is_some() {
             format!(
                 "{headline}\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
             )
         } else {
             headline
         };
+        if let Some(latest) = app.recoverable.first() {
+            hint.push_str(&format!(
+                "\n  R  Recover a closed workspace ({} session(s), {})",
+                latest.sessions.len(),
+                crate::recovery::ago(latest.record.saved_at, chrono::Utc::now())
+            ));
+        }
         let empty = ratatui::widgets::Paragraph::new(hint).style(
             Style::default()
                 .fg(super::semantic_foreground_on(

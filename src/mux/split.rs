@@ -373,7 +373,6 @@ impl SavedNode {
         }
     }
 
-    #[cfg(test)]
     pub fn sessions(&self) -> Vec<String> {
         match self {
             Self::Pane(session) => vec![session.clone()],

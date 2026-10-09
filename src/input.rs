@@ -214,6 +214,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
         Mode::PaneList => handle_pane_list(app, key.code),
+        Mode::RecoverWorkspace => handle_recover_workspace(app, key.code),
         Mode::Scratchpad => unreachable!(),
     }
 
@@ -565,6 +566,34 @@ fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::Split
     }
 }
 
+/// Choosing a closed workspace to bring back: Enter recovers it, `x` forgets it.
+fn handle_recover_workspace(app: &mut App, key: KeyCode) {
+    let count = app.recoverable.len();
+    if count == 0 {
+        app.mode = Mode::Normal;
+        return;
+    }
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.recover_selected = app.recover_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.recover_selected = (app.recover_selected + 1).min(count - 1);
+        }
+        KeyCode::Enter => {
+            let index = app.recover_selected.min(count - 1);
+            app.mode = Mode::Normal;
+            if let Err(error) = app.recover_workspace(index) {
+                app.status_message = Some(format!("Cannot recover the workspace: {error}"));
+            }
+            crate::mux_input::sync_workspace_panels(app);
+        }
+        KeyCode::Char('x') => app.forget_workspace(app.recover_selected.min(count - 1)),
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        _ => {}
+    }
+}
+
 /// Every character `handle_pane_list` above claims. The configured tmux end key — the
 /// one tmux shortcut that also fires in the pane switcher — is validated against this
 /// and matched after these, so drift here makes a configured key inert, never hijacked.
@@ -576,7 +605,7 @@ pub(crate) const PANE_LIST_COMMAND_KEYS: &[char] = &[
 /// shortcuts are validated against this and matched after these.
 pub(crate) const LIST_COMMAND_KEYS: &[char] = &[
     'q', 'k', 'j', '/', 'r', 'e', 'g', 'T', ' ', 'd', 'f', 'p', 's', 'H', 'c', 'n', 'N', '?', ',',
-    '.', 'u',
+    '.', 'u', 'R',
 ];
 
 fn handle_normal(app: &mut App, key: KeyCode) {
@@ -644,6 +673,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('T') => open_favorite_tabs(app),
+        KeyCode::Char('R') => app.open_recover_workspace(),
         KeyCode::Char(' ') => match app.toggle_selected_favorite() {
             Ok(Some(true)) => app.status_message = Some("Added to favorites".to_string()),
             Ok(Some(false)) => app.status_message = Some("Removed from favorites".to_string()),
@@ -756,6 +786,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::GlobalSettings => KeyCode::Char(','),
         CommandId::ProjectSettings => KeyCode::Char('.'),
         CommandId::OpenHelp => KeyCode::Char('?'),
+        CommandId::RecoverWorkspace => KeyCode::Char('R'),
         _ => return,
     };
     handle_normal(app, key);

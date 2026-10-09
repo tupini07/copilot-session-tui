@@ -447,6 +447,22 @@ then does CST show just the focused session, saying so in the status bar until t
 room again. Tabs and their splits survive CST restarting itself for an update, but are
 not kept after quitting.
 
+### Recovering a workspace
+
+Each CST keeps a note of the tabs it has open — which sessions, how they are split, and
+which one had focus — and updates it as they change. If CST quits with sessions still
+open, crashes, or goes down with the machine, the next CST offers them back: the session
+list shows **R ↻ recover workspace**, and `R` (or *Recover a workspace* in command
+search) lists the workspaces of closed CSTs, newest first, with how long ago, how many
+sessions, and their titles. `Enter` reopens one — every session resumed, in its tabs and
+layout — and `x` forgets it. Nothing is reopened until you ask.
+
+Several CSTs running at once each keep their own note, so recovering one never loses
+another. A session that is already running — in another CST, or in a terminal of its
+own — is never resumed a second time; it is left out of what is offered. Closing every
+tab before quitting leaves nothing to recover. The ten most recent workspaces are kept,
+for up to thirty days.
+
 ### Prompt snippets
 
 `prefix` `s` opens reusable prompts without leaving the attached session. Select one and

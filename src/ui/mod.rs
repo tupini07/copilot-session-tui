@@ -364,6 +364,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::FavoriteOpen => popups::draw_favorite_open(f, app),
         Mode::NewSessionKind => popups::draw_new_session_kind(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
+        Mode::RecoverWorkspace => popups::draw_recover_workspace(f, app),
         Mode::Rename => popups::draw_rename(f, app),
         _ => {}
     }

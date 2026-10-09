@@ -893,7 +893,8 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             close_context_overlays(app);
             crate::input::execute_palette_list_command(app, command);
         }
-        SearchSessions | FilterProject | ClearProjectFilter | CycleSort | ToggleHiddenSessions => {
+        SearchSessions | FilterProject | ClearProjectFilter | CycleSort | ToggleHiddenSessions
+        | RecoverWorkspace => {
             close_context_overlays(app);
             if matches!(app.view, View::Attached(_)) {
                 app.detach();

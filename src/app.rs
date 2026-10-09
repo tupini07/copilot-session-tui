@@ -175,6 +175,8 @@ pub enum Mode {
     Settings,
     ProjectSettings,
     BranchName,
+    /// Choosing a closed workspace to bring back.
+    RecoverWorkspace,
     /// Pane switcher opened with `prefix w`.
     PaneList,
     Scratchpad,
@@ -867,6 +869,16 @@ pub struct App {
     /// A session being started from the split picker, to open beside `anchor`
     /// rather than in a tab of its own. Cleared whenever that flow is left.
     pub new_split: Option<NewSplit>,
+    /// When this instance started; with the pid, what its workspace record is named by.
+    pub instance_started_at: chrono::DateTime<chrono::Utc>,
+    /// Where workspace records are kept, or `None` to keep none (tests).
+    pub workspace_record_root: Option<PathBuf>,
+    /// The last record written, to write again only when the workspace changes.
+    last_workspace_record: Option<crate::recovery::WorkspaceRecord>,
+    last_workspace_record_at: Option<std::time::Instant>,
+    /// Workspaces of closed CSTs that could be brought back, newest first.
+    pub recoverable: Vec<crate::recovery::Recoverable>,
+    pub recover_selected: usize,
     /// A click that only moved focus to another split owns the rest of its gesture,
     /// so the session it landed in never sees a release without a press.
     pub swallow_mouse_until_up: bool,
@@ -1040,6 +1052,13 @@ impl App {
             pane_selected: 0,
             split_picker: None,
             new_split: None,
+            instance_started_at: chrono::Utc::now(),
+            // Never the real state directory from a test.
+            workspace_record_root: (!cfg!(test)).then(crate::recovery::root),
+            last_workspace_record: None,
+            last_workspace_record_at: None,
+            recoverable: Vec::new(),
+            recover_selected: 0,
             swallow_mouse_until_up: false,
             dock_sizes: crate::ui::DockSizes::default(),
             dragging_divider: None,
@@ -3835,6 +3854,171 @@ impl App {
         self.mode = Mode::FilterProject;
     }
 
+    /// This instance's workspace as it stands, or `None` with nothing open.
+    pub fn current_workspace_record(&self) -> Option<crate::recovery::WorkspaceRecord> {
+        let mux = self.mux.as_ref()?;
+        if mux.panes.is_empty() {
+            return None;
+        }
+        Some(crate::recovery::WorkspaceRecord {
+            pid: std::process::id(),
+            started_at: self.instance_started_at,
+            saved_at: chrono::Utc::now(),
+            launch_dir: self.cwd.clone(),
+            sessions: mux
+                .panes
+                .iter()
+                .map(|pane| crate::recovery::RecordedSession {
+                    session_id: pane.session_id.clone(),
+                    cwd: pane.cwd.to_string_lossy().to_string(),
+                    title: pane.title.clone(),
+                })
+                .collect(),
+            focused_session_id: mux.focused_pane().map(|pane| pane.session_id.clone()),
+            windows: mux.save_windows(),
+        })
+    }
+
+    /// Write this instance's workspace down if it has changed, or once a heartbeat has
+    /// passed so other instances can tell it is still running. With nothing open the
+    /// record goes: closing every tab means there is nothing to recover.
+    pub fn save_workspace_record(&mut self) {
+        let Some(root) = self.workspace_record_root.clone() else {
+            return;
+        };
+        let Some(record) = self.current_workspace_record() else {
+            if self.last_workspace_record.take().is_some() {
+                crate::recovery::remove_in(&root, std::process::id(), self.instance_started_at);
+            }
+            return;
+        };
+        let unchanged = self
+            .last_workspace_record
+            .as_ref()
+            .is_some_and(|last| last.same_workspace(&record));
+        let heartbeat_due = self
+            .last_workspace_record_at
+            .is_none_or(|at| at.elapsed() >= crate::recovery::HEARTBEAT);
+        if unchanged && !heartbeat_due {
+            return;
+        }
+        if crate::recovery::write_in(&root, &record).is_ok() {
+            self.last_workspace_record = Some(record);
+            self.last_workspace_record_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Hand the workspace over to the CST taking this one's place after an update; it
+    /// reopens these sessions itself, and must not be offered them as lost.
+    pub fn forget_own_workspace_record(&mut self) {
+        if let Some(root) = self.workspace_record_root.as_ref() {
+            crate::recovery::remove_in(root, std::process::id(), self.instance_started_at);
+        }
+        self.last_workspace_record = None;
+    }
+
+    /// Look again for workspaces of closed CSTs that could be brought back.
+    pub fn refresh_recoverable(&mut self) {
+        let Some(root) = self.workspace_record_root.clone() else {
+            return;
+        };
+        if self.mux.is_none() {
+            // Recovering means hosting the sessions, which only the multiplexer does.
+            self.recoverable.clear();
+            return;
+        }
+        let state = self.copilot_home.join("session-state");
+        let mux = self.mux.as_ref();
+        self.recoverable = crate::recovery::recoverable_in(
+            &root,
+            (std::process::id(), self.instance_started_at),
+            chrono::Utc::now(),
+            crate::session::process::process_is_running,
+            |session| {
+                !crate::session::process::active_session_pids(&state.join(session)).is_empty()
+            },
+            |session| mux.is_some_and(|mux| mux.pane_for_session(session).is_some()),
+        );
+        self.recover_selected = self
+            .recover_selected
+            .min(self.recoverable.len().saturating_sub(1));
+    }
+
+    pub fn open_recover_workspace(&mut self) {
+        self.refresh_recoverable();
+        if self.recoverable.is_empty() {
+            self.status_message = Some("No closed workspace to recover".to_string());
+            return;
+        }
+        self.recover_selected = 0;
+        self.mode = Mode::RecoverWorkspace;
+    }
+
+    /// Bring a closed workspace back: every session in it that is free to resume, in
+    /// its tabs and layouts, focused where it was. Its record goes, since this
+    /// instance's own now covers those sessions.
+    pub fn recover_workspace(&mut self, index: usize) -> Result<()> {
+        let Some(workspace) = self.recoverable.get(index).cloned() else {
+            return Ok(());
+        };
+        let mut failed = Vec::new();
+        for session in &workspace.sessions {
+            let cwd = if Path::new(&session.cwd).is_dir() {
+                session.cwd.clone()
+            } else {
+                // The directory may be gone — a removed worktree. Resume anyway, from
+                // somewhere that exists, rather than lose the session.
+                self.cwd.clone().unwrap_or_else(|| ".".to_string())
+            };
+            if let Err(error) =
+                self.attach_session(&session.session_id, &cwd, session.title.clone())
+            {
+                failed.push(format!("'{}': {error}", session.title));
+            }
+        }
+        if let Some(mux) = self.mux.as_mut() {
+            mux.restore_windows(&workspace.record.windows);
+            let focus = workspace
+                .record
+                .focused_session_id
+                .as_deref()
+                .and_then(|session| mux.pane_for_session(session))
+                .or_else(|| {
+                    workspace
+                        .sessions
+                        .first()
+                        .and_then(|session| mux.pane_for_session(&session.session_id))
+                });
+            if let Some(id) = focus {
+                mux.focus(id);
+                self.view = View::Attached(id);
+            }
+        }
+        let _ = std::fs::remove_file(&workspace.path);
+        self.refresh_recoverable();
+        let restored = workspace.sessions.len() - failed.len();
+        self.status_message = Some(if failed.is_empty() {
+            format!("Recovered {restored} session(s)")
+        } else {
+            format!(
+                "Recovered {restored} session(s); could not resume {}",
+                failed.join(", ")
+            )
+        });
+        Ok(())
+    }
+
+    /// Drop a closed workspace from the list for good.
+    pub fn forget_workspace(&mut self, index: usize) {
+        if let Some(workspace) = self.recoverable.get(index) {
+            let _ = std::fs::remove_file(&workspace.path);
+        }
+        self.refresh_recoverable();
+        if self.recoverable.is_empty() {
+            self.mode = Mode::Normal;
+        }
+    }
+
     /// A session just opened from the split picker joins the tab it was asked for,
     /// rather than keeping the tab of its own every new session opens in.
     pub(crate) fn join_pending_split(&mut self, id: crate::mux::PaneId) {
@@ -4904,6 +5088,129 @@ mod tests {
             ..UserConfig::default()
         };
         App::new(Vec::new(), config)
+    }
+
+    /// A multiplexed app holding idle sessions `session-1..=count`, recording its
+    /// workspace under `root`.
+    fn recording_app(count: u64, root: &Path) -> App {
+        let mut app = app_with(true);
+        app.workspace_record_root = Some(root.to_path_buf());
+        for id in 1..=count {
+            let (program, args) = if cfg!(windows) {
+                (
+                    "cmd.exe".to_string(),
+                    vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+                )
+            } else {
+                (
+                    "/bin/sh".to_string(),
+                    vec!["-c".to_string(), "sleep 30".to_string()],
+                )
+            };
+            let events = app.mux.as_ref().unwrap().events.clone();
+            let pane = Pane::spawn(
+                PaneSpec {
+                    id,
+                    title: format!("Session {id}"),
+                    cwd: std::env::temp_dir(),
+                    session_id: format!("session-{id}"),
+                    program,
+                    args,
+                    events_path: None,
+                    terminal_light_mode: Some(false),
+                    hooks_active: false,
+                },
+                24,
+                80,
+                events,
+            )
+            .unwrap();
+            app.mux.as_mut().unwrap().push(pane);
+        }
+        app
+    }
+
+    #[test]
+    fn the_workspace_record_follows_the_tabs_and_goes_when_every_tab_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = recording_app(3, root.path());
+        let mux = app.mux.as_mut().unwrap();
+        mux.focus(1);
+        mux.split_with(crate::mux::SplitDirection::Columns, 2);
+        app.save_workspace_record();
+
+        let files: Vec<_> = std::fs::read_dir(root.path()).unwrap().collect();
+        assert_eq!(files.len(), 1, "one record per instance");
+        let record: crate::recovery::WorkspaceRecord =
+            serde_json::from_slice(&std::fs::read(files[0].as_ref().unwrap().path()).unwrap())
+                .unwrap();
+        let sessions: Vec<_> = record
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(sessions, ["session-1", "session-2", "session-3"]);
+        assert_eq!(record.focused_session_id.as_deref(), Some("session-2"));
+        assert_eq!(record.windows.len(), 1, "the tab holding two sessions");
+        assert_eq!(record.tab_count(), 2);
+
+        for id in 1..=3 {
+            app.mux.as_mut().unwrap().remove(id);
+        }
+        app.save_workspace_record();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "closing every tab leaves nothing to recover"
+        );
+    }
+
+    #[test]
+    fn only_a_closed_instances_free_sessions_are_offered_and_forgetting_removes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = recording_app(1, root.path());
+        app.save_workspace_record();
+        let now = chrono::Utc::now();
+        let closed = crate::recovery::WorkspaceRecord {
+            // No process has this id; the instance is gone.
+            pid: u32::MAX - 7,
+            started_at: now - chrono::Duration::hours(2),
+            saved_at: now - chrono::Duration::minutes(10),
+            launch_dir: None,
+            sessions: ["session-1", "never-started-anywhere"]
+                .into_iter()
+                .map(|id| crate::recovery::RecordedSession {
+                    session_id: id.to_string(),
+                    cwd: ".".to_string(),
+                    title: id.to_string(),
+                })
+                .collect(),
+            focused_session_id: None,
+            windows: Vec::new(),
+        };
+        crate::recovery::write_in(root.path(), &closed).unwrap();
+
+        app.refresh_recoverable();
+        assert_eq!(app.recoverable.len(), 1, "not this instance's own record");
+        let offered: Vec<_> = app.recoverable[0]
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            ["never-started-anywhere"],
+            "a session already open here is not resumed again"
+        );
+
+        app.forget_workspace(0);
+        assert!(app.recoverable.is_empty());
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "only ours"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]
