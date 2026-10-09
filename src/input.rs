@@ -455,19 +455,31 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
         KeyCode::Down | KeyCode::Char('j') => {
             app.pane_selected = (app.pane_selected + 1).min(count - 1);
         }
+        // Rows are labelled with their tab's number, and a tab can hold several
+        // sessions, so a digit goes to the first session in that tab.
         KeyCode::Char(digit @ '1'..='9') => {
-            let index = digit as usize - '1' as usize;
-            if index < count {
+            let number = digit as usize - '0' as usize;
+            let mux = app.mux.as_ref().expect("mux checked above");
+            if let Some(index) = mux
+                .panes
+                .iter()
+                .position(|pane| mux.tab_number(pane.id) == Some(number))
+            {
                 app.pane_selected = index;
             }
         }
+        // The session itself gets the keyboard: its tab comes on screen with it, and
+        // in a split it is that session's split that is focused, not whichever one the
+        // tab last had. Choosing by tab position instead went to the wrong split, or
+        // nowhere once a tab held several sessions.
         KeyCode::Enter => {
             let index = app.pane_selected.min(count - 1);
             let mux = app.mux.as_mut().expect("mux checked above");
-            mux.select_index(index);
             let id = mux.panes[index].id;
+            mux.focus(id);
             app.mode = Mode::Normal;
             app.view = View::Attached(id);
+            app.workspace_focus = WorkspaceFocus::Chat;
             crate::mux_input::sync_workspace_panels(app);
         }
         KeyCode::Char('x') => {

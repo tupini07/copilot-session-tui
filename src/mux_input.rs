@@ -3496,6 +3496,43 @@ mod tests {
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
+    /// Found by using it: choosing a session that shares a tab with others went to
+    /// whichever split the tab last had focused, or nowhere from another tab.
+    #[test]
+    fn the_session_switcher_focuses_the_chosen_session_even_inside_a_split() {
+        let mut app = split_app(3);
+        // Tab 1 holds 1 and 2; tab 2 holds 3.
+        app.mux.as_mut().unwrap().focus(1);
+        app.open_pane_list();
+        assert_eq!(app.pane_list_ids(), vec![1, 2, 3]);
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "the other split"
+        );
+        assert_eq!(app.view, View::Attached(2));
+
+        // From the other tab, straight to a session that is part of a split.
+        app.mux.as_mut().unwrap().focus(3);
+        app.open_pane_list();
+        press_attached(&mut app, KeyCode::Up);
+        press_attached(&mut app, KeyCode::Enter);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(mux.focused, Some(2));
+        assert!(
+            mux.current_window().unwrap().layout.contains(1),
+            "its tab came back"
+        );
+
+        // A digit is a tab number, as the rows are labelled.
+        app.open_pane_list();
+        press_attached(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.pane_selected, 2, "tab 2's first session, the third row");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
     #[test]
     fn ctrl_tab_and_ctrl_page_keys_switch_tabs_like_a_browser_from_any_panel() {
         let mut app = split_app(3);
