@@ -3478,29 +3478,125 @@ mod tests {
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
+    /// `split_app`, with names and projects that share no characters with tab numbers,
+    /// so a typed filter matches only what each test means it to.
+    fn named_split_app(names: &[&str]) -> App {
+        let mut app = split_app(names.len() as u64);
+        for (pane, name) in app.mux.as_mut().unwrap().panes.iter_mut().zip(names) {
+            pane.title = name.to_string();
+            pane.cwd = std::path::PathBuf::from("/work/project");
+        }
+        app
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            press_attached(app, KeyCode::Char(character));
+        }
+    }
+
     #[test]
-    fn the_split_picker_labels_and_selects_sessions_by_their_tab_number() {
-        let mut app = split_app(4);
+    fn the_split_picker_finds_a_session_by_the_tab_number_its_row_is_labelled_with() {
+        let mut app = named_split_app(&["alpha", "beta", "gamma", "delta"]);
         app.open_split_picker(crate::mux::SplitDirection::Columns);
         assert_eq!(app.pane_list_ids(), vec![3, 4]);
-        handle_attached_event(
-            &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
-        );
+        type_text(&mut app, "3");
         assert_eq!(
-            app.pane_selected, 2,
-            "session 4 is in tab 3, now that 1 and 2 share tab 1: the row after 3"
+            app.pane_list_ids(),
+            vec![4],
+            "session 4 is in tab 3, now that 1 and 2 share tab 1"
         );
-        handle_attached_event(
-            &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
-        );
-        assert_eq!(app.pane_selected, 2, "tab 1 is on screen, so not on offer");
-        handle_attached_event(
-            &mut app,
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        );
+        assert_eq!(app.pane_selected, 1, "the match, not the new-session row");
+        press_attached(&mut app, KeyCode::Enter);
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// The handler used to index every pane while the popup drew a filtered list, so
+    /// Enter on the only match opened whichever session happened to be first.
+    #[test]
+    fn enter_in_a_filtered_switcher_opens_the_highlighted_match_not_the_row_at_that_index() {
+        let mut app = named_split_app(&["api-server", "web-client", "docs-site"]);
+        app.open_pane_list();
+        type_text(&mut app, "docs");
+        assert_eq!(app.pane_list_ids(), vec![3]);
+        assert_eq!(app.pane_selected, 0);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(3));
+        assert_eq!(app.view, View::Attached(3));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn letters_that_used_to_be_switcher_commands_are_filter_text_and_never_close_a_session() {
+        let mut app = named_split_app(&["fix-queue", "xkjq-tool"]);
+        app.open_pane_list();
+        type_text(&mut app, "xkjq");
+        assert_eq!(app.mode, Mode::PaneList, "q no longer dismisses");
+        assert_eq!(app.pane_filter, "xkjq");
+        assert_eq!(app.pane_list_ids(), vec![2]);
+        assert_eq!(
+            app.mux.as_ref().unwrap().panes.len(),
+            2,
+            "x no longer closes the highlighted session"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_keeps_the_switcher_open_until_backspace_widens_it() {
+        let mut app = named_split_app(&["alpha", "beta"]);
+        app.open_pane_list();
+        type_text(&mut app, "betz");
+        assert!(app.pane_list_ids().is_empty());
+        press_attached(&mut app, KeyCode::Enter);
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Delete);
+        assert_eq!(
+            app.mode,
+            Mode::PaneList,
+            "Enter with nothing to open is a no-op"
+        );
+        assert_eq!(app.mux.as_ref().unwrap().panes.len(), 2);
+
+        press_attached(&mut app, KeyCode::Backspace);
+        assert_eq!(app.pane_list_ids(), vec![2]);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn delete_closes_the_highlighted_match_and_the_next_opening_starts_unfiltered() {
+        let mut app = named_split_app(&["alpha", "beta", "gamma"]);
+        app.open_pane_list();
+        type_text(&mut app, "gam");
+        press_attached(&mut app, KeyCode::Delete);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(
+            mux.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the match went, not the first session"
+        );
+        assert!(app.pane_list_ids().is_empty(), "still filtered to it");
+
+        app.open_pane_list();
+        assert_eq!(app.pane_filter, "");
+        assert_eq!(app.pane_list_ids(), vec![1, 2]);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_split_pickers_new_session_row_survives_any_filter() {
+        let mut app = named_split_app(&["alpha", "beta", "gamma"]);
+        app.open_split_picker(crate::mux::SplitDirection::Columns);
+        type_text(&mut app, "nothing like it");
+        assert!(app.pane_list_ids().is_empty());
+        assert_eq!(app.pane_selected, 0, "on the new-session row");
+        press_attached(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.split_picker, None);
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -3533,11 +3629,6 @@ mod tests {
             mux.current_window().unwrap().layout.contains(1),
             "its tab came back"
         );
-
-        // A digit is a tab number, as the rows are labelled.
-        app.open_pane_list();
-        press_attached(&mut app, KeyCode::Char('2'));
-        assert_eq!(app.pane_selected, 2, "tab 2's first session, the third row");
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
@@ -7117,6 +7208,356 @@ fn main() {
         );
 
         let _ = pane.kill();
+    }
+
+    /// The text inside the popup box titled `title`, one string per row, read cell by
+    /// cell so the session list drawn behind it — which shows the same names — is not
+    /// mistaken for the popup's rows.
+    fn popup_rows(screen: &vt100::Screen, title: &str) -> Option<Vec<String>> {
+        let (rows, cols) = screen.size();
+        let cell = |row: u16, col: u16| {
+            screen
+                .cell(row, col)
+                .map(|cell| cell.contents().to_string())
+                .unwrap_or_default()
+        };
+        // The list behind is titled "Sessions" too, but follows it with more text.
+        let heading = format!("┌ {title} ─");
+        let width = heading.chars().count() as u16;
+        let (top, left) = (0..rows).find_map(|row| {
+            (0..cols.saturating_sub(width)).find_map(|col| {
+                let text: String = (col..col + width).map(|col| cell(row, col)).collect();
+                (text == heading).then_some((row, col))
+            })
+        })?;
+        let right = (left + 1..cols).find(|col| cell(top, *col) == "┐")?;
+        Some(
+            (top + 1..rows)
+                .take_while(|row| cell(*row, left) != "└")
+                .map(|row| {
+                    (left + 1..right)
+                        .map(|col| cell(row, col))
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect(),
+        )
+    }
+
+    /// The `prefix w` switcher, typed into for real: the actual binary in a PTY, three
+    /// sessions resumed under a stand-in Copilot, and every assertion made on what the
+    /// popup draws. Hermetic in the same way as the restart e2e above, with the same
+    /// What's new leak; it also closes every session it opened before leaving, so its
+    /// workspace record is gone and nothing is offered for recovery afterwards.
+    #[test]
+    #[ignore = "drives the real cst binary in a PTY; run with CST_SWITCHER_E2E=1"]
+    fn the_session_switcher_filters_as_you_type_in_the_real_binary() {
+        use std::sync::mpsc::{self, Receiver};
+        use std::time::{Duration, Instant};
+
+        if std::env::var_os("CST_SWITCHER_E2E").is_none() {
+            return;
+        }
+
+        let mut dir = std::env::current_exe().expect("test executable path");
+        dir.pop();
+        if dir.ends_with("deps") {
+            dir.pop();
+        }
+        let cst = dir.join(format!(
+            "copilot-session-tui{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert!(
+            cst.exists(),
+            "the cst binary must exist at {}",
+            cst.display()
+        );
+
+        let sandbox = tempfile::tempdir().expect("sandbox directory");
+        let home = sandbox.path().join("home");
+        let sessions = [
+            (
+                "11111111-1111-4111-8111-111111111111",
+                "Refactor payment api",
+                "payments",
+            ),
+            (
+                "22222222-2222-4222-8222-222222222222",
+                "Polish landing page",
+                "website",
+            ),
+            (
+                "33333333-3333-4333-8333-333333333333",
+                "Write release notes",
+                "handbook",
+            ),
+        ];
+        for (index, (id, name, project)) in sessions.iter().enumerate() {
+            let state = home.join("session-state").join(id);
+            std::fs::create_dir_all(&state).unwrap();
+            let cwd = sandbox.path().join("projects").join(project);
+            std::fs::create_dir_all(&cwd).unwrap();
+            std::fs::write(
+                state.join("workspace.yaml"),
+                format!(
+                    "id: {id}\ncwd: '{}'\nname: {name}\ncreated_at: 2026-08-0{day}T12:00:00Z\nupdated_at: 2026-08-0{day}T12:00:00Z\n",
+                    cwd.display(),
+                    day = 7 - index,
+                ),
+            )
+            .unwrap();
+        }
+        let bin = sandbox.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = sandbox.path().join("invocations.log");
+        let shim_src = sandbox.path().join("copilot_shim.rs");
+        std::fs::write(
+            &shim_src,
+            r#"
+use std::io::Write;
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Ok(log) = std::env::var("CST_E2E_LOG") {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+        writeln!(file, "{}", args.join(" ")).unwrap();
+    }
+    if args.iter().any(|arg| arg == "--version") {
+        println!("1.99.0 (fake copilot for the CST switcher e2e)");
+        return;
+    }
+    if let Some(id) = args.iter().find_map(|arg| arg.strip_prefix("--resume=")) {
+        println!("FAKE COPILOT RESUMED {id}");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(600));
+        return;
+    }
+    std::process::exit(1);
+}
+"#,
+        )
+        .unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .arg(&shim_src)
+            .arg("-o")
+            .arg(bin.join(format!("copilot{}", std::env::consts::EXE_SUFFIX)))
+            .status()
+            .expect("rustc must be available to build the stand-in Copilot");
+        assert!(compiled.success(), "stand-in Copilot failed to compile");
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
+        std::env::set_var("PATH", &path);
+        std::env::set_var("CST_E2E_LOG", &log);
+
+        let (tx, rx) = mpsc::channel();
+        let mut pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "e2e driver".to_string(),
+                cwd: sandbox.path().to_path_buf(),
+                session_id: "e2e-driver".to_string(),
+                program: cst.to_string_lossy().into_owned(),
+                args: vec![
+                    "--mux".to_string(),
+                    "--copilot-home".to_string(),
+                    home.to_string_lossy().into_owned(),
+                ],
+                events_path: None,
+                terminal_light_mode: Some(false),
+                hooks_active: false,
+            },
+            35,
+            120,
+            tx,
+        )
+        .expect("cst must start inside the PTY");
+
+        fn wait_until(
+            pane: &Pane,
+            rx: &Receiver<MuxEvent>,
+            what: &str,
+            done: impl Fn(&vt100::Screen) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                let _ = rx.recv_timeout(Duration::from_millis(200));
+                if pane.with_screen(&done).unwrap() {
+                    return;
+                }
+            }
+            let frame = pane.with_screen(|screen| screen.contents()).unwrap();
+            panic!("never saw {what}; last frame:\n{frame}");
+        }
+        fn switcher(screen: &vt100::Screen) -> Vec<String> {
+            popup_rows(screen, "Sessions").unwrap_or_default()
+        }
+        fn show(pane: &Pane, step: &str) {
+            println!("── {step}");
+            for row in pane.with_screen(switcher).unwrap() {
+                println!("│{row}");
+            }
+        }
+        fn shows(rows: &[String], text: &str) -> bool {
+            rows.iter().any(|row| row.contains(text))
+        }
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        let resumed = |log: &std::path::Path| {
+            std::fs::read_to_string(log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("--resume="))
+                .count()
+        };
+        let type_text = |pane: &mut Pane, text: &str| {
+            for character in text.chars() {
+                pane.send_key(&key(KeyCode::Char(character))).unwrap();
+            }
+        };
+
+        wait_until(&pane, &rx, "the session list", |screen| {
+            screen.contents().contains("Refactor payment api")
+        });
+        if pane
+            .with_screen(|screen| screen.contents())
+            .unwrap()
+            .contains("What's new")
+        {
+            pane.send_key(&key(KeyCode::Esc)).unwrap();
+            wait_until(&pane, &rx, "What's new close", |screen| {
+                !screen.contents().contains("What's new")
+            });
+        }
+
+        // Resume each session from the list, coming back to it in between.
+        for index in 0..sessions.len() {
+            for _ in 0..sessions.len() {
+                pane.send_key(&key(KeyCode::Up)).unwrap();
+            }
+            for _ in 0..index {
+                pane.send_key(&key(KeyCode::Down)).unwrap();
+            }
+            pane.send_key(&key(KeyCode::Enter)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while resumed(&log) <= index {
+                assert!(Instant::now() < deadline, "session {index} never resumed");
+                let _ = rx.recv_timeout(Duration::from_millis(200));
+            }
+            wait_until(&pane, &rx, "the resumed session", |screen| {
+                screen.contents().contains("FAKE COPILOT RESUMED")
+            });
+            if index + 1 < sessions.len() {
+                pane.send_key(&prefix).unwrap();
+                pane.send_key(&key(KeyCode::Char('d'))).unwrap();
+                wait_until(&pane, &rx, "the list again", |screen| {
+                    !screen.contents().contains("FAKE COPILOT RESUMED")
+                });
+            }
+        }
+
+        pane.send_key(&prefix).unwrap();
+        pane.send_key(&key(KeyCode::Char('w'))).unwrap();
+        wait_until(&pane, &rx, "the switcher with every session", |screen| {
+            let rows = switcher(screen);
+            sessions.iter().all(|(_, name, _)| shows(&rows, name))
+        });
+        show(&pane, "prefix w");
+
+        type_text(&mut pane, "notes");
+        wait_until(&pane, &rx, "only the release notes", |screen| {
+            let rows = switcher(screen);
+            shows(&rows, "Filter: notes")
+                && shows(&rows, "Write release notes")
+                && !shows(&rows, "Refactor payment api")
+                && !shows(&rows, "Polish landing page")
+        });
+        show(&pane, "typed 'notes'");
+
+        // x and q were commands here; now they are letters that match nothing.
+        for _ in 0.."notes".len() {
+            pane.send_key(&key(KeyCode::Backspace)).unwrap();
+        }
+        type_text(&mut pane, "xq");
+        wait_until(&pane, &rx, "no matches", |screen| {
+            let rows = switcher(screen);
+            shows(&rows, "Filter: xq") && shows(&rows, "No matching sessions")
+        });
+        show(&pane, "typed 'xq'");
+
+        // Narrow by project rather than title, then open the match.
+        pane.send_key(&key(KeyCode::Backspace)).unwrap();
+        pane.send_key(&key(KeyCode::Backspace)).unwrap();
+        type_text(&mut pane, "websi");
+        wait_until(&pane, &rx, "only the website session", |screen| {
+            let rows = switcher(screen);
+            shows(&rows, "Polish landing page") && !shows(&rows, "Write release notes")
+        });
+        show(&pane, "typed 'websi'");
+        pane.send_key(&key(KeyCode::Enter)).unwrap();
+        wait_until(&pane, &rx, "the website session attached", |screen| {
+            screen
+                .contents()
+                .contains(&format!("FAKE COPILOT RESUMED {}", sessions[1].0))
+        });
+        println!("── Enter opened {}", sessions[1].1);
+        assert_eq!(resumed(&log), 3, "nothing was started or ended by typing");
+
+        // Down moves within the matches; Delete closes the highlighted one.
+        pane.send_key(&prefix).unwrap();
+        pane.send_key(&key(KeyCode::Char('w'))).unwrap();
+        type_text(&mut pane, "a");
+        pane.send_key(&key(KeyCode::Down)).unwrap();
+        wait_until(&pane, &rx, "the switcher filtered to 'a'", |screen| {
+            shows(&switcher(screen), "Filter: a█")
+        });
+        show(&pane, "typed 'a', pressed Down");
+        pane.send_key(&key(KeyCode::Backspace)).unwrap();
+        type_text(&mut pane, "pay");
+        pane.send_key(&key(KeyCode::Delete)).unwrap();
+        wait_until(&pane, &rx, "the payments session closed", |screen| {
+            let rows = switcher(screen);
+            shows(&rows, "Filter: pay") && shows(&rows, "No matching sessions")
+        });
+        show(&pane, "typed 'pay', pressed Delete");
+
+        pane.send_key(&key(KeyCode::Esc)).unwrap();
+        pane.send_key(&prefix).unwrap();
+        pane.send_key(&key(KeyCode::Char('w'))).unwrap();
+        wait_until(&pane, &rx, "two sessions left, unfiltered", |screen| {
+            let rows = switcher(screen);
+            shows(&rows, "Filter: █")
+                && !shows(&rows, "Refactor payment api")
+                && shows(&rows, "Polish landing page")
+                && shows(&rows, "Write release notes")
+        });
+        show(&pane, "reopened after Esc");
+
+        // Close the rest, so this CST leaves no workspace to recover.
+        pane.send_key(&key(KeyCode::Delete)).unwrap();
+        pane.send_key(&key(KeyCode::Delete)).unwrap();
+        wait_until(
+            &pane,
+            &rx,
+            "the switcher gone with the last session",
+            |screen| popup_rows(screen, "Sessions").is_none(),
+        );
+        std::thread::sleep(Duration::from_secs(2));
+        let _ = pane.kill();
+        let sandbox_path = sandbox.path().to_string_lossy().replace('\\', "\\\\");
+        if let Ok(entries) = std::fs::read_dir(crate::recovery::root()) {
+            for entry in entries.flatten() {
+                let leaked = std::fs::read_to_string(entry.path())
+                    .is_ok_and(|record| record.contains(&sandbox_path));
+                assert!(
+                    !leaked,
+                    "left a workspace record: {}",
+                    entry.path().display()
+                );
+            }
+        }
     }
 
     #[test]

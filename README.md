@@ -343,7 +343,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | Key | Action |
 |-----|--------|
 | `prefix` `d` | Back to the session list — the session keeps running |
-| `prefix` `w` | Session switcher |
+| `prefix` `w` | Session switcher: type to filter, `↑`/`↓` and `Enter` to open, `Del` to close the highlighted session |
 | `prefix` `c` | Focus the main session chat |
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
@@ -982,7 +982,8 @@ clipboard forwarding.
 
 The four tmux action keys are configurable in `config.json`. Resume, new-session, and
 new-worktree keys are used from the session list; persistent-session termination is also
-available after the multiplexer prefix:
+available after the multiplexer prefix. In the session switcher every key filters, so there
+it is `Shift+Del` instead:
 
 ```json
 {

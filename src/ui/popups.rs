@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, DeleteTarget, SettingsEditField, SettingsSection};
@@ -400,7 +400,8 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let theme = app.theme();
 
     let ids = app.pane_list_ids();
-    let height = (ids.len() + 6).min(20) as u16;
+    // Sized for every session rather than the matches, so it holds still while typing.
+    let height = (mux.panes.len() + 7).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
     prepare_popup(f, area, theme);
@@ -417,10 +418,31 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let chunks = Layout::default()
+    let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(inner);
+    let filter_area = layout[0];
+    let chunks = [layout[1], layout[2]];
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " Filter: ",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(app.pane_filter.clone(), Style::default().fg(theme.text)),
+            Span::styled("█", Style::default().fg(theme.accent)),
+        ]))
+        .style(surface_style(theme)),
+        filter_area,
+    );
 
     // The split picker opens with a row for starting a brand-new session.
     let row_offset = usize::from(app.split_picker.is_some());
@@ -494,7 +516,19 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             ))),
         );
     }
-    f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
+    if ids.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            " No matching sessions",
+            Style::default().fg(theme.muted).bg(theme.surface),
+        ))));
+    }
+    // Stateful only so a highlight below the fold scrolls into view.
+    let mut state = ListState::default().with_selected(Some(app.pane_selected));
+    f.render_stateful_widget(
+        List::new(items).style(surface_style(theme)),
+        chunks[0],
+        &mut state,
+    );
 
     if app.split_picker.is_some() {
         let hint = Line::from(vec![
@@ -515,21 +549,18 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         Span::raw(" select  "),
         Span::styled("Enter", Style::default().fg(theme.accent_alt)),
         Span::raw(" attach  "),
-        Span::styled("x", Style::default().fg(theme.accent_alt)),
-        Span::raw(" close  "),
+        Span::styled("Del", Style::default().fg(theme.accent_alt)),
+        Span::raw(" close session  "),
     ];
     if app.tmux_support.is_available() {
         hint_spans.extend([
-            Span::styled(
-                app.config.tmux_keys.end_session.clone(),
-                Style::default().fg(theme.accent_alt),
-            ),
+            Span::styled("Shift+Del", Style::default().fg(theme.accent_alt)),
             Span::raw(" end tmux  "),
         ]);
     }
     hint_spans.extend([
         Span::styled("Esc", Style::default().fg(theme.accent_alt)),
-        Span::raw(" close"),
+        Span::raw(" cancel"),
     ]);
     let hint = Line::from(hint_spans);
     f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
@@ -982,7 +1013,11 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
             &format!("{prefix} d"),
             "Back to the list (session keeps running)",
         ));
-        text.push(help_line(theme, &format!("{prefix} w"), "Session switcher"));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} w"),
+            "Session switcher (type to filter)",
+        ));
         text.push(help_line(
             theme,
             &format!("{prefix} c"),
