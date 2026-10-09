@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.35.0 - 2026-10-09
+
+- Note: in the session switcher, Delete closes a session and Shift+Delete ends a tmux one.
+- Type in the session switcher to filter it, then pick a session with the arrows and Enter.
+- Put several live sessions in one tab, side by side or stacked, and drag borders to resize them.
+- Bring a session from another tab into a split, or start a new one there, from the split picker.
+- Bring back the tabs of a CST that quit or crashed.
+- Switch tabs with Ctrl+Tab and Ctrl+Shift+Tab, as in a browser.
+- PR, issue and discussion text in the inspector is shown as formatted markdown.
+
 ## v0.34.0 - 2026-10-06
 
 - Sessions can run inside tmux and keep working after CST exits or SSH drops (Linux and macOS).
