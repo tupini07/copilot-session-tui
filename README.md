@@ -351,9 +351,13 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `u` | Install an update without stopping running sessions |
 | `prefix` `h` `e` | Open scratchpad shortcut help |
 | `prefix` `g` `i` | Inspect a GitHub issue, pull request, or discussion |
-| `prefix` `n` / `p` | Next / previous session |
+| `prefix` `n` / `p` | Next / previous tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab, as in a browser — from any panel, no prefix. Windows Terminal keeps these for its own tabs unless you unbind them there |
+| `Ctrl+PageDown` / `Ctrl+PageUp` | The same, and these reach CST in Windows Terminal as it comes |
 | `prefix` `m` | Move this tab: `←`/`→` slide it, `Esc` when done |
 | `prefix` `1`–`9` | Jump to a session by number |
+| `prefix` `←` `↑` `→` `↓` | Move to the neighbouring split |
+| `prefix` `l` | Splits and layout; see below |
 | `prefix` `x` | End a CST-owned session or detach a tmux-backed tab |
 | `prefix` `X` | End the persistent tmux session and stop Copilot |
 | `prefix` `q` | Quit CST; direct sessions end and tmux-backed sessions detach |
@@ -381,6 +385,83 @@ this is a nudge against the edge rather than a hold. For a long trip the keyboar
 is the calmer option.
 
 Tabs live as long as CST does, so the order is not written to disk.
+
+### Splits
+
+A tab can hold several sessions side by side or stacked, so you can watch long-running
+ones without flipping between tabs. It works like tmux: a new session opens in a tab of
+its own, and splitting brings a session from another tab into this one. Everything
+about splits except moving between them is under `prefix` `l`, with keys borrowed from
+Doom Emacs's window commands; a popup lists them while it waits:
+
+| `prefix` `l` then | Action |
+|-----|--------|
+| `v` or `\|` | Bring another session in beside this one |
+| `s` or `-` | Bring another session in below this one |
+| `z` | Give this session the whole tab, or put the split back |
+| `d` | Take this session out into a tab of its own, next to this one |
+| `r` | Resize: `←`/`→` narrower or wider, `↑`/`↓` shorter or taller, `Esc` when done |
+| `=` | Give every split the same share again |
+
+`v` and `s` open the session switcher with the sessions in other tabs; the one you pick
+leaves its tab, which closes if that leaves it empty. Splitting the way the focused
+session's own split already runs adds to it, and splitting across nests — so a session
+in a tall column can sit beside a stack of two. When every session is already in this
+tab, the other direction just turns the focused session's split.
+
+The switcher's first row, **+ New session…**, starts a session straight into the split:
+it asks which project — the focused session's own comes first — and then, as `n` does,
+whether to run it as-is or in a new isolated Git worktree.
+
+Every split is a live, interactive chat. Typing goes to the focused one; click another,
+or use `prefix` and an arrow, to move. The wheel scrolls whichever split it is over
+without taking focus, and Ctrl+click opens a link in any of them.
+
+A tab holding several sessions is labelled `⧉` and the title of the one last focused
+there, with the marker of whichever of them most wants you. Switching tabs, by number,
+`prefix` `n`/`p`, a click or the switcher, brings that whole tab back as you left it.
+
+The scratchpad and terminal are shared: one column on the right and one strip along the
+bottom, always showing the focused session's. Once any session in the tab has one open
+it stays on screen, with a placeholder for sessions that have none, so moving between
+splits never makes the others reflow to a new width. Closing it closes it for all of
+them.
+
+A turn finishing in a split you are not typing into sends no notification while the CST
+window has focus, because you watched it finish; its border turns to the attention colour
+instead, and its tab keeps its marker until you focus it. Questions, plan approvals and
+errors still notify, just as they do for the focused session.
+
+Drag the line between two splits to resize them; the sessions on either side reflow as
+you go and the rest stay put. The scratchpad's left edge and the terminal's top edge
+drag the same way, with or without a split, and the sizes last until CST quits.
+`prefix` `l` `r` does it from the keyboard, two cells at a time; left and right work on
+columns and up and down on stacks, so in a column holding a stack every arrow does
+something. No split shrinks below a usable chat, and `prefix` `l` `=` undoes all of it.
+
+A zoomed session has a heavier frame and says so in its title. Ending a session with
+`prefix` `x` takes it out of its split, and restarting one that died puts it back where
+it was. When space runs short, the scratchpad and terminal shrink first, down to their
+minimums, so opening one never hides the split. Only when the window is too small even
+then does CST show just the focused session, saying so in the status bar until there is
+room again. Tabs and their splits survive CST restarting itself for an update, but are
+not kept after quitting.
+
+### Recovering a workspace
+
+Each CST keeps a note of the tabs it has open — which sessions, how they are split, and
+which one had focus — and updates it as they change. If CST quits with sessions still
+open, crashes, or goes down with the machine, the next CST offers them back: the session
+list shows **R ↻ recover workspace**, and `R` (or *Recover a workspace* in command
+search) lists the workspaces of closed CSTs, newest first, with how long ago, how many
+sessions, and their titles. `Enter` reopens one — every session resumed, in its tabs and
+layout — and `x` forgets it. Nothing is reopened until you ask.
+
+Several CSTs running at once each keep their own note, so recovering one never loses
+another. A session that is already running — in another CST, or in a terminal of its
+own — is never resumed a second time; it is left out of what is offered. Closing every
+tab before quitting leaves nothing to recover. The ten most recent workspaces are kept,
+for up to thirty days.
 
 ### Prompt snippets
 

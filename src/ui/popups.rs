@@ -308,19 +308,109 @@ pub fn draw_busy(f: &mut Frame, title: &str, detail: &str, theme: Theme) {
     );
 }
 
+/// The workspaces of closed CSTs, newest first, each with enough to recognise it by:
+/// how long ago, how many sessions in how many tabs, where, and what they were.
+pub fn draw_recover_workspace(f: &mut Frame, app: &App) {
+    let theme = app.theme();
+    let now = chrono::Utc::now();
+    let height = (app.recoverable.len() * 2 + 4).min(24) as u16;
+    let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(80.0) as u16;
+    let area = centered_rect(70, percent_y.max(25), f.area());
+    prepare_popup(f, area, theme);
+    let block = Block::default()
+        .title(" Recover a workspace ")
+        .borders(Borders::ALL)
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let width = usize::from(chunks[0].width.saturating_sub(6));
+    let items: Vec<ListItem> = app
+        .recoverable
+        .iter()
+        .enumerate()
+        .map(|(index, workspace)| {
+            let record = &workspace.record;
+            let selected = index == app.recover_selected;
+            let base = if selected {
+                super::row_selection_style(theme)
+            } else {
+                Style::default().fg(theme.text).bg(theme.surface)
+            };
+            let place = record
+                .launch_dir
+                .as_deref()
+                .map(|dir| format!(" · {}", project_label(std::path::Path::new(dir))))
+                .unwrap_or_default();
+            // Sessions already running elsewhere stay there; say how many come back.
+            let count = if workspace.sessions.len() == record.sessions.len() {
+                format!("{} session(s)", record.sessions.len())
+            } else {
+                format!(
+                    "{} of {} session(s)",
+                    workspace.sessions.len(),
+                    record.sessions.len()
+                )
+            };
+            let summary = format!(
+                " {}  {count} in {} tab(s){place}",
+                crate::recovery::ago(record.saved_at, now),
+                record.tab_count(),
+            );
+            let titles = workspace
+                .sessions
+                .iter()
+                .map(|session| session.title.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            ListItem::new(vec![
+                Line::from(Span::styled(summary, base.add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    format!("   {}", crate::text::truncate_to_width(&titles, width)),
+                    if selected { base } else { base.fg(theme.muted) },
+                )),
+            ])
+        })
+        .collect();
+    f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
+
+    let hint = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
+        Span::raw(" select  "),
+        Span::styled("Enter", Style::default().fg(theme.accent_alt)),
+        Span::raw(" recover  "),
+        Span::styled("x", Style::default().fg(theme.accent_alt)),
+        Span::raw(" forget  "),
+        Span::styled("Esc", Style::default().fg(theme.accent_alt)),
+        Span::raw(" close"),
+    ]);
+    f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
+}
+
 pub fn draw_pane_list(f: &mut Frame, app: &App) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
     let theme = app.theme();
 
-    let height = (mux.panes.len() + 5).min(20) as u16;
+    let ids = app.pane_list_ids();
+    let height = (ids.len() + 6).min(20) as u16;
     let percent_y = ((height as f32 / f.area().height as f32) * 100.0).min(70.0) as u16;
     let area = centered_rect(60, percent_y.max(30), f.area());
     prepare_popup(f, area, theme);
 
+    let title = match app.split_picker {
+        Some(direction) => format!(" Show beside this session ({}) ", direction.label()),
+        None => " Sessions ".to_string(),
+    };
     let block = Block::default()
-        .title(" Sessions ")
+        .title(title)
         .borders(Borders::ALL)
         .style(surface_style(theme))
         .border_style(Style::default().fg(theme.accent));
@@ -332,9 +422,11 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let items: Vec<ListItem> = mux
-        .panes
+    // The split picker opens with a row for starting a brand-new session.
+    let row_offset = usize::from(app.split_picker.is_some());
+    let mut items: Vec<ListItem> = ids
         .iter()
+        .filter_map(|id| mux.pane(*id))
         .enumerate()
         .map(|(index, pane)| {
             let title = app.pane_session_title(&pane.session_id, &pane.title);
@@ -346,7 +438,7 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             if app.pane_is_tmux_backed(pane) {
                 title.push_str(" [tmux]");
             }
-            let selected = index == app.pane_selected;
+            let selected = index + row_offset == app.pane_selected;
             let base = if selected {
                 super::row_selection_style(theme)
             } else {
@@ -361,7 +453,9 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {} ", index + 1),
+                    // The tab's own number, which only differs from the row's when the
+                    // split picker leaves out the sessions already in this tab.
+                    format!(" {} ", mux.tab_number(pane.id).unwrap_or(index + 1)),
                     if selected {
                         base
                     } else {
@@ -386,8 +480,35 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
         })
         .collect();
 
+    if row_offset == 1 {
+        let style = if app.pane_selected == 0 {
+            super::row_selection_style(theme)
+        } else {
+            Style::default().fg(theme.accent_alt).bg(theme.surface)
+        };
+        items.insert(
+            0,
+            ListItem::new(Line::from(Span::styled(
+                " +   New session… (choose its project next)",
+                style,
+            ))),
+        );
+    }
     f.render_widget(List::new(items).style(surface_style(theme)), chunks[0]);
 
+    if app.split_picker.is_some() {
+        let hint = Line::from(vec![
+            Span::raw(" "),
+            Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
+            Span::raw(" select  "),
+            Span::styled("Enter", Style::default().fg(theme.accent_alt)),
+            Span::raw(" split  "),
+            Span::styled("Esc", Style::default().fg(theme.accent_alt)),
+            Span::raw(" cancel"),
+        ]);
+        f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
+        return;
+    }
     let mut hint_spans = vec![
         Span::raw(" "),
         Span::styled("↑↓", Style::default().fg(theme.accent_alt)),
@@ -660,7 +781,11 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     prepare_popup(f, area, theme);
 
     let block = Block::default()
-        .title(" Select Project ")
+        .title(if app.new_split.is_some() {
+            " New session in which project? "
+        } else {
+            " Select Project "
+        })
         .borders(Borders::ALL)
         .style(surface_style(theme))
         .border_style(Style::default().fg(theme.accent_alt));
@@ -697,7 +822,8 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(sep).style(surface_style(theme)), chunks[1]);
 
     // Project list
-    let has_all_option = app.project_search_query.is_empty();
+    // Choosing where a new split session runs, "all projects" is not a place.
+    let has_all_option = app.project_search_query.is_empty() && app.new_split.is_none();
     let visible_rows = chunks[2].height as usize;
 
     // Build all logical items with their indices
@@ -825,6 +951,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         help_line(theme, "Space", "Toggle selected session favorite"),
         help_line(theme, "g", "Grab a favorite, then ↑/↓ to reorder"),
         help_line(theme, "T", "Open favorites as panes or terminal tabs"),
+        help_line(theme, "R", "Recover the tabs of a closed or crashed CST"),
         Line::from(""),
         help_section(theme, "Filter & sort"),
         help_line(theme, "/", "Search / fuzzy filter"),
@@ -894,12 +1021,32 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.push(help_line(
             theme,
             &format!("{prefix} n/p"),
-            "Next / previous session",
+            "Next / previous tab (also Ctrl+Tab, Ctrl+PageDown/Up)",
         ));
         text.push(help_line(
             theme,
             &format!("{prefix} 1-9"),
             "Jump to session by number",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} ←↑→↓"),
+            "Move to the neighbouring split (or click it)",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} l v / l s"),
+            "Bring another session in beside / below this one",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} l z / l d"),
+            "Zoom this split / take it out of the split",
+        ));
+        text.push(help_line(
+            theme,
+            &format!("{prefix} l r / l ="),
+            "Resize this split (or drag a divider) / make all equal",
         ));
         if app.tmux_support.is_available() {
             text.push(help_line(

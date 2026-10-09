@@ -7,10 +7,10 @@ use std::time::Duration;
 use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::app::App;
-use crate::mux::{PaneStatus, PrefixState};
+use crate::mux::{PaneId, PaneStatus, PrefixState};
 use crate::text;
 use crate::theme::{apply_terminal_theme, fill_area, Theme, ThemeName};
-use crate::ui::tabs;
+use crate::ui::{tabs, ChatSlot};
 
 /// Frames of the startup spinner. Braille dots read as motion even in a plain terminal.
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -47,25 +47,297 @@ fn draw_starting(f: &mut Frame, area: Rect, elapsed: Duration, theme: Theme) {
     f.render_widget(Paragraph::new(lines), box_area);
 }
 
-pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+/// Draw every session on screen, then settle the borders they share.
+pub fn draw_chats(f: &mut Frame, app: &App, slots: &[ChatSlot]) {
+    let in_split = slots.len() > 1;
+    for slot in slots {
+        draw_chat(f, app, slot, in_split);
+    }
+    if !in_split {
+        return;
+    }
+    join_shared_borders(f.buffer_mut(), slots);
+    // A boundary belongs to the later slot, so a slot's trailing edge is drawn in its
+    // neighbour's colour. Recolouring afterwards gives each highlighted slot its whole
+    // frame; the focused one goes last so it wins the edge it shares with a slot that
+    // is asking for attention.
+    let theme = app.theme();
+    let focused = app.mux.as_ref().and_then(|mux| mux.focused);
+    let mut highlighted: Vec<(&ChatSlot, Color)> = slots
+        .iter()
+        .filter_map(|slot| chat_border_color(app, slot.pane, in_split, theme).map(|c| (slot, c)))
+        .collect();
+    highlighted.sort_by_key(|(slot, _)| Some(slot.pane) == focused);
+    for (slot, color) in highlighted {
+        recolor_frame(f.buffer_mut(), full_frame(slot), color);
+    }
+}
+
+/// The colour a chat's border stands out in, or `None` for the resting colour.
+fn chat_border_color(app: &App, id: PaneId, in_split: bool, theme: Theme) -> Option<Color> {
+    let mux = app.mux.as_ref()?;
+    if mux.focused == Some(id) {
+        return (app.workspace_focus == crate::app::WorkspaceFocus::Chat)
+            .then_some(theme.accent_alt);
+    }
+    if !in_split {
+        return None;
+    }
+    // Only a split shows an unfocused chat at all. There the status bar describes
+    // someone else, so the border is what says this session has died or wants the
+    // user — it raises no notification while visible.
+    let pane = mux.pane(id)?;
+    if !pane.is_running() {
+        Some(theme.error)
+    } else {
+        pane.needs_attention().then_some(theme.warning)
+    }
+}
+
+/// What a split's border is titled with.
+///
+/// The tab number leads because titles alone do not tell sessions apart: several
+/// started in one project all carry its name until Copilot renames them.
+///
+/// Fitted to the border's `width`: Copilot names sessions after their task, often at
+/// sentence length, and left alone the name ran into the corner with no sign it was
+/// cut — and pushed "exited" off the end, which is the part that matters.
+fn split_title(
+    mux: &crate::mux::MuxState,
+    pane: &crate::mux::Pane,
+    width: u16,
+    zoomed: bool,
+) -> String {
+    let number = mux
+        .number_in_window(pane.id)
+        .map(|number| format!("{number} "))
+        .unwrap_or_default();
+    let state = format!(
+        "{}{}",
+        if pane.is_running() { "" } else { " · exited" },
+        if zoomed { " · zoomed" } else { "" }
+    );
+    // Both corners, the padding space either side, and one column of border showing
+    // after the title so it does not butt against the corner.
+    let room = usize::from(width)
+        .saturating_sub(5)
+        .saturating_sub(text::display_width(&number) + text::display_width(&state));
+    format!(
+        " {number}{}{state} ",
+        text::truncate_to_width(&pane.title, room)
+    )
+}
+
+/// A slot's frame including the trailing edge its neighbour draws.
+fn full_frame(slot: &ChatSlot) -> Rect {
+    let mut area = slot.area;
+    if !slot.borders.contains(Borders::RIGHT) {
+        area.width += 1;
+    }
+    if !slot.borders.contains(Borders::BOTTOM) {
+        area.height += 1;
+    }
+    area
+}
+
+fn is_border_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "─" | "│" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+    )
+}
+
+/// Recolour the box-drawing cells around `area`, leaving any title text alone.
+fn recolor_frame(buffer: &mut ratatui::buffer::Buffer, area: Rect, color: Color) {
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let (left, right, top, bottom) = (area.left(), area.right() - 1, area.top(), area.bottom() - 1);
+    for x in left..=right {
+        for y in [top, bottom] {
+            recolor_border_cell(buffer, x, y, color);
+        }
+    }
+    for y in top..=bottom {
+        for x in [left, right] {
+            recolor_border_cell(buffer, x, y, color);
+        }
+    }
+}
+
+fn recolor_border_cell(buffer: &mut ratatui::buffer::Buffer, x: u16, y: u16, color: Color) {
+    if let Some(cell) = buffer.cell_mut((x, y)) {
+        if is_border_symbol(cell.symbol()) {
+            cell.set_fg(color);
+        }
+    }
+}
+
+/// Turn the corners and edges where borders meet into tees and crosses, so each
+/// boundary reads as one divider rather than a box butted against a line.
+///
+/// Worked out per cell from its neighbours — which of them have a line reaching
+/// towards it — rather than from where splits are, so it is right at any depth of
+/// nesting: a stack inside a column meets the column's edge with ├ and ┤, and a
+/// boundary running into another meets it with ┬ or ┴.
+fn join_shared_borders(buffer: &mut ratatui::buffer::Buffer, slots: &[ChatSlot]) {
+    // Arms as up, down, left, right.
+    fn arms(symbol: &str) -> Option<[bool; 4]> {
+        Some(match symbol {
+            "─" => [false, false, true, true],
+            "│" => [true, true, false, false],
+            "┌" => [false, true, false, true],
+            "┐" => [false, true, true, false],
+            "└" => [true, false, false, true],
+            "┘" => [true, false, true, false],
+            "├" => [true, true, false, true],
+            "┤" => [true, true, true, false],
+            "┬" => [false, true, true, true],
+            "┴" => [true, false, true, true],
+            "┼" => [true, true, true, true],
+            _ => return None,
+        })
+    }
+    fn symbol(arms: [bool; 4]) -> Option<&'static str> {
+        Some(match arms {
+            [true, true, false, true] => "├",
+            [true, true, true, false] => "┤",
+            [false, true, true, true] => "┬",
+            [true, false, true, true] => "┴",
+            [true, true, true, true] => "┼",
+            _ => return None,
+        })
+    }
+    // Only the frames' own cells count, on both sides. Copilot draws boxes and rules
+    // of its own inside a chat, and a rule running up to the border would otherwise
+    // join it and put a tee in the middle of a plain edge.
+    let mut frame_cells = std::collections::HashSet::new();
+    for frame in slots.iter().map(full_frame) {
+        let frame = frame.intersection(buffer.area);
+        if frame.is_empty() {
+            continue;
+        }
+        for x in frame.left()..frame.right() {
+            frame_cells.insert((x, frame.top()));
+            frame_cells.insert((x, frame.bottom() - 1));
+        }
+        for y in frame.top()..frame.bottom() {
+            frame_cells.insert((frame.left(), y));
+            frame_cells.insert((frame.right() - 1, y));
+        }
+    }
+    let mut joins = Vec::new();
+    for &(x, y) in &frame_cells {
+        let Some(own) = arms(buffer[(x, y)].symbol()) else {
+            continue;
+        };
+        let reaches = |dx: i32, dy: i32, arm: usize| {
+            let (nx, ny) = (i32::from(x) + dx, i32::from(y) + dy);
+            let (Ok(nx), Ok(ny)) = (u16::try_from(nx), u16::try_from(ny)) else {
+                return false;
+            };
+            frame_cells.contains(&(nx, ny))
+                && arms(buffer[(nx, ny)].symbol()).is_some_and(|a| a[arm])
+        };
+        // A neighbour reaching towards this cell: up's down arm, and so on.
+        let joined = [
+            own[0] || reaches(0, -1, 1),
+            own[1] || reaches(0, 1, 0),
+            own[2] || reaches(-1, 0, 3),
+            own[3] || reaches(1, 0, 2),
+        ];
+        if joined != own {
+            if let Some(junction) = symbol(joined) {
+                joins.push((x, y, junction));
+            }
+        }
+    }
+    for (x, y, junction) in joins {
+        buffer[(x, y)].set_symbol(junction);
+    }
+}
+
+/// The scratchpad or terminal dock in a split, when the focused session has none of
+/// its own. Kept on screen rather than removed so the other sessions keep their size.
+pub fn draw_empty_dock(f: &mut Frame, area: Rect, title: &str, message: &str, theme: Theme) {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(panel_style(theme))
+        .border_style(Style::default().fg(theme.inactive));
+    let inner = block.inner(area);
+    fill_area(f.buffer_mut(), area, theme.background);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            message.to_string(),
+            Style::default().fg(theme.muted),
+        )))
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     let theme = app.theme();
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
-    let Some(pane) = mux.focused_pane() else {
+    let Some(pane) = mux.pane(slot.pane) else {
         return;
     };
+    let focused = mux.focused == Some(slot.pane);
 
-    let border_color = if app.workspace_focus == crate::app::WorkspaceFocus::Chat {
-        theme.accent_alt
+    let border_color = chat_border_color(app, slot.pane, in_split, theme).unwrap_or(theme.inactive);
+    // A view scrolled into history looks exactly like a session that has stopped
+    // producing output, which is what it was taken for in testing. Say so on the
+    // border, where it cannot cover the history being read. Worked out before the
+    // title, which gets whatever room the label leaves rather than being drawn over.
+    let scrolled_back = pane
+        .with_screen(|screen| screen.scrollback())
+        .unwrap_or_default();
+    let label = (scrolled_back > 0).then(|| {
+        let full = format!(" ↑ {scrolled_back} lines back · type to return ");
+        // Long enough to explain itself only when that still leaves the title room.
+        if text::display_width(&full) + 24 <= usize::from(slot.area.width) {
+            full
+        } else {
+            format!(" ↑ {scrolled_back} back ")
+        }
+    });
+    let label_width = label
+        .as_deref()
+        .map_or(0, |label| text::display_width(label) as u16);
+    // Each split is titled with its session, since there is no single "the chat" to
+    // name any more and the tab strip only marks one of them.
+    // A zoomed chat fills the screen exactly as an unsplit one does, so it says so
+    // three ways: a heavier frame, the word in the title, and a colour of its own —
+    // the theme's other accent, since the usual one means focus and yellow and red
+    // already mean attention and exit.
+    let zoomed = focused && mux.zoomed();
+    let border_color = if zoomed { theme.accent } else { border_color };
+    let title = if in_split || zoomed {
+        split_title(
+            mux,
+            pane,
+            slot.area.width.saturating_sub(label_width),
+            zoomed,
+        )
     } else {
-        theme.inactive
+        " Chat ".to_string()
     };
     let block = Block::default()
-        .title(" Chat ")
-        .borders(Borders::ALL)
+        .title(title)
+        .border_type(if zoomed {
+            ratatui::widgets::BorderType::Thick
+        } else {
+            ratatui::widgets::BorderType::Plain
+        })
+        .borders(slot.borders)
         .style(panel_style(theme))
         .border_style(Style::default().fg(border_color));
+    let area = slot.area;
     let terminal_area = block.inner(area);
     fill_area(f.buffer_mut(), area, theme.background);
     f.render_widget(block, area);
@@ -80,14 +352,33 @@ pub fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // the write traded that for a cursor that was hidden more often than not. A painted
     // cursor is just part of the frame, which is how the terminal and scratchpad panes
     // have always drawn theirs.
-    let cursor = Cursor::default()
-        .visibility(app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting);
+    let cursor = Cursor::default().visibility(
+        focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
+    );
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen).cursor(cursor);
         f.render_widget(widget, terminal_area);
         apply_terminal_theme(f.buffer_mut(), terminal_area, theme);
     });
-    decorate_references(f, app, terminal_area, theme);
+    if let Some(label) = label.filter(|_| area.height > 0) {
+        let width = label_width.min(area.width.saturating_sub(4));
+        let label_area = Rect {
+            x: area.right().saturating_sub(width + 2),
+            y: area.y,
+            width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(label, Style::default().fg(theme.warning))),
+            label_area,
+        );
+    }
+    // Reference statuses are resolved against the focused session's repository. Another
+    // split may be in a different one, where the same number is a different item, so
+    // its references stay plain rather than risk a wrong colour.
+    if focused {
+        decorate_references(f, app, terminal_area, theme);
+    }
 
     if starting {
         draw_starting(f, terminal_area, pane.started_at.elapsed(), theme);
@@ -220,10 +511,18 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             let PrefixState::Transient(mode) = mux.prefix_state else {
                 unreachable!("guarded by the arm above")
             };
-            vec![
+            let mut spans = vec![
                 Span::styled(mode.badge(), badge_style(theme, theme.accent_alt)),
                 Span::raw(mode.hint()),
-            ]
+            ];
+            // Why the last step did nothing, e.g. a split already at its minimum.
+            if let Some(message) = app.status_message.as_deref() {
+                spans.push(Span::styled(
+                    format!(" {message} "),
+                    Style::default().fg(theme.warning),
+                ));
+            }
+            spans
         }
         PaneStatus::Running if mux.prefix_state == PrefixState::Help => vec![
             Span::styled(" Help ", badge_style(theme, theme.warning)),
@@ -233,10 +532,31 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" GitHub ", badge_style(theme, theme.accent)),
             Span::raw(" i inspect  Esc cancel "),
         ],
+        PaneStatus::Running if mux.prefix_state == PrefixState::Layout => vec![
+            Span::styled(" Layout ", badge_style(theme, theme.accent_alt)),
+            Span::raw(format!(" {} ", crate::mux::LAYOUT_HINT)),
+        ],
         PaneStatus::Running if mux.prefix_state == PrefixState::Root => vec![
             Span::styled(format!(" {prefix} "), badge_style(theme, theme.warning)),
             Span::raw(format!(" choose a command · {prefix} search · Esc close ")),
         ],
+        // The answer to the last command — "nothing to zoom", a bell in another tab —
+        // until the next key. This bar used to show none of them, so a command that
+        // could not act looked like a key that had not registered.
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && app.status_message.is_some() =>
+        {
+            vec![Span::styled(
+                format!(
+                    " {} ",
+                    text::truncate_to_width(
+                        app.status_message.as_deref().unwrap_or_default(),
+                        area.width.saturating_sub(2) as usize,
+                    )
+                ),
+                Style::default().fg(theme.warning),
+            )]
+        }
         PaneStatus::Running
             if mux.prefix_state == PrefixState::Idle && app.update_notice.is_some() =>
         {
@@ -249,6 +569,24 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                         area.width.saturating_sub(11) as usize,
                     )
                 )),
+            ]
+        }
+        // A split that is not being drawn is otherwise indistinguishable from no split,
+        // and the user would have no idea why the other sessions vanished.
+        PaneStatus::Running if mux.prefix_state == PrefixState::Idle && mux.zoomed() => {
+            vec![
+                Span::styled(" Zoomed ", badge_style(theme, theme.accent_alt)),
+                Span::raw(format!(" {prefix} l z shows the split again ")),
+            ]
+        }
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && app.workspace_areas.split_collapsed =>
+        {
+            vec![
+                Span::styled(" Split hidden ", badge_style(theme, theme.warning)),
+                Span::raw(
+                    " too little room for every session; enlarge the window or close a panel ",
+                ),
             ]
         }
         PaneStatus::Running => vec![
@@ -308,33 +646,73 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
     }
 }
 
-/// Tab titles exactly as the bar draws them.
+/// Tab titles exactly as the bar draws them, one per tab.
 ///
 /// Shared with click hit-testing so the two can never disagree about where a tab starts
 /// and ends.
 pub fn tab_sources(mux: &crate::mux::MuxState) -> Vec<tabs::TabSource> {
-    mux.panes
+    mux.windows
         .iter()
-        .map(|pane| tabs::TabSource {
-            marker: tab_marker(pane),
-            title: pane.title.clone(),
-            running: pane.is_running(),
+        .filter_map(|window| {
+            let shown = mux.pane(window.last_focused)?;
+            let members: Vec<&crate::mux::Pane> = window
+                .layout
+                .panes()
+                .into_iter()
+                .filter_map(|id| mux.pane(id))
+                .collect();
+            // A tab of several sessions is titled by the one last focused there, marked
+            // as holding more. Every title would be legible only one at a time: the
+            // strip gives a tab a couple of dozen columns, and Copilot names sessions
+            // with whole sentences.
+            let title = if window.is_split() {
+                format!("⧉ {}", shown.title)
+            } else {
+                shown.title.clone()
+            };
+            Some(tabs::TabSource {
+                marker: window_marker(&members),
+                title,
+                running: members.iter().any(|pane| pane.is_running()),
+            })
         })
         .collect()
 }
 
-/// The pane whose tab covers `column`, for click-to-switch.
+/// The marker for a tab: whichever of its sessions most wants the user. A question in
+/// one session of three must not hide behind a spinner in another.
+fn window_marker(members: &[&crate::mux::Pane]) -> String {
+    let markers: Vec<String> = members.iter().map(|pane| tab_marker(pane)).collect();
+    let rank = |marker: &str| match marker {
+        "? " => 0,
+        "● " => 1,
+        "! " => 2,
+        "▲ " => 3,
+        "✎ " => 5,
+        "× " => 6,
+        "  " => 7,
+        // Anything else is a spinner frame: a turn in progress.
+        _ => 4,
+    };
+    markers
+        .into_iter()
+        .min_by_key(|marker| rank(marker))
+        .unwrap_or_else(|| "  ".to_string())
+}
+
+/// The session a click on the tab covering `column` brings back: whichever had the
+/// keyboard last in that tab.
 pub fn tab_at(
     mux: &crate::mux::MuxState,
     area: Rect,
     column: u16,
     row: u16,
 ) -> Option<crate::mux::PaneId> {
-    tab_index_at(mux, area, column, row).map(|index| mux.panes[index].id)
+    tab_index_at(mux, area, column, row).map(|index| mux.windows[index].last_focused)
 }
 
-/// Position in `mux.panes` of the tab covering `column`, for a drag that has to know
-/// where it is going rather than only which pane it is over.
+/// Position in the strip of the tab covering `column`, for a drag that has to know
+/// where it is going rather than only which tab it is over.
 ///
 /// Strict about the strip's empty tail: a click out there is not a click on the last
 /// tab. A drag that wants to treat an overshoot as "park it at the end" applies that
@@ -353,7 +731,7 @@ pub fn tab_index_at(
     for (offset, width) in widths.iter().enumerate() {
         if column >= x && column < x + width {
             let index = start + offset;
-            return (index < mux.panes.len()).then_some(index);
+            return (index < mux.windows.len()).then_some(index);
         }
         x += width;
     }
@@ -371,18 +749,18 @@ pub fn visible_tab_bounds(mux: &crate::mux::MuxState, area: Rect) -> Option<(usi
     }
     let (start, widths) = strip(mux, area);
     let last = start + widths.len().checked_sub(1)?;
-    Some((start, last.min(mux.panes.len().saturating_sub(1))))
+    Some((start, last.min(mux.windows.len().saturating_sub(1))))
 }
 
 /// The rendered strip as `(index of the first tab, width of each tab)`.
 ///
 /// The strip is windowed around the focused tab when it overflows, so every caller
-/// mapping a column back to a pane has to apply that same offset. Sharing one
+/// mapping a column back to a tab has to apply that same offset. Sharing one
 /// computation keeps hit-testing from drifting away from what was drawn.
 fn strip(mux: &crate::mux::MuxState, area: Rect) -> (usize, Vec<u16>) {
     let focused_index = mux
-        .focused_pane()
-        .and_then(|pane| mux.panes.iter().position(|other| other.id == pane.id))
+        .focused
+        .and_then(|id| mux.window_index_of(id))
         .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, _) = tabs::layout(&sessions, focused_index, area.width as usize);
@@ -410,15 +788,9 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let Some(mux) = app.mux.as_ref() else {
         return;
     };
-    let Some(pane) = mux.focused_pane() else {
+    let Some(focused_index) = mux.focused.and_then(|id| mux.window_index_of(id)) else {
         return;
     };
-
-    let focused_index = mux
-        .panes
-        .iter()
-        .position(|candidate| candidate.id == pane.id)
-        .unwrap_or(0);
     let sessions = tab_sources(mux);
     let (tab_list, hidden) = tabs::layout(&sessions, focused_index, area.width as usize);
     let start = tabs::window_start_for(sessions.len(), tab_list.len(), focused_index);
@@ -431,8 +803,11 @@ pub fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         let width = text::display_width(&tab.label);
         // A drag reorders as the pointer moves, so without this the strip would
         // rearrange itself under a pointer with nothing to show it is the cause.
-        let held = app.dragging_tab.is_some()
-            && mux.panes.get(start + offset).map(|pane| pane.id) == app.dragging_tab;
+        let held = app.dragging_tab.is_some_and(|dragged| {
+            mux.windows
+                .get(start + offset)
+                .is_some_and(|window| window.layout.contains(dragged))
+        });
         let (label_style, rule_style, glyph) = if held {
             (
                 // Filled rather than merely recoloured: the tab should read as picked
@@ -1499,6 +1874,33 @@ mod tests {
     }
 
     #[test]
+    fn the_attached_status_bar_answers_a_command_that_could_not_act_until_the_next_key() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        let pane = silent_pane(events);
+        let id = pane.id;
+        app.mux.as_mut().expect("mux").push(pane);
+        app.view = crate::app::View::Attached(id);
+        app.status_message = Some("Nothing to zoom: only one session is on screen".to_string());
+
+        assert!(
+            render(&mut app).contains("Nothing to zoom"),
+            "without this a refused command looks like a key that did not register"
+        );
+
+        crate::mux_input::handle_attached_event(
+            &mut app,
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('a'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(!render(&mut app).contains("Nothing to zoom"));
+        assert!(render(&mut app).contains("for commands"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
     fn move_tab_mode_says_so_in_the_status_bar_for_as_long_as_it_is_open() {
         let mut app = mux_app();
         let events = app.mux.as_ref().expect("mux").events.clone();
@@ -1563,6 +1965,299 @@ mod tests {
             settled[(column, rule_row)].symbol(),
             "━",
             "which is a different glyph from merely being focused"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn side_by_side_sessions_share_one_divider_lit_for_whichever_has_focus() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "left"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "right"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let slots = app.workspace_areas.chats.clone();
+        assert_eq!(slots.len(), 2);
+        let divider = slots[1].area.x;
+        let (top, bottom) = (slots[1].area.y, slots[1].area.bottom() - 1);
+        assert_eq!(
+            buffer[(divider, top)].symbol(),
+            "┬",
+            "{}",
+            row(&buffer, top, 100)
+        );
+        assert_eq!(buffer[(divider, bottom)].symbol(), "┴");
+        assert_eq!(
+            buffer[(divider - 1, top + 1)].symbol(),
+            " ",
+            "one column between the two chats, not two"
+        );
+
+        let accent = app.theme().accent_alt;
+        assert_eq!(buffer[(divider, top + 1)].style().fg, Some(accent));
+        assert_ne!(
+            buffer[(slots[0].area.x, top + 1)].style().fg,
+            Some(accent),
+            "the unfocused split's own edge stays at rest"
+        );
+
+        // Focusing the left session moves the lit frame, divider included.
+        app.mux.as_mut().expect("mux").focus(1);
+        app.view = crate::app::View::Attached(1);
+        let buffer = render_buffer(&mut app, 100, 30);
+        assert_eq!(buffer[(slots[0].area.x, top + 1)].style().fg, Some(accent));
+        assert_eq!(buffer[(divider, top + 1)].style().fg, Some(accent));
+        assert!(
+            row(&buffer, top, 100).contains(" 1 left "),
+            "titled with the tab number, since sessions in one project share a name"
+        );
+        assert!(row(&buffer, top, 100).contains(" 2 right "));
+
+        // A watched split that dies says so itself: the status bar is describing the
+        // focused one.
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .pane_mut(2)
+            .expect("pane")
+            .mark_exited(Some(1));
+        let buffer = render_buffer(&mut app, 100, 30);
+        assert!(row(&buffer, top, 100).contains(" 2 right · exited "));
+        assert_eq!(
+            buffer[(slots[1].area.right() - 1, top + 1)].style().fg,
+            Some(app.theme().error)
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// Found by running CST: the label was drawn over the end of a long title, which
+    /// then read "1 Refactor the a ↑ 3 lines back".
+    #[test]
+    fn a_scrolled_back_split_shows_its_label_beside_the_title_rather_than_over_it() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux.as_mut().expect("mux").push(named_pane(
+            events.clone(),
+            1,
+            "Refactor the authentication middleware to support OAuth device flow",
+        ));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 2, "two"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 3, "three"));
+        app.mux.as_mut().expect("mux").focus(1);
+        for id in [2, 3] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .split_with(crate::mux::SplitDirection::Columns, id);
+        }
+        app.view = crate::app::View::Attached(3);
+        let history: String = (1..=100).map(|line| format!("line {line}\r\n")).collect();
+        let pane = app.mux.as_mut().expect("mux").pane_mut(1).expect("pane");
+        pane.feed(history.as_bytes());
+        pane.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+        .expect("scrolls");
+
+        let buffer = render_buffer(&mut app, 160, 30);
+        let slot = app.workspace_areas.chats[0];
+        let top: String = (slot.area.x..slot.area.right())
+            .map(|x| buffer[(x, slot.area.y)].symbol().to_string())
+            .collect();
+        let label = top.find('↑').expect("the label is there");
+        let ellipsis = top.find('…').expect("the title is cut to fit");
+        assert!(ellipsis < label, "{top}");
+        assert!(top.contains(" 1 Refactor"), "{top}");
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    /// A zoomed split fills the screen like an unsplit chat; without a mark of its own
+    /// there was no telling the other sessions were still there.
+    #[test]
+    fn a_zoomed_split_has_a_heavier_frame_and_says_zoomed() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "left"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "right"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.mux.as_mut().expect("mux").toggle_split_zoom();
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let chat = app.workspace_areas.chat;
+        assert_eq!(buffer[(chat.x, chat.y)].symbol(), "┏");
+        assert_eq!(
+            buffer[(chat.x, chat.y + 1)].style().fg,
+            Some(app.theme().accent),
+            "a colour of its own, not the focus accent"
+        );
+        assert_ne!(app.theme().accent, app.theme().accent_alt);
+        assert!(row(&buffer, chat.y, 100).contains("right · zoomed"));
+
+        app.mux.as_mut().expect("mux").toggle_split_zoom();
+        let buffer = render_buffer(&mut app, 100, 30);
+        let chat = app.workspace_areas.chats[0].area;
+        assert_eq!(buffer[(chat.x, chat.y)].symbol(), "┌");
+        assert!(!row(&buffer, chat.y, 100).contains("zoomed"));
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_long_split_title_is_cut_with_an_ellipsis_and_never_hides_that_it_exited() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "short"));
+        app.mux.as_mut().expect("mux").push(named_pane(
+            events,
+            2,
+            "Refactor the authentication middleware to support OAuth device flow",
+        ));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Columns, 2);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .pane_mut(2)
+            .expect("pane")
+            .mark_exited(Some(1));
+        app.view = crate::app::View::Attached(2);
+
+        let buffer = render_buffer(&mut app, 100, 30);
+        let slot = app.workspace_areas.chats[1];
+        let top = row(&buffer, slot.area.y, 100);
+        assert!(top.contains("… · exited "), "{top}");
+        assert_eq!(
+            buffer[(slot.area.right() - 2, slot.area.y)].symbol(),
+            "─",
+            "the title stops short of the corner: {top}"
+        );
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn a_stack_inside_a_column_joins_the_borders_around_it_with_tees() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        for (id, title) in [(1, "tall"), (2, "upper"), (3, "lower"), (4, "elsewhere")] {
+            app.mux
+                .as_mut()
+                .expect("mux")
+                .push(named_pane(events.clone(), id, title));
+        }
+        let mux = app.mux.as_mut().expect("mux");
+        mux.focus(1);
+        mux.split_with(crate::mux::SplitDirection::Columns, 2);
+        mux.split_with(crate::mux::SplitDirection::Rows, 3);
+        app.view = crate::app::View::Attached(3);
+
+        let buffer = render_buffer(&mut app, 120, 36);
+        let areas = app.workspace_areas.clone();
+        let find = |id| {
+            areas
+                .chats
+                .iter()
+                .find(|slot| slot.pane == id)
+                .unwrap()
+                .area
+        };
+        let (tall, upper, lower) = (find(1), find(2), find(3));
+        // The column boundary runs the full height; the stack's boundary meets it.
+        assert_eq!(buffer[(upper.x, tall.y)].symbol(), "┬");
+        assert_eq!(buffer[(upper.x, tall.bottom() - 1)].symbol(), "┴");
+        assert_eq!(buffer[(lower.x, lower.y)].symbol(), "├");
+        assert_eq!(buffer[(lower.right() - 1, lower.y)].symbol(), "┤");
+        assert_eq!(upper.x, lower.x);
+
+        // One tab for the three, marked as holding more than one, and one for the rest.
+        let strip = row(&buffer, areas.tabs.y + 1, 120);
+        assert!(strip.contains("⧉ lower"), "{strip}");
+        assert!(strip.contains("elsewhere"), "{strip}");
+        assert!(!strip.contains(" tall"), "{strip}");
+        let _ = app.mux.as_mut().expect("mux").shutdown();
+    }
+
+    #[test]
+    fn stacked_sessions_share_a_titled_divider_lit_down_to_it_for_the_upper_one() {
+        let mut app = mux_app();
+        let events = app.mux.as_ref().expect("mux").events.clone();
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events.clone(), 1, "upper"));
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .push(named_pane(events, 2, "lower"));
+        app.mux.as_mut().expect("mux").focus(1);
+        app.mux
+            .as_mut()
+            .expect("mux")
+            .split_with(crate::mux::SplitDirection::Rows, 2);
+        app.mux.as_mut().expect("mux").focus(1);
+        app.view = crate::app::View::Attached(1);
+
+        let buffer = render_buffer(&mut app, 100, 40);
+        let slots = app.workspace_areas.chats.clone();
+        let divider = slots[1].area.y;
+        let (left, right) = (slots[1].area.x, slots[1].area.right() - 1);
+        assert_eq!(buffer[(left, divider)].symbol(), "├");
+        assert_eq!(buffer[(right, divider)].symbol(), "┤");
+        assert!(
+            row(&buffer, divider, 100).contains("lower"),
+            "the shared line carries the lower session's title"
+        );
+        assert_eq!(
+            buffer[(left + 1, divider - 1)].symbol(),
+            " ",
+            "one row between the two chats, not two"
+        );
+
+        // The upper split is focused, so its frame is lit down to the shared line,
+        // while the lower one's own bottom edge stays at rest.
+        let accent = app.theme().accent_alt;
+        assert_eq!(buffer[(left, divider)].style().fg, Some(accent));
+        assert_eq!(buffer[(left, divider - 1)].style().fg, Some(accent));
+        assert_ne!(
+            buffer[(left, slots[1].area.bottom() - 1)].style().fg,
+            Some(accent)
         );
         let _ = app.mux.as_mut().expect("mux").shutdown();
     }

@@ -16,6 +16,7 @@ mod mux;
 mod mux_input;
 mod notifications;
 mod paste;
+mod recovery;
 mod scratchpad;
 #[cfg(feature = "screenshots")]
 mod screenshots;
@@ -217,6 +218,9 @@ enum HookPluginCommand {
 struct RestartManifest {
     panes: Vec<RestartManifestPane>,
     focused_session_id: Option<String>,
+    /// Defaulted so a manifest from a CST that predates splits still loads.
+    #[serde(default)]
+    windows: Vec<mux::split::SavedWindow>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -545,10 +549,14 @@ fn main() -> Result<()> {
                 .and_then(|mux| mux.pane_for_session(session_id))
             {
                 if let Some(mux) = app.mux.as_mut() {
-                    mux.focused = Some(pane_id);
+                    mux.focus(pane_id);
                 }
                 app.view = app::View::Attached(pane_id);
             }
+        }
+        if let Some(mux) = app.mux.as_mut() {
+            mux.restore_windows(&restart_manifest.windows);
+            mux_input::sync_view(&mut app);
         }
         mux_input::sync_workspace_panels(&mut app);
     }
@@ -808,6 +816,25 @@ impl PreparedRestart {
                     .iter()
                     .any(|pane| pane.copilot_running && &pane.session_id == session_id)
             }),
+            // Only sessions that are reopened can take a place in a tab again.
+            windows: request
+                .windows
+                .iter()
+                .filter_map(|window| {
+                    let layout = window.layout.clone().retain(&|session_id: &str| {
+                        request
+                            .panes
+                            .iter()
+                            .any(|pane| pane.copilot_running && pane.session_id == session_id)
+                    })?;
+                    matches!(layout, mux::split::SavedNode::Split { .. }).then(|| {
+                        mux::split::SavedWindow {
+                            layout,
+                            ..window.clone()
+                        }
+                    })
+                })
+                .collect(),
         };
         let path = restart_gate_path(self.gate.path(), "manifest");
         let temporary = restart_gate_path(self.gate.path(), "manifest.tmp");
@@ -1075,6 +1102,9 @@ impl Drop for TerminalEventReader {
     }
 }
 
+/// How often the session list looks again for workspaces of CSTs closed meanwhile.
+const RECOVERY_SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -1084,6 +1114,8 @@ fn run_app(
     // The watcher compares against the revision actually applied by App, so a quick
     // A -> B -> A reversion cannot be hidden by a stale watcher-local baseline.
     app.request_config_reload();
+    app.refresh_recoverable();
+    let mut last_recovery_scan = std::time::Instant::now();
     let _config_watcher = app.mux.as_ref().map(|mux| {
         ConfigWatcher::start(
             mux.events.clone(),
@@ -1155,58 +1187,11 @@ fn run_app(
         }
 
         let size = terminal.size()?;
-        let attached_layout = matches!(app.view, app::View::Attached(_)).then(|| {
-            ui::attached_layout(
-                ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                app.attached_scratchpad_visible(),
-                app.attached_terminal_visible(),
-                app.tab_bar_visible(),
-            )
-        });
         update_layout_metrics(app, size.height);
-
-        if let Some(layout) = attached_layout {
-            app.workspace_areas = app::WorkspaceAreas {
-                chat: layout.chat,
-                tabs: layout.tabs,
-                scratchpad: layout.scratchpad,
-                terminal: layout.terminal,
-            };
-            if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut())
-            {
-                if let Err(error) = terminal_pane.resize(
-                    area.x.saturating_add(1),
-                    area.y.saturating_add(1),
-                    area.height.saturating_sub(2),
-                    area.width.saturating_sub(2),
-                ) {
-                    app.status_message = Some(format!("Terminal resize failed: {error}"));
-                }
-            }
-
-            let chat = layout.chat_pane();
-            let rows = chat.height.max(1);
-            let cols = chat.width.max(1);
-            if app.pane_size != (rows, cols) || app.pane_origin != (chat.x, chat.y) {
-                app.pane_size = (rows, cols);
-                app.pane_origin = (chat.x, chat.y);
-                if let Some(mux) = app.mux.as_mut() {
-                    mux.resize_all_at(chat.x, chat.y, rows, cols);
-                }
-            }
-        } else {
-            if app.mux.is_some() {
-                let rows = size.height.saturating_sub(1).max(1);
-                let cols = size.width.max(1);
-                if app.pane_size != (rows, cols) || app.pane_origin != (0, 0) {
-                    app.pane_size = (rows, cols);
-                    app.pane_origin = (0, 0);
-                    if let Some(mux) = app.mux.as_mut() {
-                        mux.resize_all(rows, cols);
-                    }
-                }
-            }
-        }
+        size_sessions_for_frame(
+            app,
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+        );
 
         input::maybe_load_details(app);
         app.poll_session_load();
@@ -1267,6 +1252,14 @@ fn run_app(
         } else {
             input::handle_input(app)?;
             repaint = true;
+        }
+        // Before the exit checks below, so a quit still writes the workspace it is
+        // leaving: the sessions are only shut down after this.
+        app.save_workspace_record();
+        if last_recovery_scan.elapsed() >= RECOVERY_SCAN_INTERVAL {
+            // Another CST closing while this one is open has a workspace to offer.
+            last_recovery_scan = std::time::Instant::now();
+            app.refresh_recoverable();
         }
 
         if exit_waits_for_update(app) {
@@ -1342,6 +1335,8 @@ fn run_app(
                 mux_input::sync_workspace_panels(app);
                 continue;
             }
+            // The new CST reopens these sessions from the manifest; they are not lost.
+            app.forget_own_workspace_record();
             prepared_restart = Some(prepared);
             break;
         }
@@ -1393,6 +1388,80 @@ fn run_app(
     }
 
     Ok(prepared_restart)
+}
+
+/// Give every session the size it is drawn at, ahead of this frame.
+fn size_sessions_for_frame(app: &mut App, screen: ratatui::layout::Rect) {
+    if !matches!(app.view, app::View::Attached(_)) {
+        // The list draws no session, so none is resized: each keeps the size it was
+        // last shown at, and going to the list and back costs nothing. This used to
+        // resize them all to the full window, a leftover from when sessions were drawn
+        // full screen - Copilot reflowed on the way out and again on the way back,
+        // twice per visible session once splits existed.
+        //
+        // A session started from here is spawned at the chat size it will be shown
+        // at, so it does not reflow the moment it appears either. Once it exists
+        // there are at least two tabs, hence the strip.
+        if app.mux.is_some() {
+            let chat = ui::attached_layout_sized(
+                screen,
+                false,
+                false,
+                app.mux.as_ref().is_some_and(|mux| !mux.panes.is_empty()),
+                app.dock_sizes,
+            )
+            .chat_pane();
+            app.pane_size = (chat.height.max(1), chat.width.max(1));
+            app.pane_origin = (chat.x, chat.y);
+        }
+        return;
+    }
+
+    let layout = app.attached_layout(screen);
+    app.workspace_areas = app::WorkspaceAreas::from_layout(&layout);
+    if let (Some(area), Some(terminal_pane)) = (layout.terminal, app.terminal.active_mut()) {
+        if let Err(error) = terminal_pane.resize(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.height.saturating_sub(2),
+            area.width.saturating_sub(2),
+        ) {
+            app.status_message = Some(format!("Terminal resize failed: {error}"));
+        }
+    }
+
+    let chat = layout.chat_pane();
+    app.pane_size = (chat.height.max(1), chat.width.max(1));
+    app.pane_origin = (chat.x, chat.y);
+    // Sessions on screen take the size they are drawn at. Every other one — in
+    // another tab, or behind a zoom — takes the size it will be drawn at when it
+    // comes back, so neither switching tabs nor unzooming makes Copilot reflow.
+    let mut areas: std::collections::HashMap<mux::PaneId, ratatui::layout::Rect> = layout
+        .chats
+        .iter()
+        .map(|slot| (slot.pane, slot.pane_area()))
+        .collect();
+    if let Some(mux) = app.mux.as_ref() {
+        for window in &mux.windows {
+            let members = window.layout.panes();
+            if members.iter().all(|id| areas.contains_key(id)) {
+                continue;
+            }
+            let background = app.background_layout(screen, window);
+            for slot in &background.chats {
+                areas.entry(slot.pane).or_insert_with(|| slot.pane_area());
+            }
+            for id in members {
+                areas.entry(id).or_insert_with(|| background.chat_pane());
+            }
+        }
+    }
+    if let Some(mux) = app.mux.as_mut() {
+        for pane in &mut mux.panes {
+            let area = areas.get(&pane.id).copied().unwrap_or(chat);
+            let _ = pane.ensure_size_at(area.x, area.y, area.height.max(1), area.width.max(1));
+        }
+    }
 }
 
 fn update_layout_metrics(app: &mut App, height: u16) {
@@ -1562,8 +1631,16 @@ fn prioritize_explicit_exit(app: &mut App) -> bool {
 }
 
 fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> bool {
+    // Anything CST draws over the session takes the key itself, so the child will not
+    // echo it and nothing else would trigger the frame. The split picker found this:
+    // it stays on the attached screen, and its selection did not move until the
+    // session happened to print.
     if !matches!(app.view, app::View::Attached(_))
         || app.workspace_focus != app::WorkspaceFocus::Chat
+        || app.mode != app::Mode::Normal
+        || app.confirm_end_tmux.is_some()
+        || crate::input::thread_inbox_active(app)
+        || crate::input::whats_new_active(app)
         || app.confirm_quit
         || app.confirm_update_restart
         || app.command_palette.is_some()
@@ -1591,6 +1668,8 @@ fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> b
             app.update_notice.is_some()
                 || mux.prefix_state != mux::PrefixState::Idle
                 || mux.prefix.matches(key)
+                // Switches tabs itself; no session will echo it.
+                || mux_input::tab_switch_key(key).is_some()
         }
         crossterm::event::Event::Key(_) => false,
         _ => true,
@@ -1877,6 +1956,7 @@ mod tests {
                 },
             ],
             focused_session_id: Some("session-2".to_string()),
+            windows: Vec::new(),
         };
 
         let args = restart_arguments(&cli, Path::new(r"C:\copilot-home"), true);
@@ -1914,6 +1994,90 @@ mod tests {
             ["session-2", "session-1"]
         );
         assert_eq!(manifest.focused_session_id.as_deref(), Some("session-2"));
+    }
+
+    #[test]
+    fn a_tab_of_several_sessions_survives_the_update_restart_minus_those_not_reopened() {
+        use mux::split::{SavedNode, SavedWindow};
+        let pane = |session_id: &str, copilot_running: bool| app::UpdateRestartPane {
+            pane_id: None,
+            copilot_running,
+            terminal_generation: None,
+            session_id: session_id.to_string(),
+            cwd: PathBuf::from("work"),
+            title: session_id.to_string(),
+        };
+        let leaf = |session: &str| SavedNode::Pane(session.to_string());
+        let request = app::UpdateRestartRequest {
+            panes: vec![
+                pane("a", true),
+                pane("b", true),
+                pane("c", false),
+                pane("d", true),
+            ],
+            focused_session_id: Some("a".to_string()),
+            windows: vec![
+                // a beside a stack of c and b
+                SavedWindow {
+                    layout: SavedNode::Split {
+                        direction: mux::SplitDirection::Columns,
+                        children: vec![
+                            leaf("a"),
+                            SavedNode::Split {
+                                direction: mux::SplitDirection::Rows,
+                                children: vec![leaf("c"), leaf("b")],
+                                weights: vec![50, 150],
+                            },
+                        ],
+                        weights: vec![100, 100],
+                    },
+                    zoomed: false,
+                    focused_session_id: Some("b".to_string()),
+                },
+                // c and d: only d comes back, which is no longer a split
+                SavedWindow {
+                    layout: SavedNode::Split {
+                        direction: mux::SplitDirection::Rows,
+                        children: vec![leaf("c"), leaf("d")],
+                        weights: vec![100, 100],
+                    },
+                    zoomed: false,
+                    focused_session_id: None,
+                },
+            ],
+        };
+        let prepared = PreparedRestart {
+            child: None,
+            gate: tempfile::tempdir().unwrap(),
+            released: false,
+        };
+        prepared.write_manifest(&request).unwrap();
+        let manifest: RestartManifest = serde_json::from_slice(
+            &std::fs::read(restart_gate_path(prepared.gate.path(), "manifest")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.windows.len(),
+            1,
+            "a tab left with one session needs no saving"
+        );
+        let window = &manifest.windows[0];
+        assert_eq!(window.layout.sessions(), ["a", "b"]);
+        assert_eq!(window.focused_session_id.as_deref(), Some("b"));
+        assert!(matches!(
+            window.layout,
+            SavedNode::Split {
+                direction: mux::SplitDirection::Columns,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_restart_manifest_from_before_splits_still_loads() {
+        let manifest: RestartManifest =
+            serde_json::from_str(r#"{"panes":[],"focused_session_id":null}"#).unwrap();
+        assert!(manifest.windows.is_empty());
     }
 
     #[test]
@@ -1971,6 +2135,7 @@ mod tests {
                 title: "Shell".to_string(),
             }],
             focused_session_id: Some("stopped-chat".to_string()),
+            windows: Vec::new(),
         };
 
         let prepared = PreparedRestart {
@@ -2100,6 +2265,82 @@ mod tests {
     }
 
     #[test]
+    fn going_to_the_session_list_and_back_resizes_no_session() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        let events = app.mux.as_ref().unwrap().events.clone();
+        let (program, args) = if cfg!(windows) {
+            (
+                "cmd.exe".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let pane = Pane::spawn(
+            PaneSpec {
+                id: 1,
+                title: "Listed".to_string(),
+                cwd: std::env::temp_dir(),
+                session_id: "listed".to_string(),
+                program,
+                args,
+                events_path: None,
+                terminal_light_mode: Some(false),
+                hooks_active: false,
+            },
+            24,
+            80,
+            events,
+        )
+        .unwrap();
+        app.mux.as_mut().unwrap().push(pane);
+        let screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+
+        app.view = app::View::Attached(1);
+        size_sessions_for_frame(&mut app, screen);
+        let shown = app.pane_size;
+        let chat = app.workspace_areas.chats[0].pane_area();
+
+        // Checked while on the list: coming back would put any size right again, which
+        // is exactly the second reflow this is about.
+        app.view = app::View::List;
+        size_sessions_for_frame(&mut app, screen);
+        let pane = app.mux.as_mut().unwrap().pane_mut(1).unwrap();
+        assert!(
+            !pane
+                .ensure_size_at(chat.x, chat.y, chat.height, chat.width)
+                .unwrap(),
+            "still exactly where it was shown, so Copilot never reflowed"
+        );
+
+        app.view = app::View::Attached(1);
+        size_sessions_for_frame(&mut app, screen);
+        assert_eq!(app.pane_size, shown);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_session_started_from_the_list_is_spawned_at_the_size_it_will_be_shown_at() {
+        let config = config::UserConfig {
+            mux: true,
+            ..config::UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        app.view = app::View::List;
+        let screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        size_sessions_for_frame(&mut app, screen);
+        let chat = ui::attached_layout(screen, false, false, false).chat_pane();
+        assert_eq!(app.pane_size, (chat.height, chat.width));
+    }
+
+    #[test]
     fn ordinary_chat_input_waits_for_the_child_before_repainting() {
         let config = config::UserConfig {
             mux: true,
@@ -2148,6 +2389,16 @@ mod tests {
             &app,
             &crossterm::event::Event::Paste("large prompt".to_string())
         ));
+
+        // A modal over the session takes the key, so no echo will repaint for it.
+        app.mode = app::Mode::PaneList;
+        app.split_picker = Some(mux::SplitDirection::Columns);
+        assert!(
+            terminal_event_needs_repaint(&app, &character),
+            "the split picker would sit unchanged until the session printed"
+        );
+        app.mode = app::Mode::Normal;
+        app.split_picker = None;
 
         let prefix = crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('b'),

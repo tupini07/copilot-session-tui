@@ -64,12 +64,98 @@ pub enum WorkspaceHelp {
     Scratchpad,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceAreas {
+    /// The focused session's chat box.
     pub chat: Rect,
+    /// Every session on screen. Also the record of what the user can see, which is
+    /// what decides whether a session's output repaints and whether it notifies.
+    pub chats: Vec<crate::ui::ChatSlot>,
+    /// Where each split put its members, for dragging and resizing.
+    pub splits: Vec<crate::ui::SplitGeometry>,
     pub tabs: Rect,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
+    pub split_collapsed: bool,
+    /// The screen the areas were laid out for, so they can be laid out again between
+    /// frames.
+    pub screen: Rect,
+}
+
+/// A border on the attached screen that can be dragged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Divider {
+    /// The boundary in front of member `index` of the split at `path` in the tab's
+    /// layout, shared with the member before it.
+    Split { path: Vec<usize>, index: usize },
+    /// The scratchpad column's left edge.
+    ScratchpadDock,
+    /// The terminal strip's top edge.
+    TerminalDock,
+}
+
+impl WorkspaceAreas {
+    pub fn from_layout(layout: &crate::ui::AttachedLayout) -> Self {
+        Self {
+            chat: layout.chat,
+            chats: layout.chats.clone(),
+            splits: layout.splits.clone(),
+            tabs: layout.tabs,
+            scratchpad: layout.scratchpad,
+            terminal: layout.terminal,
+            split_collapsed: layout.split_collapsed,
+            screen: layout.screen,
+        }
+    }
+
+    /// The border under the pointer that can be dragged to resize what is either side.
+    pub fn divider_at(&self, column: u16, row: u16) -> Option<Divider> {
+        let along = |area: Rect| column >= area.x && column < area.right();
+        let down = |area: Rect| row >= area.y && row < area.bottom();
+        // Each boundary is the later member's leading edge. Inner splits are listed
+        // first, so a click where a nested boundary meets an outer one picks the
+        // nested one — the shorter line, which is the one aimed at.
+        for split in &self.splits {
+            let (across_start, across_length) = split.across;
+            let within = |at: u16| at >= across_start && at < across_start + across_length;
+            for (index, start) in split.starts.iter().enumerate().skip(1) {
+                let hit = match split.direction {
+                    crate::mux::SplitDirection::Columns => column == *start && within(row),
+                    crate::mux::SplitDirection::Rows => row == *start && within(column),
+                };
+                if hit {
+                    return Some(Divider::Split {
+                        path: split.path.clone(),
+                        index,
+                    });
+                }
+            }
+        }
+        if let Some(area) = self.scratchpad {
+            if column == area.x && down(area) {
+                return Some(Divider::ScratchpadDock);
+            }
+        }
+        if let Some(area) = self.terminal {
+            if row == area.y && along(area) {
+                return Some(Divider::TerminalDock);
+            }
+        }
+        None
+    }
+
+    /// The session whose chat box is under the pointer, border included.
+    pub fn chat_at(&self, column: u16, row: u16) -> Option<crate::mux::PaneId> {
+        self.chats
+            .iter()
+            .find(|slot| {
+                column >= slot.area.x
+                    && column < slot.area.right()
+                    && row >= slot.area.y
+                    && row < slot.area.bottom()
+            })
+            .map(|slot| slot.pane)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +175,8 @@ pub enum Mode {
     Settings,
     ProjectSettings,
     BranchName,
+    /// Choosing a closed workspace to bring back.
+    RecoverWorkspace,
     /// Pane switcher opened with `prefix w`.
     PaneList,
     Scratchpad,
@@ -147,6 +235,16 @@ pub struct PendingWorktree {
 /// A tmux launch deferred to the main loop for the same reason as [`PendingWorktree`]:
 /// starting a tmux server and waiting out the startup grace takes long enough that the
 /// key handler must not block on it before anything is painted.
+/// Where a session started from the split picker goes once it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSplit {
+    pub direction: crate::mux::SplitDirection,
+    /// The session it is split beside.
+    pub anchor: crate::mux::PaneId,
+    /// Chosen in the project picker; until then, the flow is still choosing.
+    pub project: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PendingTmuxLaunch {
     New {
@@ -164,6 +262,8 @@ pub enum PendingTmuxLaunch {
 pub struct UpdateRestartRequest {
     pub panes: Vec<UpdateRestartPane>,
     pub focused_session_id: Option<String>,
+    /// Tabs holding more than one session, so they come back that way.
+    pub windows: Vec<crate::mux::split::SavedWindow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,6 +863,29 @@ pub struct App {
     pub confirm_quit: bool,
     /// Highlighted row in the pane switcher.
     pub pane_selected: usize,
+    /// The pane switcher is choosing a session to split with, in this direction,
+    /// rather than one to switch to.
+    pub split_picker: Option<crate::mux::SplitDirection>,
+    /// A session being started from the split picker, to open beside `anchor`
+    /// rather than in a tab of its own. Cleared whenever that flow is left.
+    pub new_split: Option<NewSplit>,
+    /// When this instance started; with the pid, what its workspace record is named by.
+    pub instance_started_at: chrono::DateTime<chrono::Utc>,
+    /// Where workspace records are kept, or `None` to keep none (tests).
+    pub workspace_record_root: Option<PathBuf>,
+    /// The last record written, to write again only when the workspace changes.
+    last_workspace_record: Option<crate::recovery::WorkspaceRecord>,
+    last_workspace_record_at: Option<std::time::Instant>,
+    /// Workspaces of closed CSTs that could be brought back, newest first.
+    pub recoverable: Vec<crate::recovery::Recoverable>,
+    pub recover_selected: usize,
+    /// A click that only moved focus to another split owns the rest of its gesture,
+    /// so the session it landed in never sees a release without a press.
+    pub swallow_mouse_until_up: bool,
+    /// Dock sizes the user has dragged to. Kept for as long as CST runs.
+    pub dock_sizes: crate::ui::DockSizes,
+    /// The border being dragged, which owns the gesture until the button comes up.
+    pub dragging_divider: Option<Divider>,
     /// The `mux` value stored on disk, so a `--mux` / `--no-mux` override for this
     /// invocation is never accidentally persisted by the settings popup.
     pub mux_on_disk: bool,
@@ -927,6 +1050,18 @@ impl App {
             pane_origin: (0, 0),
             confirm_quit: false,
             pane_selected: 0,
+            split_picker: None,
+            new_split: None,
+            instance_started_at: chrono::Utc::now(),
+            // Never the real state directory from a test.
+            workspace_record_root: (!cfg!(test)).then(crate::recovery::root),
+            last_workspace_record: None,
+            last_workspace_record_at: None,
+            recoverable: Vec::new(),
+            recover_selected: 0,
+            swallow_mouse_until_up: false,
+            dock_sizes: crate::ui::DockSizes::default(),
+            dragging_divider: None,
             mux_on_disk,
             exit_dir: None,
             pending_worktree: None,
@@ -1004,8 +1139,69 @@ impl App {
             .unwrap_or(0);
         self.workspace_focus = WorkspaceFocus::Chat;
         self.terminal.unfocus();
+        self.split_picker = None;
         self.view = View::List;
         self.mode = Mode::PaneList;
+    }
+
+    /// Open the pane switcher to choose a session to put beside the focused one.
+    ///
+    /// Unlike the plain switcher this stays on the attached screen. Leaving it would
+    /// resize every session to the list's full width and back again, making each one
+    /// on screen reflow twice just to open a menu.
+    pub fn open_split_picker(&mut self, direction: crate::mux::SplitDirection) {
+        if self.mux.is_none() || !matches!(self.view, View::Attached(_)) {
+            return;
+        }
+        let candidates = self.split_candidates();
+        // Nothing to bring in, so the other direction means "turn the split". Without
+        // this, a tab holding every session could never go from side by side to
+        // stacked. Starting a new session that way is still one key away: the same
+        // direction again opens the picker.
+        if candidates.is_empty()
+            && self
+                .mux
+                .as_mut()
+                .is_some_and(|mux| mux.turn_split(direction))
+        {
+            self.status_message = Some(format!("Sessions now {}", direction.label()));
+            self.refresh_workspace_areas();
+            return;
+        }
+        self.refresh_live_pane_sessions();
+        self.split_picker = Some(direction);
+        // On the first existing session when there is one; row 0 starts a new one.
+        self.pane_selected = usize::from(!candidates.is_empty());
+        self.mode = Mode::PaneList;
+    }
+
+    /// The rows the pane switcher shows: every session, or when picking a split only
+    /// those not already on screen.
+    pub fn pane_list_ids(&self) -> Vec<crate::mux::PaneId> {
+        if self.split_picker.is_some() {
+            return self.split_candidates();
+        }
+        self.mux
+            .as_ref()
+            .map(|mux| mux.panes.iter().map(|pane| pane.id).collect())
+            .unwrap_or_default()
+    }
+
+    fn split_candidates(&self) -> Vec<crate::mux::PaneId> {
+        let Some(mux) = self.mux.as_ref() else {
+            return Vec::new();
+        };
+        // Every session in another tab; picking one brings it into this one.
+        mux.panes
+            .iter()
+            .map(|pane| pane.id)
+            .filter(|id| {
+                mux.focused != Some(*id)
+                    && !mux
+                        .current_window()
+                        .is_some_and(|window| window.layout.contains(*id))
+            })
+            .collect()
     }
 
     pub fn mux_enabled(&self) -> bool {
@@ -1429,6 +1625,12 @@ impl App {
             .is_some_and(|mux| mux.prefix_state == PrefixState::Help)
     }
 
+    pub fn layout_prefix_pending(&self) -> bool {
+        self.mux
+            .as_ref()
+            .is_some_and(|mux| mux.prefix_state == PrefixState::Layout)
+    }
+
     pub fn github_prefix_pending(&self) -> bool {
         self.mux
             .as_ref()
@@ -1717,17 +1919,16 @@ impl App {
         }
     }
 
-    /// Web links in whatever pane is showing, to be drawn as real hyperlinks.
+    /// Web links in whatever panes are showing, to be drawn as real hyperlinks.
     pub fn visible_hyperlinks(&self) -> Vec<crate::ui::hyperlinks::HyperlinkRun> {
-        match self.view {
-            View::Attached(id) => self
-                .mux
-                .as_ref()
-                .and_then(|mux| mux.pane(id))
-                .map(crate::mux::Pane::web_hyperlinks)
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        }
+        let (View::Attached(_), Some(mux)) = (self.view, self.mux.as_ref()) else {
+            return Vec::new();
+        };
+        mux.panes
+            .iter()
+            .filter(|pane| self.pane_on_screen(pane.id))
+            .flat_map(crate::mux::Pane::web_hyperlinks)
+            .collect()
     }
 
     pub fn inspect_github_item(&mut self, number: u64) {
@@ -2475,6 +2676,144 @@ impl App {
         matches!(self.view, View::Attached(id) if self.terminal_owner == Some(id)
             && self.terminal_open.contains(&id))
             && self.terminal.is_visible()
+    }
+
+    /// Whether the scratchpad column is on screen, which in a split is not the same as
+    /// the focused session having a scratchpad.
+    ///
+    /// Inside a split the column stays while any visible session has one open, and
+    /// shows a placeholder for a session that does not. Otherwise moving focus between
+    /// splits would add and remove the column, and every Copilot on screen would
+    /// reflow to the new width each time.
+    pub fn scratchpad_dock_visible(&self) -> bool {
+        self.attached_scratchpad_visible() || self.split_has_panel_open(&self.scratchpad_open)
+    }
+
+    /// The terminal strip's counterpart to [`Self::scratchpad_dock_visible`].
+    pub fn terminal_dock_visible(&self) -> bool {
+        self.attached_terminal_visible() || self.split_has_panel_open(&self.terminal_open)
+    }
+
+    fn split_has_panel_open(&self, open: &HashSet<crate::mux::PaneId>) -> bool {
+        matches!(self.view, View::Attached(_))
+            && self
+                .mux
+                .as_ref()
+                .and_then(crate::mux::MuxState::visible_layout)
+                .is_some_and(|layout| layout.panes().iter().any(|id| open.contains(id)))
+    }
+
+    /// Where everything goes while attached. The one place this is decided, so the
+    /// frame that is drawn and the sizes the sessions are given cannot disagree.
+    pub fn attached_layout(&self, area: Rect) -> crate::ui::AttachedLayout {
+        let mux = self.mux.as_ref();
+        self.layout_for(
+            area,
+            mux.and_then(crate::mux::MuxState::visible_layout),
+            mux.and_then(|mux| mux.focused),
+            (self.scratchpad_dock_visible(), self.terminal_dock_visible()),
+            (
+                self.attached_scratchpad_visible(),
+                self.attached_terminal_visible(),
+            ),
+        )
+    }
+
+    /// How a tab would be laid out if it were brought on screen now, zoom aside, for
+    /// sizing the sessions in it. Sized in advance, switching to a tab — or unzooming
+    /// one — never makes Copilot reflow.
+    pub fn background_layout(
+        &self,
+        area: Rect,
+        window: &crate::mux::Window,
+    ) -> crate::ui::AttachedLayout {
+        let panes = window.layout.panes();
+        let docks = (
+            panes.iter().any(|id| self.scratchpad_open.contains(id)),
+            panes.iter().any(|id| self.terminal_open.contains(id)),
+        );
+        self.layout_for(
+            area,
+            window.is_split().then_some(&window.layout),
+            Some(window.last_focused),
+            docks,
+            docks,
+        )
+    }
+
+    /// `split_docks` apply while `layout` fits, `own_docks` if it falls back to the
+    /// focused session alone — a lone chat shows only its own panels.
+    fn layout_for(
+        &self,
+        area: Rect,
+        layout: Option<&crate::mux::LayoutNode>,
+        focused: Option<crate::mux::PaneId>,
+        split_docks: (bool, bool),
+        own_docks: (bool, bool),
+    ) -> crate::ui::AttachedLayout {
+        let tabs = self.tab_bar_visible();
+        let collapsed = layout.is_some();
+        if let (Some(layout), Some(focused)) = (layout, focused) {
+            let (scratchpad, terminal) = split_docks;
+            let fitted = crate::ui::docks_fitted_to_split(
+                area,
+                tabs,
+                scratchpad,
+                terminal,
+                self.dock_sizes,
+                layout,
+            );
+            for sizes in [self.dock_sizes, fitted] {
+                if let Some(attached) = crate::ui::attached_split_layout(
+                    area, scratchpad, terminal, tabs, sizes, layout, focused,
+                ) {
+                    return attached;
+                }
+            }
+        }
+        // No split, or one the window is too small for. Either way only the focused
+        // session is drawn, with only its own panels.
+        let mut layout =
+            crate::ui::attached_layout_sized(area, own_docks.0, own_docks.1, tabs, self.dock_sizes);
+        layout.split_collapsed = collapsed;
+        if let Some(focused) = focused {
+            layout.chats = vec![crate::ui::ChatSlot {
+                pane: focused,
+                area: layout.chat,
+                borders: layout.chat_borders,
+            }];
+        }
+        layout
+    }
+
+    /// Lay the attached screen out again now rather than at the next frame.
+    ///
+    /// Anything that reads geometry back — a resize step, a click — sees the last
+    /// frame's. Several keys can arrive before that frame is drawn, and each would
+    /// then start from the same stale sizes and undo the one before it; three presses
+    /// of a resize key moved a divider one step. Calling this after changing the
+    /// layout keeps the record current between frames.
+    pub fn refresh_workspace_areas(&mut self) {
+        let screen = self.workspace_areas.screen;
+        if matches!(self.view, View::Attached(_)) && !screen.is_empty() {
+            self.workspace_areas = WorkspaceAreas::from_layout(&self.attached_layout(screen));
+        }
+    }
+
+    /// Whether the user can see this session right now — the attached one, or any
+    /// other sharing the screen with it in a split.
+    pub fn pane_on_screen(&self, id: crate::mux::PaneId) -> bool {
+        match self.view {
+            View::Attached(attached) => {
+                attached == id
+                    || self
+                        .workspace_areas
+                        .chats
+                        .iter()
+                        .any(|slot| slot.pane == id)
+            }
+            View::List => false,
+        }
     }
 
     pub fn collapse_stopped_terminals(&mut self) {
@@ -3450,6 +3789,9 @@ impl App {
     /// While attached, the focused pane is authoritative; the hidden session-list
     /// filter may still point at a different repository.
     pub fn command_project(&self) -> Option<String> {
+        if let Some(project) = self.new_split_project() {
+            return Some(project);
+        }
         match self.view {
             View::Attached(_) => self
                 .mux
@@ -3460,8 +3802,240 @@ impl App {
         }
     }
 
+    /// The project picked for a session being started into a split, which outranks
+    /// every other notion of "here" until that session exists or the flow is left.
+    fn new_split_project(&self) -> Option<String> {
+        self.new_split
+            .as_ref()
+            .and_then(|new_split| new_split.project.clone())
+    }
+
+    /// Start choosing a brand-new session to open beside the focused one: first its
+    /// project, then whether it runs as-is or in a worktree, both through the popups
+    /// `n` already uses.
+    pub fn begin_new_split_session(&mut self, direction: crate::mux::SplitDirection) {
+        let Some(anchor) = self.mux.as_ref().and_then(|mux| mux.focused) else {
+            return;
+        };
+        self.new_split = Some(NewSplit {
+            direction,
+            anchor,
+            project: None,
+        });
+        self.project_search_query.clear();
+        self.project_scroll_offset = 0;
+        // Start on the focused session's project, the likeliest choice — and make sure
+        // it is offered at all: a directory outside Git, or with no history yet, is in
+        // no list of known projects, and the picker would have nothing to pick.
+        let here = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .map(|pane| {
+                let cwd = pane.cwd.to_string_lossy().to_string();
+                crate::session::loader::detect_project_root(&cwd).unwrap_or(cwd)
+            });
+        if let Some(here) = here.as_ref() {
+            if !self
+                .unique_projects
+                .iter()
+                .any(|project| project.eq_ignore_ascii_case(here))
+            {
+                self.unique_projects.insert(0, here.clone());
+            }
+        }
+        self.project_selected = here
+            .and_then(|here| {
+                self.filtered_project_indices()
+                    .iter()
+                    .position(|index| self.unique_projects[*index].eq_ignore_ascii_case(&here))
+            })
+            .unwrap_or(0);
+        self.mode = Mode::FilterProject;
+    }
+
+    /// This instance's workspace as it stands, or `None` with nothing open.
+    pub fn current_workspace_record(&self) -> Option<crate::recovery::WorkspaceRecord> {
+        let mux = self.mux.as_ref()?;
+        if mux.panes.is_empty() {
+            return None;
+        }
+        Some(crate::recovery::WorkspaceRecord {
+            pid: std::process::id(),
+            started_at: self.instance_started_at,
+            saved_at: chrono::Utc::now(),
+            launch_dir: self.cwd.clone(),
+            sessions: mux
+                .panes
+                .iter()
+                .map(|pane| crate::recovery::RecordedSession {
+                    session_id: pane.session_id.clone(),
+                    cwd: pane.cwd.to_string_lossy().to_string(),
+                    title: pane.title.clone(),
+                })
+                .collect(),
+            focused_session_id: mux.focused_pane().map(|pane| pane.session_id.clone()),
+            windows: mux.save_windows(),
+        })
+    }
+
+    /// Write this instance's workspace down if it has changed, or once a heartbeat has
+    /// passed so other instances can tell it is still running. With nothing open the
+    /// record goes: closing every tab means there is nothing to recover.
+    pub fn save_workspace_record(&mut self) {
+        let Some(root) = self.workspace_record_root.clone() else {
+            return;
+        };
+        let Some(record) = self.current_workspace_record() else {
+            if self.last_workspace_record.take().is_some() {
+                crate::recovery::remove_in(&root, std::process::id(), self.instance_started_at);
+            }
+            return;
+        };
+        let unchanged = self
+            .last_workspace_record
+            .as_ref()
+            .is_some_and(|last| last.same_workspace(&record));
+        let heartbeat_due = self
+            .last_workspace_record_at
+            .is_none_or(|at| at.elapsed() >= crate::recovery::HEARTBEAT);
+        if unchanged && !heartbeat_due {
+            return;
+        }
+        if crate::recovery::write_in(&root, &record).is_ok() {
+            self.last_workspace_record = Some(record);
+            self.last_workspace_record_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Hand the workspace over to the CST taking this one's place after an update; it
+    /// reopens these sessions itself, and must not be offered them as lost.
+    pub fn forget_own_workspace_record(&mut self) {
+        if let Some(root) = self.workspace_record_root.as_ref() {
+            crate::recovery::remove_in(root, std::process::id(), self.instance_started_at);
+        }
+        self.last_workspace_record = None;
+    }
+
+    /// Look again for workspaces of closed CSTs that could be brought back.
+    pub fn refresh_recoverable(&mut self) {
+        let Some(root) = self.workspace_record_root.clone() else {
+            return;
+        };
+        if self.mux.is_none() {
+            // Recovering means hosting the sessions, which only the multiplexer does.
+            self.recoverable.clear();
+            return;
+        }
+        let state = self.copilot_home.join("session-state");
+        let mux = self.mux.as_ref();
+        self.recoverable = crate::recovery::recoverable_in(
+            &root,
+            (std::process::id(), self.instance_started_at),
+            chrono::Utc::now(),
+            crate::session::process::process_is_running,
+            |session| {
+                !crate::session::process::active_session_pids(&state.join(session)).is_empty()
+            },
+            |session| mux.is_some_and(|mux| mux.pane_for_session(session).is_some()),
+        );
+        self.recover_selected = self
+            .recover_selected
+            .min(self.recoverable.len().saturating_sub(1));
+    }
+
+    pub fn open_recover_workspace(&mut self) {
+        self.refresh_recoverable();
+        if self.recoverable.is_empty() {
+            self.status_message = Some("No closed workspace to recover".to_string());
+            return;
+        }
+        self.recover_selected = 0;
+        self.mode = Mode::RecoverWorkspace;
+    }
+
+    /// Bring a closed workspace back: every session in it that is free to resume, in
+    /// its tabs and layouts, focused where it was. Its record goes, since this
+    /// instance's own now covers those sessions.
+    pub fn recover_workspace(&mut self, index: usize) -> Result<()> {
+        let Some(workspace) = self.recoverable.get(index).cloned() else {
+            return Ok(());
+        };
+        let mut failed = Vec::new();
+        for session in &workspace.sessions {
+            let cwd = if Path::new(&session.cwd).is_dir() {
+                session.cwd.clone()
+            } else {
+                // The directory may be gone — a removed worktree. Resume anyway, from
+                // somewhere that exists, rather than lose the session.
+                self.cwd.clone().unwrap_or_else(|| ".".to_string())
+            };
+            if let Err(error) =
+                self.attach_session(&session.session_id, &cwd, session.title.clone())
+            {
+                failed.push(format!("'{}': {error}", session.title));
+            }
+        }
+        if let Some(mux) = self.mux.as_mut() {
+            mux.restore_windows(&workspace.record.windows);
+            let focus = workspace
+                .record
+                .focused_session_id
+                .as_deref()
+                .and_then(|session| mux.pane_for_session(session))
+                .or_else(|| {
+                    workspace
+                        .sessions
+                        .first()
+                        .and_then(|session| mux.pane_for_session(&session.session_id))
+                });
+            if let Some(id) = focus {
+                mux.focus(id);
+                self.view = View::Attached(id);
+            }
+        }
+        let _ = std::fs::remove_file(&workspace.path);
+        self.refresh_recoverable();
+        let restored = workspace.sessions.len() - failed.len();
+        self.status_message = Some(if failed.is_empty() {
+            format!("Recovered {restored} session(s)")
+        } else {
+            format!(
+                "Recovered {restored} session(s); could not resume {}",
+                failed.join(", ")
+            )
+        });
+        Ok(())
+    }
+
+    /// Drop a closed workspace from the list for good.
+    pub fn forget_workspace(&mut self, index: usize) {
+        if let Some(workspace) = self.recoverable.get(index) {
+            let _ = std::fs::remove_file(&workspace.path);
+        }
+        self.refresh_recoverable();
+        if self.recoverable.is_empty() {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// A session just opened from the split picker joins the tab it was asked for,
+    /// rather than keeping the tab of its own every new session opens in.
+    pub(crate) fn join_pending_split(&mut self, id: crate::mux::PaneId) {
+        let (Some(new_split), Some(mux)) = (self.new_split.take(), self.mux.as_mut()) else {
+            return;
+        };
+        if mux.pane(new_split.anchor).is_some() {
+            mux.focus(new_split.anchor);
+            mux.split_with(new_split.direction, id);
+        }
+    }
+
     /// Directory to start a plain new session in.
     pub fn new_session_dir(&self) -> Option<String> {
+        if let Some(project) = self.new_split_project() {
+            return Some(project);
+        }
         match self.view {
             View::Attached(_) => self
                 .mux
@@ -3474,18 +4048,46 @@ impl App {
 
     /// Attach an existing Copilot session as a pane, or focus it if already attached.
     pub fn attach_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
+        self.attach_session_replacing(session_id, cwd, title, None)
+    }
+
+    /// [`Self::attach_session`], putting the new pane exactly where `replacing` is —
+    /// its slot in a split, or its place in the strip — and closing `replacing`.
+    pub fn attach_session_replacing(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        title: String,
+        replacing: Option<crate::mux::PaneId>,
+    ) -> Result<()> {
+        if let Some(old) = replacing {
+            self.reopen_session(session_id, cwd, title)?;
+            if let Some(mux) = self.mux.as_mut() {
+                if let Some(new) = mux.focused {
+                    mux.replace_in_place(old, new);
+                    self.view = View::Attached(new);
+                }
+            }
+            return Ok(());
+        }
         // A pane that already exited is not worth re-focusing; drop it and resume afresh.
         if let Some(mux) = self.mux.as_mut() {
             if let Some(existing) = mux.pane_for_session(session_id) {
                 let running = mux.pane(existing).is_some_and(|pane| pane.is_running());
                 if running {
-                    mux.focused = Some(existing);
+                    mux.focus(existing);
                     self.view = View::Attached(existing);
                     return Ok(());
                 }
                 mux.remove(existing);
             }
         }
+        self.reopen_session(session_id, cwd, title)
+    }
+
+    /// Open `session_id` in a new tab: through tmux if it is still alive there,
+    /// otherwise by resuming it.
+    fn reopen_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
         if let Some(reference) = tmux::find_live(session_id)? {
             return self.attach_tmux_session(reference, title);
         }
@@ -3502,7 +4104,7 @@ impl App {
 
     /// The tab strip only earns its two rows once there is something to switch between.
     pub fn tab_bar_visible(&self) -> bool {
-        self.mux.as_ref().is_some_and(|mux| mux.panes.len() > 1)
+        self.mux.as_ref().is_some_and(|mux| mux.windows.len() > 1)
     }
 
     /// Open every inactive favorite as a pane, in the user's configured order.
@@ -3538,7 +4140,7 @@ impl App {
 
         if let Some(id) = first {
             if let Some(mux) = self.mux.as_mut() {
-                mux.focused = Some(id);
+                mux.focus(id);
             }
             self.view = View::Attached(id);
         }
@@ -3620,6 +4222,7 @@ impl App {
             mux.events.clone(),
         )?;
         mux.push(pane);
+        self.join_pending_split(id);
         self.view = View::Attached(id);
         self.restore_workspace_panels(id, &workspace_session_id);
         Ok(())
@@ -4134,9 +4737,15 @@ impl App {
                     .filter(|session_id| panes.iter().any(|pane| pane.session_id == *session_id))
             })
             .map(str::to_string);
+        let windows = self
+            .mux
+            .as_ref()
+            .map(crate::mux::MuxState::save_windows)
+            .unwrap_or_default();
         UpdateRestartRequest {
             panes,
             focused_session_id,
+            windows,
         }
     }
 
@@ -4316,10 +4925,14 @@ impl App {
                 .and_then(|mux| mux.pane_for_session(session_id))
             {
                 if let Some(mux) = self.mux.as_mut() {
-                    mux.focused = Some(pane_id);
+                    mux.focus(pane_id);
                 }
                 self.view = View::Attached(pane_id);
             }
+        }
+        if let Some(mux) = self.mux.as_mut() {
+            mux.restore_windows(&request.windows);
+            crate::mux_input::sync_view(self);
         }
         let message = if recovery_errors.is_empty() {
             format!(
@@ -4475,6 +5088,129 @@ mod tests {
             ..UserConfig::default()
         };
         App::new(Vec::new(), config)
+    }
+
+    /// A multiplexed app holding idle sessions `session-1..=count`, recording its
+    /// workspace under `root`.
+    fn recording_app(count: u64, root: &Path) -> App {
+        let mut app = app_with(true);
+        app.workspace_record_root = Some(root.to_path_buf());
+        for id in 1..=count {
+            let (program, args) = if cfg!(windows) {
+                (
+                    "cmd.exe".to_string(),
+                    vec!["/c".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+                )
+            } else {
+                (
+                    "/bin/sh".to_string(),
+                    vec!["-c".to_string(), "sleep 30".to_string()],
+                )
+            };
+            let events = app.mux.as_ref().unwrap().events.clone();
+            let pane = Pane::spawn(
+                PaneSpec {
+                    id,
+                    title: format!("Session {id}"),
+                    cwd: std::env::temp_dir(),
+                    session_id: format!("session-{id}"),
+                    program,
+                    args,
+                    events_path: None,
+                    terminal_light_mode: Some(false),
+                    hooks_active: false,
+                },
+                24,
+                80,
+                events,
+            )
+            .unwrap();
+            app.mux.as_mut().unwrap().push(pane);
+        }
+        app
+    }
+
+    #[test]
+    fn the_workspace_record_follows_the_tabs_and_goes_when_every_tab_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = recording_app(3, root.path());
+        let mux = app.mux.as_mut().unwrap();
+        mux.focus(1);
+        mux.split_with(crate::mux::SplitDirection::Columns, 2);
+        app.save_workspace_record();
+
+        let files: Vec<_> = std::fs::read_dir(root.path()).unwrap().collect();
+        assert_eq!(files.len(), 1, "one record per instance");
+        let record: crate::recovery::WorkspaceRecord =
+            serde_json::from_slice(&std::fs::read(files[0].as_ref().unwrap().path()).unwrap())
+                .unwrap();
+        let sessions: Vec<_> = record
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(sessions, ["session-1", "session-2", "session-3"]);
+        assert_eq!(record.focused_session_id.as_deref(), Some("session-2"));
+        assert_eq!(record.windows.len(), 1, "the tab holding two sessions");
+        assert_eq!(record.tab_count(), 2);
+
+        for id in 1..=3 {
+            app.mux.as_mut().unwrap().remove(id);
+        }
+        app.save_workspace_record();
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "closing every tab leaves nothing to recover"
+        );
+    }
+
+    #[test]
+    fn only_a_closed_instances_free_sessions_are_offered_and_forgetting_removes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = recording_app(1, root.path());
+        app.save_workspace_record();
+        let now = chrono::Utc::now();
+        let closed = crate::recovery::WorkspaceRecord {
+            // No process has this id; the instance is gone.
+            pid: u32::MAX - 7,
+            started_at: now - chrono::Duration::hours(2),
+            saved_at: now - chrono::Duration::minutes(10),
+            launch_dir: None,
+            sessions: ["session-1", "never-started-anywhere"]
+                .into_iter()
+                .map(|id| crate::recovery::RecordedSession {
+                    session_id: id.to_string(),
+                    cwd: ".".to_string(),
+                    title: id.to_string(),
+                })
+                .collect(),
+            focused_session_id: None,
+            windows: Vec::new(),
+        };
+        crate::recovery::write_in(root.path(), &closed).unwrap();
+
+        app.refresh_recoverable();
+        assert_eq!(app.recoverable.len(), 1, "not this instance's own record");
+        let offered: Vec<_> = app.recoverable[0]
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            ["never-started-anywhere"],
+            "a session already open here is not resumed again"
+        );
+
+        app.forget_workspace(0);
+        assert!(app.recoverable.is_empty());
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "only ours"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     #[test]
@@ -6789,6 +7525,7 @@ mod tests {
                 },
             ],
             focused_session_id: Some("finished-naturally".to_string()),
+            windows: Vec::new(),
         });
 
         app.retain_terminated_restart_panes(&[2]);

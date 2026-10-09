@@ -6,9 +6,9 @@ use crate::input::{
 };
 use crate::mux::pane::PaneNotification;
 use crate::mux::{
-    resolve_github_command, resolve_help_command, resolve_prefix_command_with_tmux_keys,
-    resolve_transient_command, GithubCommand, HelpCommand, MuxEvent, PrefixCommand, PrefixState,
-    TransientCommand, TransientMode,
+    resolve_github_command, resolve_help_command, resolve_layout_command,
+    resolve_prefix_command_with_tmux_keys, resolve_transient_command, GithubCommand, HelpCommand,
+    MuxEvent, MuxState, PrefixCommand, PrefixState, TransientCommand, TransientMode,
 };
 use crate::notifications::NotificationKind;
 use crate::snippets::{SnippetEditorField, SnippetModal, SnippetScope, SnippetScreen};
@@ -24,6 +24,12 @@ const HOOK_READY_GRACE: std::time::Duration = std::time::Duration::from_millis(7
 /// Everything except the prefix key is forwarded to the child, because Copilot wants
 /// nearly every keystroke for itself.
 pub fn handle_attached_event(app: &mut App, event: Event) {
+    // A message in the attached status bar answers the last thing the user did, so
+    // the next keystroke retires it — whatever that keystroke goes on to set is the
+    // new answer. Without this a message would sit over the prefix reminder forever.
+    if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press) {
+        app.status_message = None;
+    }
     if app.confirm_end_tmux.is_some() {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
@@ -46,9 +52,8 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Press {
                 handle_quit_confirm(app, key.code);
-                // The attached status bar has nowhere to show the shared "Quit
-                // cancelled" notice, and leaving it set would surface it stale on a
-                // later detach.
+                // Cancelling is answer enough on the attached screen, where the
+                // shared "Quit cancelled" notice would only cover the prefix reminder.
                 if !app.should_quit {
                     app.status_message = None;
                 }
@@ -82,6 +87,17 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Choosing the project for a new session started from the split picker. The list
+    // view's own project filter never opens here.
+    if app.mode == Mode::FilterProject {
+        if let Event::Key(key) = &event {
+            if key.kind == KeyEventKind::Press {
+                crate::input::handle_filter_project(app, key.code);
+            }
+        }
+        return;
+    }
+
     if let Event::Key(key) = &event {
         if key.kind == KeyEventKind::Press {
             let is_prefix = app.mux.as_ref().is_some_and(|mux| {
@@ -89,6 +105,16 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
             });
             if is_prefix {
                 handle_attached_key(app, *key);
+                return;
+            }
+            // Browser-style: whichever panel has the keyboard, these switch tabs.
+            if let Some(forward) = tab_switch_key(key) {
+                close_context_overlays(app);
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.cycle(forward);
+                }
+                sync_workspace_panels(app);
+                sync_view(app);
                 return;
             }
         }
@@ -163,15 +189,29 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
     }
 
     if let Event::Mouse(mouse) = &event {
+        if app.swallow_mouse_until_up {
+            match mouse.kind {
+                MouseEventKind::Drag(_) => return,
+                MouseEventKind::Up(_) => {
+                    app.swallow_mouse_until_up = false;
+                    return;
+                }
+                // A release can go missing (outside the window, say); anything else
+                // means that gesture is over.
+                _ => app.swallow_mouse_until_up = false,
+            }
+        }
         // Ctrl+click, as in any terminal. A plain click still belongs to the child, which
-        // uses it for its own interface.
+        // uses it for its own interface. Opening a link needs nothing from the session it
+        // is in, so this works in any split, focused or not.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && mouse.modifiers.contains(KeyModifiers::CONTROL)
         {
+            let under = app.workspace_areas.chat_at(mouse.column, mouse.row);
             let link = app
                 .mux
                 .as_ref()
-                .and_then(|mux| mux.focused_pane())
+                .and_then(|mux| under.and_then(|id| mux.pane(id)).or(mux.focused_pane()))
                 .and_then(|pane| pane.link_at(mouse.column, mouse.row));
             if let Some(link) = link {
                 app.open_link(&link);
@@ -212,8 +252,51 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 _ => {}
             }
         }
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            focus_clicked_workspace(app, mouse.column, mouse.row);
+        // Same rule as a tab drag: once a border is picked up, the whole gesture is
+        // the resize's, or the pointer passing over a chat would select text in it.
+        if let Some(divider) = app.dragging_divider.clone() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    drag_divider_to(app, divider, mouse.column, mouse.row);
+                    return;
+                }
+                MouseEventKind::Up(_) => {
+                    app.dragging_divider = None;
+                    return;
+                }
+                _ => app.dragging_divider = None,
+            }
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(divider) = app.workspace_areas.divider_at(mouse.column, mouse.row) {
+                app.dragging_divider = Some(divider);
+                return;
+            }
+        }
+        // The wheel scrolls whichever split it is over, without taking focus: reading
+        // back through a session being watched should not pull the keyboard away from
+        // the one being typed into.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let under = app.workspace_areas.chat_at(mouse.column, mouse.row);
+            if let Some(mux) = app.mux.as_mut() {
+                if let Some(pane) = under
+                    .filter(|id| mux.focused != Some(*id))
+                    .and_then(|id| mux.pane_mut(id))
+                {
+                    let _ = pane.handle_mouse(*mouse);
+                    return;
+                }
+            }
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(_))
+            && focus_clicked_workspace(app, mouse.column, mouse.row)
+        {
+            // The click was to choose a session, not to act in it.
+            app.swallow_mouse_until_up = true;
+            return;
         }
     }
 
@@ -721,6 +804,21 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             close_context_overlays(app);
             enter_transient_mode(app, TransientMode::MoveTab);
         }
+        SplitSideBySide | SplitStacked | ZoomSplit | UnsplitSession | ResizeSplit
+        | EqualizeSplits => {
+            close_context_overlays(app);
+            run_split_command(
+                app,
+                match command {
+                    SplitSideBySide => PrefixCommand::Split(crate::mux::SplitDirection::Columns),
+                    SplitStacked => PrefixCommand::Split(crate::mux::SplitDirection::Rows),
+                    ZoomSplit => PrefixCommand::ZoomSplit,
+                    ResizeSplit => PrefixCommand::ResizeSplit,
+                    EqualizeSplits => PrefixCommand::EqualizeSplits,
+                    _ => PrefixCommand::UnsplitFocused,
+                },
+            );
+        }
         OpenScratchpadHelp => app.workspace_help = Some(WorkspaceHelp::Scratchpad),
         BackToSessionList => {
             close_context_overlays(app);
@@ -795,7 +893,8 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             close_context_overlays(app);
             crate::input::execute_palette_list_command(app, command);
         }
-        SearchSessions | FilterProject | ClearProjectFilter | CycleSort | ToggleHiddenSessions => {
+        SearchSessions | FilterProject | ClearProjectFilter | CycleSort | ToggleHiddenSessions
+        | RecoverWorkspace => {
             close_context_overlays(app);
             if matches!(app.view, View::Attached(_)) {
                 app.detach();
@@ -845,12 +944,34 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    if prefix_state == PrefixState::Layout {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if let Some(command) = resolve_layout_command(&key) {
+            close_context_overlays(app);
+            run_split_command(app, command);
+        }
+        return;
+    }
+
     // A transient mode keeps acting until it is dismissed, so it is checked before
     // the one-shot menus and only leaves on its own terms.
     if let PrefixState::Transient(mode) = prefix_state {
         match resolve_transient_command(mode, &key) {
             TransientCommand::Step(forward) => {
                 step_transient_mode(app, mode, forward);
+                return;
+            }
+            TransientCommand::Resize(axis, grow) => {
+                app.status_message = (!resize_focused_split(app, axis, grow)).then(|| {
+                    if grow {
+                        "No room left to grow this split that way"
+                    } else {
+                        "This split cannot shrink that way"
+                    }
+                    .to_string()
+                });
                 return;
             }
             TransientCommand::Leave => {
@@ -930,6 +1051,11 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                     mux.prefix_state = PrefixState::Help;
                 }
             }
+            Some(PrefixCommand::Layout) => {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.prefix_state = PrefixState::Layout;
+                }
+            }
             Some(PrefixCommand::Github) => {
                 if let Some(mux) = app.mux.as_mut() {
                     mux.prefix_state = PrefixState::Github;
@@ -947,6 +1073,18 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                     mux.select_index(index.saturating_sub(1));
                 }
                 sync_workspace_panels(app);
+            }
+            Some(
+                command @ (PrefixCommand::Split(_)
+                | PrefixCommand::FocusSplit(_)
+                | PrefixCommand::ZoomSplit
+                | PrefixCommand::UnsplitFocused
+                | PrefixCommand::ResizeSplit
+                | PrefixCommand::EqualizeSplits),
+            ) => {
+                close_context_overlays(app);
+                run_split_command(app, command);
+                return;
             }
             Some(PrefixCommand::Cancel) | None => {}
         }
@@ -1605,6 +1743,49 @@ fn focus_chat(app: &mut App) {
     app.terminal.unfocus();
 }
 
+/// Ctrl+Tab and Ctrl+Shift+Tab, and Ctrl+PageDown and Ctrl+PageUp, as in a browser:
+/// `Some(true)` for the next tab, `Some(false)` for the previous one.
+///
+/// Both pairs, because Windows Terminal claims Ctrl+Tab for its own tabs unless the
+/// binding is removed, while the page keys reach the application there. Copilot uses
+/// neither, so taking them costs it nothing.
+pub(crate) fn tab_switch_key(key: &KeyEvent) -> Option<bool> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    match key.code {
+        KeyCode::Tab => Some(!shift),
+        // Terminals report Shift+Tab as its own key, with or without the modifier.
+        KeyCode::BackTab => Some(false),
+        KeyCode::PageDown if !shift => Some(true),
+        KeyCode::PageUp if !shift => Some(false),
+        _ => None,
+    }
+}
+
+/// The other sessions sharing the screen, with their session ids.
+///
+/// In a split the scratchpad and terminal are one dock, kept open while any session
+/// on screen has that panel. Closing it therefore closes it for all of them: closing
+/// only the focused session's left the dock up with a placeholder in it, and there
+/// was no way to make it go away short of visiting every session in turn.
+fn other_sessions_on_screen(
+    app: &App,
+    except: crate::mux::PaneId,
+) -> Vec<(crate::mux::PaneId, String)> {
+    let Some(mux) = app.mux.as_ref() else {
+        return Vec::new();
+    };
+    app.workspace_areas
+        .chats
+        .iter()
+        .filter(|slot| slot.pane != except)
+        .filter_map(|slot| mux.pane(slot.pane))
+        .map(|pane| (pane.id, pane.session_id.clone()))
+        .collect()
+}
+
 fn toggle_attached_scratchpad(app: &mut App) {
     let Some((pane_id, session_id, _, _)) = focused_workspace_context(app) else {
         return;
@@ -1620,6 +1801,11 @@ fn toggle_attached_scratchpad(app: &mut App) {
             app.scratchpad = None;
             app.scratchpad_owner = None;
             app.remember_scratchpad_panel(pane_id, &session_id, false);
+            for (id, session_id) in other_sessions_on_screen(app, pane_id) {
+                if app.scratchpad_open.contains(&id) {
+                    app.remember_scratchpad_panel(id, &session_id, false);
+                }
+            }
             app.workspace_focus = WorkspaceFocus::Chat;
         } else {
             app.workspace_focus = WorkspaceFocus::Scratchpad;
@@ -1656,6 +1842,12 @@ fn toggle_attached_terminal(app: &mut App) {
         app.terminal.hide();
         app.terminal_owner = None;
         app.remember_terminal_panel(pane_id, &session_id, false);
+        // Shells keep running; only the dock goes, as for the focused session.
+        for (id, session_id) in other_sessions_on_screen(app, pane_id) {
+            if app.terminal_open.contains(&id) {
+                app.remember_terminal_panel(id, &session_id, false);
+            }
+        }
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     }
@@ -1696,6 +1888,14 @@ pub fn sync_workspace_panels(app: &mut App) {
         app.workspace_focus = WorkspaceFocus::Chat;
         return;
     };
+
+    // With the scratchpad column already up beside a split, a session without one gets
+    // its own, empty if it has never had notes, rather than a placeholder telling the
+    // user to open it. The terminal dock keeps its placeholder: opening one starts a
+    // shell, which clicking between splits should not do.
+    if !app.scratchpad_open.contains(&pane_id) && app.scratchpad_dock_visible() {
+        app.remember_scratchpad_panel(pane_id, &session_id, true);
+    }
 
     if app.scratchpad_owner != Some(pane_id) || app.scratchpad.is_none() {
         if !close_scratchpad(app) {
@@ -1783,6 +1983,8 @@ fn transient_mode_unavailable(app: &App, mode: TransientMode) -> Option<&'static
             let panes = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
             (panes < 2).then_some("Only one session is open — nothing to reorder")
         }
+        TransientMode::ResizeSplit => (app.workspace_areas.chats.len() < 2)
+            .then_some("Only one session is on screen — nothing to resize"),
     }
 }
 
@@ -1813,6 +2015,8 @@ fn step_transient_mode(app: &mut App, mode: TransientMode, forward: bool) {
                 app.status_message = None;
             }
         }
+        // Its keys resolve to `Resize`, which carries the axis a plain step cannot.
+        TransientMode::ResizeSplit => {}
     }
 }
 
@@ -1844,7 +2048,7 @@ fn focus_clicked_tab(app: &mut App, column: u16, row: u16) -> bool {
     }
     close_context_overlays(app);
     if let Some(mux) = app.mux.as_mut() {
-        mux.focused = Some(id);
+        mux.focus(id);
     }
     app.view = View::Attached(id);
     // The same bookkeeping the prefix pane-switch does: acknowledges the newly focused
@@ -1879,10 +2083,10 @@ fn drag_tab_to(app: &mut App, column: u16, row: u16) {
     if area.height == 0 || row < area.y || row >= area.bottom() {
         return;
     }
-    let Some(from) = mux.panes.iter().position(|pane| pane.id == id) else {
+    let Some(from) = mux.window_index_of(id) else {
         return;
     };
-    let last = mux.panes.len().saturating_sub(1);
+    let last = mux.windows.len().saturating_sub(1);
     let under = crate::ui::pane::tab_index_at(mux, area, column, row);
     let (first_shown, last_shown) =
         crate::ui::pane::visible_tab_bounds(mux, area).unwrap_or((0, 0));
@@ -1899,24 +2103,43 @@ fn drag_tab_to(app: &mut App, column: u16, row: u16) {
     mux.move_pane_to(id, target);
 }
 
-fn focus_clicked_workspace(app: &mut App, column: u16, row: u16) {
-    let areas = app.workspace_areas;
+/// Move focus to whatever panel was clicked. Returns true when that meant switching
+/// to another split's session, so the caller can keep the click from reaching it.
+fn focus_clicked_workspace(app: &mut App, column: u16, row: u16) -> bool {
+    let areas = &app.workspace_areas;
+    let chat = areas.chat_at(column, row);
+    // A placeholder dock has nothing to type into, so a click on one is ignored rather
+    // than leaving the keyboard on an empty box.
     if areas
         .scratchpad
         .is_some_and(|area| contains(area, column, row))
     {
-        app.workspace_focus = WorkspaceFocus::Scratchpad;
-        app.terminal.unfocus();
+        if app.attached_scratchpad_visible() {
+            app.workspace_focus = WorkspaceFocus::Scratchpad;
+            app.terminal.unfocus();
+        }
     } else if areas
         .terminal
         .is_some_and(|area| contains(area, column, row))
     {
-        app.workspace_focus = WorkspaceFocus::Terminal;
-        app.terminal.focus();
-    } else if contains(areas.chat, column, row) {
+        if app.attached_terminal_visible() {
+            app.workspace_focus = WorkspaceFocus::Terminal;
+            app.terminal.focus();
+        }
+    } else if let Some(id) = chat {
         app.workspace_focus = WorkspaceFocus::Chat;
         app.terminal.unfocus();
+        if app.mux.as_ref().and_then(|mux| mux.focused) != Some(id) {
+            close_context_overlays(app);
+            if let Some(mux) = app.mux.as_mut() {
+                mux.focus(id);
+            }
+            sync_workspace_panels(app);
+            sync_view(app);
+            return true;
+        }
     }
+    false
 }
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
@@ -1949,6 +2172,23 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         if matches!(resolve_github_command(&key), Some(GithubCommand::Inspect)) {
             app.status_message =
                 Some("Attach to a session before inspecting a GitHub item".to_string());
+        }
+        return true;
+    }
+
+    // Splits only exist on the attached screen, so a layout command goes there first,
+    // the same way `prefix c` and `prefix e` do.
+    if state == PrefixState::Layout {
+        if let Some(mux) = app.mux.as_mut() {
+            mux.prefix_state = PrefixState::Idle;
+        }
+        if let Some(command) = resolve_layout_command(&key) {
+            if app.mux.as_ref().is_none_or(|mux| mux.panes.is_empty()) {
+                app.status_message = Some("No sessions are running".to_string());
+            } else {
+                attach_focused(app);
+                run_split_command(app, command);
+            }
         }
         return true;
     }
@@ -2059,9 +2299,284 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
         }
         Some(PrefixCommand::KillPane) => kill_focused(app),
         Some(PrefixCommand::EndPersistentSession) => end_focused_tmux(app),
+        // Splits only exist on the attached screen, so these go there first, the same
+        // way `prefix c` and `prefix e` do.
+        Some(
+            command @ (PrefixCommand::Split(_)
+            | PrefixCommand::FocusSplit(_)
+            | PrefixCommand::ZoomSplit
+            | PrefixCommand::UnsplitFocused
+            | PrefixCommand::ResizeSplit
+            | PrefixCommand::EqualizeSplits),
+        ) => {
+            attach_focused(app);
+            run_split_command(app, command);
+        }
+        Some(PrefixCommand::Layout) => {
+            if let Some(mux) = app.mux.as_mut() {
+                mux.prefix_state = PrefixState::Layout;
+            }
+        }
         Some(PrefixCommand::Cancel) | None => {}
     }
     true
+}
+
+/// Put the dragged border under the pointer.
+fn drag_divider_to(app: &mut App, divider: crate::app::Divider, column: u16, row: u16) {
+    use crate::app::Divider;
+    match divider {
+        Divider::Split { path, index } => drag_split_divider(app, &path, index, column, row),
+        Divider::ScratchpadDock => {
+            let areas = &app.workspace_areas;
+            let (Some(dock), Some(first)) = (areas.scratchpad, areas.chats.first()) else {
+                return;
+            };
+            let left = areas
+                .chats
+                .iter()
+                .map(|slot| slot.area.x)
+                .min()
+                .unwrap_or(first.area.x);
+            let total = dock.right().saturating_sub(left);
+            if total == 0 {
+                return;
+            }
+            let width = dock.right().saturating_sub(column);
+            let percent = (u32::from(width) * 100 / u32::from(total)) as u16;
+            // One percent short of the exact limit, because the layout rounds and a
+            // cell too many would hide the split after all.
+            let room = total.saturating_sub(split_needs(app).0);
+            let cap = (u32::from(room) * 100 / u32::from(total)) as u16;
+            let range = crate::ui::SCRATCHPAD_PERCENT_RANGE;
+            app.dock_sizes.scratchpad_percent = percent
+                .min(cap.saturating_sub(1))
+                .clamp(*range.start(), *range.end());
+        }
+        Divider::TerminalDock => {
+            let areas = &app.workspace_areas;
+            let (Some(dock), Some(top)) = (
+                areas.terminal,
+                areas.chats.iter().map(|slot| slot.area.y).min(),
+            ) else {
+                return;
+            };
+            let room = dock
+                .bottom()
+                .saturating_sub(top)
+                .saturating_sub(split_needs(app).1);
+            // The layout also caps this so a lone chat keeps some rows.
+            let rows = dock
+                .bottom()
+                .saturating_sub(row)
+                .min(room)
+                .max(crate::ui::MIN_TERMINAL_ROWS);
+            app.dock_sizes.terminal_rows = Some(rows);
+        }
+    }
+    app.refresh_workspace_areas();
+}
+
+/// Columns and rows the sessions on screen need to stay on screen, borders included.
+///
+/// A dock dragged past this would make every split vanish under the pointer, which
+/// reads as the sessions closing; the drag stops here instead, the way a divider
+/// between two splits stops at their minimum.
+fn split_needs(app: &App) -> (u16, u16) {
+    let Some(layout) = app
+        .mux
+        .as_ref()
+        .and_then(MuxState::visible_layout)
+        .filter(|_| app.workspace_areas.chats.len() > 1)
+    else {
+        return (0, 0);
+    };
+    (
+        crate::ui::minimum_extent(layout, crate::mux::SplitDirection::Columns, false),
+        crate::ui::minimum_extent(layout, crate::mux::SplitDirection::Rows, false),
+    )
+}
+
+/// Give the split at `path` these member lengths. Weights in cells reproduce the frame
+/// exactly, so nothing outside the two members being resized shifts by a rounding cell.
+fn set_split_lengths(app: &mut App, path: &[usize], lengths: Vec<u16>) {
+    if let Some(crate::mux::LayoutNode::Split { weights, .. }) = app
+        .mux
+        .as_mut()
+        .and_then(MuxState::current_layout_mut)
+        .and_then(|layout| layout.node_at_mut(path))
+    {
+        if weights.len() == lengths.len() {
+            *weights = lengths;
+        }
+    }
+    app.refresh_workspace_areas();
+}
+
+fn drag_split_divider(app: &mut App, path: &[usize], index: usize, column: u16, row: u16) {
+    let Some(split) = app
+        .workspace_areas
+        .splits
+        .iter()
+        .find(|split| split.path == path)
+        .cloned()
+    else {
+        return;
+    };
+    let Some(before) = index.checked_sub(1) else {
+        return;
+    };
+    if index >= split.lengths.len() {
+        return;
+    }
+    let at = match split.direction {
+        crate::mux::SplitDirection::Columns => column,
+        crate::mux::SplitDirection::Rows => row,
+    };
+    let pair = split.lengths[before] + split.lengths[index];
+    let (low, high) = (
+        split.minimums[before],
+        pair.saturating_sub(split.minimums[index]),
+    );
+    if low > high {
+        return;
+    }
+    let first = at.saturating_sub(split.starts[before]).clamp(low, high);
+    let mut lengths = split.lengths;
+    lengths[before] = first;
+    lengths[index] = pair - first;
+    set_split_lengths(app, &split.path, lengths);
+}
+
+/// One keyboard step of resizing along `axis`: the focused session's member of the
+/// nearest split running that way takes cells from, or gives them to, the member
+/// after it — or before it, for the last one. Left and right act on columns, up and
+/// down on rows, so in a column holding a stack every arrow does something.
+fn resize_focused_split(app: &mut App, axis: crate::mux::SplitDirection, grow: bool) -> bool {
+    const STEP: u16 = 2;
+    let Some(path) = app.mux.as_ref().and_then(|mux| {
+        let focused = mux.focused?;
+        mux.current_window()?.layout.path_to(focused)
+    }) else {
+        return false;
+    };
+    // The deepest split on the way to the focused session that runs along `axis`.
+    let Some(split) = app
+        .workspace_areas
+        .splits
+        .iter()
+        .filter(|split| split.direction == axis && path.starts_with(&split.path))
+        .max_by_key(|split| split.path.len())
+        .cloned()
+    else {
+        return false;
+    };
+    let index = path[split.path.len()];
+    let neighbour = if index + 1 < split.lengths.len() {
+        index + 1
+    } else {
+        index - 1
+    };
+    let (from, to) = if grow {
+        (neighbour, index)
+    } else {
+        (index, neighbour)
+    };
+    let moved = split.lengths[from]
+        .saturating_sub(split.minimums[from])
+        .min(STEP);
+    if moved == 0 {
+        return false;
+    }
+    let mut lengths = split.lengths;
+    lengths[from] -= moved;
+    lengths[to] += moved;
+    set_split_lengths(app, &split.path, lengths);
+    true
+}
+
+/// The session on screen next to the focused one in `step`'s direction: of those
+/// lying wholly that way and overlapping it across, the nearest, then the one sharing
+/// most of its edge. Found from what is drawn rather than the layout tree, because
+/// "left" means left on the screen however the splits happen to be nested.
+fn split_neighbour(app: &App, step: crate::mux::SplitStep) -> Option<crate::mux::PaneId> {
+    use crate::mux::SplitStep;
+    let focused = app.mux.as_ref()?.focused?;
+    let chats = &app.workspace_areas.chats;
+    let current = chats.iter().find(|slot| slot.pane == focused)?.area;
+    let overlap = |a: (u16, u16), b: (u16, u16)| a.1.min(b.1).saturating_sub(a.0.max(b.0));
+    chats
+        .iter()
+        .filter(|slot| slot.pane != focused)
+        .filter_map(|slot| {
+            let area = slot.area;
+            let horizontal = (area.x, area.right());
+            let vertical = (area.y, area.bottom());
+            let (distance, shared) = match step {
+                SplitStep::Left if area.right() <= current.x => (
+                    current.x - area.right(),
+                    overlap(vertical, (current.y, current.bottom())),
+                ),
+                SplitStep::Right if area.x >= current.right() => (
+                    area.x - current.right(),
+                    overlap(vertical, (current.y, current.bottom())),
+                ),
+                SplitStep::Up if area.bottom() <= current.y => (
+                    current.y - area.bottom(),
+                    overlap(horizontal, (current.x, current.right())),
+                ),
+                SplitStep::Down if area.y >= current.bottom() => (
+                    area.y - current.bottom(),
+                    overlap(horizontal, (current.x, current.right())),
+                ),
+                _ => return None,
+            };
+            (shared > 0).then_some((distance, std::cmp::Reverse(shared), slot.pane))
+        })
+        .min()
+        .map(|(_, _, pane)| pane)
+}
+
+/// The split commands, which behave the same from the list and from a session.
+fn run_split_command(app: &mut App, command: PrefixCommand) {
+    match command {
+        PrefixCommand::Split(direction) => app.open_split_picker(direction),
+        PrefixCommand::ResizeSplit => {
+            enter_transient_mode(app, TransientMode::ResizeSplit);
+            return;
+        }
+        PrefixCommand::FocusSplit(step) => {
+            if let Some(target) = split_neighbour(app, step) {
+                if let Some(mux) = app.mux.as_mut() {
+                    mux.focus(target);
+                }
+                app.workspace_focus = WorkspaceFocus::Chat;
+                sync_workspace_panels(app);
+            }
+        }
+        PrefixCommand::EqualizeSplits => {
+            if !app.mux.as_mut().is_some_and(MuxState::equalize_split) {
+                app.status_message =
+                    Some("Nothing to equalize: only one session is on screen".to_string());
+            }
+        }
+        PrefixCommand::ZoomSplit => {
+            if !app.mux.as_mut().is_some_and(MuxState::toggle_split_zoom) {
+                app.status_message =
+                    Some("Nothing to zoom: only one session is on screen".to_string());
+            }
+        }
+        PrefixCommand::UnsplitFocused => {
+            if app.mux.as_mut().is_some_and(MuxState::unsplit_focused) {
+                sync_workspace_panels(app);
+            } else {
+                app.status_message = Some("This session is not in a split".to_string());
+            }
+        }
+        _ => {}
+    }
+    sync_view(app);
+    app.refresh_workspace_areas();
 }
 
 /// Bring the focused pane back on screen after the list changed it.
@@ -2113,8 +2628,6 @@ struct RestartTarget {
     session_id: String,
     cwd: String,
     title: String,
-    /// Slot in the tab strip, so the restarted pane lands where the dead one sat.
-    index: usize,
 }
 
 /// Restart is only offered on a pane whose session has exited: while the child is
@@ -2125,13 +2638,11 @@ fn restart_target(app: &App) -> Option<RestartTarget> {
     if pane.is_running() {
         return None;
     }
-    let index = mux.panes.iter().position(|entry| entry.id == pane.id)?;
     Some(RestartTarget {
         pane_id: pane.id,
         session_id: pane.session_id.clone(),
         cwd: pane.cwd.to_string_lossy().into_owned(),
         title: pane.title.clone(),
-        index,
     })
 }
 
@@ -2145,15 +2656,15 @@ fn restart_focused(app: &mut App) {
     if !app.forget_workspace_panels(target.pane_id) {
         return;
     }
-    match app.attach_session(&target.session_id, &target.cwd, target.title) {
+    // In the dead pane's place — its slot in a split, or its tab — so nothing
+    // reshuffles under the user.
+    match app.attach_session_replacing(
+        &target.session_id,
+        &target.cwd,
+        target.title,
+        Some(target.pane_id),
+    ) {
         Ok(()) => {
-            // attach_session drops the dead pane and appends the new one; put it back
-            // in the old slot so the tab strip does not reshuffle under the user.
-            if let Some(mux) = app.mux.as_mut() {
-                if let Some(id) = mux.focused {
-                    mux.move_pane_to(id, target.index);
-                }
-            }
             sync_workspace_panels(app);
         }
         Err(error) => {
@@ -2171,6 +2682,22 @@ pub fn sync_view(app: &mut App) {
         (View::Attached(_), None) => View::List,
         (View::List, _) => View::List,
     };
+}
+
+/// A turn finishing in another session that shares the screen in a split, in a window
+/// the user is looking at.
+///
+/// Such a session is not *attended* — it does not have the keyboard, so it still
+/// raises its attention marker, and its border shows it. But the user watched it
+/// finish, and a notification saying so is noise. Only `Ready` is held back, which is
+/// exactly what attending the focused session holds back: questions, plan approvals
+/// and errors notify even from the focused session, because they block until someone
+/// acts, and a session merely being watched has no better claim to silence.
+fn watched_in_split(app: &App, id: crate::mux::PaneId, kind: NotificationKind) -> bool {
+    kind == NotificationKind::Ready
+        && app.terminal_focused
+        && !matches!(app.view, View::Attached(attached) if attached == id)
+        && app.pane_on_screen(id)
 }
 
 /// Apply a PTY event. Returns true when the UI needs a repaint.
@@ -2218,19 +2745,20 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::PlanApproval => NotificationKind::PlanApproval,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                app.enqueue_notification(kind, title.clone(), Some(&session_id));
+                if !watched_in_split(app, id, kind) {
+                    app.enqueue_notification(kind, title.clone(), Some(&session_id));
+                }
             }
             if outcome.bell {
-                if let Some(title) = app
-                    .mux
-                    .as_ref()
-                    .and_then(|mux| mux.pane(id))
-                    .map(|pane| pane.title.clone())
-                {
+                // Numbered like its tab, since several sessions often share a title.
+                if let Some(title) = app.mux.as_ref().and_then(|mux| {
+                    let pane = mux.pane(id)?;
+                    Some(format!("{} {}", mux.tab_number(id)?, pane.title))
+                }) {
                     app.status_message = Some(format!("🔔 {title}"));
                 }
             }
-            matches!(app.view, View::Attached(focused) if focused == id)
+            app.pane_on_screen(id)
                 || outcome.bell
                 || attention_changed
                 || title_changed
@@ -2238,17 +2766,21 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         }
         MuxEvent::Exited(id, code) => {
             let was_focused = app.mux.as_ref().is_some_and(|mux| mux.focused == Some(id));
-            if let Some(mux) = app.mux.as_mut() {
-                if let Some(pane) = mux.pane_mut(id) {
-                    pane.mark_exited(code);
-                }
-            }
-            let title = app
+            // A tab the user just closed reports its process exiting a moment later.
+            // There is nothing to say about it, and saying "Session '' exited" would
+            // replace the message that closing it left, such as that a tmux session
+            // is still running.
+            let Some(title) = app
                 .mux
-                .as_ref()
-                .and_then(|mux| mux.pane(id))
-                .map(|pane| pane.title.clone())
-                .unwrap_or_default();
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .map(|pane| {
+                    pane.mark_exited(code);
+                    pane.title.clone()
+                })
+            else {
+                return false;
+            };
             app.status_message = Some(match code {
                 Some(0) | None => format!("Session '{title}' finished"),
                 Some(code) => format!("Session '{title}' exited with code {code}"),
@@ -2293,12 +2825,17 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::Ready => NotificationKind::Ready,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                app.enqueue_notification(kind, title, Some(&session_id));
+                if !watched_in_split(app, id, kind) {
+                    app.enqueue_notification(kind, title, Some(&session_id));
+                }
             }
             if focused && action_or_progress_changed {
                 sync_outer_progress(app);
             }
-            focused || attention_changed || action_or_progress_changed || notification.is_some()
+            app.pane_on_screen(id)
+                || attention_changed
+                || action_or_progress_changed
+                || notification.is_some()
         }
         MuxEvent::HookLifecycle(id, event) => {
             let attended = app.terminal_focused
@@ -2342,7 +2879,9 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::Ready => NotificationKind::Ready,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                app.enqueue_notification(kind, title, Some(&session_id));
+                if !watched_in_split(app, id, kind) {
+                    app.enqueue_notification(kind, title, Some(&session_id));
+                }
             }
             if focused {
                 sync_outer_progress(app);
@@ -2379,7 +2918,9 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::PlanApproval => NotificationKind::PlanApproval,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                app.enqueue_notification(kind, title, Some(&session_id));
+                if !watched_in_split(app, id, kind) {
+                    app.enqueue_notification(kind, title, Some(&session_id));
+                }
             }
             if focused {
                 sync_outer_progress(app);
@@ -2469,6 +3010,812 @@ mod tests {
         app.disable_workspace_state_persistence();
         app.disable_config_persistence();
         app
+    }
+
+    /// Sessions `1..=count`, with 1 and 2 side by side and 2 focused, and one frame's
+    /// layout recorded the way the main loop records it.
+    fn split_app(count: u64) -> App {
+        let mut app = mux_app();
+        for id in 1..=count {
+            push_test_pane(&mut app, id, &format!("split-{id}"));
+        }
+        app.mux.as_mut().unwrap().focused = Some(1);
+        app.view = View::Attached(1);
+        assert!(app
+            .mux
+            .as_mut()
+            .unwrap()
+            .split_with(crate::mux::SplitDirection::Columns, 2));
+        sync_view(&mut app);
+        record_frame(&mut app);
+        app
+    }
+
+    fn record_frame(app: &mut App) {
+        let layout = app.attached_layout(Rect::new(0, 0, 160, 40));
+        app.workspace_areas = crate::app::WorkspaceAreas::from_layout(&layout);
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn inside(app: &App, id: u64) -> (u16, u16) {
+        let slot = app
+            .workspace_areas
+            .chats
+            .iter()
+            .find(|slot| slot.pane == id)
+            .expect("session on screen");
+        let area = slot.pane_area();
+        (area.x + 2, area.y + 2)
+    }
+
+    #[test]
+    fn output_from_a_split_that_is_not_focused_repaints_or_that_split_would_freeze() {
+        let mut app = split_app(3);
+        assert!(app.pane_on_screen(1));
+        assert!(handle_mux_event(
+            &mut app,
+            MuxEvent::Output(1, Default::default())
+        ));
+        assert!(
+            !handle_mux_event(&mut app, MuxEvent::Output(3, Default::default())),
+            "a session off screen still costs no frame"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_turn_finishing_in_a_watched_split_marks_it_without_notifying() {
+        let mut app = split_app(3);
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        app.terminal_focused = true;
+        let finished = crate::mux::callbacks::PaneSignals {
+            events: vec![crate::mux::callbacks::PaneSignalEvent::Bell],
+            ..Default::default()
+        };
+
+        handle_mux_event(&mut app, MuxEvent::Output(1, finished.clone()));
+        assert!(app.notification_requests.is_empty());
+        assert!(
+            app.mux.as_ref().unwrap().pane(1).unwrap().needs_attention(),
+            "the marker is how a watched split says it is done"
+        );
+
+        handle_mux_event(&mut app, MuxEvent::Output(3, finished));
+        assert_eq!(
+            app.notification_requests.len(),
+            1,
+            "a session off screen notifies exactly as before"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_question_in_a_watched_split_still_notifies_like_one_in_the_focused_session() {
+        use crate::events::lifecycle::{InputKind, LifecycleEvent};
+        let mut app = split_app(2);
+        app.config.notifications.enabled = true;
+        app.config.notifications.topic = "private_topic".to_string();
+        app.terminal_focused = true;
+
+        handle_mux_event(
+            &mut app,
+            MuxEvent::SessionLifecycle(
+                1,
+                LifecycleEvent::InputRequested {
+                    tool_call_id: "question-1".into(),
+                    kind: InputKind::Question,
+                },
+            ),
+        );
+        assert_eq!(app.notification_requests.len(), 1);
+        assert_eq!(
+            app.notification_requests[0].kind,
+            NotificationKind::Question
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn clicking_another_split_focuses_it_and_keeps_the_rest_of_that_click_from_it() {
+        let mut app = split_app(2);
+        let (column, row) = inside(&app, 1);
+
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(1));
+        assert_eq!(app.view, View::Attached(1));
+        assert!(app.swallow_mouse_until_up);
+
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, row),
+        );
+        assert!(!app.swallow_mouse_until_up);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_split_under_it_without_taking_focus() {
+        let mut app = split_app(2);
+        let (column, row) = inside(&app, 1);
+        handle_attached_event(&mut app, mouse(MouseEventKind::ScrollUp, column, row));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        assert!(!app.swallow_mouse_until_up);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_split_picker_offers_only_sessions_off_screen_and_never_leaves_the_split() {
+        let mut app = split_app(4);
+        app.open_split_picker(crate::mux::SplitDirection::Columns);
+        assert_eq!(app.mode, Mode::PaneList);
+        assert_eq!(
+            app.view,
+            View::Attached(2),
+            "the list view would resize every session on screen and back"
+        );
+        assert_eq!(app.pane_list_ids(), vec![3, 4]);
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.split_picker, None);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(mux.current_window().unwrap().layout.panes(), vec![1, 2, 4]);
+        assert_eq!(mux.focused, Some(4));
+        assert_eq!(app.view, View::Attached(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found once messages could be seen while attached: closing a tab printed what it
+    /// meant to, and the exit of its process a moment later replaced it with
+    /// "Session '' exited with code 1".
+    #[test]
+    fn the_exit_of_a_session_whose_tab_was_just_closed_says_nothing() {
+        let mut app = split_app(2);
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        );
+        let closed = app.status_message.clone();
+        assert!(closed
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Ended")));
+
+        assert!(!handle_mux_event(&mut app, MuxEvent::Exited(2, Some(1))));
+        assert_eq!(app.status_message, closed);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn splitting_the_other_way_with_every_session_on_screen_turns_the_split() {
+        let mut app = split_app(2);
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(app.mode, Mode::Normal, "nothing to pick, so no picker");
+        let layout = app
+            .mux
+            .as_ref()
+            .unwrap()
+            .current_window()
+            .unwrap()
+            .layout
+            .clone();
+        assert!(matches!(
+            layout,
+            crate::mux::LayoutNode::Split {
+                direction: crate::mux::SplitDirection::Rows,
+                ..
+            }
+        ));
+        assert_eq!(layout.panes(), vec![1, 2]);
+        assert_eq!(
+            app.workspace_areas.chats[0].area.x, app.workspace_areas.chats[1].area.x,
+            "laid out stacked straight away"
+        );
+
+        // Already that way: nothing to turn, so the picker opens, offering only a new
+        // session.
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(app.mode, Mode::PaneList);
+        assert!(app.pane_list_ids().is_empty());
+        assert_eq!(app.pane_selected, 0, "on the new-session row");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_split_prefix_keys_open_the_picker_and_move_focus_between_splits() {
+        let mut app = split_app(3);
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_attached_event(&mut app, Event::Key(prefix));
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(1));
+        assert_eq!(app.view, View::Attached(1));
+
+        handle_attached_event(&mut app, Event::Key(prefix));
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix_state,
+            PrefixState::Layout,
+            "waiting for a layout key, which the status bar lists"
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mode, Mode::PaneList);
+        assert_eq!(app.split_picker, Some(crate::mux::SplitDirection::Rows));
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn layout_equalize_undoes_resizing_and_esc_leaves_the_menu_without_acting() {
+        let mut app = split_app(2);
+        let before = chat_widths(&app);
+        if let Some(crate::mux::LayoutNode::Split { weights, .. }) =
+            app.mux.as_mut().unwrap().current_layout_mut()
+        {
+            *weights = vec![300, 100];
+        }
+        app.refresh_workspace_areas();
+        assert_ne!(chat_widths(&app), before);
+
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        for code in [KeyCode::Char('l'), KeyCode::Esc] {
+            handle_attached_event(&mut app, Event::Key(prefix));
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        assert_ne!(chat_widths(&app), before);
+
+        for code in [KeyCode::Char('l'), KeyCode::Char('=')] {
+            if code == KeyCode::Char('l') {
+                handle_attached_event(&mut app, Event::Key(prefix));
+            }
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(chat_widths(&app), before);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    fn chat_widths(app: &App) -> Vec<u16> {
+        app.workspace_areas
+            .chats
+            .iter()
+            .map(|slot| slot.pane_area().width)
+            .collect()
+    }
+
+    #[test]
+    fn dragging_a_split_divider_moves_it_with_the_pointer_and_stops_at_a_usable_width() {
+        let mut app = split_app(3);
+        app.mux
+            .as_mut()
+            .unwrap()
+            .split_with(crate::mux::SplitDirection::Columns, 3);
+        record_frame(&mut app);
+        let before = chat_widths(&app);
+        let divider = app.workspace_areas.chats[1].area;
+        let row = divider.y + 3;
+        assert_eq!(
+            app.workspace_areas.divider_at(divider.x, row),
+            Some(crate::app::Divider::Split {
+                path: Vec::new(),
+                index: 1
+            })
+        );
+
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), divider.x, row),
+        );
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(3),
+            "grabbing a border is not a click in either split"
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), divider.x + 5, row),
+        );
+        record_frame(&mut app);
+        let after = chat_widths(&app);
+        assert_eq!(after[0], before[0] + 5);
+        assert_eq!(after[1], before[1] - 5);
+        assert_eq!(after[2], before[2], "the split beyond the pair stays put");
+
+        // Far past the next divider: the middle split keeps its minimum.
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 159, row),
+        );
+        record_frame(&mut app);
+        assert_eq!(chat_widths(&app)[1], crate::ui::MIN_SPLIT_COLS);
+
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 159, row),
+        );
+        assert_eq!(app.dragging_divider, None);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn dragging_the_scratchpad_edge_resizes_the_dock_within_its_limits() {
+        let mut app = split_app(2);
+        app.scratchpad_open.insert(1);
+        record_frame(&mut app);
+        let dock = app.workspace_areas.scratchpad.expect("dock on screen");
+        let row = dock.y + 2;
+
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), dock.x, row),
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), dock.x - 16, row),
+        );
+        assert_eq!(app.dock_sizes.scratchpad_percent, 45);
+
+        // All the way to the left edge: the dock stops where both splits still fit,
+        // short of its own maximum, rather than hiding them under the pointer.
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, row),
+        );
+        record_frame(&mut app);
+        assert!(app.dock_sizes.scratchpad_percent < *crate::ui::SCRATCHPAD_PERCENT_RANGE.end());
+        assert!(!app.workspace_areas.split_collapsed);
+        assert_eq!(app.workspace_areas.chats.len(), 2);
+        assert!(
+            app.workspace_areas
+                .chats
+                .iter()
+                .all(|slot| slot.pane_area().width >= crate::ui::MIN_SPLIT_COLS),
+            "{:?}",
+            chat_widths(&app)
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), 0, row),
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_resize_mode_trades_cells_with_a_neighbour_until_one_reaches_its_minimum() {
+        let mut app = split_app(2);
+        let before = chat_widths(&app);
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_attached_event(&mut app, Event::Key(prefix));
+        for code in [KeyCode::Char('l'), KeyCode::Char('r')] {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(
+            app.mux.as_ref().unwrap().prefix_state,
+            PrefixState::Transient(TransientMode::ResizeSplit)
+        );
+
+        // The focused split is the last one, so it trades with the one before it.
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+        );
+        record_frame(&mut app);
+        assert_eq!(chat_widths(&app), vec![before[0] - 2, before[1] + 2]);
+
+        for _ in 0..100 {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            );
+            record_frame(&mut app);
+        }
+        assert_eq!(chat_widths(&app)[0], crate::ui::MIN_SPLIT_COLS);
+        assert!(app.status_message.is_some(), "says why the key did nothing");
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mux.as_ref().unwrap().prefix_state, PrefixState::Idle);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Keys arrive faster than frames. Found running CST for real: three presses before
+    /// the next draw each started from the same stale sizes, and moved one step.
+    #[test]
+    fn resize_steps_that_arrive_before_the_next_frame_still_add_up() {
+        let mut app = split_app(2);
+        let before = chat_widths(&app);
+        app.mux.as_mut().unwrap().prefix_state = PrefixState::Transient(TransientMode::ResizeSplit);
+        for _ in 0..3 {
+            handle_attached_event(
+                &mut app,
+                Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            );
+        }
+        assert_eq!(chat_widths(&app), vec![before[0] - 6, before[1] + 6]);
+        record_frame(&mut app);
+        assert_eq!(chat_widths(&app), vec![before[0] - 6, before[1] + 6]);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn the_split_picker_labels_and_selects_sessions_by_their_tab_number() {
+        let mut app = split_app(4);
+        app.open_split_picker(crate::mux::SplitDirection::Columns);
+        assert_eq!(app.pane_list_ids(), vec![3, 4]);
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            app.pane_selected, 2,
+            "session 4 is in tab 3, now that 1 and 2 share tab 1: the row after 3"
+        );
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+        );
+        assert_eq!(app.pane_selected, 2, "tab 1 is on screen, so not on offer");
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(4));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found by using it: choosing a session that shares a tab with others went to
+    /// whichever split the tab last had focused, or nowhere from another tab.
+    #[test]
+    fn the_session_switcher_focuses_the_chosen_session_even_inside_a_split() {
+        let mut app = split_app(3);
+        // Tab 1 holds 1 and 2; tab 2 holds 3.
+        app.mux.as_mut().unwrap().focus(1);
+        app.open_pane_list();
+        assert_eq!(app.pane_list_ids(), vec![1, 2, 3]);
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "the other split"
+        );
+        assert_eq!(app.view, View::Attached(2));
+
+        // From the other tab, straight to a session that is part of a split.
+        app.mux.as_mut().unwrap().focus(3);
+        app.open_pane_list();
+        press_attached(&mut app, KeyCode::Up);
+        press_attached(&mut app, KeyCode::Enter);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(mux.focused, Some(2));
+        assert!(
+            mux.current_window().unwrap().layout.contains(1),
+            "its tab came back"
+        );
+
+        // A digit is a tab number, as the rows are labelled.
+        app.open_pane_list();
+        press_attached(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.pane_selected, 2, "tab 2's first session, the third row");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn ctrl_tab_and_ctrl_page_keys_switch_tabs_like_a_browser_from_any_panel() {
+        let mut app = split_app(3);
+        let key = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+
+        handle_attached_event(&mut app, key(KeyCode::Tab, ctrl));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(3), "next tab");
+        handle_attached_event(&mut app, key(KeyCode::BackTab, ctrl | KeyModifiers::SHIFT));
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "back, to who had focus"
+        );
+        handle_attached_event(&mut app, key(KeyCode::PageDown, ctrl));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(3));
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        handle_attached_event(&mut app, key(KeyCode::PageUp, ctrl));
+        assert_eq!(
+            app.mux.as_ref().unwrap().focused,
+            Some(2),
+            "even from the scratchpad"
+        );
+
+        // Plain Tab still belongs to Copilot.
+        assert_eq!(
+            tab_switch_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            tab_switch_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            None
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    fn press_attached(app: &mut App, code: KeyCode) {
+        handle_attached_event(app, Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn the_split_pickers_first_row_starts_a_new_session_by_asking_for_its_project_first() {
+        let mut app = split_app(3);
+        app.unique_projects = vec!["/work/alpha".to_string(), "/work/beta".to_string()];
+        app.open_split_picker(crate::mux::SplitDirection::Rows);
+        assert_eq!(app.pane_selected, 1, "an existing session is the default");
+        press_attached(&mut app, KeyCode::Up);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::FilterProject);
+        assert_eq!(
+            app.new_split.as_ref().map(|new_split| new_split.anchor),
+            Some(2)
+        );
+        // The focused session's own directory is offered first, and starts selected.
+        let here = app
+            .mux
+            .as_ref()
+            .unwrap()
+            .focused_pane()
+            .unwrap()
+            .cwd
+            .clone();
+        assert_eq!(app.unique_projects[0], here.to_string_lossy());
+        assert_eq!(app.project_selected, 0);
+
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Down);
+        press_attached(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::NewSessionKind, "then as-is or worktree");
+        assert_eq!(app.new_session_dir().as_deref(), Some("/work/beta"));
+        assert_eq!(app.command_project().as_deref(), Some("/work/beta"));
+        assert_eq!(app.project_filter, None, "the list filter is not touched");
+
+        press_attached(&mut app, KeyCode::Esc);
+        assert_eq!(app.new_split, None, "leaving the flow forgets the split");
+        assert_ne!(app.new_session_dir().as_deref(), Some("/work/beta"));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_session_opened_from_the_split_picker_joins_the_split_instead_of_a_new_tab() {
+        let mut app = split_app(3);
+        app.new_split = Some(crate::app::NewSplit {
+            direction: crate::mux::SplitDirection::Rows,
+            anchor: 2,
+            project: Some("/work".to_string()),
+        });
+        // Stands in for the freshly spawned session, which opened in a tab of its own.
+        app.mux.as_mut().unwrap().focus(3);
+        app.join_pending_split(3);
+        let mux = app.mux.as_ref().unwrap();
+        assert_eq!(mux.windows.len(), 1);
+        assert_eq!(mux.windows[0].layout.panes(), vec![1, 2, 3]);
+        assert_eq!(mux.focused, Some(3));
+        assert_eq!(app.new_split, None);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Session 1 in a tall column beside a stack of 2 over 3, focused on 3.
+    fn nested_app() -> App {
+        let mut app = split_app(3);
+        assert!(app
+            .mux
+            .as_mut()
+            .unwrap()
+            .split_with(crate::mux::SplitDirection::Rows, 3));
+        record_frame(&mut app);
+        app
+    }
+
+    fn slot(app: &App, id: u64) -> Rect {
+        app.workspace_areas
+            .chats
+            .iter()
+            .find(|slot| slot.pane == id)
+            .expect("on screen")
+            .area
+    }
+
+    #[test]
+    fn a_column_can_hold_a_stack_beside_one_tall_session() {
+        let mut app = nested_app();
+        let (one, two, three) = (slot(&app, 1), slot(&app, 2), slot(&app, 3));
+        assert_eq!(
+            one.height,
+            two.height + three.height,
+            "1 is as tall as the stack"
+        );
+        assert_eq!(two.x, three.x);
+        assert_eq!(two.bottom(), three.y);
+        assert!(one.right() <= two.x);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn arrows_move_to_whatever_is_that_way_on_screen_however_the_splits_nest() {
+        let mut app = nested_app();
+        let step = |app: &mut App, step| {
+            run_split_command(app, PrefixCommand::FocusSplit(step));
+            app.mux.as_ref().unwrap().focused
+        };
+        use crate::mux::SplitStep::{Down, Left, Right, Up};
+        assert_eq!(step(&mut app, Up), Some(2));
+        assert_eq!(step(&mut app, Left), Some(1));
+        assert_eq!(step(&mut app, Left), Some(1), "nothing further left");
+        assert!(matches!(step(&mut app, Right), Some(2 | 3)));
+        assert_eq!(step(&mut app, Down), Some(3));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn dragging_the_border_inside_a_stack_trades_height_between_its_two_sessions_only() {
+        let mut app = nested_app();
+        let (one, three) = (slot(&app, 1), slot(&app, 3));
+        let (column, row) = (three.x + 5, three.y);
+        assert_eq!(
+            app.workspace_areas.divider_at(column, row),
+            Some(crate::app::Divider::Split {
+                path: vec![1],
+                index: 1
+            })
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), column, row - 4),
+        );
+        handle_attached_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, row - 4),
+        );
+        assert_eq!(slot(&app, 3).y, three.y - 4);
+        assert_eq!(slot(&app, 3).height, three.height + 4);
+        assert_eq!(slot(&app, 1), one, "the tall session is untouched");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn resize_arrows_work_on_their_own_axis_in_a_column_holding_a_stack() {
+        let mut app = nested_app();
+        let (one, three) = (slot(&app, 1), slot(&app, 3));
+        assert!(resize_focused_split(
+            &mut app,
+            crate::mux::SplitDirection::Rows,
+            true
+        ));
+        assert_eq!(
+            slot(&app, 3).height,
+            three.height + 2,
+            "down makes it taller"
+        );
+        assert_eq!(slot(&app, 1), one);
+        assert!(resize_focused_split(
+            &mut app,
+            crate::mux::SplitDirection::Columns,
+            true
+        ));
+        assert_eq!(
+            slot(&app, 3).width,
+            three.width + 2,
+            "right widens the column"
+        );
+        assert_eq!(slot(&app, 1).width, one.width - 2);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found by using it: the dock stayed while any session on screen had a scratchpad,
+    /// so closing the focused one left a placeholder and the dock could not be shut.
+    #[test]
+    fn closing_the_scratchpad_in_a_split_closes_the_shared_dock_for_every_session() {
+        let mut app = split_app(2);
+        let temp = tempfile::tempdir().unwrap();
+        app.scratchpad =
+            Some(crate::scratchpad::Scratchpad::open_in(temp.path(), "split-2").unwrap());
+        app.scratchpad_owner = Some(2);
+        app.scratchpad_open.insert(1);
+        app.scratchpad_open.insert(2);
+        app.workspace_focus = WorkspaceFocus::Scratchpad;
+        assert!(app.scratchpad_dock_visible());
+
+        toggle_attached_scratchpad(&mut app);
+
+        assert!(app.scratchpad_open.is_empty());
+        assert!(!app.scratchpad_dock_visible());
+        assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found by using it: focusing a split beside an open scratchpad showed "No
+    /// scratchpad for …", when the user plainly wanted that session's notes there.
+    #[test]
+    fn focusing_a_split_beside_an_open_scratchpad_gives_that_session_its_own() {
+        let mut app = split_app(2);
+        app.mux.as_mut().unwrap().focus(1);
+        app.view = View::Attached(1);
+        app.scratchpad_open.insert(2);
+        // Only the scratchpad: a terminal dock means a shell, so it is never implied.
+        app.terminal_open.insert(2);
+
+        sync_workspace_panels(&mut app);
+
+        assert!(app.scratchpad_open.contains(&1));
+        assert!(
+            app.attached_scratchpad_visible(),
+            "its own, not a placeholder"
+        );
+        assert!(!app.terminal_open.contains(&1));
+        // Dropped unsaved, so the test leaves no empty notes file behind.
+        app.scratchpad = None;
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn a_dock_stays_while_any_split_has_that_panel_so_moving_focus_reflows_nobody() {
+        let mut app = split_app(2);
+        app.scratchpad_open.insert(1);
+        assert!(
+            !app.attached_scratchpad_visible(),
+            "focused session has none"
+        );
+        assert!(app.scratchpad_dock_visible());
+
+        let layout = app.attached_layout(Rect::new(0, 0, 160, 40));
+        assert!(layout.scratchpad.is_some());
+
+        app.mux.as_mut().unwrap().toggle_split_zoom();
+        assert!(
+            !app.scratchpad_dock_visible(),
+            "zoomed, only the focused session's own panels count"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     /// Switching by click must do the same bookkeeping as `prefix n`, or the new pane
@@ -5785,8 +7132,8 @@ fn main() {
         assert_eq!(target.session_id, "crashed");
         assert_eq!(target.title, "Test session 2");
         assert_eq!(
-            target.index, 1,
-            "the restarted pane must land back where the dead one sat, not at the end"
+            target.pane_id, 2,
+            "the dead pane is the one replaced, so the new one takes its place"
         );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }

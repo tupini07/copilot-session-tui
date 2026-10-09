@@ -11,8 +11,39 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme();
     let selection_style = super::row_selection_style(theme);
     let selection_fg = selection_style.fg.unwrap_or(theme.selection_fg);
+    // Loading is said here and only here: this is the list it is filling. Said in the
+    // header as well, it ran alongside "No sessions found" for a list that simply had
+    // not arrived yet.
+    let loading = app.sessions_loading();
+    let mut title = vec![Span::raw(" Sessions ")];
+    if loading && !app.filtered_indices.is_empty() {
+        title.push(Span::styled(
+            format!("{} loading more… ", super::spinner_frame()),
+            Style::default()
+                .fg(super::semantic_foreground_on(
+                    theme,
+                    theme.info,
+                    theme.background,
+                ))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    // Where to find a closed CST's workspace, whenever there is one to bring back.
+    if !app.recoverable.is_empty() {
+        title.push(Span::styled(
+            " R ",
+            Style::default()
+                .fg(super::badge_foreground(theme, theme.accent))
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        title.push(Span::styled(
+            " ↻ recover workspace ",
+            Style::default().fg(theme.accent),
+        ));
+    }
     let block = Block::default()
-        .title(" Sessions ")
+        .title(Line::from(title))
         .borders(Borders::ALL)
         .style(Style::default().fg(theme.text).bg(theme.background))
         .border_style(Style::default().fg(theme.muted));
@@ -21,11 +52,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     if app.filtered_indices.is_empty() {
-        let hint = if app.new_session_dir().is_some() {
-            "  No sessions found\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
+        let headline = if loading {
+            format!("  {} Loading sessions…", super::spinner_frame())
         } else {
-            "  No sessions found"
+            "  No sessions found".to_string()
         };
+        let mut hint = if app.new_session_dir().is_some() {
+            format!(
+                "{headline}\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
+            )
+        } else {
+            headline
+        };
+        if let Some(latest) = app.recoverable.first() {
+            hint.push_str(&format!(
+                "\n  R  Recover a closed workspace ({} session(s), {})",
+                latest.sessions.len(),
+                crate::recovery::ago(latest.record.saved_at, chrono::Utc::now())
+            ));
+        }
         let empty = ratatui::widgets::Paragraph::new(hint).style(
             Style::default()
                 .fg(super::semantic_foreground_on(

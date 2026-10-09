@@ -18,10 +18,11 @@ pub mod whats_new;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Mode, View, WorkspaceAreas, WorkspaceFocus, WorkspaceHelp};
+use crate::mux::{LayoutNode, PaneId, SplitDirection};
 use crate::theme::{fill_area, Theme, ThemeName};
 
 const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -76,26 +77,75 @@ pub(crate) fn row_selection_style(theme: Theme) -> Style {
     }
 }
 
+/// Smallest chat, inside its border, that a split may leave a session with. Copilot's
+/// own layout falls apart below this, so a split that cannot give every session this
+/// much hides itself rather than squeezing them. Three columns fit on 120.
+pub const MIN_SPLIT_COLS: u16 = 32;
+pub const MIN_SPLIT_ROWS: u16 = 8;
+
+/// One session's chat on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatSlot {
+    pub pane: PaneId,
+    pub area: Rect,
+    /// Edges this slot draws itself. A slot followed by another leaves its trailing
+    /// edge to that neighbour, so a boundary costs one column rather than two — which
+    /// is also what gives a divider a single cell to grab.
+    pub borders: Borders,
+}
+
+impl ChatSlot {
+    /// Where the session's own cells go; see [`AttachedLayout::chat_pane`].
+    pub fn pane_area(&self) -> Rect {
+        Block::default().borders(self.borders).inner(self.area)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachedLayout {
     pub tabs: Rect,
+    /// The focused session's chat box.
     pub chat: Rect,
+    pub chat_borders: Borders,
+    /// Every session on screen, in split order. Exactly one outside a split.
+    pub chats: Vec<ChatSlot>,
+    /// Where each split's members went, outermost first.
+    pub splits: Vec<SplitGeometry>,
     pub scratchpad: Option<Rect>,
     pub terminal: Option<Rect>,
     pub status: Rect,
+    /// A split exists but the window is too small to show it, so only the focused
+    /// session is drawn.
+    pub split_collapsed: bool,
+    /// The whole screen this was laid out for.
+    pub screen: Rect,
+}
+
+/// Where one split in a tab's layout put its members, kept for dragging the borders
+/// between them and resizing from the keyboard — both need the cells as drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitGeometry {
+    /// Child indices from the root of the layout to this split.
+    pub path: Vec<usize>,
+    pub direction: SplitDirection,
+    /// Where each member starts along the split's direction.
+    pub starts: Vec<u16>,
+    /// Each member's length along it, borders included.
+    pub lengths: Vec<u16>,
+    /// The least each member can be along it.
+    pub minimums: Vec<u16>,
+    /// Where the split starts across its direction, and how far it reaches.
+    pub across: (u16, u16),
 }
 
 impl AttachedLayout {
-    /// Where the session pane's own cells go: inside the chat box's border.
+    /// Where the focused session's own cells go: inside the chat box's border.
     ///
     /// One definition, because two things must agree on it exactly — where panes are
     /// sized to, and where anything that addresses a pane's cells from outside thinks they
     /// are. A click, or a link drawn over the frame, lands a cell off otherwise.
     pub fn chat_pane(&self) -> Rect {
-        self.chat.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        })
+        Block::default().borders(self.chat_borders).inner(self.chat)
     }
 }
 
@@ -149,36 +199,60 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     if matches!(app.view, View::Attached(_)) {
-        let layout = attached_layout(
-            size,
-            app.attached_scratchpad_visible(),
-            app.attached_terminal_visible(),
-            app.tab_bar_visible(),
-        );
-        app.workspace_areas = WorkspaceAreas {
-            chat: layout.chat,
-            tabs: layout.tabs,
-            scratchpad: layout.scratchpad,
-            terminal: layout.terminal,
-        };
-        pane::draw_chat(f, app, layout.chat);
-        if let (Some(area), Some(scratchpad)) = (layout.scratchpad, app.scratchpad.as_mut()) {
-            scratchpad::draw_in_with_theme(
-                f,
-                scratchpad,
-                area,
-                app.workspace_focus == WorkspaceFocus::Scratchpad,
-                theme,
-            );
+        let layout = app.attached_layout(size);
+        app.workspace_areas = WorkspaceAreas::from_layout(&layout);
+        pane::draw_chats(f, app, &layout.chats);
+        let focused_title = app
+            .mux
+            .as_ref()
+            .and_then(|mux| {
+                let pane = mux.focused_pane()?;
+                Some(match mux.number_in_window(pane.id) {
+                    Some(number) => format!("{number} {}", pane.title),
+                    None => pane.title.clone(),
+                })
+            })
+            .unwrap_or_default();
+        let own_scratchpad = app.attached_scratchpad_visible();
+        if let Some(area) = layout.scratchpad {
+            match app.scratchpad.as_mut() {
+                Some(scratchpad) if own_scratchpad => {
+                    scratchpad::draw_in_with_theme(
+                        f,
+                        scratchpad,
+                        area,
+                        app.workspace_focus == WorkspaceFocus::Scratchpad,
+                        theme,
+                    );
+                }
+                _ => pane::draw_empty_dock(
+                    f,
+                    area,
+                    " Scratchpad ",
+                    &format!("No scratchpad for {focused_title} — prefix e opens one"),
+                    theme,
+                ),
+            }
         }
-        if let (Some(area), Some(terminal)) = (layout.terminal, app.terminal.active()) {
-            terminal_pane::draw_with_theme(
-                f,
-                terminal,
-                app.workspace_focus == WorkspaceFocus::Terminal,
-                area,
-                theme,
-            );
+        if let Some(area) = layout.terminal {
+            match app.terminal.active() {
+                Some(terminal) if app.attached_terminal_visible() => {
+                    terminal_pane::draw_with_theme(
+                        f,
+                        terminal,
+                        app.workspace_focus == WorkspaceFocus::Terminal,
+                        area,
+                        theme,
+                    );
+                }
+                _ => pane::draw_empty_dock(
+                    f,
+                    area,
+                    " Terminal ",
+                    &format!("No terminal for {focused_title} — prefix t opens one"),
+                    theme,
+                ),
+            }
         }
         pane::draw_tabs(f, app, layout.tabs);
         pane::draw_status(f, app, layout.status);
@@ -197,6 +271,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         if app.mode == Mode::NewSessionKind {
             popups::draw_new_session_kind(f, app);
+        }
+        // Asked while attached only when starting a new session into a split.
+        if app.mode == Mode::FilterProject {
+            popups::draw_project_filter(f, app);
         }
         // `prefix q` can raise this without leaving the pane, so it has to be drawn
         // here too — the list view below is never reached while attached.
@@ -261,16 +339,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .bg(theme.accent),
         ),
         Span::raw(format!("  {} sessions", app.filtered_indices.len())),
-        Span::styled(
-            if app.sessions_loading() {
-                format!(" · {} loading remaining sessions…", spinner_frame())
-            } else {
-                String::new()
-            },
-            Style::default()
-                .fg(semantic_foreground_on(theme, theme.info, theme.background))
-                .add_modifier(Modifier::BOLD),
-        ),
     ]))
     .style(Style::default().fg(theme.text).bg(theme.background));
 
@@ -296,6 +364,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::FavoriteOpen => popups::draw_favorite_open(f, app),
         Mode::NewSessionKind => popups::draw_new_session_kind(f, app),
         Mode::FilterProject => popups::draw_project_filter(f, app),
+        Mode::RecoverWorkspace => popups::draw_recover_workspace(f, app),
         Mode::Rename => popups::draw_rename(f, app),
         _ => {}
     }
@@ -361,11 +430,53 @@ pub fn terminal_panel_height(content_height: u16) -> u16 {
     }
 }
 
+#[cfg(test)]
 pub fn attached_layout(
     area: Rect,
     scratchpad_visible: bool,
     terminal_visible: bool,
     tabs_visible: bool,
+) -> AttachedLayout {
+    attached_layout_sized(
+        area,
+        scratchpad_visible,
+        terminal_visible,
+        tabs_visible,
+        DockSizes::default(),
+    )
+}
+
+/// How much room the docks take. Starts at the built-in proportions; dragging a
+/// dock's edge changes it for as long as CST runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DockSizes {
+    pub scratchpad_percent: u16,
+    /// `None` until someone drags it, so until then the height follows the window.
+    pub terminal_rows: Option<u16>,
+}
+
+impl Default for DockSizes {
+    fn default() -> Self {
+        Self {
+            scratchpad_percent: 35,
+            terminal_rows: None,
+        }
+    }
+}
+
+/// How far the scratchpad column can be dragged: never so narrow it is lost under the
+/// pointer, never so wide the chats get less than a third.
+pub const SCRATCHPAD_PERCENT_RANGE: std::ops::RangeInclusive<u16> = 15..=65;
+pub const MIN_TERMINAL_ROWS: u16 = 4;
+/// The chats keep at least this many rows above the terminal, however far it is dragged.
+const MIN_ROWS_ABOVE_TERMINAL: u16 = 5;
+
+pub fn attached_layout_sized(
+    area: Rect,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+    tabs_visible: bool,
+    sizes: DockSizes,
 ) -> AttachedLayout {
     // A lone session has nothing to switch to, so the strip collapses to nothing rather
     // than spending two rows of Copilot's output on a single tab.
@@ -386,8 +497,13 @@ pub fn attached_layout(
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),
-                Constraint::Length(terminal_panel_height(content.height)),
+                Constraint::Min(MIN_ROWS_ABOVE_TERMINAL),
+                Constraint::Length(
+                    sizes
+                        .terminal_rows
+                        .unwrap_or_else(|| terminal_panel_height(content.height))
+                        .min(content.height.saturating_sub(MIN_ROWS_ABOVE_TERMINAL)),
+                ),
             ])
             .split(content);
         (sections[0], Some(sections[1]))
@@ -398,7 +514,10 @@ pub fn attached_layout(
     let (chat, scratchpad) = if scratchpad_visible {
         let sections = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .constraints([
+                Constraint::Percentage(100 - sizes.scratchpad_percent),
+                Constraint::Percentage(sizes.scratchpad_percent),
+            ])
             .split(top);
         (sections[0], Some(sections[1]))
     } else {
@@ -408,10 +527,265 @@ pub fn attached_layout(
     AttachedLayout {
         tabs,
         chat,
+        chat_borders: Borders::ALL,
+        chats: Vec::new(),
+        splits: Vec::new(),
         scratchpad,
         terminal,
         status,
+        split_collapsed: false,
+        screen: area,
     }
+}
+
+/// The attached layout with a tab's sessions sharing the chat area by `layout`, or
+/// `None` when the window is too small to give each of them a usable chat.
+///
+/// The docks are laid out first and the sessions get what is left, so the scratchpad
+/// and terminal are the same size however many sessions share the screen.
+pub fn attached_split_layout(
+    area: Rect,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+    tabs_visible: bool,
+    sizes: DockSizes,
+    layout: &LayoutNode,
+    focused: PaneId,
+) -> Option<AttachedLayout> {
+    let mut attached = attached_layout_sized(
+        area,
+        scratchpad_visible,
+        terminal_visible,
+        tabs_visible,
+        sizes,
+    );
+    let mut chats = Vec::new();
+    let mut splits = Vec::new();
+    lay_out(
+        layout,
+        attached.chat,
+        (false, false),
+        &mut Vec::new(),
+        &mut chats,
+        &mut splits,
+    )?;
+    let focused = chats.iter().find(|slot| slot.pane == focused)?;
+    attached.chat = focused.area;
+    attached.chat_borders = focused.borders;
+    attached.chats = chats;
+    attached.splits = splits;
+    Some(attached)
+}
+
+/// The inner length a chat needs along `axis`: width for columns, height for rows.
+fn chat_minimum(axis: SplitDirection) -> u16 {
+    match axis {
+        SplitDirection::Columns => MIN_SPLIT_COLS,
+        SplitDirection::Rows => MIN_SPLIT_ROWS,
+    }
+}
+
+/// The least room `node` needs along `axis`, borders included.
+///
+/// `drop_trailing` is whether its trailing edge on that axis is drawn by a neighbour:
+/// a boundary between two members is drawn once, by the later one, so everything but
+/// the last member of a split saves a line.
+pub fn minimum_extent(node: &LayoutNode, axis: SplitDirection, drop_trailing: bool) -> u16 {
+    match node {
+        LayoutNode::Pane(_) => chat_minimum(axis) + 1 + u16::from(!drop_trailing),
+        LayoutNode::Split {
+            direction,
+            children,
+            ..
+        } if *direction == axis => {
+            let last = children.len().saturating_sub(1);
+            children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| minimum_extent(child, axis, index < last || drop_trailing))
+                .sum()
+        }
+        LayoutNode::Split { children, .. } => children
+            .iter()
+            .map(|child| minimum_extent(child, axis, drop_trailing))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// Lay `node` out in `area`. `drops` says whether its right and bottom edges belong
+/// to a neighbour; see [`minimum_extent`]. The rule holds at every depth only because
+/// a split never sits directly inside one running the same way.
+fn lay_out(
+    node: &LayoutNode,
+    area: Rect,
+    drops: (bool, bool),
+    path: &mut Vec<usize>,
+    chats: &mut Vec<ChatSlot>,
+    splits: &mut Vec<SplitGeometry>,
+) -> Option<()> {
+    let (drop_right, drop_bottom) = drops;
+    match node {
+        LayoutNode::Pane(pane) => {
+            let mut borders = Borders::ALL;
+            if drop_right {
+                borders -= Borders::RIGHT;
+            }
+            if drop_bottom {
+                borders -= Borders::BOTTOM;
+            }
+            let inner = Block::default().borders(borders).inner(area);
+            if inner.width < MIN_SPLIT_COLS || inner.height < MIN_SPLIT_ROWS {
+                return None;
+            }
+            chats.push(ChatSlot {
+                pane: *pane,
+                area,
+                borders,
+            });
+            Some(())
+        }
+        LayoutNode::Split {
+            direction,
+            children,
+            weights,
+        } => {
+            let (length, start, drop_along, across) = match direction {
+                SplitDirection::Columns => (area.width, area.x, drop_right, (area.y, area.height)),
+                SplitDirection::Rows => (area.height, area.y, drop_bottom, (area.x, area.width)),
+            };
+            let last = children.len().saturating_sub(1);
+            let drops_along: Vec<bool> = (0..children.len())
+                .map(|index| index < last || drop_along)
+                .collect();
+            let minimums: Vec<u16> = children
+                .iter()
+                .zip(&drops_along)
+                .map(|(child, drop)| minimum_extent(child, *direction, *drop))
+                .collect();
+            let lengths = share_with_minimums(length, weights, &minimums)?;
+            let mut starts = Vec::with_capacity(children.len());
+            let mut offset = start;
+            for (index, child) in children.iter().enumerate() {
+                starts.push(offset);
+                let (child_area, child_drops) = match direction {
+                    SplitDirection::Columns => (
+                        Rect::new(offset, area.y, lengths[index], area.height),
+                        (drops_along[index], drop_bottom),
+                    ),
+                    SplitDirection::Rows => (
+                        Rect::new(area.x, offset, area.width, lengths[index]),
+                        (drop_right, drops_along[index]),
+                    ),
+                };
+                path.push(index);
+                let placed = lay_out(child, child_area, child_drops, path, chats, splits);
+                path.pop();
+                placed?;
+                offset += lengths[index];
+            }
+            splits.push(SplitGeometry {
+                path: path.clone(),
+                direction: *direction,
+                starts,
+                lengths,
+                minimums,
+                across,
+            });
+            Some(())
+        }
+    }
+}
+
+/// Dock sizes shrunk, as far as their minimums, so that `layout` fits beside them.
+///
+/// Docks give way before sessions do. Opening the terminal under three stacked
+/// sessions at its usual height left them too few rows, and the whole split vanished
+/// the moment the terminal appeared. These sizes are only for laying this screen out;
+/// the ones the user dragged to are kept, and come back when there is room.
+pub fn docks_fitted_to_split(
+    area: Rect,
+    tabs_visible: bool,
+    scratchpad_visible: bool,
+    terminal_visible: bool,
+    sizes: DockSizes,
+    layout: &LayoutNode,
+) -> DockSizes {
+    let needed_cols = minimum_extent(layout, SplitDirection::Columns, false);
+    let needed_rows = minimum_extent(layout, SplitDirection::Rows, false);
+    let mut fitted = sizes;
+    if terminal_visible {
+        let tab_height = if tabs_visible { TAB_BAR_HEIGHT } else { 0 };
+        let content = area.height.saturating_sub(tab_height + 1);
+        let current = sizes
+            .terminal_rows
+            .unwrap_or_else(|| terminal_panel_height(content));
+        let room = content.saturating_sub(needed_rows);
+        fitted.terminal_rows = Some(current.min(room).max(MIN_TERMINAL_ROWS));
+    }
+    if scratchpad_visible && area.width > 0 {
+        let room = area.width.saturating_sub(needed_cols);
+        // A percent short of the exact fit, because the layout rounds.
+        let cap = (u32::from(room) * 100 / u32::from(area.width)) as u16;
+        fitted.scratchpad_percent = sizes
+            .scratchpad_percent
+            .min(cap.saturating_sub(1))
+            .max(*SCRATCHPAD_PERCENT_RANGE.start());
+    }
+    fitted
+}
+
+/// Split `total` cells in proportion to `weights`, giving every share at least
+/// `minimum`. `None` when there are not enough cells for that.
+#[cfg(test)]
+pub(crate) fn share_cells(total: u16, weights: &[u16], minimum: u16) -> Option<Vec<u16>> {
+    share_with_minimums(total, weights, &vec![minimum; weights.len()])
+}
+
+/// Split `total` cells in proportion to `weights`, giving share `i` at least
+/// `minimums[i]`. `None` when there are not enough cells for that.
+///
+/// Rounding can leave each share a cell short, and those cells go to the leading
+/// shares so the sizes always add up to exactly `total` — a gap would show the
+/// background through between two chats.
+pub(crate) fn share_with_minimums(
+    total: u16,
+    weights: &[u16],
+    minimums: &[u16],
+) -> Option<Vec<u16>> {
+    let count = weights.len();
+    let needed: u32 = minimums.iter().map(|minimum| u32::from(*minimum)).sum();
+    if count == 0 || minimums.len() != count || u32::from(total) < needed {
+        return None;
+    }
+    let sum: u32 = weights
+        .iter()
+        .map(|weight| u32::from((*weight).max(1)))
+        .sum();
+    let mut sizes: Vec<u16> = weights
+        .iter()
+        .map(|weight| (u32::from(total) * u32::from((*weight).max(1)) / sum) as u16)
+        .collect();
+    let mut remainder = total - sizes.iter().sum::<u16>();
+    for size in &mut sizes {
+        if remainder == 0 {
+            break;
+        }
+        *size += 1;
+        remainder -= 1;
+    }
+    // Lift anything under its minimum, taking from whichever share has most to spare.
+    while let Some(short) = (0..count).find(|&index| sizes[index] < minimums[index]) {
+        let donor = (0..count).max_by_key(|&index| sizes[index].saturating_sub(minimums[index]))?;
+        let spare = sizes[donor].saturating_sub(minimums[donor]);
+        let take = (minimums[short] - sizes[short]).min(spare);
+        if take == 0 {
+            return None;
+        }
+        sizes[donor] -= take;
+        sizes[short] += take;
+    }
+    Some(sizes)
 }
 
 /// A vertical scrollbar down the right edge of `area`, drawn only when the content
@@ -458,6 +832,209 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
+    fn split_of(direction: SplitDirection, panes: &[PaneId]) -> LayoutNode {
+        LayoutNode::Split {
+            direction,
+            children: panes.iter().map(|id| LayoutNode::Pane(*id)).collect(),
+            weights: vec![crate::mux::split::DEFAULT_WEIGHT; panes.len()],
+        }
+    }
+
+    fn three_columns() -> LayoutNode {
+        split_of(SplitDirection::Columns, &[1, 2, 3])
+    }
+
+    #[test]
+    fn three_columns_tile_the_chat_area_sharing_one_border_column_per_boundary() {
+        let area = Rect::new(0, 0, 120, 40);
+        let layout = attached_split_layout(
+            area,
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            2,
+        )
+        .expect("three columns fit on 120");
+        let chats = &layout.chats;
+
+        assert_eq!(chats.len(), 3);
+        assert_eq!(chats[0].area.x, 0);
+        assert_eq!(chats[2].area.right(), 120);
+        for pair in chats.windows(2) {
+            assert_eq!(
+                pair[0].area.right(),
+                pair[1].area.x,
+                "no gap and no overlap between neighbours"
+            );
+            assert!(
+                !pair[0].borders.contains(Borders::RIGHT),
+                "the boundary is drawn once, by the later slot"
+            );
+            assert!(pair[0].pane_area().right() < pair[1].pane_area().x);
+        }
+        for slot in chats {
+            assert!(slot.pane_area().width >= MIN_SPLIT_COLS);
+            assert_eq!(slot.area.y, layout.tabs.bottom());
+        }
+        // 120 columns less four border columns, shared evenly.
+        let widths: Vec<u16> = chats.iter().map(|slot| slot.pane_area().width).collect();
+        assert_eq!(widths.iter().sum::<u16>(), 116);
+        assert!(widths.iter().max().unwrap() - widths.iter().min().unwrap() <= 1);
+    }
+
+    #[test]
+    fn the_focused_chat_is_the_focused_sessions_slot_so_its_size_drives_new_panes() {
+        let layout = attached_split_layout(
+            Rect::new(0, 0, 120, 40),
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            3,
+        )
+        .unwrap();
+        let third = layout.chats[2];
+        assert_eq!(layout.chat, third.area);
+        assert_eq!(layout.chat_pane(), third.pane_area());
+    }
+
+    #[test]
+    fn a_window_too_narrow_for_every_split_refuses_rather_than_squeezing_them() {
+        // Three columns of 32 plus four borders need 100.
+        assert!(attached_split_layout(
+            Rect::new(0, 0, 99, 40),
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            1
+        )
+        .is_none());
+        assert!(attached_split_layout(
+            Rect::new(0, 0, 100, 40),
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            1
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn the_docks_keep_their_size_whatever_the_split_so_moving_focus_reflows_nothing() {
+        let area = Rect::new(0, 0, 200, 50);
+        let single = attached_layout(area, true, true, true);
+        let split = attached_split_layout(
+            area,
+            true,
+            true,
+            true,
+            DockSizes::default(),
+            &three_columns(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(split.scratchpad, single.scratchpad);
+        assert_eq!(split.terminal, single.terminal);
+        assert_eq!(
+            split.chats.last().unwrap().area.right(),
+            single.scratchpad.unwrap().x,
+            "the split fills exactly the room the single chat had"
+        );
+    }
+
+    #[test]
+    fn stacked_splits_keep_each_top_edge_so_every_session_has_its_title() {
+        let split = split_of(SplitDirection::Rows, &[1, 2, 3]);
+        let layout = attached_split_layout(
+            Rect::new(0, 0, 100, 50),
+            false,
+            false,
+            true,
+            DockSizes::default(),
+            &split,
+            1,
+        )
+        .unwrap();
+        for pair in layout.chats.windows(2) {
+            assert_eq!(pair[0].area.bottom(), pair[1].area.y);
+            assert!(!pair[0].borders.contains(Borders::BOTTOM));
+            assert!(pair[1].borders.contains(Borders::TOP));
+        }
+    }
+
+    #[test]
+    fn dragged_dock_sizes_are_used_but_the_terminal_never_takes_the_chats_last_rows() {
+        let area = Rect::new(0, 0, 100, 40);
+        let wide = attached_layout_sized(
+            area,
+            true,
+            true,
+            true,
+            DockSizes {
+                scratchpad_percent: 50,
+                terminal_rows: Some(10),
+            },
+        );
+        assert_eq!(wide.scratchpad.unwrap().width, 50);
+        assert_eq!(wide.terminal.unwrap().height, 10);
+
+        let greedy = attached_layout_sized(
+            area,
+            false,
+            true,
+            true,
+            DockSizes {
+                terminal_rows: Some(500),
+                ..DockSizes::default()
+            },
+        );
+        assert_eq!(greedy.chat.height, MIN_ROWS_ABOVE_TERMINAL);
+    }
+
+    #[test]
+    fn docks_shrink_to_keep_a_split_on_screen_before_the_split_gives_way() {
+        let area = Rect::new(0, 0, 160, 45);
+        let stacked = split_of(SplitDirection::Rows, &[1, 2, 3]);
+        let sizes = DockSizes::default();
+        assert!(
+            attached_split_layout(area, false, true, true, sizes, &stacked, 1).is_none(),
+            "the terminal at its usual height leaves three rows too little room"
+        );
+        let fitted = docks_fitted_to_split(area, true, false, true, sizes, &stacked);
+        let layout = attached_split_layout(area, false, true, true, fitted, &stacked, 1)
+            .expect("a shorter terminal makes room");
+        assert!(layout.terminal.unwrap().height >= MIN_TERMINAL_ROWS);
+
+        let four = split_of(SplitDirection::Columns, &[1, 2, 3, 4]);
+        assert!(attached_split_layout(area, true, false, true, sizes, &four, 1).is_none());
+        let fitted = docks_fitted_to_split(area, true, true, false, sizes, &four);
+        assert!(attached_split_layout(area, true, false, true, fitted, &four, 1).is_some());
+
+        // Too small even with both docks at their minimum: the split still gives way.
+        let tiny = Rect::new(0, 0, 80, 20);
+        let fitted = docks_fitted_to_split(tiny, true, false, true, sizes, &stacked);
+        assert!(attached_split_layout(tiny, false, true, true, fitted, &stacked, 1).is_none());
+    }
+
+    #[test]
+    fn shares_add_up_exactly_and_honour_both_the_weights_and_the_minimum() {
+        assert_eq!(
+            share_cells(100, &[100, 100, 100], 10),
+            Some(vec![34, 33, 33])
+        );
+        assert_eq!(share_cells(100, &[300, 100], 10), Some(vec![75, 25]));
+        // A tiny weight is lifted to the minimum at the expense of the largest share.
+        assert_eq!(share_cells(100, &[990, 10], 32), Some(vec![68, 32]));
+        assert_eq!(share_cells(63, &[100, 100], 32), None);
+    }
+
     #[test]
     fn attached_workspace_places_scratchpad_right_and_terminal_below() {
         let layout = attached_layout(Rect::new(0, 0, 120, 40), true, true, true);
@@ -496,8 +1073,10 @@ mod tests {
         assert!(layout.tabs.bottom() <= layout.chat.y);
     }
 
+    /// Said once, in the list being filled. It used to sit in the header while the
+    /// list itself said "No sessions found", which read as a contradiction.
     #[test]
-    fn first_frame_says_the_rest_of_the_catalog_is_loading() {
+    fn first_frame_says_the_list_is_loading_instead_of_that_there_are_no_sessions() {
         let mut app = App::new(Vec::new(), UserConfig::default());
         let (_sender, receiver) = std::sync::mpsc::channel();
         app.begin_session_load(receiver);
@@ -512,8 +1091,9 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("0 sessions"), "got:\n{text}");
-        assert!(text.contains("loading remaining sessions…"), "got:\n{text}");
+        assert!(text.contains("Loading sessions…"), "got:\n{text}");
+        assert!(!text.contains("No sessions found"), "got:\n{text}");
+        assert_eq!(text.matches("oading").count(), 1, "said once:\n{text}");
         assert!(
             SPINNER_FRAMES.iter().any(|frame| text.contains(frame)),
             "got:\n{text}"

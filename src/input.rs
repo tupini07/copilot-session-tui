@@ -2,7 +2,7 @@
 use crate::app::SettingsSection;
 use crate::app::{
     App, DeleteTarget, Mode, NewSessionRequest, PendingTmuxLaunch, PendingWorktree,
-    SettingsEditField, TakeoverTarget, View, WorktreeLaunchTarget,
+    SettingsEditField, TakeoverTarget, View, WorkspaceFocus, WorktreeLaunchTarget,
 };
 use crate::config;
 use crate::session::loader;
@@ -214,6 +214,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::ProjectSettings => handle_project_settings(app, key.code),
         Mode::BranchName => handle_branch_name(app, key.code),
         Mode::PaneList => handle_pane_list(app, key.code),
+        Mode::RecoverWorkspace => handle_recover_workspace(app, key.code),
         Mode::Scratchpad => unreachable!(),
     }
 
@@ -433,10 +434,15 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
 
 /// Pane switcher: attach, kill, or dismiss without touching the underlying session list.
 fn handle_pane_list(app: &mut App, key: KeyCode) {
-    let Some(count) = app.mux.as_ref().map(|mux| mux.panes.len()) else {
+    if app.mux.is_none() {
         app.mode = Mode::Normal;
         return;
-    };
+    }
+    if let Some(direction) = app.split_picker {
+        handle_split_picker(app, key, direction);
+        return;
+    }
+    let count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
     if count == 0 {
         app.mode = Mode::Normal;
         return;
@@ -449,19 +455,31 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
         KeyCode::Down | KeyCode::Char('j') => {
             app.pane_selected = (app.pane_selected + 1).min(count - 1);
         }
+        // Rows are labelled with their tab's number, and a tab can hold several
+        // sessions, so a digit goes to the first session in that tab.
         KeyCode::Char(digit @ '1'..='9') => {
-            let index = digit as usize - '1' as usize;
-            if index < count {
+            let number = digit as usize - '0' as usize;
+            let mux = app.mux.as_ref().expect("mux checked above");
+            if let Some(index) = mux
+                .panes
+                .iter()
+                .position(|pane| mux.tab_number(pane.id) == Some(number))
+            {
                 app.pane_selected = index;
             }
         }
+        // The session itself gets the keyboard: its tab comes on screen with it, and
+        // in a split it is that session's split that is focused, not whichever one the
+        // tab last had. Choosing by tab position instead went to the wrong split, or
+        // nowhere once a tab held several sessions.
         KeyCode::Enter => {
             let index = app.pane_selected.min(count - 1);
             let mux = app.mux.as_mut().expect("mux checked above");
-            mux.select_index(index);
             let id = mux.panes[index].id;
+            mux.focus(id);
             app.mode = Mode::Normal;
             app.view = View::Attached(id);
+            app.workspace_focus = WorkspaceFocus::Chat;
             crate::mux_input::sync_workspace_panels(app);
         }
         KeyCode::Char('x') => {
@@ -506,6 +524,88 @@ fn handle_pane_list(app: &mut App, key: KeyCode) {
     }
 }
 
+/// The pane switcher choosing a session to show beside the focused one.
+///
+/// Only navigation and choosing: closing or ending a session from here would remove
+/// it from a list that exists to add one, which is not what anyone opening it meant.
+fn handle_split_picker(app: &mut App, key: KeyCode, direction: crate::mux::SplitDirection) {
+    // Row 0 starts a brand-new session; the sessions in other tabs follow it.
+    let candidates = app.pane_list_ids();
+    let rows = candidates.len() + 1;
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.pane_selected = app.pane_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.pane_selected = (app.pane_selected + 1).min(rows - 1);
+        }
+        // The rows are labelled with their tab numbers, so a digit means that tab.
+        KeyCode::Char(digit @ '1'..='9') => {
+            let number = digit as usize - '0' as usize;
+            let mux = app.mux.as_ref().expect("mux checked by the caller");
+            if let Some(index) = candidates
+                .iter()
+                .position(|id| mux.tab_number(*id) == Some(number))
+            {
+                app.pane_selected = index + 1;
+            }
+        }
+        KeyCode::Enter => {
+            let selected = app.pane_selected.min(rows - 1);
+            app.split_picker = None;
+            app.mode = Mode::Normal;
+            if selected == 0 {
+                app.begin_new_split_session(direction);
+                return;
+            }
+            let id = candidates[selected - 1];
+            if app
+                .mux
+                .as_mut()
+                .is_some_and(|mux| mux.split_with(direction, id))
+            {
+                app.workspace_focus = WorkspaceFocus::Chat;
+                crate::mux_input::sync_workspace_panels(app);
+                crate::mux_input::sync_view(app);
+                app.refresh_workspace_areas();
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.split_picker = None;
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+}
+
+/// Choosing a closed workspace to bring back: Enter recovers it, `x` forgets it.
+fn handle_recover_workspace(app: &mut App, key: KeyCode) {
+    let count = app.recoverable.len();
+    if count == 0 {
+        app.mode = Mode::Normal;
+        return;
+    }
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.recover_selected = app.recover_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.recover_selected = (app.recover_selected + 1).min(count - 1);
+        }
+        KeyCode::Enter => {
+            let index = app.recover_selected.min(count - 1);
+            app.mode = Mode::Normal;
+            if let Err(error) = app.recover_workspace(index) {
+                app.status_message = Some(format!("Cannot recover the workspace: {error}"));
+            }
+            crate::mux_input::sync_workspace_panels(app);
+        }
+        KeyCode::Char('x') => app.forget_workspace(app.recover_selected.min(count - 1)),
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        _ => {}
+    }
+}
+
 /// Every character `handle_pane_list` above claims. The configured tmux end key — the
 /// one tmux shortcut that also fires in the pane switcher — is validated against this
 /// and matched after these, so drift here makes a configured key inert, never hijacked.
@@ -517,7 +617,7 @@ pub(crate) const PANE_LIST_COMMAND_KEYS: &[char] = &[
 /// shortcuts are validated against this and matched after these.
 pub(crate) const LIST_COMMAND_KEYS: &[char] = &[
     'q', 'k', 'j', '/', 'r', 'e', 'g', 'T', ' ', 'd', 'f', 'p', 's', 'H', 'c', 'n', 'N', '?', ',',
-    '.', 'u',
+    '.', 'u', 'R',
 ];
 
 fn handle_normal(app: &mut App, key: KeyCode) {
@@ -585,6 +685,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('T') => open_favorite_tabs(app),
+        KeyCode::Char('R') => app.open_recover_workspace(),
         KeyCode::Char(' ') => match app.toggle_selected_favorite() {
             Ok(Some(true)) => app.status_message = Some("Added to favorites".to_string()),
             Ok(Some(false)) => app.status_message = Some("Removed from favorites".to_string()),
@@ -697,6 +798,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::GlobalSettings => KeyCode::Char(','),
         CommandId::ProjectSettings => KeyCode::Char('.'),
         CommandId::OpenHelp => KeyCode::Char('?'),
+        CommandId::RecoverWorkspace => KeyCode::Char('R'),
         _ => return,
     };
     handle_normal(app, key);
@@ -1053,12 +1155,20 @@ pub(crate) fn handle_new_session_kind(app: &mut App, key: KeyCode) {
         KeyCode::Char('n') | KeyCode::Enter => {
             app.mode = Mode::Normal;
             start_plain_new_session(app);
+            // Spawning took it if it worked. If not, it must not linger and pull the
+            // next, unrelated new session into a split.
+            app.new_split = None;
         }
         KeyCode::Char('w') | KeyCode::Char('W') => {
             app.mode = Mode::Normal;
             begin_worktree_session(app);
+            // Kept only while the branch name is being asked for.
+            if app.mode != Mode::BranchName {
+                app.new_split = None;
+            }
         }
         KeyCode::Esc | KeyCode::Char('q') => {
+            app.new_split = None;
             app.mode = Mode::Normal;
         }
         _ => {}
@@ -1325,10 +1435,35 @@ fn cancel_delete(app: &mut App) {
     app.status_message = Some("Delete cancelled".to_string());
 }
 
-fn handle_filter_project(app: &mut App, key: KeyCode) {
+pub(crate) fn handle_filter_project(app: &mut App, key: KeyCode) {
     let filtered = app.filtered_project_indices();
-    let has_all_option = app.project_search_query.is_empty();
+    // Choosing where a new split session runs, "all projects" is not a place.
+    let choosing_for_split = app.new_split.is_some();
+    let has_all_option = app.project_search_query.is_empty() && !choosing_for_split;
     let total = filtered.len() + usize::from(has_all_option);
+
+    if choosing_for_split {
+        match key {
+            KeyCode::Esc => {
+                app.new_split = None;
+                app.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                let Some(&project_index) = filtered.get(app.project_selected) else {
+                    return;
+                };
+                let project = app.unique_projects[project_index].clone();
+                if let Some(new_split) = app.new_split.as_mut() {
+                    new_split.project = Some(project);
+                }
+                // Then the same question `n` asks: as-is, or in a new worktree.
+                app.mode = Mode::NewSessionKind;
+                return;
+            }
+            _ => {}
+        }
+    }
 
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
@@ -1930,6 +2065,13 @@ fn save_and_close_project_settings(app: &mut App) {
 /// Runs from the main loop rather than the key handler so the "creating…" notice is
 /// already on screen before this blocks.
 pub fn run_pending_worktree(app: &mut App, pending: PendingWorktree) {
+    run_worktree_launch(app, pending);
+    // A split this was started for has been joined by now, or the launch failed;
+    // either way it must not carry over to the next new session.
+    app.new_split = None;
+}
+
+fn run_worktree_launch(app: &mut App, pending: PendingWorktree) {
     let PendingWorktree {
         project,
         branch,
@@ -1995,6 +2137,7 @@ fn handle_branch_name(app: &mut App, key: KeyCode) {
         KeyCode::Esc => {
             app.branch_config = None;
             app.worktree_launch_target = WorktreeLaunchTarget::Standard;
+            app.new_split = None;
             app.mode = Mode::Normal;
             app.status_message = Some("Isolated session cancelled".to_string());
         }
