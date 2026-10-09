@@ -1889,6 +1889,14 @@ pub fn sync_workspace_panels(app: &mut App) {
         return;
     };
 
+    // With the scratchpad column already up beside a split, a session without one gets
+    // its own, empty if it has never had notes, rather than a placeholder telling the
+    // user to open it. The terminal dock keeps its placeholder: opening one starts a
+    // shell, which clicking between splits should not do.
+    if !app.scratchpad_open.contains(&pane_id) && app.scratchpad_dock_visible() {
+        app.remember_scratchpad_panel(pane_id, &session_id, true);
+    }
+
     if app.scratchpad_owner != Some(pane_id) || app.scratchpad.is_none() {
         if !close_scratchpad(app) {
             return;
@@ -3762,6 +3770,30 @@ mod tests {
         assert!(app.scratchpad_open.is_empty());
         assert!(!app.scratchpad_dock_visible());
         assert_eq!(app.workspace_focus, WorkspaceFocus::Chat);
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Found by using it: focusing a split beside an open scratchpad showed "No
+    /// scratchpad for …", when the user plainly wanted that session's notes there.
+    #[test]
+    fn focusing_a_split_beside_an_open_scratchpad_gives_that_session_its_own() {
+        let mut app = split_app(2);
+        app.mux.as_mut().unwrap().focus(1);
+        app.view = View::Attached(1);
+        app.scratchpad_open.insert(2);
+        // Only the scratchpad: a terminal dock means a shell, so it is never implied.
+        app.terminal_open.insert(2);
+
+        sync_workspace_panels(&mut app);
+
+        assert!(app.scratchpad_open.contains(&1));
+        assert!(
+            app.attached_scratchpad_visible(),
+            "its own, not a placeholder"
+        );
+        assert!(!app.terminal_open.contains(&1));
+        // Dropped unsaved, so the test leaves no empty notes file behind.
+        app.scratchpad = None;
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
