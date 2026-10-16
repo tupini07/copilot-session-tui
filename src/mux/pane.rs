@@ -389,7 +389,7 @@ impl Pane {
                 match chunk {
                     PtyChunk::Output(bytes) => {
                         let signals = if let Ok(mut parser) = pump_parser.lock() {
-                            parser.process(&bytes);
+                            super::callbacks::feed(&mut parser, &bytes);
                             if !pump_has_visible_output.load(Ordering::Relaxed)
                                 && Self::screen_has_visible_text(parser.screen())
                             {
@@ -590,7 +590,7 @@ impl Pane {
     #[cfg(any(test, feature = "screenshots"))]
     pub fn feed_synthetic(&mut self, bytes: &[u8]) {
         if let Ok(mut parser) = self.parser.lock() {
-            parser.process(bytes);
+            super::callbacks::feed(&mut parser, bytes);
             if Self::screen_has_visible_text(parser.screen()) {
                 self.has_visible_output.store(true, Ordering::Release);
             }
@@ -665,37 +665,23 @@ impl Pane {
         let Ok(parser) = self.parser.lock() else {
             return Vec::new();
         };
-        let screen = parser.screen();
-        let (_, width) = screen.size();
         parser
             .callbacks()
-            .links_on_screen(screen)
+            .links_on_screen(parser.screen())
             .into_iter()
-            .filter_map(|crate::mux::callbacks::LiveLink { start, end, target }| {
+            .filter_map(|crate::mux::callbacks::LiveLink { cells, target }| {
                 let Some(crate::links::Target::Web(url)) = crate::links::classify(&target) else {
                     return None;
                 };
-                let mut cells = Vec::new();
-                let (mut row, mut column) = start;
-                while (row, column) < end {
-                    let cell = screen.cell(row, column)?;
-                    // The right half of a wide character is drawn by its left half.
-                    if !cell.is_wide_continuation()
-                        && row < self.viewport.rows
-                        && column < self.viewport.cols
-                    {
-                        cells.push((
-                            self.viewport.x + column,
-                            self.viewport.y + row,
-                            cell.contents().to_string(),
-                        ));
-                    }
-                    column += 1;
-                    if column >= width {
-                        column = 0;
-                        row += 1;
-                    }
-                }
+                let cells = cells
+                    .into_iter()
+                    .filter(|(row, column, _)| {
+                        *row < self.viewport.rows && *column < self.viewport.cols
+                    })
+                    .map(|(row, column, text)| {
+                        (self.viewport.x + column, self.viewport.y + row, text)
+                    })
+                    .collect();
                 Some(crate::ui::hyperlinks::HyperlinkRun { target: url, cells })
             })
             .collect()
@@ -1286,7 +1272,7 @@ impl Pane {
     #[cfg(test)]
     pub fn feed(&self, bytes: &[u8]) {
         if let Ok(mut parser) = self.parser.lock() {
-            parser.process(bytes);
+            super::callbacks::feed(&mut parser, bytes);
         }
     }
 

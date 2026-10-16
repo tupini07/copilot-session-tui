@@ -37,6 +37,10 @@ pub struct PaneCallbacks {
     /// open — only a URL spelled out in full could be clicked, and only because Windows
     /// Terminal recognises those by sight.
     links: std::collections::VecDeque<LinkSpan>,
+    /// Kept in step with `vt100`'s own parser to learn which bytes open or close a link.
+    scout: vte::Parser,
+    /// Kept in step with `vt100`'s own parser to learn which bytes print a character.
+    stepper: vte::Parser,
 }
 
 /// How many links are remembered at once.
@@ -46,35 +50,104 @@ pub struct PaneCallbacks {
 /// that have scrolled away or been drawn over.
 const MAX_LINKS: usize = 256;
 
+/// How many cells one link may claim.
+///
+/// Far longer than any link anyone draws. It only bounds a child that opens a link and
+/// never closes it, which would otherwise grow the list with everything it prints.
+const MAX_LINK_CELLS: usize = 4096;
+
 struct OpenLink {
-    start: (u16, u16),
     alternate: bool,
     target: String,
+    /// Every cell a character was written to while the link was open, as (row, column).
+    cells: Vec<(u16, u16)>,
 }
 
 /// A link that is still on screen, for whoever needs to draw or reach it.
 pub struct LiveLink {
-    /// First cell, as (row, column).
-    pub start: (u16, u16),
-    /// One past the last cell, as (row, column).
-    pub end: (u16, u16),
+    /// Each cell the link covers, as (row, column, what it reads).
+    pub cells: Vec<(u16, u16, String)>,
     pub target: String,
 }
 
 /// One hyperlink as drawn: where it sat, what it read, and where it pointed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LinkSpan {
-    /// First cell, as (row, column).
-    start: (u16, u16),
-    /// One past the last cell, as (row, column).
-    end: (u16, u16),
-    alternate: bool,
-    /// The text those cells held when the link was drawn.
+    /// Each cell the link covers, as (row, column), with what it held when drawn.
     ///
     /// Checked again at click time. The child redraws freely, and a click must never
     /// open a link that has since been painted over with something else.
-    text: String,
+    cells: Vec<((u16, u16), String)>,
+    alternate: bool,
     target: String,
+}
+
+/// Feed a pane's output to its screen, noting which cells each link covers.
+///
+/// A link is the cells written while it was open, and nothing else — which is what a real
+/// terminal does too. Copilot's renderer redraws only what changed, so it opens a link,
+/// jumps to where the link's text goes, prints it, jumps back to the prompt and only then
+/// closes the link. Taking everything between the cursor at the open and the cursor at the
+/// close as the link turned whole stretches of the screen into it, and the outer terminal
+/// drew all of them dotted-underlined and clickable.
+///
+/// `vt100` reports neither printed characters nor cursor moves, so two `vte` parsers run
+/// alongside it to say what each byte did. Output goes through a byte at a time only when
+/// it touches a link; everything else goes through whole.
+pub fn feed(parser: &mut vt100::Parser<PaneCallbacks>, bytes: &[u8]) {
+    let callbacks = parser.callbacks_mut();
+    let mut links = SpotsLinks(false);
+    callbacks.scout.advance(&mut links, bytes);
+    if !links.0 && callbacks.open_link.is_none() {
+        callbacks.stepper.advance(&mut SpotsPrint(false), bytes);
+        parser.process(bytes);
+        return;
+    }
+    for byte in bytes {
+        let byte = std::slice::from_ref(byte);
+        let mut printed = SpotsPrint(false);
+        parser.callbacks_mut().stepper.advance(&mut printed, byte);
+        parser.process(byte);
+        if printed.0 && parser.callbacks().open_link.is_some() {
+            if let Some(cell) = written_cell(parser.screen()) {
+                parser.callbacks_mut().wrote(cell);
+            }
+        }
+    }
+}
+
+/// The cell the character just printed landed in.
+///
+/// `vt100` leaves the cursor just past what it wrote and wraps only when the next
+/// character arrives, so the character sits right behind the cursor — or two behind, if
+/// it is wide.
+fn written_cell(screen: &vt100::Screen) -> Option<(u16, u16)> {
+    let (row, column) = screen.cursor_position();
+    let column = column.checked_sub(1)?;
+    if screen.cell(row, column)?.is_wide_continuation() {
+        Some((row, column.checked_sub(1)?))
+    } else {
+        Some((row, column))
+    }
+}
+
+/// Whether the bytes it was fed open or close a link.
+struct SpotsLinks(bool);
+
+impl vte::Perform for SpotsLinks {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _: bool) {
+        self.0 |= params.first() == Some(&&b"8"[..]);
+    }
+}
+
+/// Whether the bytes it was fed put a character on screen.
+struct SpotsPrint(bool);
+
+impl vte::Perform for SpotsPrint {
+    fn print(&mut self, c: char) {
+        // The characters `vt100` refuses to draw.
+        self.0 |= c != '\u{fffd}' && !('\u{80}'..'\u{a0}').contains(&c);
+    }
 }
 
 impl PaneCallbacks {
@@ -94,6 +167,8 @@ impl PaneCallbacks {
             theme_updates_requested: false,
             open_link: None,
             links: std::collections::VecDeque::new(),
+            scout: vte::Parser::new(),
+            stepper: vte::Parser::new(),
         }
     }
 
@@ -103,20 +178,28 @@ impl PaneCallbacks {
     /// back, because links are recorded against the live screen and would line up with
     /// the wrong rows of history.
     pub fn link_at(&self, screen: &vt100::Screen, row: u16, column: u16) -> Option<String> {
+        // A wide character is recorded by its left half; the right half is the same letter.
+        let column = match screen.cell(row, column) {
+            Some(cell) if cell.is_wide_continuation() => column.saturating_sub(1),
+            _ => column,
+        };
         self.live_links(screen)
-            .find(|link| (row, column) >= link.start && (row, column) < link.end)
+            .find(|link| link.cells.iter().any(|(cell, _)| *cell == (row, column)))
             .map(|link| link.target.clone())
     }
 
-    /// Every link still showing on the live screen, as `(start, end, target)` cells.
+    /// Every link still showing on the live screen.
     ///
     /// The same rule as [`Self::link_at`], so what gets drawn as a hyperlink and what a
     /// click can reach never disagree.
     pub fn links_on_screen(&self, screen: &vt100::Screen) -> Vec<LiveLink> {
         self.live_links(screen)
             .map(|link| LiveLink {
-                start: link.start,
-                end: link.end,
+                cells: link
+                    .cells
+                    .iter()
+                    .map(|((row, column), text)| (*row, *column, text.clone()))
+                    .collect(),
                 target: link.target.clone(),
             })
             .collect()
@@ -134,8 +217,11 @@ impl PaneCallbacks {
         let alternate = screen.alternate_screen();
         self.links.iter().rev().filter(move |link| {
             live && link.alternate == alternate
-                && screen.contents_between(link.start.0, link.start.1, link.end.0, link.end.1)
-                    == link.text
+                && link.cells.iter().all(|((row, column), text)| {
+                    screen
+                        .cell(*row, *column)
+                        .is_some_and(|cell| cell.contents() == text)
+                })
         })
     }
 
@@ -146,38 +232,61 @@ impl PaneCallbacks {
         // everything after the parameters field is put back together.
         let target = params.get(2..).unwrap_or_default().join(&b';');
         let target = String::from_utf8_lossy(&target).into_owned();
-        let here = screen.cursor_position();
         // Whatever was open ends here — either this sequence closes it, or a new link
         // starts without the old one having been closed, which some programs do.
         if let Some(open) = self.open_link.take() {
-            self.record_link(screen, open, here);
+            self.record_link(screen, open);
         }
         if !target.is_empty() {
             self.open_link = Some(OpenLink {
-                start: here,
                 alternate: screen.alternate_screen(),
                 target,
+                cells: Vec::new(),
             });
         }
     }
 
-    fn record_link(&mut self, screen: &vt100::Screen, open: OpenLink, end: (u16, u16)) {
-        if end <= open.start || open.alternate != screen.alternate_screen() {
+    /// A character was just written to `cell`, which makes it part of the open link.
+    fn wrote(&mut self, cell: (u16, u16)) {
+        if let Some(open) = &mut self.open_link {
+            // Repeats are dropped when the link is recorded, not here: checking every cell
+            // on every character would cost the most for a child that never closes a link.
+            if open.cells.len() < MAX_LINK_CELLS {
+                open.cells.push(cell);
+            }
+        }
+    }
+
+    fn record_link(&mut self, screen: &vt100::Screen, open: OpenLink) {
+        if open.alternate != screen.alternate_screen() {
             return;
         }
-        let text = screen.contents_between(open.start.0, open.start.1, end.0, end.1);
-        if text.trim().is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let cells: Option<Vec<_>> = open
+            .cells
+            .into_iter()
+            .filter(|cell| seen.insert(*cell))
+            .map(|(row, column)| {
+                let cell = screen.cell(row, column)?;
+                Some(((row, column), cell.contents().to_string()))
+            })
+            .collect();
+        let Some(cells) =
+            cells.filter(|cells| cells.iter().any(|(_, text)| !text.trim().is_empty()))
+        else {
             return;
-        }
-        // The child redraws its view constantly and sends the same link each time. The
-        // newer copy replaces the older one rather than piling up behind it.
-        self.links
-            .retain(|link| link.start != open.start || link.alternate != open.alternate);
+        };
+        // The child redraws its view constantly and sends the same link each time, or a
+        // longer one as a reply streams in. A cell shows whichever link was drawn on it
+        // last, so that one replaces any older link it overlaps.
+        let drawn: std::collections::HashSet<_> = cells.iter().map(|(cell, _)| *cell).collect();
+        self.links.retain(|link| {
+            link.alternate != open.alternate
+                || !link.cells.iter().any(|(cell, _)| drawn.contains(cell))
+        });
         self.links.push_back(LinkSpan {
-            start: open.start,
-            end,
+            cells,
             alternate: open.alternate,
-            text,
             target: open.target,
         });
         while self.links.len() > MAX_LINKS {
@@ -343,7 +452,7 @@ mod tests {
         let (mut parser, rx, _) = parser_with_replies(false);
 
         // Move to row 3, col 5 (1-based), then ask where the cursor is.
-        parser.process(b"\x1b[3;5H\x1b[6n");
+        feed(&mut parser, b"\x1b[3;5H\x1b[6n");
 
         let reply = rx.try_recv().unwrap();
         assert_eq!(reply, b"\x1b[3;5R");
@@ -353,13 +462,13 @@ mod tests {
     fn answers_device_status_and_attribute_queries() {
         let (mut parser, rx, _) = parser_with_replies(false);
 
-        parser.process(b"\x1b[5n");
+        feed(&mut parser, b"\x1b[5n");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[0n");
 
-        parser.process(b"\x1b[c");
+        feed(&mut parser, b"\x1b[c");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[?62;1;6c");
 
-        parser.process(b"\x1b[>c");
+        feed(&mut parser, b"\x1b[>c");
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[>0;10;1c");
     }
 
@@ -367,7 +476,7 @@ mod tests {
     fn reports_the_text_area_size() {
         let (mut parser, rx, _) = parser_with_replies(false);
 
-        parser.process(b"\x1b[18t");
+        feed(&mut parser, b"\x1b[18t");
 
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[8;24;80t");
     }
@@ -376,7 +485,7 @@ mod tests {
     fn captures_the_window_title() {
         let (mut parser, _rx, _) = parser_with_replies(false);
 
-        parser.process(b"\x1b]2;my session\x07");
+        feed(&mut parser, b"\x1b]2;my session\x07");
 
         assert_eq!(
             parser.callbacks_mut().take_title().as_deref(),
@@ -388,7 +497,7 @@ mod tests {
     fn unrelated_sequences_produce_no_reply() {
         let (mut parser, rx, _) = parser_with_replies(false);
 
-        parser.process(b"hello\x1b[1;1H");
+        feed(&mut parser, b"hello\x1b[1;1H");
 
         assert!(rx.try_recv().is_err());
     }
@@ -397,7 +506,7 @@ mod tests {
     fn forwards_clipboard_requests_to_the_host() {
         let (mut parser, _, events) = parser_with_replies(false);
 
-        parser.process(b"\x1b]52;c;Q29waWVkIHRleHQ=\x07");
+        feed(&mut parser, b"\x1b]52;c;Q29waWVkIHRleHQ=\x07");
 
         let MuxEvent::HostSequence(id, sequence) = events.try_recv().unwrap() else {
             panic!("expected host sequence");
@@ -410,7 +519,7 @@ mod tests {
     fn forwards_progress_state_to_the_host() {
         let (mut parser, _, events) = parser_with_replies(false);
 
-        parser.process(b"\x1b]9;4;3;0\x07");
+        feed(&mut parser, b"\x1b]9;4;3;0\x07");
 
         let MuxEvent::HostSequence(id, sequence) = events.try_recv().unwrap() else {
             panic!("expected host sequence");
@@ -429,9 +538,9 @@ mod tests {
     fn progress_signals_are_drained_per_output_chunk() {
         let (mut parser, _, _) = parser_with_replies(false);
 
-        parser.process(b"\x1b]9;4;3;0\x07");
+        feed(&mut parser, b"\x1b]9;4;3;0\x07");
         let working = parser.callbacks_mut().take_signals();
-        parser.process(b"\x1b]9;4;0;0\x07");
+        feed(&mut parser, b"\x1b]9;4;0;0\x07");
         let complete = parser.callbacks_mut().take_signals();
 
         assert_eq!(
@@ -460,7 +569,8 @@ mod tests {
     #[test]
     fn a_named_link_is_found_under_its_text_and_nowhere_else() {
         let (mut parser, _, events) = parser_with_replies(false);
-        parser.process(
+        feed(
+            &mut parser,
             b"see \x1b]8;;file:///D:/gallery/index.html\x1b\\Open the local gallery\x1b]8;;\x1b\\.",
         );
 
@@ -475,14 +585,117 @@ mod tests {
         );
     }
 
+    /// The report: dotted underlines across the blank half of the chat and the whole
+    /// footer, all opening a truncated `http://exa` in the browser.
+    ///
+    /// Copilot repaints only what changed. These bytes are its shape, taken from a real
+    /// capture: open the link wherever the cursor happens to be, jump to the link's text,
+    /// print it, jump back to the prompt, and only then close the link. The link is what
+    /// was printed in between — not everything from one cursor position to the other.
+    #[test]
+    fn a_link_is_only_the_text_printed_while_it_was_open_not_where_the_cursor_wandered() {
+        let (mut parser, _, _) = parser_with_replies(false);
+        feed(&mut parser, b"\x1b[3;1HI asked \x1b[20;1Hfooter\x1b[1;1H");
+        feed(
+            &mut parser,
+            b"\x1b]8;id=a;http://example.com\x1b\\\x1b[4m\x1b[3;9Hhttp://example.com\
+              \x1b[20;1H\x1b[m\x1b]8;;\x1b\\",
+        );
+
+        let target = Some("http://example.com".to_string());
+        assert_eq!(link_under(&parser, 2, 8), target, "its first letter");
+        assert_eq!(link_under(&parser, 2, 25), target, "its last letter");
+        assert_eq!(link_under(&parser, 0, 0), None, "where the link was opened");
+        assert_eq!(link_under(&parser, 2, 26), None, "the blank after it");
+        assert_eq!(link_under(&parser, 10, 40), None, "the rows in between");
+        assert_eq!(link_under(&parser, 19, 0), None, "where it was closed");
+        let links = parser.callbacks().links_on_screen(parser.screen());
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].cells.len(), "http://example.com".len());
+    }
+
+    #[test]
+    fn a_link_closed_after_the_cursor_jumped_back_up_is_still_clickable() {
+        // The same repaint, from a prompt below the link: the close arrives with the
+        // cursor above where the link began, which used to throw the link away.
+        let (mut parser, _, _) = parser_with_replies(false);
+        feed(
+            &mut parser,
+            b"\x1b[20;3H\x1b]8;;http://example.com\x1b\\\x1b[3;9Hhttp://example.com\
+              \x1b[20;3H\x1b]8;;\x1b\\",
+        );
+
+        assert_eq!(
+            link_under(&parser, 2, 10).as_deref(),
+            Some("http://example.com")
+        );
+    }
+
+    #[test]
+    fn a_link_that_grows_as_the_reply_streams_in_is_replaced_not_duplicated() {
+        // Copilot draws `http://ex`, then `http://example.co`, on the same cells. Only the
+        // newest can still be clicked — and only once.
+        let (mut parser, _, _) = parser_with_replies(false);
+        for partial in ["http://ex", "http://example.co", "http://example.com"] {
+            feed(
+                &mut parser,
+                format!("\x1b[2;5H\x1b]8;;{partial}\x1b\\{partial}\x1b]8;;\x1b\\").as_bytes(),
+            );
+        }
+
+        assert_eq!(parser.callbacks().links.len(), 1);
+        assert_eq!(
+            link_under(&parser, 1, 4).as_deref(),
+            Some("http://example.com")
+        );
+    }
+
+    #[test]
+    fn a_link_opened_in_one_chunk_of_output_and_printed_in_the_next_is_still_found() {
+        // The child's output arrives in arbitrary pieces, and a sequence can be cut anywhere.
+        let (mut parser, _, _) = parser_with_replies(false);
+        feed(&mut parser, b"\x1b[2;1H\x1b]");
+        feed(&mut parser, b"8;;https://a.ex");
+        feed(&mut parser, b"ample\x1b\\li");
+        feed(&mut parser, b"nk\x1b]8;;\x1b");
+        feed(&mut parser, b"\\ plain");
+
+        assert_eq!(
+            link_under(&parser, 1, 0).as_deref(),
+            Some("https://a.example")
+        );
+        assert_eq!(
+            link_under(&parser, 1, 3).as_deref(),
+            Some("https://a.example")
+        );
+        assert_eq!(link_under(&parser, 1, 5), None);
+    }
+
+    #[test]
+    fn a_wide_character_in_a_link_can_be_clicked_on_either_half() {
+        let (mut parser, _, _) = parser_with_replies(false);
+        feed(
+            &mut parser,
+            "\x1b]8;;https://a.example\x1b\\链接\x1b]8;;\x1b\\".as_bytes(),
+        );
+
+        for column in 0..4 {
+            assert!(link_under(&parser, 0, column).is_some(), "column {column}");
+        }
+        assert_eq!(link_under(&parser, 0, 4), None);
+    }
+
     #[test]
     fn a_link_drawn_over_is_no_longer_there_to_click() {
         let (mut parser, _, _) = parser_with_replies(false);
-        parser.process(b"\x1b]8;;https://a.example\x1b\\first\x1b]8;;\x1b\\");
+        feed(
+            &mut parser,
+            b"\x1b]8;;https://a.example\x1b\\first\x1b]8;;\x1b\\",
+        );
         assert!(link_under(&parser, 0, 0).is_some());
 
         // The child redraws that line with something else, and no link this time.
-        parser.process(b"\x1b[1;1Hplain");
+        feed(&mut parser, b"\x1b[1;1Hplain");
 
         assert_eq!(
             link_under(&parser, 0, 0),
@@ -495,7 +708,10 @@ mod tests {
     fn a_target_containing_semicolons_arrives_whole() {
         // The parser splits OSC parameters on `;`, which a URL may legitimately contain.
         let (mut parser, _, _) = parser_with_replies(false);
-        parser.process(b"\x1b]8;;https://example.com/a;b=1;c\x1b\\x\x1b]8;;\x1b\\");
+        feed(
+            &mut parser,
+            b"\x1b]8;;https://example.com/a;b=1;c\x1b\\x\x1b]8;;\x1b\\",
+        );
 
         assert_eq!(
             link_under(&parser, 0, 0).as_deref(),
@@ -507,7 +723,10 @@ mod tests {
     fn a_link_that_wraps_can_be_clicked_on_either_row() {
         let (mut parser, _, _) = parser_with_replies(false);
         // Eight letters starting four from the right edge: half on each row.
-        parser.process(b"\x1b[1;77H\x1b]8;;https://w.example\x1b\\abcdefgh\x1b]8;;\x1b\\");
+        feed(
+            &mut parser,
+            b"\x1b[1;77H\x1b]8;;https://w.example\x1b\\abcdefgh\x1b]8;;\x1b\\",
+        );
 
         assert!(link_under(&parser, 0, 76).is_some(), "the first half");
         assert!(link_under(&parser, 1, 3).is_some(), "the second half");
@@ -519,7 +738,10 @@ mod tests {
         // Copilot repaints its whole view constantly. Every repaint resends the links.
         let (mut parser, _, _) = parser_with_replies(false);
         for _ in 0..1000 {
-            parser.process(b"\x1b[1;1H\x1b]8;;https://a.example\x1b\\link\x1b]8;;\x1b\\");
+            feed(
+                &mut parser,
+                b"\x1b[1;1H\x1b]8;;https://a.example\x1b\\link\x1b]8;;\x1b\\",
+            );
         }
         assert_eq!(parser.callbacks().links.len(), 1);
     }
@@ -528,7 +750,8 @@ mod tests {
     fn a_new_link_closes_one_left_open() {
         // Some programs start the next link without closing the last.
         let (mut parser, _, _) = parser_with_replies(false);
-        parser.process(
+        feed(
+            &mut parser,
             b"\x1b]8;;https://a.example\x1b\\one \x1b]8;;https://b.example\x1b\\two\x1b]8;;\x1b\\",
         );
 
@@ -555,9 +778,12 @@ mod tests {
             PaneCallbacks::new(7, tx, event_tx, Some(false)),
         );
         for line in 0..40 {
-            parser.process(format!("line {line}\r\n").as_bytes());
+            feed(&mut parser, format!("line {line}\r\n").as_bytes());
         }
-        parser.process(b"\x1b]8;;https://a.example\x1b\\link\x1b]8;;\x1b\\");
+        feed(
+            &mut parser,
+            b"\x1b]8;;https://a.example\x1b\\link\x1b]8;;\x1b\\",
+        );
         let (row, _) = parser.screen().cursor_position();
         assert!(link_under(&parser, row, 0).is_some());
 
@@ -570,7 +796,7 @@ mod tests {
     fn does_not_forward_unrelated_osc_commands() {
         let (mut parser, _, events) = parser_with_replies(false);
 
-        parser.process(b"\x1b]8;;https://example.com\x07");
+        feed(&mut parser, b"\x1b]8;;https://example.com\x07");
 
         assert!(events.try_recv().is_err());
     }
@@ -593,7 +819,7 @@ mod tests {
         let mut parser =
             vt100::Parser::new_with_callbacks(24, 80, 0, PaneCallbacks::new(7, tx, events, None));
 
-        parser.process(b"\x1b[?996n");
+        feed(&mut parser, b"\x1b[?996n");
 
         assert!(replies.try_recv().is_err());
     }
@@ -601,14 +827,14 @@ mod tests {
     #[test]
     fn subscribed_children_receive_only_real_appearance_changes() {
         let (mut parser, replies, _) = parser_with_replies(false);
-        parser.process(b"\x1b[?2031h");
+        feed(&mut parser, b"\x1b[?2031h");
 
         parser.callbacks_mut().set_terminal_light_mode(Some(true));
         assert_eq!(replies.try_recv().unwrap(), b"\x1b[?997;2n");
         parser.callbacks_mut().set_terminal_light_mode(Some(true));
         assert!(replies.try_recv().is_err());
 
-        parser.process(b"\x1b[?2031l");
+        feed(&mut parser, b"\x1b[?2031l");
         parser.callbacks_mut().set_terminal_light_mode(Some(false));
         assert!(replies.try_recv().is_err());
     }

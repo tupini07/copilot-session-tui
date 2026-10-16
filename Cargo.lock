@@ -461,6 +461,7 @@ dependencies = [
  "ureq",
  "uuid",
  "vt100",
+ "vte",
  "windows-sys 0.59.0",
 ]
 
