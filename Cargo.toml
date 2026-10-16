@@ -39,6 +39,9 @@ edtui = { path = "vendor/edtui", version = "0.11.6", default-features = false, f
 arboard = { version = "3.6.1", default-features = false }
 portable-pty = "0.9"
 vt100 = "0.16"
+# The parser vt100 is built on, run alongside it: vt100 never says which bytes printed a
+# character, and a hyperlink is exactly the characters printed while it is open.
+vte = "0.15"
 tui-term = "0.3"
 # GitHub bodies are markdown. Syntax highlighting is left off: its themes are its own and
 # would clash with the CST theme the diff view already highlights with.
