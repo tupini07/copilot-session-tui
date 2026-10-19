@@ -171,7 +171,10 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
     // text — in Normal mode every character is a command, so pasting must not run one.
     // These prompts are all single-line, so line breaks are dropped rather than sent.
     if let Event::Paste(text) = &event {
-        if matches!(app.mode, Mode::Search | Mode::Rename | Mode::FilterProject) {
+        if matches!(
+            app.mode,
+            Mode::Search | Mode::Rename | Mode::FilterProject | Mode::NewProject
+        ) {
             for character in text.chars().filter(|character| !character.is_control()) {
                 let key =
                     crossterm::event::KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
@@ -210,6 +213,7 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         Mode::FavoriteOpen => handle_favorite_open(app, key.code),
         Mode::NewSessionKind => handle_new_session_kind(app, key.code),
         Mode::FilterProject => handle_filter_project(app, key.code),
+        Mode::NewProject => handle_new_project(app, key.code),
         Mode::Help => handle_help(app, key.code),
         Mode::Settings => handle_settings(app, key.code),
         Mode::ProjectSettings => handle_project_settings(app, key.code),
@@ -617,7 +621,7 @@ fn handle_recover_workspace(app: &mut App, key: KeyCode) {
 /// shortcuts are validated against this and matched after these.
 pub(crate) const LIST_COMMAND_KEYS: &[char] = &[
     'q', 'k', 'j', '/', 'r', 'e', 'g', 'T', ' ', 'd', 'f', 'p', 's', 'H', 'c', 'n', 'N', '?', ',',
-    '.', 'u', 'R',
+    '.', 'u', 'R', 'P',
 ];
 
 fn handle_normal(app: &mut App, key: KeyCode) {
@@ -701,6 +705,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.project_search_query.clear();
             app.mode = Mode::FilterProject;
         }
+        KeyCode::Char('P') => app.begin_new_project(),
         KeyCode::Char('s') => {
             app.cycle_sort();
             app.status_message = Some(format!("Sorted by: {}", app.sort_label()));
@@ -792,6 +797,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::DeleteSelected => KeyCode::Char('d'),
         CommandId::SearchSessions => KeyCode::Char('/'),
         CommandId::FilterProject => KeyCode::Char('f'),
+        CommandId::NewProject => KeyCode::Char('P'),
         CommandId::ClearProjectFilter => KeyCode::Char('c'),
         CommandId::CycleSort => KeyCode::Char('s'),
         CommandId::ToggleHiddenSessions => KeyCode::Char('H'),
@@ -1545,6 +1551,53 @@ pub(crate) fn handle_filter_project(app: &mut App, key: KeyCode) {
         }
         _ => {}
     }
+}
+
+pub(crate) fn handle_new_project(app: &mut App, key: KeyCode) {
+    use crate::new_project::NewProjectKind;
+    let dialog = &mut app.new_project;
+    if dialog.kind.is_none() {
+        match key {
+            KeyCode::Char('e') | KeyCode::Char('E') => dialog.choose(NewProjectKind::Existing),
+            KeyCode::Char('c') | KeyCode::Char('C') => dialog.choose(NewProjectKind::Create),
+            KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+            _ => {}
+        }
+        return;
+    }
+    match key {
+        KeyCode::Esc => dialog.back(),
+        KeyCode::Tab => dialog.complete(),
+        KeyCode::Backspace => dialog.pop(),
+        KeyCode::Char(character) => dialog.push(character),
+        KeyCode::Enter => finish_new_project(app),
+        _ => {}
+    }
+}
+
+fn finish_new_project(app: &mut App) {
+    let directory = match app.new_project.prepare() {
+        Ok(directory) => directory,
+        Err(error) => {
+            app.new_project.error = Some(error);
+            return;
+        }
+    };
+    let project = match app.add_project(&directory) {
+        Ok(project) => project,
+        Err(error) => {
+            // The folder may exist by now, so a retry has to adopt it, not create it.
+            app.new_project.kind = Some(crate::new_project::NewProjectKind::Existing);
+            app.new_project.error = Some(format!("Could not save the project: {error}"));
+            return;
+        }
+    };
+    app.mode = Mode::Normal;
+    let name = Path::new(&project)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| project.clone());
+    app.status_message = Some(format!("Showing project {name} — n starts a session in it"));
 }
 
 fn handle_help(app: &mut App, key: KeyCode) {
@@ -2938,6 +2991,65 @@ mod tests {
             app.should_new_session.is_none(),
             "nothing may start until a kind is chosen"
         );
+    }
+
+    #[test]
+    fn creating_a_project_from_the_list_leads_straight_to_starting_its_first_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+
+        handle_normal(&mut app, KeyCode::Char('P'));
+        assert_eq!(app.mode, Mode::NewProject);
+        handle_new_project(&mut app, KeyCode::Char('c'));
+        for character in "brand-new".chars() {
+            handle_new_project(&mut app, KeyCode::Char(character));
+        }
+        handle_new_project(&mut app, KeyCode::Enter);
+
+        let created = temp.path().join("brand-new");
+        assert!(created.is_dir());
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.project_filter,
+            Some(crate::session::loader::project_root_of_directory(&created))
+        );
+        handle_normal(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.mode, Mode::NewSessionKind);
+    }
+
+    #[test]
+    fn a_rejected_project_path_keeps_the_dialog_open_with_the_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+
+        handle_normal(&mut app, KeyCode::Char('P'));
+        handle_new_project(&mut app, KeyCode::Char('e'));
+        for character in "not-there".chars() {
+            handle_new_project(&mut app, KeyCode::Char(character));
+        }
+        handle_new_project(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.mode, Mode::NewProject);
+        assert!(app.new_project.error.is_some());
+        assert!(app.config.projects.is_empty());
+    }
+
+    #[test]
+    fn escape_in_the_path_goes_back_to_the_question_and_again_closes_it() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+
+        handle_normal(&mut app, KeyCode::Char('P'));
+        handle_new_project(&mut app, KeyCode::Char('e'));
+        handle_new_project(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::NewProject);
+        assert_eq!(app.new_project.kind, None);
+
+        handle_new_project(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

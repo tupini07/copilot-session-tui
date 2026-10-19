@@ -171,6 +171,8 @@ pub enum Mode {
     /// Asks whether a new session should run in the project as-is or in a worktree.
     NewSessionKind,
     FilterProject,
+    /// Adding a folder as a project, so it can be chosen before it has any sessions.
+    NewProject,
     Help,
     Settings,
     ProjectSettings,
@@ -860,6 +862,7 @@ pub struct App {
     pub project_settings_selected: usize,
     pub project_settings_editing: bool,
     pub project_settings_input: String,
+    pub new_project: crate::new_project::NewProjectDialog,
     pub branch_input: String,
     pub branch_config: Option<EffectiveWorktreeConfig>,
     pub worktree_launch_target: WorktreeLaunchTarget,
@@ -973,7 +976,7 @@ pub struct App {
 
 impl App {
     pub fn new(sessions: Vec<Session>, config: UserConfig) -> Self {
-        let unique_projects = extract_unique_projects(&sessions);
+        let unique_projects = extract_unique_projects(&sessions, &config.projects);
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
         let mux_on_disk = config.mux;
         let mux = config.mux.then(|| new_mux(&config));
@@ -1054,6 +1057,7 @@ impl App {
             project_settings_selected: 0,
             project_settings_editing: false,
             project_settings_input: String::new(),
+            new_project: Default::default(),
             branch_input: String::new(),
             branch_config: None,
             worktree_launch_target: WorktreeLaunchTarget::Standard,
@@ -1493,6 +1497,7 @@ impl App {
         // user, so the disk value is only remembered for future saves.
         let selected_id = self.selected_session().map(|session| session.id.clone());
         let favorites_changed = self.config.favorites != persisted.favorites;
+        let projects_changed = self.config.projects != persisted.projects;
         let hidden_title_prefixes_changed =
             self.config.hidden_title_prefixes != persisted.hidden_title_prefixes;
         let hidden_path_prefixes_changed =
@@ -1521,6 +1526,9 @@ impl App {
         }
         if let Some(settings) = self.project_settings.as_mut() {
             settings.refresh_global(&self.config);
+        }
+        if projects_changed {
+            self.rebuild_unique_projects();
         }
         if favorites_changed || hidden_title_prefixes_changed || hidden_path_prefixes_changed {
             self.apply_filter();
@@ -3494,7 +3502,7 @@ impl App {
 
     fn rebuild_unique_projects(&mut self) {
         let selected_project = self.unique_projects.get(self.project_selected).cloned();
-        self.unique_projects = extract_unique_projects(&self.sessions);
+        self.unique_projects = extract_unique_projects(&self.sessions, &self.config.projects);
         if let Some(project) = self.cwd_project.as_ref() {
             if !self
                 .unique_projects
@@ -3875,6 +3883,39 @@ impl App {
     pub fn set_project_filter(&mut self, project: Option<String>) {
         self.project_filter = project;
         self.apply_filter();
+    }
+
+    /// Open the dialog that adds a project, its path starting beside the project in
+    /// view — a new project is most often a sibling of the one being worked in.
+    pub fn begin_new_project(&mut self) {
+        let start = match self.active_project() {
+            Some(project) => Path::new(&project).parent().map(Path::to_path_buf),
+            None => self.cwd.as_ref().map(PathBuf::from),
+        };
+        self.new_project = crate::new_project::NewProjectDialog::new(start);
+        self.mode = Mode::NewProject;
+    }
+
+    /// Remember `directory` as a project even while it has no sessions, and filter the
+    /// list to it so `n` starts the first one there. Returns the project as it is
+    /// matched, which is the enclosing repository for a folder inside one.
+    pub fn add_project(&mut self, directory: &Path) -> anyhow::Result<String> {
+        let project = crate::session::loader::project_root_of_directory(directory);
+        let known = self
+            .config
+            .projects
+            .iter()
+            .any(|added| added.eq_ignore_ascii_case(&project));
+        if !known {
+            self.config.projects.push(project.clone());
+            if let Err(error) = self.save_config() {
+                self.config.projects.pop();
+                return Err(error);
+            }
+        }
+        self.rebuild_unique_projects();
+        self.set_project_filter(Some(project.clone()));
+        Ok(project)
     }
 
     /// Record the directory `cst` was launched from. When that directory belongs to a
@@ -5438,7 +5479,7 @@ fn new_mux(config: &UserConfig) -> MuxState {
     MuxState::new(prefix)
 }
 
-fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
+fn extract_unique_projects(sessions: &[Session], added: &[String]) -> Vec<String> {
     use chrono::{DateTime, Utc};
     // Track the most recent updated_at per project (using resolved project_root)
     let mut latest: std::collections::HashMap<String, DateTime<Utc>> =
@@ -5461,6 +5502,17 @@ fn extract_unique_projects(sessions: &[Session]) -> Vec<String> {
     }
     let mut projects: Vec<String> = latest.keys().cloned().collect();
     projects.sort_by(|a, b| latest[b].cmp(&latest[a])); // most recent first
+                                                        // With no sessions there is no activity to rank by, so these follow the ones that
+                                                        // have some, newest addition first. A folder deleted since is left out: offering it
+                                                        // would only lead to `n` launching Copilot somewhere that does not exist.
+    for project in added.iter().rev() {
+        let known = projects
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(project));
+        if !known && std::path::Path::new(project).is_dir() {
+            projects.push(project.clone());
+        }
+    }
     projects
 }
 
@@ -6579,6 +6631,95 @@ mod tests {
             .unique_projects
             .iter()
             .any(|project| project.eq_ignore_ascii_case(&launch_project)));
+    }
+
+    #[test]
+    fn an_added_project_with_no_sessions_survives_the_catalog_being_reloaded() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.disable_config_persistence();
+        let project = app.add_project(temp.path()).unwrap();
+
+        // The background scan replaces the project list wholesale; anything not
+        // rebuilt from config would vanish the first time it finished.
+        app.apply_loaded_catalog(Vec::new());
+
+        assert_eq!(app.unique_projects, vec![project.clone()]);
+        assert_eq!(app.config.projects, vec![project]);
+    }
+
+    #[test]
+    fn adding_a_project_filters_to_it_so_the_next_new_session_starts_there() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            vec![session(
+                "elsewhere",
+                "other-project",
+                "2026-08-14T12:00:00Z",
+            )],
+            UserConfig::default(),
+        );
+        app.disable_config_persistence();
+
+        let project = app.add_project(temp.path()).unwrap();
+
+        assert_eq!(app.project_filter.as_deref(), Some(project.as_str()));
+        assert!(app.filtered_indices.is_empty(), "it has no sessions yet");
+        assert_eq!(app.new_session_dir(), Some(project));
+    }
+
+    #[test]
+    fn an_added_project_that_also_has_sessions_is_listed_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.disable_config_persistence();
+        let project = app.add_project(temp.path()).unwrap();
+        let session_dir = temp.path().join("session-state");
+        std::fs::create_dir(&session_dir).unwrap();
+
+        app.apply_loaded_catalog(vec![Session {
+            dir_path: session_dir,
+            // Windows paths compare case-insensitively everywhere else in CST.
+            ..session("first", &project.to_uppercase(), "2026-08-14T12:00:00Z")
+        }]);
+
+        assert_eq!(app.unique_projects.len(), 1, "{:?}", app.unique_projects);
+    }
+
+    #[test]
+    fn an_added_project_whose_folder_was_deleted_is_no_longer_offered() {
+        let temp = tempfile::tempdir().unwrap();
+        let gone = temp.path().join("gone");
+        let config = UserConfig {
+            projects: vec![gone.to_string_lossy().to_string()],
+            ..UserConfig::default()
+        };
+
+        let app = App::new(Vec::new(), config);
+
+        assert!(app.unique_projects.is_empty());
+    }
+
+    #[test]
+    fn projects_with_sessions_come_before_added_ones_that_have_none_yet() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = UserConfig {
+            projects: vec![temp.path().to_string_lossy().to_string()],
+            ..UserConfig::default()
+        };
+
+        let app = App::new(
+            vec![session("old", "busy-project", "2020-01-01T00:00:00Z")],
+            config,
+        );
+
+        assert_eq!(
+            app.unique_projects,
+            vec![
+                "busy-project".to_string(),
+                temp.path().to_string_lossy().to_string()
+            ]
+        );
     }
 
     #[test]

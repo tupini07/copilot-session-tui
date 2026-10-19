@@ -102,6 +102,19 @@ pub struct UserConfig {
     )]
     pub favorites: Vec<String>,
 
+    /// Project directories added by hand, oldest first.
+    ///
+    /// Every other project is discovered from the sessions that ran in it, so one with
+    /// no sessions yet would exist nowhere CST could find it, and `n` would have nowhere
+    /// to start the first one. Entries stay after sessions appear: deleting the last
+    /// session must not make a project the user created vanish with it.
+    #[serde(
+        default,
+        deserialize_with = "deduplicated",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub projects: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<PromptSnippet>,
 
@@ -305,10 +318,10 @@ impl Default for NotificationConfig {
     }
 }
 
-/// Drop repeated favorites while preserving first-seen order.
+/// Drop repeated entries while preserving first-seen order.
 ///
-/// The file is hand-editable and a duplicate would otherwise show the same session
-/// twice in the list and open it twice as a tab.
+/// The file is hand-editable and a duplicate favorite would otherwise show the same
+/// session twice in the list and open it twice as a tab.
 fn deduplicated<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -385,6 +398,7 @@ impl Default for UserConfig {
             yolo: false,
             theme: crate::theme::ThemeName::Classic,
             favorites: Vec::new(),
+            projects: Vec::new(),
             snippets: Vec::new(),
             model: None,
             reasoning_effort: None,
@@ -1217,6 +1231,29 @@ mod tests {
             serde_json::from_str(r#"{"favorites":["session-a","session-b"]}"#).unwrap();
 
         assert_eq!(loaded.favorites, vec!["session-a", "session-b"]);
+    }
+
+    #[test]
+    fn configs_from_before_added_projects_existed_still_load_and_stay_unchanged() {
+        let loaded: UserConfig = serde_json::from_str(r#"{"favorites":["a"]}"#).unwrap();
+
+        assert!(loaded.projects.is_empty());
+        assert!(
+            !serde_json::to_string(&loaded).unwrap().contains("projects"),
+            "an empty list must not start appearing in configs that never used it"
+        );
+    }
+
+    #[test]
+    fn added_projects_round_trip_in_the_order_they_were_added() {
+        let mut config = UserConfig::default();
+        config.projects.push(r"D:\work\zeta".to_string());
+        config.projects.push(r"D:\work\alpha".to_string());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: UserConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.projects, vec![r"D:\work\zeta", r"D:\work\alpha"]);
     }
 
     #[test]
