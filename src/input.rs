@@ -192,6 +192,11 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    // As on the attached screen: a message answers the last keystroke, so the next one
+    // retires it. Left alone it would sit in the footer for the rest of the run, and
+    // the footer gives it the line its key hints would otherwise use.
+    app.status_message = None;
+
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         request_quit(app);
         return Ok(());
@@ -3017,6 +3022,23 @@ mod tests {
         );
         handle_normal(&mut app, KeyCode::Char('n'));
         assert_eq!(app.mode, Mode::NewSessionKind);
+    }
+
+    #[test]
+    fn the_next_key_in_the_list_retires_the_last_status_message() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.status_message = Some("Filter cleared".to_string());
+
+        handle_terminal_event(
+            &mut app,
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(app.status_message, None);
     }
 
     #[test]

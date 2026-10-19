@@ -125,7 +125,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let line2 = match app.mode {
-        Mode::Normal if app.grabbed_favorite.is_none() => {
+        // Appended after the hints, a message started past the edge of anything
+        // narrower than ~110 columns. It only lasts until the next key, so the hints
+        // it covers are back as soon as they could be used.
+        Mode::Normal if app.grabbed_favorite.is_none() && app.status_message.is_none() => {
             let mut spans = vec![
                 Span::raw(" "),
                 key_span("Space", theme),
@@ -171,19 +174,6 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 ));
                 spans.push(key_span("u", theme));
                 spans.push(Span::raw(" Update"));
-            }
-            if let Some(ref msg) = app.status_message {
-                spans.push(Span::raw("  │  "));
-                spans.push(Span::styled(
-                    msg.as_str(),
-                    Style::default()
-                        .fg(super::semantic_foreground_on(
-                            theme,
-                            theme.warning,
-                            theme.chrome_bg,
-                        ))
-                        .add_modifier(Modifier::BOLD),
-                ));
             }
             Line::from(spans)
         }
@@ -263,6 +253,26 @@ mod tests {
             tool_call_count: 0,
             details_parsed_len: 0,
         }
+    }
+
+    #[test]
+    fn a_status_message_is_shown_whole_on_an_ordinary_width_terminal() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.status_message =
+            Some("Showing project fresh-project — n starts a session in it".into());
+        let backend = TestBackend::new(80, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &app, frame.area()))
+            .unwrap();
+        let second_line: String = (0..80)
+            .map(|column| terminal.backend().buffer()[(column, 1)].symbol())
+            .collect();
+
+        assert!(
+            second_line.contains("n starts a session in it"),
+            "got: {second_line}"
+        );
     }
 
     #[test]
