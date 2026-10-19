@@ -37,6 +37,44 @@ All three must pass. Clippy carries three pre-existing warnings; anything beyond
 yours. Do not report work as complete without running these — and report the real result,
 including failures.
 
+### Then drive the real binary until it works and looks right
+
+For anything a user sees or touches, passing tests are not the finish line. Unit tests
+check the cases you thought of; they cannot tell you that a popup's error pushes its key
+hints out of sight, that a message renders past the edge of the screen, or that Enter
+never arrives. All three were found this way, after `cargo test` was green.
+
+So build it, drive the whole flow in the actual binary, read the screens, fix what you
+find, and drive it again. Repeat until it works *and* looks right at an ordinary size
+such as 110×30. Take the paths a user would, including errors, cancelling and a restart,
+not only the happy one. When you report, say which paths you drove and which you did not.
+
+CST is a TUI, so this takes some setup:
+
+- `cargo test` does not rebuild the binary. Run `cargo build` first, or you are testing
+  an old build.
+- Run it in a pseudo-terminal and read the screen back as text. A scratch crate using
+  `portable-pty` and `vt100` does it: write keys to the master, and dump the screen cell
+  by cell, because flattened `contents()` misplaces wide characters. On Windows, ConPTY
+  shows nothing until its opening `ESC[6n` is answered with `ESC[1;1R`. Send Enter as a
+  write of its own after a short pause; bundled with typed text it is lost. SGR mouse
+  sequences (`ESC[<0;col;rowM`, then `m`) arrive as real clicks.
+- Isolate the sessions: point `COPILOT_HOME` at a scratch directory holding
+  `session-state/<id>/workspace.yaml` (`id`, `cwd`, `summary`, `created_at`), and put a
+  stub `copilot` first on `PATH` that answers `--version`, exits on `plugin`, and
+  otherwise prints its arguments and working directory and idles.
+- **The config is not isolated.** `config_path()` uses `dirs::config_dir()`, which
+  ignores environment variables on Windows, so a test that saves anything writes the
+  user's real `config.json` — and every other running CST reloads it within a second.
+  Back the file up first, and before restoring it check that only what your test touched
+  differs, so you do not undo a change the user made meanwhile. Or stop short of the step
+  that saves.
+- Opening a session writes a recovery record to `workspaces/<pid>-*.json` under CST's
+  local data directory (`%LOCALAPPDATA%\copilot-session-tui` on Windows). Delete the ones
+  your test instances left, or the user's next CST offers to recover fake sessions.
+- Do not screenshot the desktop to check how something looks; you would capture the
+  user's other windows. Read the screen back from the pseudo-terminal instead.
+
 ## Conventions that are enforced, not merely preferred
 
 - **Tests** live in `#[cfg(test)] mod tests` at the bottom of the file they test, and are

@@ -234,6 +234,15 @@ pub fn detect_project_root(cwd: &str) -> Option<String> {
     find_project_root(cwd)
 }
 
+/// The project a directory belongs to, spelled the way sessions started there will
+/// report theirs. Anything else and the first session in a project added by hand would
+/// turn up under a near-duplicate of it — a trailing separator or `\\?\` prefix is
+/// enough to make the two compare unequal.
+pub fn project_root_of_directory(directory: &Path) -> String {
+    let canonical = canonicalize_or_lossy(directory);
+    find_project_root(&canonical).unwrap_or(canonical)
+}
+
 /// Resolve the project root from a working directory.
 /// Walks up from `cwd` looking for `.git`. If `.git` is a file (git worktree),
 /// follows the `gitdir:` pointer back to the main repository root.
@@ -477,5 +486,32 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
 
         assert!(detect_project_root(&temp.path().to_string_lossy()).is_none());
+    }
+
+    #[test]
+    fn a_directory_added_by_hand_is_keyed_without_trailing_separators_or_verbatim_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let typed = format!("{}{}", temp.path().display(), std::path::MAIN_SEPARATOR);
+
+        let project = project_root_of_directory(Path::new(&typed));
+
+        assert_eq!(project, canonicalize_or_lossy(temp.path()));
+        assert!(!project.ends_with(std::path::MAIN_SEPARATOR));
+        assert!(!project.starts_with(r"\\?\"));
+    }
+
+    #[test]
+    fn a_directory_added_inside_a_repository_belongs_to_that_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        let nested = temp.path().join("packages").join("web");
+        fs::create_dir_all(&nested).unwrap();
+
+        // Sessions started anywhere in the repository are grouped under its root, so
+        // a project keyed by the subfolder would never collect any of them.
+        assert_eq!(
+            project_root_of_directory(&nested),
+            canonicalize_or_lossy(temp.path())
+        );
     }
 }

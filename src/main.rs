@@ -14,6 +14,7 @@ mod input;
 mod links;
 mod mux;
 mod mux_input;
+mod new_project;
 mod notifications;
 mod paste;
 mod recovery;

@@ -967,6 +967,7 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         help_section(theme, "Filter & sort"),
         help_line(theme, "/", "Search / fuzzy filter"),
         help_line(theme, "f/p", "Filter by project (type to search)"),
+        help_line(theme, "P", "New project: add a folder, or create one"),
         help_line(theme, "c", "Clear project filter"),
         help_line(theme, "s", "Cycle sort order"),
         help_line(theme, "H", "Temporarily show/hide filtered sessions"),
@@ -2431,7 +2432,14 @@ pub fn draw_new_session_kind(f: &mut Frame, app: &App) {
         )),
         Line::from(""),
         choice("n", "here, in the project as-is (Enter too)"),
-        choice("w", "in a new isolated Git worktree"),
+        if app.new_session_dir_is_in_git() {
+            choice("w", "in a new isolated Git worktree")
+        } else {
+            Line::from(Span::styled(
+                "  w  in a new isolated Git worktree (needs a Git repository)",
+                Style::default().fg(theme.muted),
+            ))
+        },
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
@@ -2459,6 +2467,108 @@ pub fn draw_new_session_kind(f: &mut Frame, app: &App) {
             Span::raw(" cancel"),
         ]),
     ];
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(surface_style(theme))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+pub fn draw_new_project(f: &mut Frame, app: &App) {
+    use crate::new_project::NewProjectKind;
+    let theme = app.theme();
+    let dialog = &app.new_project;
+    // Tall enough for a path that wraps twice and an error under it, so neither pushes
+    // the key hints out of sight.
+    let area = centered_rect(65, 50, f.area());
+    prepare_popup(f, area, theme);
+    let block = Block::default()
+        .title(" New Project ")
+        .borders(Borders::ALL)
+        .style(surface_style(theme))
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let key = |key: &'static str| {
+        Span::styled(
+            key,
+            Style::default()
+                .fg(theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let heading = |text: &'static str| {
+        Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+
+    let mut lines = vec![Line::from("")];
+    match dialog.kind {
+        None => lines.extend([
+            heading("  Add a project to start sessions in"),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                key("e"),
+                Span::raw("  an existing folder"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                key("c"),
+                Span::raw("  create a new folder"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::raw("  "), key("Esc"), Span::raw(" cancel")]),
+        ]),
+        Some(kind) => {
+            lines.extend([
+                heading(match kind {
+                    NewProjectKind::Existing => "  Folder to add as a project:",
+                    NewProjectKind::Create => "  Folder to create as a project:",
+                }),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(&dialog.input, Style::default().fg(theme.text)),
+                    Span::styled("█", Style::default().fg(theme.accent_alt)),
+                ]),
+                Line::from(""),
+            ]);
+            if let Some(error) = &dialog.error {
+                lines.push(Line::from(Span::styled(
+                    format!("  {error}"),
+                    Style::default().fg(theme.error),
+                )));
+            } else if let Some(project) = &dialog.enclosing_project {
+                lines.push(Line::from(Span::styled(
+                    format!("  Inside the Git project {project}; that is what will be added"),
+                    Style::default().fg(theme.warning),
+                )));
+            }
+            lines.extend([
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    key("Tab"),
+                    Span::raw(" complete  "),
+                    key("Enter"),
+                    Span::raw(match kind {
+                        NewProjectKind::Existing => " add  ",
+                        NewProjectKind::Create => " create  ",
+                    }),
+                    key("Esc"),
+                    Span::raw(" back"),
+                ]),
+            ]);
+        }
+    }
 
     f.render_widget(
         Paragraph::new(lines)
