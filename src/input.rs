@@ -2657,6 +2657,24 @@ mod tests {
     }
 
     #[test]
+    fn once_a_help_search_is_confirmed_the_arrows_scroll_and_enter_closes_again() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.open_help();
+        handle_help(&mut app, KeyCode::Char('/'));
+        type_into_help(&mut app, "favorite");
+        handle_help(&mut app, KeyCode::Enter);
+        let focus = app.help_search.as_ref().unwrap().focus;
+        let scroll = app.help_scroll;
+
+        handle_help(&mut app, KeyCode::Down);
+
+        assert_eq!(app.help_scroll, scroll + 1);
+        assert_eq!(app.help_search.as_ref().unwrap().focus, focus);
+        handle_help(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
     fn esc_clears_the_help_search_before_a_second_esc_closes_the_help() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
         app.open_help();

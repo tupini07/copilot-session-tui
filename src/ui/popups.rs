@@ -899,6 +899,9 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(list, chunks[2]);
 }
 
+/// The blank, title and version lines `help_lines` opens with.
+const HELP_TITLE_LINES: usize = 4;
+
 /// Everything the help popup lists, without its footer. Input handling needs it
 /// too, to know where a search lands before anything is drawn.
 pub fn help_lines(app: &App) -> Vec<Line<'static>> {
@@ -1133,6 +1136,9 @@ pub fn help_matches(lines: &[Line], query: &str) -> Vec<usize> {
     lines
         .iter()
         .enumerate()
+        // The popup's own title says "Session" and would catch the commonest
+        // search before any key could.
+        .skip(HELP_TITLE_LINES)
         .filter(|(_, line)| {
             let text: String = line
                 .spans
@@ -2834,6 +2840,22 @@ mod help_tests {
             rows.join("\n")
         );
         assert!(!app.help_search.as_ref().unwrap().reveal);
+    }
+
+    #[test]
+    fn a_help_search_for_session_lands_on_keys_rather_than_the_popup_title() {
+        let app = App::new(Vec::new(), UserConfig::default());
+        let lines = help_lines(&app);
+
+        let first = help_matches(&lines, "session")[0];
+
+        let text: String = lines[first]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text.trim(), "Sessions");
+        assert!(help_matches(&lines, "keyboard shortcuts").is_empty());
     }
 
     #[test]
