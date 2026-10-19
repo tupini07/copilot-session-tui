@@ -1154,10 +1154,19 @@ pub fn help_matches(lines: &[Line], query: &str) -> Vec<usize> {
 
 pub fn draw_help(f: &mut Frame, app: &mut App) {
     let theme = app.theme();
-    let area = centered_rect(55, 70, f.area());
+    let mut text = help_lines(app);
+    // Wide enough for the longest line where the screen allows: the text is not
+    // wrapped, because scrolling and the search highlight count whole lines,
+    // and a search must not land on a line whose matching words are cut off.
+    let screen = f.area();
+    let mut area = centered_rect(55, 70, screen);
+    let content = text.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+    if content > area.width {
+        area.width = content.min(screen.width);
+        area.x = screen.x + (screen.width - area.width) / 2;
+    }
     prepare_popup(f, area, theme);
 
-    let mut text = help_lines(app);
     let matches = app
         .help_search
         .as_ref()
@@ -1311,7 +1320,8 @@ fn help_line(theme: Theme, key: &str, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            format!("{:<12}", key),
+            // The layout keys ("C-b l v / l s") are 13 wide and ran into their text.
+            format!("{key:<15}"),
             Style::default()
                 .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
@@ -2856,6 +2866,22 @@ mod help_tests {
             .collect();
         assert_eq!(text.trim(), "Sessions");
         assert!(help_matches(&lines, "keyboard shortcuts").is_empty());
+    }
+
+    #[test]
+    fn help_lines_show_in_full_at_an_ordinary_size_so_a_search_never_lands_on_hidden_words() {
+        let config = UserConfig {
+            mux: true,
+            ..UserConfig::default()
+        };
+        let (text, _) = rendered_with(config, 110, 30, usize::MAX);
+
+        assert!(text.contains("has completed work"), "got:\n{text}");
+        assert!(text.contains("Ctrl+PageDown/Up)"), "got:\n{text}");
+        assert!(
+            text.contains("C-b l z / l d  Zoom this split"),
+            "a long key ran into its description:\n{text}"
+        );
     }
 
     #[test]
