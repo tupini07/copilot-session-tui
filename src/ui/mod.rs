@@ -11,6 +11,7 @@ pub mod session_detail;
 pub mod session_list;
 pub mod snippets;
 pub mod status_bar;
+pub mod tab_menu;
 pub mod tabs;
 pub mod terminal_pane;
 pub mod thread_inbox;
@@ -257,6 +258,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         pane::draw_tabs(f, app, layout.tabs);
         pane::draw_status(f, app, layout.status);
+        tab_menu::draw(f, app);
         if github_inspector::is_prompt(app) {
             github_inspector::draw(f, app);
         }

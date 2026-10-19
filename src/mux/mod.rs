@@ -585,7 +585,18 @@ impl MuxState {
         {
             window.last_focused = id;
         }
-        self.focused = Some(id);
+        self.set_focused(Some(id));
+    }
+
+    /// Every change of focus goes through here, because arriving at a pane is what
+    /// reads its hand-made unread mark and no path to it may skip that.
+    fn set_focused(&mut self, id: Option<PaneId>) {
+        if id != self.focused {
+            if let Some(pane) = id.and_then(|id| self.pane_mut(id)) {
+                pane.clear_unread_mark();
+            }
+        }
+        self.focused = id;
     }
 
     pub fn remove(&mut self, id: PaneId) {
@@ -625,7 +636,7 @@ impl MuxState {
             }
         }
         if was_focused {
-            self.focused = successor;
+            self.set_focused(successor);
         }
         self.sort_panes();
     }
@@ -712,7 +723,7 @@ impl MuxState {
         window.last_focused = next;
         let broken_out = self.new_window(focused);
         self.windows.insert(index + 1, broken_out);
-        self.focused = Some(next);
+        self.set_focused(Some(next));
         self.sort_panes();
         true
     }
@@ -1005,6 +1016,35 @@ mod tests {
             .iter()
             .map(|window| window.layout.panes())
             .collect()
+    }
+
+    #[test]
+    fn coming_back_to_a_tab_reads_its_unread_mark_but_staying_or_leaving_does_not() {
+        let mut mux = mux_with_panes(3);
+        let unread = |mux: &MuxState, id| mux.pane(id).unwrap().is_unread();
+
+        mux.pane_mut(1).unwrap().mark_unread();
+        mux.focus(1);
+        assert!(
+            unread(&mux, 1),
+            "clicking the tab already in front is no arrival"
+        );
+        mux.focus(2);
+        assert!(
+            unread(&mux, 1),
+            "walking away from it is the point of the mark"
+        );
+        mux.cycle(false);
+        assert!(!unread(&mux, 1), "coming back is what reads it");
+
+        // Closing the focused tab hands focus on without going through `focus`, and
+        // that is still the user arriving at the tab that takes its place.
+        mux.pane_mut(2).unwrap().mark_unread();
+        mux.focus(3);
+        mux.remove(3);
+        assert_eq!(mux.focused, Some(2));
+        assert!(!unread(&mux, 2));
+        let _ = mux.shutdown();
     }
 
     /// The reason for windows: before them, starting a session while a split was on

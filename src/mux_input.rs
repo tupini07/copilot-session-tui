@@ -98,6 +98,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Ahead of the prefix gate: while it is open the menu is what the keys are for, and
+    // the prefix or a tab switch acting behind it would leave it pointing at nothing.
+    if app.tab_menu.is_some() {
+        handle_tab_menu_event(app, event);
+        return;
+    }
+
     if let Event::Key(key) = &event {
         if key.kind == KeyEventKind::Press {
             let is_prefix = app.mux.as_ref().is_some_and(|mux| {
@@ -228,6 +235,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 app.inspect_github_item(number);
                 return;
             }
+        }
+        // As in a browser, a right-click opens the tab's menu without switching to it:
+        // marking another tab unread should not mean leaving this one.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
+            && open_tab_menu(app, mouse.column, mouse.row)
+        {
+            return;
         }
         // The tab strip sits above the workspace, so it claims the click before the
         // panes below get a chance to take focus.
@@ -916,6 +930,7 @@ fn close_context_overlays(app: &mut App) {
     app.close_github_inspector();
     app.snippet_modal = None;
     app.workspace_help = None;
+    app.tab_menu = None;
 }
 
 fn handle_attached_key(app: &mut App, key: KeyEvent) {
@@ -2059,6 +2074,78 @@ fn focus_clicked_tab(app: &mut App, column: u16, row: u16) -> bool {
     // second-class way of doing it.
     sync_workspace_panels(app);
     true
+}
+
+/// Open the menu for the tab under the pointer. Returns whether there was one.
+fn open_tab_menu(app: &mut App, column: u16, row: u16) -> bool {
+    let area = app.workspace_areas.tabs;
+    let screen = app.workspace_areas.screen;
+    let Some(menu) = app.mux.as_ref().and_then(|mux| {
+        let id = crate::ui::pane::tab_at(mux, area, column, row)?;
+        let unread = mux.pane(id)?.is_unread();
+        Some(crate::ui::tab_menu::TabMenu::new(
+            id, unread, column, row, screen,
+        ))
+    }) else {
+        return false;
+    };
+    app.tab_menu = Some(menu);
+    true
+}
+
+/// Everything while the tab menu is open goes here, and nothing gets past it: the
+/// press that dismisses it is not also a click on whatever was underneath.
+fn handle_tab_menu_event(app: &mut App, event: Event) {
+    let Some(menu) = app.tab_menu.as_mut() else {
+        return;
+    };
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            KeyCode::Esc => app.tab_menu = None,
+            KeyCode::Up => menu.select_next(false),
+            KeyCode::Down => menu.select_next(true),
+            KeyCode::Enter => {
+                let selected = menu.selected;
+                choose_tab_menu_item(app, selected);
+            }
+            _ => {}
+        },
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = menu.item_at(mouse.column, mouse.row) {
+                    choose_tab_menu_item(app, index);
+                } else if !menu.contains(mouse.column, mouse.row) {
+                    app.tab_menu = None;
+                }
+                app.swallow_mouse_until_up = true;
+            }
+            // A right-click on another tab moves the menu there, as it would in a
+            // browser; anywhere else it only puts the menu away.
+            MouseEventKind::Down(_) => {
+                app.tab_menu = None;
+                open_tab_menu(app, mouse.column, mouse.row);
+                app.swallow_mouse_until_up = true;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn choose_tab_menu_item(app: &mut App, index: usize) {
+    use crate::ui::tab_menu::TabMenuItem;
+    let Some(menu) = app.tab_menu.take() else {
+        return;
+    };
+    // The session may have ended while the menu was up.
+    let Some(pane) = app.mux.as_mut().and_then(|mux| mux.pane_mut(menu.pane)) else {
+        return;
+    };
+    match menu.items.get(index) {
+        Some(TabMenuItem::MarkUnread) => pane.mark_unread(),
+        Some(TabMenuItem::MarkRead) => pane.mark_read(),
+        None => {}
+    }
 }
 
 /// Carry the dragged tab to the slot under the pointer.
@@ -8087,6 +8174,145 @@ fn main() {
 
         assert_eq!(tab_order(&app), ["one", "two", "three"]);
         assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+    }
+
+    /// Three tabs on an 80×24 screen with the strip on the top row, focused on the first.
+    fn tab_menu_app() -> App {
+        let mut app = three_tab_app();
+        app.workspace_areas.tabs = Rect::new(0, 0, 80, 1);
+        app.workspace_areas.screen = Rect::new(0, 0, 80, 24);
+        app
+    }
+
+    fn tab_column(app: &App, index: usize) -> u16 {
+        let mux = app.mux.as_ref().unwrap();
+        (0..80u16)
+            .find(|column| {
+                crate::ui::pane::tab_index_at(mux, app.workspace_areas.tabs, *column, 0)
+                    == Some(index)
+            })
+            .expect("tab is on the strip")
+    }
+
+    fn pane_is_unread(app: &App, id: u64) -> bool {
+        app.mux.as_ref().unwrap().pane(id).unwrap().is_unread()
+    }
+
+    #[test]
+    fn right_clicking_a_tab_opens_its_menu_without_switching_to_it() {
+        let mut app = tab_menu_app();
+        let second = tab_column(&app, 1);
+
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            second,
+            0,
+        );
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Right), second, 0);
+
+        assert_eq!(app.tab_menu.as_ref().map(|menu| menu.pane), Some(2));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(1));
+        assert_eq!(
+            app.dragging_tab, None,
+            "a right-click is not the start of a drag"
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn marking_a_background_tab_unread_holds_until_the_user_goes_back_to_it() {
+        let mut app = tab_menu_app();
+        let second = tab_column(&app, 1);
+
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            second,
+            0,
+        );
+        handle_attached_event(&mut app, Event::Key(KeyEvent::from(KeyCode::Enter)));
+
+        assert!(app.tab_menu.is_none());
+        assert!(pane_is_unread(&app, 2));
+        assert!(
+            !pane_is_unread(&app, 1),
+            "the mark lands on the tab clicked"
+        );
+
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), second, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), second, 0);
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(2));
+        assert!(!pane_is_unread(&app, 2));
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// The case the feature is for: something read, not yet dealt with. The mark is
+    /// made on the tab in front of the user, and every key there acknowledges it.
+    #[test]
+    fn marking_the_tab_in_front_of_you_unread_survives_typing_in_it() {
+        let mut app = tab_menu_app();
+        let first = tab_column(&app, 0);
+        let second = tab_column(&app, 1);
+
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Right), first, 0);
+        let item = app.tab_menu.as_ref().unwrap().area;
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            item.x + 1,
+            item.y + 1,
+        );
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Up(MouseButton::Left),
+            item.x + 1,
+            item.y + 1,
+        );
+        assert!(app.tab_menu.is_none());
+        assert!(pane_is_unread(&app, 1));
+
+        handle_attached_event(&mut app, Event::Key(KeyEvent::from(KeyCode::Char('x'))));
+        assert!(pane_is_unread(&app, 1));
+
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), second, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), second, 0);
+        assert!(pane_is_unread(&app, 1), "leaving does not read it");
+        let first = tab_column(&app, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), first, 0);
+        assert!(!pane_is_unread(&app, 1), "coming back does");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn dismissing_the_tab_menu_acts_on_nothing_and_the_dismissing_click_reaches_nothing() {
+        let mut app = tab_menu_app();
+        let second = tab_column(&app, 1);
+
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            second,
+            0,
+        );
+        handle_attached_event(&mut app, Event::Key(KeyEvent::from(KeyCode::Esc)));
+        assert!(app.tab_menu.is_none());
+        assert!(!pane_is_unread(&app, 2));
+
+        // Clicking away over another tab must not also switch to it.
+        handle_attached_mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Right),
+            second,
+            0,
+        );
+        let third = tab_column(&app, 2);
+        handle_attached_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), third, 0);
+        handle_attached_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), third, 0);
+        assert!(app.tab_menu.is_none());
+        assert!(!pane_is_unread(&app, 2));
+        assert_eq!(app.mux.as_ref().unwrap().focused, Some(1));
+        let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
     fn handle_attached_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {

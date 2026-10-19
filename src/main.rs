@@ -1713,6 +1713,7 @@ fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> b
         || app.github_inspector.is_some()
         || app.snippet_modal.is_some()
         || app.workspace_help.is_some()
+        || app.tab_menu.is_some()
         || !app.terminal_focused
     {
         return true;

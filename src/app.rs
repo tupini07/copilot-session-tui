@@ -934,6 +934,7 @@ pub struct App {
     pub workspace_areas: WorkspaceAreas,
     /// The pane a tab drag is carrying, from the press on its tab until release.
     pub dragging_tab: Option<crate::mux::PaneId>,
+    pub tab_menu: Option<crate::ui::tab_menu::TabMenu>,
     pub host_sequences: Vec<Vec<u8>>,
     pub github_inspector: Option<GithubInspector>,
     github_request_receiver: Option<mpsc::Receiver<GithubLoadResult>>,
@@ -1103,6 +1104,7 @@ impl App {
             command_palette: None,
             workspace_areas: WorkspaceAreas::default(),
             dragging_tab: None,
+            tab_menu: None,
             host_sequences: Vec::new(),
             github_inspector: None,
             github_request_receiver: None,

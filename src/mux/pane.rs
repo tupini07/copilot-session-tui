@@ -121,6 +121,11 @@ pub struct Pane {
     attention_resolved_at: u64,
     pending_inputs: Vec<(String, InputKind)>,
     needs_attention: bool,
+    /// Set by hand from the tab's menu, as a reminder that something already read still
+    /// needs dealing with. Kept apart from `needs_attention` because that goes with any
+    /// keystroke in the focused pane, so a mark made on the tab in front of the user
+    /// would not survive their next key.
+    marked_unread: bool,
     ready_sent_in_cycle: bool,
     error_sent_in_cycle: bool,
 }
@@ -282,6 +287,7 @@ impl Pane {
             attention_resolved_at: 0,
             pending_inputs: Vec::new(),
             needs_attention: false,
+            marked_unread: false,
             ready_sent_in_cycle: false,
             error_sent_in_cycle: false,
         }
@@ -1083,15 +1089,36 @@ impl Pane {
     }
 
     /// A turn that finished while the user was looking somewhere else, and that they
-    /// have not been back to since.
+    /// have not been back to since — or one they marked unread to come back to.
     ///
     /// `needs_attention` deliberately lumps this in with a live question, because both
     /// mean "this pane wants you". They do not want the same thing though: a question
     /// blocks the session until it is answered, while this is only a result waiting to
     /// be read. The tab strip tells them apart so a glance can say which pane is
     /// actually stuck.
+    ///
+    /// A hand-made mark counts here but not in `needs_attention`, which also puts "? "
+    /// in the outer window title: a reminder the user left for themselves is not the
+    /// session asking for anything.
     pub fn is_unread(&self) -> bool {
-        self.needs_attention && !self.requires_user_action()
+        (self.needs_attention || self.marked_unread) && !self.requires_user_action()
+    }
+
+    pub fn mark_unread(&mut self) {
+        self.marked_unread = true;
+    }
+
+    /// Both kinds of unread go: the finished turn and the hand-made mark.
+    pub fn mark_read(&mut self) {
+        self.needs_attention = false;
+        self.marked_unread = false;
+    }
+
+    /// Coming back to the pane is what reads a hand-made mark. Only arrival does, not
+    /// activity once there, or a mark set on the tab in front of the user would go with
+    /// their next keystroke.
+    pub fn clear_unread_mark(&mut self) {
+        self.marked_unread = false;
     }
 
     pub fn requires_user_action(&self) -> bool {
@@ -2100,6 +2127,41 @@ mod tests {
         });
         assert!(pane.needs_attention());
         assert!(pane.requires_user_action());
+        assert!(!pane.is_unread());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_hand_made_unread_mark_outlasts_typing_in_the_pane_and_never_claims_to_be_a_question() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(42, program, args), 24, 80, tx).unwrap();
+
+        pane.mark_unread();
+        assert!(pane.is_unread());
+        // Every keystroke in the focused pane acknowledges it. A mark set on the tab in
+        // front of the user has to survive that, or it is gone before they can leave.
+        pane.acknowledge_attention();
+        assert!(pane.is_unread());
+        // A reminder to oneself is not the session asking for anything, so it must not
+        // put "? " in the window title or the outer terminal's alert.
+        assert!(!pane.needs_attention());
+        assert!(!pane.display_title().starts_with("? "));
+
+        // A live question still outranks it, as it does a finished turn.
+        pane.apply_lifecycle(LifecycleEvent::InputRequested {
+            tool_call_id: "ask".into(),
+            kind: InputKind::Question,
+        });
+        assert!(!pane.is_unread());
+        pane.apply_lifecycle(LifecycleEvent::Reset);
+        assert!(pane.is_unread(), "answering the question leaves the mark");
+
+        pane.mark_read();
         assert!(!pane.is_unread());
         pane.shutdown().unwrap();
     }
