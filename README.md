@@ -320,6 +320,12 @@ The TUI reads session data directly from `~/.copilot/session-state/` (or `COPILO
 
 When you resume a session, the TUI exits cleanly and launches `copilot --resume=<session-id>`.
 
+CST's own files live in your system's usual places: settings in `config.json` under the
+config folder (`%APPDATA%\copilot-session-tui` on Windows), and its state (scratchpads,
+recovery records, the worktree registry) under the local data folder. Set `CST_HOME` to keep
+all of it in one folder instead, settings under `$CST_HOME/config` and state under
+`$CST_HOME/data`, for example to try CST or test it without touching your own setup.
+
 ## Multiplexer
 
 By default CST is a tmux-like host: sessions run in PTY-backed panes *inside* CST, so several

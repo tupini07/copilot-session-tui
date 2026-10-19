@@ -17,6 +17,7 @@ mod mux_input;
 mod new_project;
 mod notifications;
 mod paste;
+mod paths;
 mod recovery;
 mod scratchpad;
 #[cfg(feature = "screenshots")]

@@ -17,6 +17,8 @@ fresh directory, `<temp>/cst-e2e/<script name>/` (e.g.
 - `<dump>.txt`, `<dump>.html` and `<dump>.png` for every `dump` in the script, and
   `failed.*` for the screen at the moment a step failed;
 - `home/`, the fake `COPILOT_HOME` with the script's sessions, and `projects/`;
+- `cst-home/`, CST's own settings and state for the run (it is started with
+  `CST_HOME` pointing here), so nothing it saves reaches your real setup;
 - `bin/copilot`, the stub that stands in for the Copilot CLI;
 - `raw.bin`, every byte CST wrote to its terminal, for when the escape sequences
   themselves are the question.
@@ -49,6 +51,7 @@ checked before anything starts, so a typo fails at once.
 | `git_project <name>` | The same, with `git init` run in it. |
 | `env KEY=VALUE` | An environment variable for CST. |
 | `arg <argument>` | A command-line argument for CST, one per line. |
+| `config <json>` | CST's settings file for this run, on one line, e.g. `config {"theme": "gruvbox"}`. Without it CST runs on its defaults. |
 
 ### Driving
 
@@ -76,20 +79,24 @@ reads anything sent too soon as Alt+key.
 Do not send Enter in the same write as typed text (`key hello\r`): ConPTY drops it.
 `type hello` then `press enter` is two writes.
 
-## What it does not isolate
+## Isolation
 
-- **CST's config is your real one.** CST finds `config.json` through the `dirs`
-  crate, which ignores environment variables on Windows. A run that saves anything
-  (a favourite, a project, a setting) changes the file every running CST reloads.
-  The driver copies it to `config.before.json` in the run directory first and prints
-  a warning if the run changed it; compare before restoring it, since another CST may
-  have saved its own change meanwhile. Better: stop the script short of the save.
-- **The config also decides how a session opens.** With the multiplexer off,
-  resuming one opens a real terminal window on the desktop. Put `arg --mux` in any
-  script that opens a session, as `smoke.e2e` does.
-- **Other state under CST's data directory is shared too.** The `R recover workspace`
-  hint, for example, reflects your own recovery records. The record this run's CST
-  writes is deleted at the end, and the driver fails if it could not be.
+CST runs with `CST_HOME` set to the run's `cst-home/`, so its settings, recovery
+records, scratchpads and worktree registry all start empty and stay in the run
+directory. Saving a setting, a favourite or a project in a script is safe.
+
+The driver still checks that your real `config.json` and recovery folder were left
+alone, and fails the run if not. That catches a binary that ignores `CST_HOME`, such
+as one built before it existed and passed with `--exe`. Your config is copied to
+`config.before.json` in the run directory first, in case it is needed.
+
+What is not isolated:
+
+- **Anything a session itself opens.** Pass `arg --mux` in any script that resumes or
+  starts a session, as `smoke.e2e` does, so the session is a pane the driver can see
+  rather than a terminal window on the desktop.
+- **The update check** reads and writes its cache in the real `~/.copilot`, like any
+  CST would.
 - Session dates are fixed in January 2026, so how old they read depends on today.
 
 ## Changing the driver

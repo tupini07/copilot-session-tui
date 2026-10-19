@@ -229,6 +229,7 @@ enum Step {
     Project { name: String, git: bool },
     Env(String, String),
     Arg(String),
+    Config(String),
     Wait(Duration),
     WaitFor(String),
     WaitGone(String),
@@ -260,6 +261,7 @@ impl Step {
                 | Step::Project { .. }
                 | Step::Env(..)
                 | Step::Arg(_)
+                | Step::Config(_)
         )
     }
 }
@@ -336,6 +338,7 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             Step::Env(key.to_string(), value.to_string())
         }
         "arg" => Step::Arg(need("an argument")?),
+        "config" => Step::Config(need("the settings as JSON")?),
         "wait" => Step::Wait(millis(need("milliseconds")?)?),
         "wait_for" => Step::WaitFor(need("text")?),
         "wait_gone" => Step::WaitGone(need("text")?),
@@ -490,6 +493,7 @@ struct Setup {
     projects: Vec<(String, bool)>,
     env: Vec<(String, String)>,
     args: Vec<String>,
+    config: Option<String>,
 }
 
 struct Running {
@@ -524,6 +528,7 @@ impl Driver {
             Step::Project { name, git } => self.setup.projects.push((name.clone(), *git)),
             Step::Env(key, value) => self.setup.env.push((key.clone(), value.clone())),
             Step::Arg(arg) => self.setup.args.push(arg.clone()),
+            Step::Config(json) => self.setup.config = Some(json.clone()),
             Step::Pace(pace) => self.pace = *pace,
             Step::Timeout(timeout) => self.timeout = *timeout,
             _ => {
@@ -625,6 +630,18 @@ impl Driver {
         std::fs::copy(&me, &stub)
             .map_err(|error| format!("cannot install the copilot stub: {error}"))?;
 
+        // Where CST looks for its settings under CST_HOME; without a `config` line
+        // there is no file and CST runs on its defaults.
+        if let Some(json) = &self.setup.config {
+            let dir = self
+                .run_dir
+                .join("cst-home")
+                .join("config")
+                .join("copilot-session-tui");
+            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            std::fs::write(dir.join("config.json"), json).map_err(|error| error.to_string())?;
+        }
+
         self.config_before = Some(std::fs::read(config_path()).ok());
         if let Some(Some(bytes)) = &self.config_before {
             let _ = std::fs::write(self.run_dir.join("config.before.json"), bytes);
@@ -644,6 +661,8 @@ impl Driver {
         }
         command.cwd(&self.run_dir);
         command.env("COPILOT_HOME", &home);
+        // CST keeps its own config and state here rather than in the user's.
+        command.env("CST_HOME", self.run_dir.join("cst-home"));
         let path = std::env::var_os("PATH").unwrap_or_default();
         let path =
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
@@ -804,8 +823,10 @@ impl Driver {
         let _ = std::fs::write(self.run_dir.join("raw.bin"), &*running.raw.lock().unwrap());
         let mut clean = true;
 
-        // Every CST writes a recovery record named after its pid; left behind,
-        // the user's next CST offers to recover these fake sessions.
+        // With CST_HOME set, CST writes nothing to the user's own folders. These
+        // checks catch a binary that does anyway, such as one built before
+        // CST_HOME existed and passed with --exe. A recovery record left in the
+        // real folder would make the user's next CST offer to recover fake sessions.
         if let Some(pid) = pid {
             let records = recovery_dir();
             let prefix = format!("{pid}-");
@@ -822,6 +843,11 @@ impl Driver {
                     .collect()
             };
             for record in ours(&records) {
+                clean = false;
+                println!(
+                    "this CST ignored CST_HOME and wrote a recovery record to your real data folder: {}",
+                    record.display()
+                );
                 if let Err(error) = std::fs::remove_file(&record) {
                     println!("could not delete {}: {error}", record.display());
                 }
@@ -833,14 +859,13 @@ impl Driver {
             }
         }
 
-        // CST reads its config from the user's real config directory whatever the
-        // environment says, so a run that saves anything changes the user's own.
         if let Some(before) = &self.config_before {
             let after = std::fs::read(config_path()).ok();
             if &after != before {
                 clean = false;
                 println!(
-                    "WARNING: this run changed your real config: {}",
+                    "WARNING: your real config changed during this run: {}\n  \
+                     Either another CST saved it meanwhile, or this CST ignored CST_HOME.",
                     config_path().display()
                 );
                 match before {

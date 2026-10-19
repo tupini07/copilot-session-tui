@@ -88,14 +88,7 @@ pub(crate) fn write_in(root: &Path, state: &AppState) -> Result<()> {
 /// `copilot-session-tui/` rather than the other `cst/` root, which holds things the
 /// user navigates into (worktrees). This is internal bookkeeping.
 pub(crate) fn state_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("share")
-        })
-        .join("copilot-session-tui")
+    crate::paths::data_dir().join("copilot-session-tui")
 }
 
 fn state_path(root: &Path) -> PathBuf {

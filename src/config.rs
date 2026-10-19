@@ -667,24 +667,11 @@ fn default_branch_prefix() -> String {
 }
 
 pub fn default_worktree_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("share")
-        })
-        .join("cst")
-        .join("wt")
+    crate::paths::data_dir().join("cst").join("wt")
 }
 
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        })
+    crate::paths::config_dir()
         .join("copilot-session-tui")
         .join("config.json")
 }

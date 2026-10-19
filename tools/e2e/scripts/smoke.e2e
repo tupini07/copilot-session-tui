@@ -2,8 +2,9 @@
 # comes back to the list. Copy it as the start of a script for your own change.
 
 size 110x30
-# Sessions open in the built-in multiplexer whatever the user's config says;
-# otherwise Enter could open a real terminal window on their desktop.
+# Sessions open as panes in the built-in multiplexer, where the driver can see
+# them, even if a `config` line or a changed default turns it off. Otherwise
+# Enter would open a real terminal window on the desktop.
 arg --mux
 session existing-app Existing app session
 
