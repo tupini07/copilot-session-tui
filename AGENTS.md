@@ -57,8 +57,8 @@ cargo run --manifest-path tools/e2e/Cargo.toml -- path/to/your.e2e
 ```
 
 It builds CST first, runs it in a pseudo-terminal against fake sessions and a stub
-`copilot`, writes every `dump` as text, HTML and PNG, prints a pass/fail verdict, and
-deletes the recovery record its CST leaves. `tools/e2e/README.md` lists the commands.
+`copilot`, writes every `dump` as text, HTML and PNG, and prints a pass/fail verdict.
+`tools/e2e/README.md` lists the commands.
 
 - **Look at the PNGs, not only the text.** The text dump shows what is on screen; it
   does not show colour, a highlight, or a line cut off at a popup's border. That last
@@ -66,12 +66,12 @@ deletes the recovery record its CST leaves. `tools/e2e/README.md` lists the comm
 - **The driver is yours to change.** If a script needs something the driver cannot do,
   add the command (and its line in the README) rather than working around it, and
   commit that with your change. Fix it, too, when it gets something wrong.
-- **The config is not isolated.** `config_path()` uses `dirs::config_dir()`, which
-  ignores environment variables on Windows, so a run that saves anything writes the
-  user's real `config.json`, and every other running CST reloads it within a second.
-  The driver keeps a copy and warns when a run changed it; before restoring, check that
-  only what your run touched differs, so you do not undo a change the user made
-  meanwhile. Better, stop the script short of the step that saves.
+- **Start any CST you run yourself with `CST_HOME` set** to a scratch folder. Without
+  it CST uses the user's real settings and state: a run that saves anything changes
+  their `config.json`, which every running CST reloads within a second, and its
+  recovery record makes their next CST offer to recover fake sessions. The driver
+  sets it for you. The same goes for any new place CST stores files: put it under
+  `paths::config_dir()` or `paths::data_dir()`, never straight from `dirs`.
 - Do not screenshot the desktop to check how something looks; you would capture the
   user's other windows. The driver renders its PNGs from the pseudo-terminal's screen.
 

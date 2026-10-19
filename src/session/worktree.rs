@@ -148,15 +148,7 @@ struct RegistryLock {
 }
 
 pub fn registry_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("share")
-        })
-        .join("cst")
-        .join("worktrees.json")
+    crate::paths::data_dir().join("cst").join("worktrees.json")
 }
 
 pub fn resolve_repository_root(path: &Path) -> Result<PathBuf> {

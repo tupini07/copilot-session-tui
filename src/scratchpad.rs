@@ -155,13 +155,7 @@ fn delete_in(root: &Path, session_id: &str) -> Result<bool> {
 }
 
 fn scratchpad_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("share")
-        })
+    crate::paths::data_dir()
         .join("copilot-session-tui")
         .join("scratchpads")
 }
