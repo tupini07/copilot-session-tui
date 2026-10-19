@@ -1,0 +1,27 @@
+# Starts CST on one session, opens and closes the help, resumes the session and
+# comes back to the list. Copy it as the start of a script for your own change.
+
+size 110x30
+# Sessions open in the built-in multiplexer whatever the user's config says;
+# otherwise Enter could open a real terminal window on their desktop.
+arg --mux
+session existing-app Existing app session
+
+wait_for Existing app session
+dump 01-list
+
+press ?
+wait_for Keyboard Shortcuts
+dump 02-help
+press esc
+wait_gone Keyboard Shortcuts
+
+press enter
+wait_for Fake Copilot is idling
+expect --resume=00000001-0000-4000-8000-000000000001
+dump 03-session
+
+press ctrl+b d
+wait_gone Fake Copilot is idling
+expect Existing app session
+dump 04-back-to-list

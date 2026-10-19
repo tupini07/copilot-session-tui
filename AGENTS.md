@@ -33,8 +33,8 @@ cargo clippy --all-targets
 cargo test
 ```
 
-All three must pass. Clippy carries three pre-existing warnings; anything beyond those is
-yours. Do not report work as complete without running these — and report the real result,
+All three must pass. Clippy carries a few pre-existing warnings; any it reports beyond what
+`main` does are yours. Do not report work as complete without running these — and report the real result,
 including failures.
 
 ### Then drive the real binary until it works and looks right
@@ -44,36 +44,36 @@ check the cases you thought of; they cannot tell you that a popup's error pushes
 hints out of sight, that a message renders past the edge of the screen, or that Enter
 never arrives. All three were found this way, after `cargo test` was green.
 
-So build it, drive the whole flow in the actual binary, read the screens, fix what you
-find, and drive it again. Repeat until it works *and* looks right at an ordinary size
-such as 110×30. Take the paths a user would, including errors, cancelling and a restart,
-not only the happy one. When you report, say which paths you drove and which you did not.
+So drive the whole flow in the actual binary, look at the screens, fix what you find,
+and drive it again. Repeat until it works *and* looks right at an ordinary size such as
+110×30. Take the paths a user would, including errors, cancelling and a restart, not
+only the happy one. When you report, say which paths you drove and which you did not.
 
-CST is a TUI, so this takes some setup:
+`tools/e2e` does the driving. Write a script of keys and checks (start from
+`tools/e2e/scripts/smoke.e2e`) and run it:
 
-- `cargo test` does not rebuild the binary. Run `cargo build` first, or you are testing
-  an old build.
-- Run it in a pseudo-terminal and read the screen back as text. A scratch crate using
-  `portable-pty` and `vt100` does it: write keys to the master, and dump the screen cell
-  by cell, because flattened `contents()` misplaces wide characters. On Windows, ConPTY
-  shows nothing until its opening `ESC[6n` is answered with `ESC[1;1R`. Send Enter as a
-  write of its own after a short pause; bundled with typed text it is lost. SGR mouse
-  sequences (`ESC[<0;col;rowM`, then `m`) arrive as real clicks.
-- Isolate the sessions: point `COPILOT_HOME` at a scratch directory holding
-  `session-state/<id>/workspace.yaml` (`id`, `cwd`, `summary`, `created_at`), and put a
-  stub `copilot` first on `PATH` that answers `--version`, exits on `plugin`, and
-  otherwise prints its arguments and working directory and idles.
+```bash
+cargo run --manifest-path tools/e2e/Cargo.toml -- path/to/your.e2e
+```
+
+It builds CST first, runs it in a pseudo-terminal against fake sessions and a stub
+`copilot`, writes every `dump` as text, HTML and PNG, prints a pass/fail verdict, and
+deletes the recovery record its CST leaves. `tools/e2e/README.md` lists the commands.
+
+- **Look at the PNGs, not only the text.** The text dump shows what is on screen; it
+  does not show colour, a highlight, or a line cut off at a popup's border. That last
+  one looked fine as text and was only caught in the image.
+- **The driver is yours to change.** If a script needs something the driver cannot do,
+  add the command (and its line in the README) rather than working around it, and
+  commit that with your change. Fix it, too, when it gets something wrong.
 - **The config is not isolated.** `config_path()` uses `dirs::config_dir()`, which
-  ignores environment variables on Windows, so a test that saves anything writes the
-  user's real `config.json` — and every other running CST reloads it within a second.
-  Back the file up first, and before restoring it check that only what your test touched
-  differs, so you do not undo a change the user made meanwhile. Or stop short of the step
-  that saves.
-- Opening a session writes a recovery record to `workspaces/<pid>-*.json` under CST's
-  local data directory (`%LOCALAPPDATA%\copilot-session-tui` on Windows). Delete the ones
-  your test instances left, or the user's next CST offers to recover fake sessions.
+  ignores environment variables on Windows, so a run that saves anything writes the
+  user's real `config.json`, and every other running CST reloads it within a second.
+  The driver keeps a copy and warns when a run changed it; before restoring, check that
+  only what your run touched differs, so you do not undo a change the user made
+  meanwhile. Better, stop the script short of the step that saves.
 - Do not screenshot the desktop to check how something looks; you would capture the
-  user's other windows. Read the screen back from the pseudo-terminal instead.
+  user's other windows. The driver renders its PNGs from the pseudo-terminal's screen.
 
 ## Conventions that are enforced, not merely preferred
 

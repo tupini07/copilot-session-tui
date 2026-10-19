@@ -1,0 +1,14 @@
+[package]
+name = "cst-e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Drives the real CST binary in a pseudo-terminal from a script and captures what it shows"
+
+# A workspace of its own, so building, testing and linting CST never includes it.
+[workspace]
+
+[dependencies]
+dirs = "6"
+portable-pty = "0.9"
+vt100 = "0.16"
