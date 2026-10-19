@@ -899,11 +899,10 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
     f.render_widget(list, chunks[2]);
 }
 
-pub fn draw_help(f: &mut Frame, app: &mut App) {
+/// Everything the help popup lists, without its footer. Input handling needs it
+/// too, to know where a search lands before anything is drawn.
+pub fn help_lines(app: &App) -> Vec<Line<'static>> {
     let theme = app.theme();
-    let area = centered_rect(55, 70, f.area());
-    prepare_popup(f, area, theme);
-
     let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -1118,34 +1117,151 @@ pub fn draw_help(f: &mut Frame, app: &mut App) {
         text.extend(reference_legend(theme));
         text.push(Line::from(""));
     }
+    text
+}
 
+/// The help lines a search for `query` lands on, top to bottom.
+///
+/// Every word has to appear somewhere in the line, in any order and case, so
+/// "tmux new" finds "New persistent ... via tmux". A fuzzy score would make the
+/// jump land somewhere hard to predict.
+pub fn help_matches(lines: &[Line], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .to_lowercase();
+            words.iter().all(|word| text.contains(word.as_str()))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+pub fn draw_help(f: &mut Frame, app: &mut App) {
+    let theme = app.theme();
+    let area = centered_rect(55, 70, f.area());
+    prepare_popup(f, area, theme);
+
+    let mut text = help_lines(app);
+    let matches = app
+        .help_search
+        .as_ref()
+        .map(|search| help_matches(&text, &search.query));
     text.push(Line::from(Span::styled(
-        "  ↑/↓ PageUp/PageDown scroll · Esc/q/Enter/? close",
+        "  ↑/↓ PgUp/PgDn scroll · / search · Esc/q/Enter/? close",
         Style::default().fg(theme.muted),
     )));
 
-    // The list has outgrown the popup, so without scrolling the tail of it --
-    // including the multiplexer bindings -- simply cannot be read.
-    let viewport = area.height.saturating_sub(2) as usize;
-    let max_scroll = text.len().saturating_sub(viewport);
-    app.help_scroll = app.help_scroll.min(max_scroll);
-
-    let title = if max_scroll > 0 {
-        format!(" Help ({}/{}) ", app.help_scroll + 1, max_scroll + 1)
-    } else {
-        " Help ".to_string()
-    };
     let block = Block::default()
-        .title(title)
         .borders(Borders::ALL)
         .style(surface_style(theme))
         .border_style(Style::default().fg(theme.accent_alt));
+    let inner = block.inner(area);
+    let (body, search_row) = if app.help_search.is_some() {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner);
+        (rows[0], Some(rows[1]))
+    } else {
+        (inner, None)
+    };
+
+    // The list has outgrown the popup, so without scrolling the tail of it --
+    // including the multiplexer bindings -- simply cannot be read.
+    let viewport = body.height as usize;
+    let focus = app.help_search.as_ref().and_then(|search| search.focus);
+    if let Some(search) = app.help_search.as_mut() {
+        if std::mem::take(&mut search.reveal) {
+            if let Some(line) = focus {
+                if line < app.help_scroll || line >= app.help_scroll + viewport {
+                    // A third of the way down leaves the section header above it.
+                    app.help_scroll = line.saturating_sub(viewport / 3);
+                }
+            }
+        }
+    }
+    let max_scroll = text.len().saturating_sub(viewport);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+
+    // The top border is the one place always on screen, so it is where `/` is
+    // advertised; the footer saying so is only seen by those who scroll to it.
+    let title = match (max_scroll > 0, app.help_search.is_some()) {
+        (true, false) => format!(
+            " Help ({}/{}) · / search ",
+            app.help_scroll + 1,
+            max_scroll + 1
+        ),
+        (true, true) => format!(" Help ({}/{}) ", app.help_scroll + 1, max_scroll + 1),
+        (false, _) => " Help ".to_string(),
+    };
+    f.render_widget(block.title(title), area);
 
     let paragraph = Paragraph::new(text)
         .style(surface_style(theme))
-        .block(block)
         .scroll((u16::try_from(app.help_scroll).unwrap_or(u16::MAX), 0));
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph, body);
+
+    if let Some(line) = focus {
+        if line >= app.help_scroll && line < app.help_scroll + viewport {
+            let row = Rect {
+                y: body.y + (line - app.help_scroll) as u16,
+                height: 1,
+                ..body
+            };
+            f.buffer_mut().set_style(
+                row,
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg),
+            );
+        }
+    }
+
+    if let (Some(search), Some(row)) = (app.help_search.as_ref(), search_row) {
+        let matches = matches.unwrap_or_default();
+        let mut spans = vec![
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(search.query.clone(), Style::default().fg(theme.text)),
+        ];
+        if search.typing {
+            spans.push(Span::styled("█", Style::default().fg(theme.accent)));
+        }
+        let position = focus.and_then(|line| matches.iter().position(|&m| m == line));
+        let (count, count_style) = match (search.query.trim().is_empty(), position) {
+            (true, _) => (String::new(), Style::default()),
+            (false, Some(index)) => (
+                format!("  {}/{}", index + 1, matches.len()),
+                Style::default().fg(theme.muted),
+            ),
+            (false, None) => ("  no match".to_string(), Style::default().fg(theme.error)),
+        };
+        spans.push(Span::styled(count, count_style));
+        let hint = if search.typing {
+            "  ↑/↓ next · Enter done · Esc cancel"
+        } else {
+            "  n/N next · / edit · Esc clear"
+        };
+        spans.push(Span::styled(hint, Style::default().fg(theme.muted)));
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(surface_style(theme)),
+            row,
+        );
+    }
 }
 
 /// Shows what the colours on a `#1234` in the chat mean.
@@ -2627,7 +2743,7 @@ mod help_tests {
         rendered_with(UserConfig::default(), width, height, scroll)
     }
 
-    const FOOTER: &str = "Esc/q/Enter/? close";
+    const FOOTER: &str = "/ search · Esc/q/Enter/? close";
 
     #[test]
     fn a_help_screen_taller_than_its_popup_can_be_scrolled_to_the_end() {
@@ -2674,6 +2790,67 @@ mod help_tests {
         assert!(text.contains("C-b g i"), "got:\n{text}");
         assert!(text.contains("Inspect a GitHub issue"), "got:\n{text}");
         assert!(text.contains("pull request"), "got:\n{text}");
+    }
+
+    #[test]
+    fn a_help_search_scrolls_its_match_into_view_and_highlights_it() {
+        let config = UserConfig {
+            mux: true,
+            ..UserConfig::default()
+        };
+        let mut app = App::new(Vec::new(), config);
+        app.mode = crate::app::Mode::Help;
+        let query = "inspect github";
+        let matches = help_matches(&help_lines(&app), query);
+        assert_eq!(matches.len(), 1, "the query should be unambiguous");
+        app.help_search = Some(crate::app::HelpSearch {
+            query: query.to_string(),
+            typing: true,
+            focus: Some(matches[0]),
+            reveal: true,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+
+        terminal.draw(|f| draw_help(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rows = buffer_rows(buffer);
+        assert!(app.help_scroll > 0, "the match is below the fold");
+        let row = rows
+            .iter()
+            .position(|row| row.contains("Inspect a GitHub issue"))
+            .unwrap_or_else(|| panic!("match not on screen:\n{}", rows.join("\n")));
+        let column = rows[row].find("Inspect").unwrap();
+        let column = rows[row][..column].chars().count() as u16;
+        assert_eq!(
+            buffer[(column, row as u16)].bg,
+            app.theme().selection_bg,
+            "the match is not highlighted"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("/ inspect github█  1/1")),
+            "search row missing:\n{}",
+            rows.join("\n")
+        );
+        assert!(!app.help_search.as_ref().unwrap().reveal);
+    }
+
+    #[test]
+    fn a_help_search_that_finds_nothing_says_so() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.mode = crate::app::Mode::Help;
+        app.help_search = Some(crate::app::HelpSearch {
+            query: "zzzz".to_string(),
+            typing: true,
+            ..Default::default()
+        });
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+
+        terminal.draw(|f| draw_help(f, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("/ zzzz█  no match"), "got:\n{text}");
     }
 
     #[test]

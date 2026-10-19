@@ -64,6 +64,19 @@ pub enum WorkspaceHelp {
     Scratchpad,
 }
 
+/// A `/` search in the help popup, for finding a key by what it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HelpSearch {
+    pub query: String,
+    /// Still typing. Once confirmed the arrows scroll again and n/N step instead.
+    pub typing: bool,
+    /// The help line the search has landed on.
+    pub focus: Option<usize>,
+    /// Bring `focus` into view on the next draw, the only place that knows the
+    /// height. Doing it on every draw would stop the user scrolling away from it.
+    pub reveal: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceAreas {
     /// The focused session's chat box.
@@ -772,6 +785,7 @@ pub struct App {
     pub should_quit: bool,
     /// First visible line of the help popup, which is taller than it can draw.
     pub help_scroll: usize,
+    pub help_search: Option<HelpSearch>,
     pub should_resume: Option<(String, String)>, // (session_id, cwd)
     pub should_attach_tmux: Option<TmuxSessionRef>,
     pub should_new_session: Option<NewSessionRequest>,
@@ -1004,6 +1018,7 @@ impl App {
             detail_pending: None,
             should_quit: false,
             help_scroll: 0,
+            help_search: None,
             should_resume: None,
             should_attach_tmux: None,
             should_new_session: None,
@@ -1739,6 +1754,13 @@ impl App {
         self.mux
             .as_ref()
             .is_some_and(|mux| mux.prefix_state != PrefixState::Idle)
+    }
+
+    /// Open the help at the top with no search left over from last time.
+    pub fn open_help(&mut self) {
+        self.help_scroll = 0;
+        self.help_search = None;
+        self.mode = Mode::Help;
     }
 
     pub fn help_pending(&self) -> bool {

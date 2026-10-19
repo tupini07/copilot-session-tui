@@ -869,10 +869,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
         InspectGithub => app.open_github_inspector(),
         GlobalSettings => app.begin_global_settings(),
         ProjectSettings => crate::input::begin_project_settings(app),
-        OpenHelp => {
-            app.help_scroll = 0;
-            app.mode = crate::app::Mode::Help;
-        }
+        OpenHelp => app.open_help(),
         CheckForUpdates => app.request_update(),
         ThreadInbox => app.open_thread_inbox(),
         WhatsNew => {

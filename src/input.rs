@@ -388,9 +388,11 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
 
     if let Event::Mouse(mouse) = event {
         if app.mode == Mode::Help {
+            // Not routed through the arrow keys: while a search is being typed
+            // those step between matches, and the wheel should still scroll.
             match mouse.kind {
-                MouseEventKind::ScrollUp => handle_help(app, KeyCode::Up),
-                MouseEventKind::ScrollDown => handle_help(app, KeyCode::Down),
+                MouseEventKind::ScrollUp => app.help_scroll = app.help_scroll.saturating_sub(1),
+                MouseEventKind::ScrollDown => app.help_scroll = app.help_scroll.saturating_add(1),
                 _ => {}
             }
         } else if app.mode == Mode::Settings && app.theme_picker.is_some() {
@@ -422,6 +424,12 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
             }
             Mode::BranchName => app.branch_input.push_str(&text),
             Mode::PaneList => app.set_pane_filter(format!("{}{text}", app.pane_filter)),
+            Mode::Help => {
+                if let Some(search) = app.help_search.as_mut().filter(|search| search.typing) {
+                    search.query.push_str(&text);
+                    step_help_search(app, HelpStep::Stay);
+                }
+            }
             _ => {}
         }
         return;
@@ -733,10 +741,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('n') => begin_new_session_choice(app),
         KeyCode::Char('N') => begin_worktree_session(app),
-        KeyCode::Char('?') => {
-            app.help_scroll = 0;
-            app.mode = Mode::Help;
-        }
+        KeyCode::Char('?') => app.open_help(),
         KeyCode::Char(',') => {
             app.begin_global_settings();
         }
@@ -1607,7 +1612,101 @@ fn finish_new_project(app: &mut App) {
     app.status_message = Some(format!("Showing project {name} — n starts a session in it"));
 }
 
+/// Which way a help search moves from where it is.
+#[derive(Clone, Copy)]
+enum HelpStep {
+    /// Stay on the current line while the query still finds it, as an
+    /// incremental search does, rather than jumping back to the top per key.
+    Stay,
+    Next,
+    Previous,
+}
+
+fn step_help_search(app: &mut App, step: HelpStep) {
+    let matches = crate::ui::popups::help_matches(
+        &crate::ui::popups::help_lines(app),
+        app.help_search
+            .as_ref()
+            .map_or("", |search| search.query.as_str()),
+    );
+    let top = app.help_scroll;
+    let Some(search) = app.help_search.as_mut() else {
+        return;
+    };
+    let from = search.focus.unwrap_or(top);
+    let first = matches.first().copied();
+    let last = matches.last().copied();
+    search.focus = match step {
+        HelpStep::Stay => matches.iter().copied().find(|&line| line >= from).or(first),
+        HelpStep::Next => match search.focus {
+            Some(line) => matches.iter().copied().find(|&m| m > line).or(first),
+            None => matches.iter().copied().find(|&m| m >= from).or(first),
+        },
+        HelpStep::Previous => matches
+            .iter()
+            .rev()
+            .copied()
+            .find(|&line| line < from)
+            .or(last),
+    };
+    search.reveal = true;
+}
+
 fn handle_help(app: &mut App, key: KeyCode) {
+    if let Some(search) = app.help_search.as_mut() {
+        if search.typing {
+            // Every printable key is part of the query here, including the
+            // ones that would otherwise close the help.
+            match key {
+                KeyCode::Esc => app.help_search = None,
+                KeyCode::Enter => {
+                    if search.query.trim().is_empty() {
+                        app.help_search = None;
+                    } else {
+                        search.typing = false;
+                    }
+                }
+                KeyCode::Backspace => {
+                    search.query.pop();
+                    step_help_search(app, HelpStep::Stay);
+                }
+                KeyCode::Char(c) => {
+                    search.query.push(c);
+                    step_help_search(app, HelpStep::Stay);
+                }
+                KeyCode::Down | KeyCode::Tab => step_help_search(app, HelpStep::Next),
+                KeyCode::Up | KeyCode::BackTab => step_help_search(app, HelpStep::Previous),
+                _ => {}
+            }
+            return;
+        }
+        match key {
+            KeyCode::Esc => {
+                app.help_search = None;
+                return;
+            }
+            KeyCode::Char('/') => {
+                search.typing = true;
+                return;
+            }
+            KeyCode::Char('n') => {
+                step_help_search(app, HelpStep::Next);
+                return;
+            }
+            KeyCode::Char('N') => {
+                step_help_search(app, HelpStep::Previous);
+                return;
+            }
+            _ => {}
+        }
+    } else if key == KeyCode::Char('/') {
+        app.help_search = Some(crate::app::HelpSearch {
+            typing: true,
+            ..Default::default()
+        });
+        return;
+    }
+
     // Scrolling has to come first, or the keys that move through a help screen
     // taller than the popup would close it instead.
     match key {
@@ -2484,6 +2583,108 @@ mod tests {
         handle_normal(&mut app, KeyCode::Char('?'));
 
         assert_eq!(app.help_scroll, 0);
+    }
+
+    fn type_into_help(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_help(app, KeyCode::Char(c));
+        }
+    }
+
+    fn focused_help_line(app: &App) -> String {
+        let line = app
+            .help_search
+            .as_ref()
+            .and_then(|search| search.focus)
+            .expect("the search landed somewhere");
+        crate::ui::popups::help_lines(app)[line]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn keys_that_close_the_help_are_part_of_the_query_while_searching() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.open_help();
+        handle_help(&mut app, KeyCode::Char('/'));
+
+        type_into_help(&mut app, "q?/");
+
+        assert_eq!(app.mode, Mode::Help);
+        assert_eq!(app.help_search.as_ref().unwrap().query, "q?/");
+    }
+
+    #[test]
+    fn a_help_search_lands_on_what_the_words_describe_and_steps_through_the_rest() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.open_help();
+        handle_help(&mut app, KeyCode::Char('/'));
+
+        type_into_help(&mut app, "CREATE project");
+        let first = focused_help_line(&app);
+        assert!(first.contains("New project"), "landed on {first:?}");
+
+        type_into_help(&mut app, "x");
+        assert_eq!(app.help_search.as_ref().unwrap().focus, None);
+        handle_help(&mut app, KeyCode::Backspace);
+        assert_eq!(focused_help_line(&app), first);
+
+        // "favorite" is on several lines, so the steps have somewhere to go.
+        for _ in 0.."CREATE project".len() {
+            handle_help(&mut app, KeyCode::Backspace);
+        }
+        type_into_help(&mut app, "favorite");
+        let one = app.help_search.as_ref().unwrap().focus;
+        handle_help(&mut app, KeyCode::Down);
+        let two = app.help_search.as_ref().unwrap().focus;
+        assert!(two > one, "{one:?} then {two:?}");
+        handle_help(&mut app, KeyCode::Up);
+        assert_eq!(app.help_search.as_ref().unwrap().focus, one);
+
+        handle_help(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Help, "Enter confirms the search first");
+        handle_help(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.help_search.as_ref().unwrap().focus, two);
+        handle_help(&mut app, KeyCode::Char('N'));
+        assert_eq!(app.help_search.as_ref().unwrap().focus, one);
+        handle_help(&mut app, KeyCode::Char('N'));
+        assert!(
+            app.help_search.as_ref().unwrap().focus > two,
+            "stepping back from the first match wraps to the last"
+        );
+    }
+
+    #[test]
+    fn esc_clears_the_help_search_before_a_second_esc_closes_the_help() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.open_help();
+        handle_help(&mut app, KeyCode::Char('/'));
+        type_into_help(&mut app, "sort");
+        handle_help(&mut app, KeyCode::Enter);
+
+        handle_help(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Help);
+        assert_eq!(app.help_search, None);
+
+        handle_help(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn reopening_the_help_forgets_the_last_search() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.open_help();
+        handle_help(&mut app, KeyCode::Char('/'));
+        type_into_help(&mut app, "sort");
+        handle_help(&mut app, KeyCode::Enter);
+        handle_help(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.mode, Mode::Normal);
+
+        handle_normal(&mut app, KeyCode::Char('?'));
+
+        assert_eq!(app.help_search, None);
     }
 
     #[test]
