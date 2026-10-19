@@ -58,12 +58,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             "  No sessions found".to_string()
         };
         let mut hint = if app.new_session_dir().is_some() {
-            format!(
-                "{headline}\n\n  n  Start a new session here\n  N  Start an isolated worktree session"
-            )
+            format!("{headline}\n\n  n  Start a new session here")
         } else {
             headline
         };
+        // Offering it outside Git would only lead to an error; a project added by hand
+        // with `P` is often a fresh folder that is not a repository yet.
+        if app.new_session_dir_is_in_git() {
+            hint.push_str("\n  N  Start an isolated worktree session");
+        }
         if let Some(latest) = app.recoverable.first() {
             hint.push_str(&format!(
                 "\n  R  Recover a closed workspace ({} session(s), {})",

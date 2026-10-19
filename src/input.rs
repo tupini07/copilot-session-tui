@@ -1174,7 +1174,9 @@ pub(crate) fn handle_new_session_kind(app: &mut App, key: KeyCode) {
             app.new_split = None;
             app.new_session_favorite = false;
         }
-        KeyCode::Char('w') | KeyCode::Char('W') => {
+        // Shown greyed out there, so it does nothing rather than close the question
+        // only to report an error.
+        KeyCode::Char('w') | KeyCode::Char('W') if app.new_session_dir_is_in_git() => {
             app.mode = Mode::Normal;
             begin_worktree_session(app);
             // Kept only while the branch name is being asked for.
@@ -3022,6 +3024,19 @@ mod tests {
         );
         handle_normal(&mut app, KeyCode::Char('n'));
         assert_eq!(app.mode, Mode::NewSessionKind);
+    }
+
+    #[test]
+    fn worktree_is_not_offered_for_a_folder_outside_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.set_cwd_context(temp.path().to_string_lossy().to_string(), false);
+
+        handle_normal(&mut app, KeyCode::Char('n'));
+        handle_new_session_kind(&mut app, KeyCode::Char('w'));
+
+        assert_eq!(app.mode, Mode::NewSessionKind, "the question stays open");
+        assert!(app.preparing_worktrees.is_empty());
     }
 
     #[test]

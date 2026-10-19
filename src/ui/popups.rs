@@ -2432,7 +2432,14 @@ pub fn draw_new_session_kind(f: &mut Frame, app: &App) {
         )),
         Line::from(""),
         choice("n", "here, in the project as-is (Enter too)"),
-        choice("w", "in a new isolated Git worktree"),
+        if app.new_session_dir_is_in_git() {
+            choice("w", "in a new isolated Git worktree")
+        } else {
+            Line::from(Span::styled(
+                "  w  in a new isolated Git worktree (needs a Git repository)",
+                Style::default().fg(theme.muted),
+            ))
+        },
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),

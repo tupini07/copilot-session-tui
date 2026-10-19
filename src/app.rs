@@ -4215,6 +4215,13 @@ impl App {
         }
     }
 
+    /// Whether a worktree is possible where `n` would start a session. Only drawn when
+    /// asked, so the walk up for `.git` is not paid on every frame of a full list.
+    pub fn new_session_dir_is_in_git(&self) -> bool {
+        self.new_session_dir()
+            .is_some_and(|dir| crate::session::loader::detect_project_root(&dir).is_some())
+    }
+
     /// Attach an existing Copilot session as a pane, or focus it if already attached.
     pub fn attach_session(&mut self, session_id: &str, cwd: &str, title: String) -> Result<()> {
         self.attach_session_replacing(session_id, cwd, title, None)
