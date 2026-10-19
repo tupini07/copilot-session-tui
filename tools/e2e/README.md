@@ -84,6 +84,9 @@ Do not send Enter in the same write as typed text (`key hello\r`): ConPTY drops 
   The driver copies it to `config.before.json` in the run directory first and prints
   a warning if the run changed it; compare before restoring it, since another CST may
   have saved its own change meanwhile. Better: stop the script short of the save.
+- **The config also decides how a session opens.** With the multiplexer off,
+  resuming one opens a real terminal window on the desktop. Put `arg --mux` in any
+  script that opens a session, as `smoke.e2e` does.
 - **Other state under CST's data directory is shared too.** The `R recover workspace`
   hint, for example, reflects your own recovery records. The record this run's CST
   writes is deleted at the end, and the driver fails if it could not be.

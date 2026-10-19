@@ -280,7 +280,9 @@ fn parse_script(source: &str) -> Result<Vec<(usize, Step)>, String> {
                 "line {line}: `{command}` sets up the run, so it has to come before the first step that drives CST"
             ));
         }
-        launched |= !step.is_setup();
+        // `pace` and `timeout` can go anywhere, so they neither start CST nor
+        // close the setup.
+        launched |= !step.is_setup() && !matches!(step, Step::Pace(_) | Step::Timeout(_));
         steps.push((line, step));
     }
     Ok(steps)
@@ -524,7 +526,6 @@ impl Driver {
             Step::Arg(arg) => self.setup.args.push(arg.clone()),
             Step::Pace(pace) => self.pace = *pace,
             Step::Timeout(timeout) => self.timeout = *timeout,
-            Step::Wait(duration) => std::thread::sleep(*duration),
             _ => {
                 if self.cst.is_none() {
                     self.launch()?;
@@ -568,6 +569,10 @@ impl Driver {
                 let (column, row) = self.locate(at)?;
                 let button = if *down { 65 } else { 64 };
                 self.send(format!("\x1b[<{button};{};{}M", column + 1, row + 1).as_bytes())
+            }
+            Step::Wait(duration) => {
+                std::thread::sleep(*duration);
+                Ok(())
             }
             Step::Dump(name) => self.dump(name),
             _ => unreachable!("setup steps are handled before launching"),
@@ -905,6 +910,18 @@ mod tests {
         let error = parse_script("session a A\npress enter\nsize 80x24\n").unwrap_err();
 
         assert!(error.starts_with("line 3:"), "got {error}");
+    }
+
+    #[test]
+    fn pace_and_timeout_may_come_before_setup_without_closing_it() {
+        assert!(parse_script(
+            "pace 100
+timeout 500
+size 80x24
+press enter
+"
+        )
+        .is_ok());
     }
 
     #[test]

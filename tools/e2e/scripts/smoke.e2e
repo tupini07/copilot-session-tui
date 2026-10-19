@@ -2,6 +2,9 @@
 # comes back to the list. Copy it as the start of a script for your own change.
 
 size 110x30
+# Sessions open in the built-in multiplexer whatever the user's config says;
+# otherwise Enter could open a real terminal window on their desktop.
+arg --mux
 session existing-app Existing app session
 
 wait_for Existing app session
