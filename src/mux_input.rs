@@ -4974,9 +4974,7 @@ mod tests {
             pane_area.height,
             pane_area.width,
         );
-        // The child is a real process, and ConPTY clears the screen as it starts and as it
-        // is resized. Let that land first, or it can wipe the link before it is used.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        wait_for_conpty_to_settle(&app);
         app.mux
             .as_mut()
             .unwrap()
@@ -4987,6 +4985,33 @@ mod tests {
                     .as_bytes(),
             );
         (app, pane_area.x, pane_area.y)
+    }
+
+    /// Wait out what ConPTY prints into a new pane by itself.
+    ///
+    /// The child is a real process, and ConPTY clears and repaints the screen as it
+    /// starts and as it is resized. That can arrive at any moment, so a fixed sleep was
+    /// not enough: when the full suite loaded the machine it landed between the two
+    /// frames the hyperlink test compares, and the pictures differed. Every chunk of
+    /// output is announced on the mux channel, so this waits for the first one and then
+    /// for a quiet spell. Elsewhere nothing prints unasked, so there is nothing to wait for.
+    fn wait_for_conpty_to_settle(app: &App) {
+        if !cfg!(windows) {
+            return;
+        }
+        let receiver = &app.mux.as_ref().unwrap().receiver;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen_output = false;
+        while std::time::Instant::now() < deadline {
+            match receiver.recv_timeout(std::time::Duration::from_millis(400)) {
+                Ok(crate::mux::MuxEvent::Output(..)) => seen_output = true,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if seen_output => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        panic!("ConPTY never went quiet after starting the test pane");
     }
 
     fn mouse_down(column: u16, row: u16, modifiers: KeyModifiers) -> Event {
