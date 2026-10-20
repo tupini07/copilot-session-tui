@@ -3068,6 +3068,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             // status line that keeps repeating the same failure is noise.
             app.report_thread_watch_failure(reason)
         }
+        MuxEvent::ThreadWatchResumed => app.report_thread_watch_resumed(),
         MuxEvent::Term(_) => true,
     }
 }

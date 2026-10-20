@@ -29,6 +29,8 @@ pub enum MuxEvent {
     ThreadNoticesChanged,
     /// The thread watcher could not do its job, with a sentence saying why.
     ThreadWatchFailed(String),
+    /// A round of polls got through after one that was abandoned.
+    ThreadWatchResumed,
     /// A watched thread looks like it is going in circles. Reported, never acted on.
     ThreadStalled(String),
     /// The worktree a tab was opened for has been created, or could not be.

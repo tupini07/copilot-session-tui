@@ -1,0 +1,26 @@
+# Thread watching rides out GitHub being unreachable: CST starts with no network,
+# says it will keep retrying, picks up once GitHub answers, says so, and reports
+# the next outage afresh. Each poll is a minute apart, so this takes about four.
+
+size 110x30
+# The thread watcher only runs with the multiplexer.
+arg --mux
+fake_gh
+session app Waiting on a reply
+watch_thread https://github.com/o/r/discussions/7
+timeout 150000
+
+# As after a night asleep: CST comes up before the network does.
+github down
+wait_for Thread watching will keep retrying
+expect error connecting to api.github.com
+dump 01-down-at-startup
+
+github up
+wait_for Thread watching reached GitHub again
+dump 02-reached-again
+
+# The same words as the first outage, and still reported.
+github down
+wait_for Thread watching will keep retrying
+dump 03-down-again

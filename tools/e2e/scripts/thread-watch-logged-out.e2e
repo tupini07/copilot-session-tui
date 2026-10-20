@@ -1,0 +1,27 @@
+# The login goes away while a thread is watched, as after `gh auth logout` or an
+# expired token. CST says it needs a login, reads the token again, and
+# picks up once the user has logged back in. A refused login is retried every
+# five minutes, so this takes about twelve.
+
+size 110x30
+arg --mux
+fake_gh
+session app Waiting on a reply
+watch_thread https://github.com/o/r/discussions/7
+timeout 330000
+
+# Let the first poll succeed, so the account and token are already in hand.
+wait 70000
+expect_not Thread watching
+github logged-out
+
+wait_for Thread watching needs a login
+dump 01-refused
+
+# The next try reads the token again, and there is none.
+wait_for has no token
+dump 02-no-token
+
+github up
+wait_for Thread watching reached GitHub again
+dump 03-logged-in-again

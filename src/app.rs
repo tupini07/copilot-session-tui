@@ -5231,12 +5231,28 @@ impl App {
     }
 
     /// Say why the thread watcher is not working, once per distinct reason.
+    ///
+    /// The reason is shown as the watcher wrote it, because only the watcher knows
+    /// whether it is still trying. A fixed "paused" in front read as though watching
+    /// had stopped, when an unreachable GitHub is retried until it answers.
     pub fn report_thread_watch_failure(&mut self, reason: String) -> bool {
         if self.thread_watch_notice.as_deref() == Some(reason.as_str()) {
             return false;
         }
-        self.status_message = Some(format!("Thread watching paused: {reason}"));
+        self.status_message = Some(reason.clone());
         self.thread_watch_notice = Some(reason);
+        true
+    }
+
+    /// Say that watching got through again, if the user was told it had not.
+    ///
+    /// Also forgets the last failure, so the next outage is reported even when GitHub
+    /// fails it with the very same words.
+    pub fn report_thread_watch_resumed(&mut self) -> bool {
+        if self.thread_watch_notice.take().is_none() {
+            return false;
+        }
+        self.status_message = Some("Thread watching reached GitHub again".to_string());
         true
     }
 
@@ -5758,6 +5774,34 @@ mod tests {
             ..UserConfig::default()
         };
         App::new(Vec::new(), config)
+    }
+
+    #[test]
+    fn thread_watching_says_when_it_gets_through_again_and_reports_the_next_outage_afresh() {
+        // A failure notice left standing reads as though watching had stopped. And an
+        // outage tomorrow fails with the same words as one today, so remembering today's
+        // would swallow tomorrow's.
+        let mut app = app_with(false);
+        let outage = "Thread watching will keep retrying: Could not reach GitHub".to_string();
+
+        assert!(app.report_thread_watch_failure(outage.clone()));
+        assert!(
+            !app.report_thread_watch_failure(outage.clone()),
+            "the same failure every retry is noise"
+        );
+
+        assert!(app.report_thread_watch_resumed());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Thread watching reached GitHub again")
+        );
+        assert!(
+            !app.report_thread_watch_resumed(),
+            "nothing to announce when nothing was said"
+        );
+
+        assert!(app.report_thread_watch_failure(outage.clone()));
+        assert_eq!(app.status_message.as_deref(), Some(outage.as_str()));
     }
 
     /// A multiplexed app holding idle sessions `session-1..=count`, recording its

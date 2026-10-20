@@ -1,6 +1,7 @@
 //! Drives the real CST binary in a pseudo-terminal from a script, and captures
 //! what it shows as text, HTML and PNG. See `tools/e2e/README.md`.
 
+mod gh_stub;
 mod screen;
 mod stub;
 
@@ -33,6 +34,10 @@ fn main() {
         exe.file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
     });
+    if invoked_as.as_deref() == Some("gh") {
+        gh_stub::main();
+        return;
+    }
     if invoked_as.as_deref() == Some("copilot") {
         stub::main();
         return;
@@ -225,13 +230,26 @@ fn build_cst(repo: &Path) -> Result<(), String> {
 #[derive(Debug)]
 enum Step {
     Size(u16, u16),
-    Session { project: String, summary: String },
-    AddSession { project: String, summary: String },
+    Session {
+        project: String,
+        summary: String,
+    },
+    AddSession {
+        project: String,
+        summary: String,
+    },
     DeleteSession(String),
-    Project { name: String, git: bool },
+    Project {
+        name: String,
+        git: bool,
+    },
     Env(String, String),
     Arg(String),
     Config(String),
+    FakeGh,
+    WatchThread(String),
+    /// The fake `gh` marker to leave in place, or `None` for GitHub working normally.
+    Github(Option<&'static str>),
     Wait(Duration),
     WaitFor(String),
     WaitGone(String),
@@ -241,8 +259,14 @@ enum Step {
     Type(String),
     Press(Vec<String>),
     Paste(String),
-    Click { button: u8, at: Target },
-    Scroll { down: bool, at: Target },
+    Click {
+        button: u8,
+        at: Target,
+    },
+    Scroll {
+        down: bool,
+        at: Target,
+    },
     Dump(String),
     Pace(Duration),
     Timeout(Duration),
@@ -264,6 +288,8 @@ impl Step {
                 | Step::Env(..)
                 | Step::Arg(_)
                 | Step::Config(_)
+                | Step::FakeGh
+                | Step::WatchThread(_)
         )
     }
 }
@@ -344,6 +370,18 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
         }
         "arg" => Step::Arg(need("an argument")?),
         "config" => Step::Config(need("the settings as JSON")?),
+        "fake_gh" => Step::FakeGh,
+        "watch_thread" => {
+            let url = need("a thread URL")?;
+            thread_json(&url, "")?;
+            Step::WatchThread(url)
+        }
+        "github" => match need("down, logged-out or up")?.as_str() {
+            "down" => Step::Github(Some(gh_stub::DOWN_MARKER)),
+            "logged-out" => Step::Github(Some(gh_stub::LOGGED_OUT_MARKER)),
+            "up" => Step::Github(None),
+            other => return Err(format!("github goes down, logged-out or up, not {other:?}")),
+        },
         "wait" => Step::Wait(millis(need("milliseconds")?)?),
         "wait_for" => Step::WaitFor(need("text")?),
         "wait_gone" => Step::WaitGone(need("text")?),
@@ -512,6 +550,8 @@ struct Setup {
     env: Vec<(String, String)>,
     args: Vec<String>,
     config: Option<String>,
+    fake_gh: bool,
+    watched: Vec<String>,
 }
 
 struct Running {
@@ -547,6 +587,8 @@ impl Driver {
             Step::Env(key, value) => self.setup.env.push((key.clone(), value.clone())),
             Step::Arg(arg) => self.setup.args.push(arg.clone()),
             Step::Config(json) => self.setup.config = Some(json.clone()),
+            Step::FakeGh => self.setup.fake_gh = true,
+            Step::WatchThread(url) => self.setup.watched.push(url.clone()),
             Step::Pace(pace) => self.pace = *pace,
             Step::Timeout(timeout) => self.timeout = *timeout,
             _ => {
@@ -619,6 +661,25 @@ impl Driver {
                 std::fs::remove_dir_all(&dir)
                     .map_err(|error| format!("cannot delete {}: {error}", dir.display()))
             }
+            Step::Github(state) => {
+                if !self.setup.fake_gh {
+                    return Err("`github` only affects the fake `gh`; add `fake_gh`".to_string());
+                }
+                // One state at a time, so each command replaces the last.
+                for marker in [gh_stub::DOWN_MARKER, gh_stub::LOGGED_OUT_MARKER] {
+                    let path = self.run_dir.join(marker);
+                    let result = if *state == Some(marker) {
+                        std::fs::write(&path, b"")
+                    } else {
+                        match std::fs::remove_file(&path) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                            other => other,
+                        }
+                    };
+                    result.map_err(|error| format!("cannot flip {}: {error}", path.display()))?;
+                }
+                Ok(())
+            }
             _ => unreachable!("setup steps are handled before launching"),
         }
     }
@@ -674,6 +735,34 @@ impl Driver {
         let stub = bin.join(format!("copilot{}", std::env::consts::EXE_SUFFIX));
         std::fs::copy(&me, &stub)
             .map_err(|error| format!("cannot install the copilot stub: {error}"))?;
+        if self.setup.fake_gh {
+            let gh = bin.join(format!("gh{}", std::env::consts::EXE_SUFFIX));
+            std::fs::copy(&me, &gh)
+                .map_err(|error| format!("cannot install the gh stub: {error}"))?;
+        }
+
+        // Watched by the first session, and subscribed as CST starts, so nothing
+        // posted to the thread before then counts as news.
+        if !self.setup.watched.is_empty() {
+            let session = session_id(0);
+            let subscriptions = self
+                .setup
+                .watched
+                .iter()
+                .map(|url| thread_json(url, &session))
+                .collect::<Result<Vec<_>, _>>()?;
+            let dir = self
+                .run_dir
+                .join("cst-home")
+                .join("data")
+                .join("copilot-session-tui");
+            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+            std::fs::write(
+                dir.join("threads.json"),
+                format!(r#"{{"subscriptions":[{}]}}"#, subscriptions.join(",")),
+            )
+            .map_err(|error| error.to_string())?;
+        }
 
         // Where CST looks for its settings under CST_HOME; without a `config` line
         // there is no file and CST runs on its defaults.
@@ -953,6 +1042,37 @@ fn recovery_dir() -> PathBuf {
 
 /// Single-quoted, where a backslash in a Windows path is just a backslash.
 /// `00000001-0000-4000-8000-000000000001` for the first session declared, and so on.
+/// One subscription in CST's `threads.json`, for a thread URL such as
+/// `https://github.com/o/r/discussions/7`. The host can be anything, including one
+/// that answers nothing, which is how a script makes polling an issue fail.
+fn thread_json(url: &str, session: &str) -> Result<String, String> {
+    let bad = || {
+        format!(
+            "watch_thread wants https://HOST/OWNER/REPO/(issues|pull|discussions)/N, got {url:?}"
+        )
+    };
+    let path = url.strip_prefix("https://").ok_or_else(bad)?;
+    let parts: Vec<&str> = path.split('/').collect();
+    let [host, owner, repo, kind, number] = parts[..] else {
+        return Err(bad());
+    };
+    let kind = match kind {
+        "issues" => "issue",
+        "pull" => "pull_request",
+        "discussions" => "discussion",
+        _ => return Err(bad()),
+    };
+    let number: u64 = number.parse().map_err(|_| bad())?;
+    let quote = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!(
+        r#"{{"session_id":"{}","thread":{{"host":"{}","owner":"{}","repo":"{}","number":{number},"kind":"{kind}"}},"state":"active"}}"#,
+        quote(session),
+        quote(host),
+        quote(owner),
+        quote(repo),
+    ))
+}
+
 fn session_id(index: usize) -> String {
     let number = index + 1;
     format!("{number:08}-0000-4000-8000-{number:012}")
@@ -1042,5 +1162,44 @@ delete_session First
             if project == "app" && summary == "Started elsewhere"));
         assert!(matches!(&steps[3].1, Step::DeleteSession(summary) if summary == "First"));
         assert_eq!(session_id(1), "00000002-0000-4000-8000-000000000002");
+    }
+
+    #[test]
+    fn a_watched_thread_is_written_the_way_cst_reads_its_subscriptions() {
+        let json = thread_json(
+            "https://127.0.0.1:9/o/r/issues/12",
+            "00000001-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"session_id":"00000001-0000-4000-8000-000000000001","thread":{"host":"127.0.0.1:9","owner":"o","repo":"r","number":12,"kind":"issue"},"state":"active"}"#
+        );
+    }
+
+    #[test]
+    fn a_thread_url_cst_could_not_watch_is_refused_before_anything_runs() {
+        let error = parse_script("watch_thread https://github.com/o/r/wiki/7\n").unwrap_err();
+
+        assert!(error.starts_with("line 1:"), "got {error}");
+    }
+
+    #[test]
+    fn taking_github_down_is_driving_so_it_may_come_after_cst_has_started() {
+        let steps =
+            parse_script("fake_gh\npress enter\ngithub down\ngithub logged-out\ngithub up\n")
+                .unwrap();
+
+        assert!(steps[0].1.is_setup());
+        assert!(matches!(
+            steps[2].1,
+            Step::Github(Some(gh_stub::DOWN_MARKER))
+        ));
+        assert!(matches!(
+            steps[3].1,
+            Step::Github(Some(gh_stub::LOGGED_OUT_MARKER))
+        ));
+        assert!(matches!(steps[4].1, Step::Github(None)));
     }
 }

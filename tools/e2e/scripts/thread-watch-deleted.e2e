@@ -1,0 +1,36 @@
+# Two watched discussions have been deleted and one is fine. Each deleted one is
+# reported once, not again every minute, and neither stops the healthy thread
+# behind them from being checked: after an outage, the round gets through to it
+# and CST says so. Polls are a minute apart, so this takes about five.
+
+size 110x30
+arg --mux
+fake_gh
+session app Waiting on a reply
+# The fake gh knows no discussion numbered 404.
+watch_thread https://github.com/o/r/discussions/404
+watch_thread https://github.com/o/s/discussions/404
+watch_thread https://github.com/o/r/discussions/7
+timeout 150000
+
+wait_for Thread watching cannot read https://github.com/o/s/discussions/404
+dump 01-second-deleted-thread
+
+# Any key clears the status line. The next poll finds both still deleted, and
+# must not put either message back.
+press down
+expect_not Thread watching
+wait 75000
+expect_not Thread watching
+dump 02-quiet-a-minute-later
+
+github down
+wait_for Thread watching will keep retrying
+dump 03-down
+
+# Getting through means reaching the healthy thread, which is listed after the
+# two deleted ones.
+github up
+wait_for Thread watching reached GitHub again
+expect_not cannot read
+dump 04-reached-again

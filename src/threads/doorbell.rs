@@ -34,6 +34,65 @@ use super::{ThreadKind, ThreadRef};
 /// How often to ask, when nothing says otherwise.
 pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
+/// Why a poll came back without an answer, sorted by what would fix it.
+///
+/// The watcher treats these very differently, which is the reason they are not a plain
+/// string. GitHub being out of reach mends itself, so the watcher keeps asking; a
+/// refused token waits for the user to log in; one unreadable thread says nothing about
+/// the others.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PollError {
+    /// No answer, or GitHub's own error: a network that is down, a laptop waking from
+    /// sleep, an outage. Nothing to do but ask again.
+    Unreachable(String),
+    /// The credential was turned away. The same token will be turned away again.
+    Refused(String),
+    /// This one thread can no longer be read.
+    Gone(String),
+}
+
+impl PollError {
+    /// The `gh` path, used for discussions and comment lists, sorted the same way.
+    pub fn from_github(error: crate::github::GithubError) -> Self {
+        use crate::github::GithubErrorKind;
+        match error.kind {
+            // `gh`'s own wording follows CST's in this message and runs off the end of
+            // the status line mid-sentence; what it says comes to the same thing.
+            GithubErrorKind::Authentication => Self::Refused(
+                "GitHub refused the login; run `gh auth login` or check its access to the repo"
+                    .to_string(),
+            ),
+            GithubErrorKind::NotFound => Self::Gone(error.message),
+            // `gh` reports a dropped connection as a generic failure, and a guess that
+            // retries costs far less than one that stops watching for good.
+            _ => Self::Unreachable(error.message),
+        }
+    }
+
+    /// What the user is told, saying first whether anything is still being watched:
+    /// a long network error is cut off at the edge of the status line, and that is the
+    /// part that has to survive.
+    pub fn describe(&self, thread: &ThreadRef) -> String {
+        // `gh` explains itself over several lines, and a status line has one.
+        let first_line = |detail: &str| detail.lines().next().unwrap_or_default().to_string();
+        match self {
+            Self::Unreachable(detail) => {
+                format!("Thread watching will keep retrying: {}", first_line(detail))
+            }
+            // Short, because what follows ends in the command to run, and the end is
+            // what a narrow status line cuts off.
+            Self::Refused(detail) => {
+                format!("Thread watching needs a login: {}", first_line(detail))
+            }
+            Self::Gone(detail) => format!(
+                "Thread watching cannot read {}: {}",
+                thread.url(),
+                first_line(detail)
+            ),
+        }
+    }
+}
+
 /// What one thread poll produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ring {
@@ -91,22 +150,24 @@ pub fn poll_delay(configured: Duration) -> Duration {
 }
 
 /// Turn a response into whether this thread moved.
-pub fn interpret(response: &DoorbellResponse) -> Result<Ring, String> {
+pub fn interpret(response: &DoorbellResponse) -> Result<Ring, PollError> {
     match response.status {
         304 => Ok(Ring::Quiet),
         200 => Ok(Ring::Moved {
             cursor: response.cursor.clone(),
         }),
-        401 | 403 => Err(
-            "GitHub refused the request; run `gh auth login` and check the token can read \
-             this repository"
+        401 | 403 => Err(PollError::Refused(
+            "GitHub refused the token; run `gh auth login` or check its access to the repo"
                 .to_string(),
-        ),
-        404 => Err(
-            "That thread is no longer readable; it may have been deleted or made private"
-                .to_string(),
-        ),
-        other => Err(format!("GitHub answered with HTTP {other}")),
+        )),
+        404 | 410 => Err(PollError::Gone(
+            "it may have been deleted or made private".to_string(),
+        )),
+        // A 5xx or a 429 is GitHub having a bad moment, which passes like a dropped
+        // connection does.
+        other => Err(PollError::Unreachable(format!(
+            "GitHub answered with HTTP {other}"
+        ))),
     }
 }
 
@@ -190,9 +251,16 @@ pub fn current_login(host: &str) -> Result<String, String> {
         .output()
         .map_err(|error| format!("Could not ask `gh` who you are: {error}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "`gh` could not say which account is logged in to {host}"
-        ));
+        // `gh`'s first line is what tells a dropped network from a lost login, and the
+        // watcher's message is the only place the user will see it. Alone, because the
+        // status line has room for little more.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let why = stderr.lines().next().unwrap_or_default().trim();
+        return Err(if why.is_empty() {
+            format!("`gh` could not say which account is logged in to {host}")
+        } else {
+            format!("gh: {why}")
+        });
     }
     let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if login.is_empty() {
@@ -295,10 +363,102 @@ mod tests {
     #[test]
     fn a_thread_that_can_no_longer_be_read_says_so_instead_of_retrying_silently() {
         let error = interpret(&response(404)).unwrap_err();
-        assert!(error.contains("deleted or made private"), "got: {error}");
+        assert!(matches!(error, PollError::Gone(_)), "got: {error:?}");
+        let message = error.describe(&thread(ThreadKind::Issue));
+        assert!(
+            message.contains("deleted or made private"),
+            "got: {message}"
+        );
+        assert!(message.contains("/issues/2366"), "got: {message}");
 
         let error = interpret(&response(403)).unwrap_err();
-        assert!(error.contains("gh auth login"), "got: {error}");
+        assert!(matches!(error, PollError::Refused(_)), "got: {error:?}");
+        let message = error.describe(&thread(ThreadKind::Issue));
+        assert!(message.contains("gh auth login"), "got: {message}");
+    }
+
+    #[test]
+    fn github_having_a_bad_moment_is_retried_like_a_dropped_connection() {
+        // Taken as a refusal, an outage on GitHub's side would read as "log in again"
+        // and wait the long way round for a login that was never the problem.
+        for status in [500, 502, 503, 429] {
+            let error = interpret(&response(status)).unwrap_err();
+            assert!(
+                matches!(error, PollError::Unreachable(_)),
+                "HTTP {status} got: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_connection_says_it_is_still_watching_before_saying_why() {
+        // The status line cuts off what does not fit, and a network error can be long.
+        // That watching goes on is the part the user needs; the detail can be lost.
+        let message = PollError::Unreachable("Could not reach GitHub: io: timed out".into())
+            .describe(&thread(ThreadKind::Issue));
+        assert!(
+            message.starts_with("Thread watching will keep retrying"),
+            "got: {message}"
+        );
+        assert!(!message.contains("paused"), "got: {message}");
+    }
+
+    #[test]
+    fn a_refused_login_fits_an_ordinary_status_line_down_to_the_command_to_run() {
+        // At 110 columns the status line holds 109 characters after its margin. These
+        // end in what the user has to type, which is the part a cut would take.
+        let thread = thread(ThreadKind::Issue);
+        let refused = interpret(&response(401)).unwrap_err().describe(&thread);
+        let no_token = PollError::Refused(
+            "`gh` has no token for github.com; run `gh auth login --hostname github.com`".into(),
+        )
+        .describe(&thread);
+        let refused_through_gh = PollError::from_github(crate::github::GithubError {
+            kind: crate::github::GithubErrorKind::Authentication,
+            message: "GitHub authentication failed; run `gh auth login` for this repository \
+                      host: To get started with GitHub CLI, please run:  gh auth login"
+                .to_string(),
+        })
+        .describe(&thread);
+
+        for message in [refused, no_token, refused_through_gh] {
+            assert!(message.chars().count() <= 109, "too long: {message}");
+        }
+    }
+
+    #[test]
+    fn gh_explaining_itself_over_several_lines_still_fits_one_status_line() {
+        let message = PollError::Unreachable(
+            "`gh` could not load the GitHub item: error connecting to api.github.com\n\
+             check your internet connection or https://githubstatus.com"
+                .into(),
+        )
+        .describe(&thread(ThreadKind::Discussion));
+
+        assert!(!message.contains('\n'), "got: {message:?}");
+        assert!(message.ends_with("api.github.com"), "got: {message:?}");
+    }
+
+    #[test]
+    fn a_failure_through_gh_is_sorted_the_same_way_as_one_over_http() {
+        use crate::github::{GithubError, GithubErrorKind};
+        let error = |kind| GithubError {
+            kind,
+            message: "x".to_string(),
+        };
+        assert!(matches!(
+            PollError::from_github(error(GithubErrorKind::Authentication)),
+            PollError::Refused(_)
+        ));
+        assert!(matches!(
+            PollError::from_github(error(GithubErrorKind::NotFound)),
+            PollError::Gone(_)
+        ));
+        // `gh` reports a network that is down as a plain failure.
+        assert!(matches!(
+            PollError::from_github(error(GithubErrorKind::Cli)),
+            PollError::Unreachable(_)
+        ));
     }
 
     /// Proves against the real API that a conditional poll is free, and — the thing that

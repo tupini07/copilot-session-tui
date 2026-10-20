@@ -52,6 +52,8 @@ checked before anything starts, so a typo fails at once.
 | `env KEY=VALUE` | An environment variable for CST. |
 | `arg <argument>` | A command-line argument for CST, one per line. |
 | `config <json>` | CST's settings file for this run, on one line, e.g. `config {"theme": "gruvbox"}`. Without it CST runs on its defaults. |
+| `fake_gh` | Put a stub `gh` first on CST's `PATH`, logged in as `cst-e2e`. It answers what thread watching asks about a discussion (who is logged in, a token, `updatedAt`, an empty comment list) and fails anything else. Discussion number 404 does not exist, like a deleted one. Without it CST uses your real `gh`. |
+| `watch_thread <url>` | Subscribe the first session to a thread, e.g. `https://github.com/o/r/discussions/7`. Any host works, including one nothing answers on, such as `https://127.0.0.1:9/o/r/issues/1`, to make an issue poll fail. The watcher needs `arg --mux`, and polls a minute apart, so raise `timeout`. |
 
 ### Driving
 
@@ -75,6 +77,7 @@ reads anything sent too soon as Alt+key.
 | `expect <text>`, `expect_not <text>` | Fail unless it is / is not on screen right now. |
 | `add_session <project> <summary...>` | Write another session, as `session` does, while CST is running: one started from another terminal. Its id continues the numbering. |
 | `delete_session <summary...>` | Delete the folder of the session with that summary, as another CST deleting it would. |
+| `github down\|logged-out\|up` | Make the `fake_gh` stub fail every call as `gh` does with no network, or as it does with nobody logged in, or answer again. Only `gh` is affected; an issue poll goes over HTTP and is not. |
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |
 | `pace <ms>`, `timeout <ms>` | Change the pause after inputs, and the `wait_for` limit (default 10 s). |
 
