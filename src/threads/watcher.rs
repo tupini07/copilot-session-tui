@@ -282,6 +282,25 @@ pub struct ThreadWatcher {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Unreadable threads already reported, so each is said once rather than every minute.
+///
+/// The UI only remembers the last failure, and each of these names its own thread, so
+/// with two of them watched the UI would see a new message every poll and show it.
+#[derive(Debug, Default)]
+struct GoneThreads(std::collections::HashSet<String>);
+
+impl GoneThreads {
+    /// Whether this is news, recording that it is not news any more.
+    fn first_report(&mut self, thread: &ThreadRef) -> bool {
+        self.0.insert(thread.url())
+    }
+
+    /// A thread that answered again, or is no longer watched, may be reported anew.
+    fn keep_only_unreadable(&mut self, still_unreadable: impl Fn(&str) -> bool) {
+        self.0.retain(|url| still_unreadable(url));
+    }
+}
+
 /// What every check in a round shares, so checking one thread can be its own function.
 struct Watch {
     events: Sender<MuxEvent>,
@@ -390,6 +409,7 @@ impl ThreadWatcher {
             // going again. Without that, a notice from the night before would be the
             // last word on the subject.
             let mut held_up = false;
+            let mut gone = GoneThreads::default();
 
             loop {
                 thread::park_timeout(delay);
@@ -458,6 +478,7 @@ impl ThreadWatcher {
 
                 delay = doorbell::poll_delay(poll_interval);
                 let mut abandoned = false;
+                let mut unreadable: Vec<String> = Vec::new();
 
                 // One conditional request per watched thread. More requests than asking
                 // the notifications inbox once, and the only version that works: GitHub
@@ -473,9 +494,18 @@ impl ThreadWatcher {
                         continue;
                     };
                     let setback = setback(&error, poll_interval, misses);
-                    let _ = watch
-                        .events
-                        .send(MuxEvent::ThreadWatchFailed(error.describe(thread)));
+                    let news = match error {
+                        PollError::Gone(_) => {
+                            unreadable.push(thread.url());
+                            gone.first_report(thread)
+                        }
+                        _ => true,
+                    };
+                    if news {
+                        let _ = watch
+                            .events
+                            .send(MuxEvent::ThreadWatchFailed(error.describe(thread)));
+                    }
                     if setback.forget_token {
                         token = None;
                     }
@@ -490,6 +520,8 @@ impl ThreadWatcher {
                     held_up = true;
                     misses += 1;
                 } else {
+                    // Only a round that reached every thread knows which still fail.
+                    gone.keep_only_unreadable(|url| unreadable.iter().any(|u| u == url));
                     misses = 0;
                     if std::mem::take(&mut held_up) {
                         let _ = watch.events.send(MuxEvent::ThreadWatchResumed);
@@ -762,6 +794,28 @@ mod tests {
 
         assert!(!gone.abandon_round);
         assert!(!gone.forget_token);
+    }
+
+    #[test]
+    fn two_unreadable_threads_are_each_reported_once_and_not_every_minute() {
+        // The UI remembers only the last failure, so two messages taking turns would
+        // both be shown again on every poll.
+        let mut a = thread();
+        a.number = 1;
+        let mut b = thread();
+        b.number = 2;
+        let mut gone = GoneThreads::default();
+
+        assert!(gone.first_report(&a));
+        assert!(gone.first_report(&b));
+        gone.keep_only_unreadable(|_| true);
+        assert!(!gone.first_report(&a), "the next minute is not news");
+        assert!(!gone.first_report(&b));
+
+        // `a` answered again; if it disappears later, that is news once more.
+        gone.keep_only_unreadable(|url| url == b.url());
+        assert!(gone.first_report(&a));
+        assert!(!gone.first_report(&b));
     }
 
     #[test]
