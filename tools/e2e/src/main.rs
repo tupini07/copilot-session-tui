@@ -230,16 +230,26 @@ fn build_cst(repo: &Path) -> Result<(), String> {
 #[derive(Debug)]
 enum Step {
     Size(u16, u16),
-    Session { project: String, summary: String },
-    AddSession { project: String, summary: String },
+    Session {
+        project: String,
+        summary: String,
+    },
+    AddSession {
+        project: String,
+        summary: String,
+    },
     DeleteSession(String),
-    Project { name: String, git: bool },
+    Project {
+        name: String,
+        git: bool,
+    },
     Env(String, String),
     Arg(String),
     Config(String),
     FakeGh,
     WatchThread(String),
-    Github { down: bool },
+    /// The fake `gh` marker to leave in place, or `None` for GitHub working normally.
+    Github(Option<&'static str>),
     Wait(Duration),
     WaitFor(String),
     WaitGone(String),
@@ -249,8 +259,14 @@ enum Step {
     Type(String),
     Press(Vec<String>),
     Paste(String),
-    Click { button: u8, at: Target },
-    Scroll { down: bool, at: Target },
+    Click {
+        button: u8,
+        at: Target,
+    },
+    Scroll {
+        down: bool,
+        at: Target,
+    },
     Dump(String),
     Pace(Duration),
     Timeout(Duration),
@@ -360,10 +376,11 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             thread_json(&url, "")?;
             Step::WatchThread(url)
         }
-        "github" => match need("down or up")?.as_str() {
-            "down" => Step::Github { down: true },
-            "up" => Step::Github { down: false },
-            other => return Err(format!("github goes down or up, not {other:?}")),
+        "github" => match need("down, logged-out or up")?.as_str() {
+            "down" => Step::Github(Some(gh_stub::DOWN_MARKER)),
+            "logged-out" => Step::Github(Some(gh_stub::LOGGED_OUT_MARKER)),
+            "up" => Step::Github(None),
+            other => return Err(format!("github goes down, logged-out or up, not {other:?}")),
         },
         "wait" => Step::Wait(millis(need("milliseconds")?)?),
         "wait_for" => Step::WaitFor(need("text")?),
@@ -644,17 +661,24 @@ impl Driver {
                 std::fs::remove_dir_all(&dir)
                     .map_err(|error| format!("cannot delete {}: {error}", dir.display()))
             }
-            Step::Github { down } => {
+            Step::Github(state) => {
                 if !self.setup.fake_gh {
                     return Err("`github` only affects the fake `gh`; add `fake_gh`".to_string());
                 }
-                let marker = self.run_dir.join(gh_stub::DOWN_MARKER);
-                let result = if *down {
-                    std::fs::write(&marker, b"")
-                } else {
-                    std::fs::remove_file(&marker)
-                };
-                result.map_err(|error| format!("cannot flip {}: {error}", marker.display()))
+                // One state at a time, so each command replaces the last.
+                for marker in [gh_stub::DOWN_MARKER, gh_stub::LOGGED_OUT_MARKER] {
+                    let path = self.run_dir.join(marker);
+                    let result = if *state == Some(marker) {
+                        std::fs::write(&path, b"")
+                    } else {
+                        match std::fs::remove_file(&path) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                            other => other,
+                        }
+                    };
+                    result.map_err(|error| format!("cannot flip {}: {error}", path.display()))?;
+                }
+                Ok(())
             }
             _ => unreachable!("setup steps are handled before launching"),
         }
@@ -1163,10 +1187,19 @@ delete_session First
 
     #[test]
     fn taking_github_down_is_driving_so_it_may_come_after_cst_has_started() {
-        let steps = parse_script("fake_gh\npress enter\ngithub down\ngithub up\n").unwrap();
+        let steps =
+            parse_script("fake_gh\npress enter\ngithub down\ngithub logged-out\ngithub up\n")
+                .unwrap();
 
         assert!(steps[0].1.is_setup());
-        assert!(matches!(steps[2].1, Step::Github { down: true }));
-        assert!(matches!(steps[3].1, Step::Github { down: false }));
+        assert!(matches!(
+            steps[2].1,
+            Step::Github(Some(gh_stub::DOWN_MARKER))
+        ));
+        assert!(matches!(
+            steps[3].1,
+            Step::Github(Some(gh_stub::LOGGED_OUT_MARKER))
+        ));
+        assert!(matches!(steps[4].1, Step::Github(None)));
     }
 }

@@ -56,7 +56,12 @@ impl PollError {
     pub fn from_github(error: crate::github::GithubError) -> Self {
         use crate::github::GithubErrorKind;
         match error.kind {
-            GithubErrorKind::Authentication => Self::Refused(error.message),
+            // `gh`'s own wording follows CST's in this message and runs off the end of
+            // the status line mid-sentence; what it says comes to the same thing.
+            GithubErrorKind::Authentication => Self::Refused(
+                "GitHub refused the login; run `gh auth login` or check its access to the repo"
+                    .to_string(),
+            ),
             GithubErrorKind::NotFound => Self::Gone(error.message),
             // `gh` reports a dropped connection as a generic failure, and a guess that
             // retries costs far less than one that stops watching for good.
@@ -74,11 +79,10 @@ impl PollError {
             Self::Unreachable(detail) => {
                 format!("Thread watching will keep retrying: {}", first_line(detail))
             }
+            // Short, because what follows ends in the command to run, and the end is
+            // what a narrow status line cuts off.
             Self::Refused(detail) => {
-                format!(
-                    "Thread watching is waiting for a login: {}",
-                    first_line(detail)
-                )
+                format!("Thread watching needs a login: {}", first_line(detail))
             }
             Self::Gone(detail) => format!(
                 "Thread watching cannot read {}: {}",
@@ -153,8 +157,7 @@ pub fn interpret(response: &DoorbellResponse) -> Result<Ring, PollError> {
             cursor: response.cursor.clone(),
         }),
         401 | 403 => Err(PollError::Refused(
-            "GitHub refused the request; run `gh auth login` and check the token can read \
-             this repository"
+            "GitHub refused the token; run `gh auth login` or check its access to the repo"
                 .to_string(),
         )),
         404 | 410 => Err(PollError::Gone(
@@ -398,6 +401,29 @@ mod tests {
             "got: {message}"
         );
         assert!(!message.contains("paused"), "got: {message}");
+    }
+
+    #[test]
+    fn a_refused_login_fits_an_ordinary_status_line_down_to_the_command_to_run() {
+        // At 110 columns the status line holds 109 characters after its margin. These
+        // end in what the user has to type, which is the part a cut would take.
+        let thread = thread(ThreadKind::Issue);
+        let refused = interpret(&response(401)).unwrap_err().describe(&thread);
+        let no_token = PollError::Refused(
+            "`gh` has no token for github.com; run `gh auth login --hostname github.com`".into(),
+        )
+        .describe(&thread);
+        let refused_through_gh = PollError::from_github(crate::github::GithubError {
+            kind: crate::github::GithubErrorKind::Authentication,
+            message: "GitHub authentication failed; run `gh auth login` for this repository \
+                      host: To get started with GitHub CLI, please run:  gh auth login"
+                .to_string(),
+        })
+        .describe(&thread);
+
+        for message in [refused, no_token, refused_through_gh] {
+            assert!(message.chars().count() <= 109, "too long: {message}");
+        }
     }
 
     #[test]
