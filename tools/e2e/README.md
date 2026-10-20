@@ -62,7 +62,7 @@ reads anything sent too soon as Alt+key.
 
 | Command | Effect |
 | --- | --- |
-| `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
+| `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `f1` to `f12`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
 | `type <text>` | The text exactly as written, trailing spaces included. |
 | `key <bytes>` | Raw bytes, with `\e`, `\r`, `\n`, `\t`, `\s` (space), `\\` and `\xHH`. |
 | `paste <text>` | A bracketed paste. |
@@ -73,6 +73,8 @@ reads anything sent too soon as Alt+key.
 | `wait_for <text>` | Until `<text>` is on screen; fails after the timeout. |
 | `wait_gone <text>` | Until it is not. |
 | `expect <text>`, `expect_not <text>` | Fail unless it is / is not on screen right now. |
+| `add_session <project> <summary...>` | Write another session, as `session` does, while CST is running: one started from another terminal. Its id continues the numbering. |
+| `delete_session <summary...>` | Delete the folder of the session with that summary, as another CST deleting it would. |
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |
 | `pace <ms>`, `timeout <ms>` | Change the pause after inputs, and the `wait_for` limit (default 10 s). |
 

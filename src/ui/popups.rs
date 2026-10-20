@@ -973,6 +973,11 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         help_line(theme, "c", "Clear project filter"),
         help_line(theme, "s", "Cycle sort order"),
         help_line(theme, "H", "Temporarily show/hide filtered sessions"),
+        help_line(
+            theme,
+            "F5",
+            "Refresh the list (also every 2 min, and on return)",
+        ),
         Line::from(""),
         help_section(theme, "Settings & app"),
         help_line(theme, ",", "Global settings"),

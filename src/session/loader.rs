@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::DateTime;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -27,10 +27,13 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
 
     let mut sessions = Vec::new();
     let mut visited = HashSet::new();
-    load_session_directory_pass(&session_dir, &mut visited, &mut sessions)?;
+    // Hundreds of sessions share a few folders, and finding a folder's project means
+    // walking up its parents; once per folder is enough.
+    let mut roots = HashMap::new();
+    load_session_directory_pass(&session_dir, &mut visited, &mut roots, &mut sessions)?;
     // read_dir is not a snapshot. A session created while the first pass is in flight
     // may be omitted by the iterator, so reconcile directory names once before publish.
-    load_session_directory_pass(&session_dir, &mut visited, &mut sessions)?;
+    load_session_directory_pass(&session_dir, &mut visited, &mut roots, &mut sessions)?;
 
     // Sort by updated_at descending (most recent first)
     sessions.sort_by(|a, b| {
@@ -45,6 +48,7 @@ pub fn load_sessions(copilot_home: &Path) -> Result<Vec<Session>> {
 fn load_session_directory_pass(
     session_dir: &Path,
     visited: &mut HashSet<PathBuf>,
+    roots: &mut HashMap<String, String>,
     sessions: &mut Vec<Session>,
 ) -> Result<()> {
     let entries = fs::read_dir(session_dir)
@@ -54,10 +58,16 @@ fn load_session_directory_pass(
         if !path.is_dir() || visited.contains(&path) {
             continue;
         }
-        if let Ok(session) = load_single_session(&path) {
+        if let Ok(session) = load_single_session_with(&path, roots) {
             if session_is_visible(&session) {
                 visited.insert(path);
                 sessions.push(session);
+            } else if !recently_written(&path) {
+                // Hidden and old means abandoned before its first turn, and there are
+                // hundreds of those. Re-reading them all nearly doubled every scan,
+                // which the session list now repeats; only a session that may still
+                // be in the middle of being created needs the second look.
+                visited.insert(path);
             }
         }
     }
@@ -135,7 +145,21 @@ fn session_is_visible(session: &Session) -> bool {
             .unwrap_or(false)
 }
 
+/// Whether a session's metadata changed recently enough that it may still be being
+/// created. Unknown counts as recent, which only costs a second read.
+fn recently_written(dir: &Path) -> bool {
+    const RECENT: std::time::Duration = std::time::Duration::from_secs(60);
+    fs::metadata(dir.join("workspace.yaml"))
+        .and_then(|metadata| metadata.modified())
+        .map(|modified| modified.elapsed().map_or(true, |age| age < RECENT))
+        .unwrap_or(true)
+}
+
 fn load_single_session(dir: &Path) -> Result<Session> {
+    load_single_session_with(dir, &mut HashMap::new())
+}
+
+fn load_single_session_with(dir: &Path, roots: &mut HashMap<String, String>) -> Result<Session> {
     let workspace_path = dir.join("workspace.yaml");
     let yaml_str = fs::read_to_string(&workspace_path)
         .with_context(|| format!("Failed to read {}", workspace_path.display()))?;
@@ -157,7 +181,10 @@ fn load_single_session(dir: &Path) -> Result<Session> {
 
     let is_active = detect_active(dir);
     let cwd = ws.cwd.unwrap_or_default();
-    let project_root = resolve_project_root(&cwd);
+    let project_root = roots
+        .entry(cwd.clone())
+        .or_insert_with(|| resolve_project_root(&cwd))
+        .clone();
 
     Ok(Session {
         id: ws.id,
@@ -425,7 +452,8 @@ mod tests {
 
         let mut visited = HashSet::new();
         let mut sessions = Vec::new();
-        load_session_directory_pass(&root, &mut visited, &mut sessions).unwrap();
+        load_session_directory_pass(&root, &mut visited, &mut HashMap::new(), &mut sessions)
+            .unwrap();
 
         // Copilot created the directory during the first pass but had not finished its
         // workspace file. A failed first parse must remain eligible for reconciliation.
@@ -442,7 +470,8 @@ mod tests {
             ),
         )
         .unwrap();
-        load_session_directory_pass(&root, &mut visited, &mut sessions).unwrap();
+        load_session_directory_pass(&root, &mut visited, &mut HashMap::new(), &mut sessions)
+            .unwrap();
 
         assert_eq!(
             sessions
@@ -451,6 +480,41 @@ mod tests {
                 .collect::<HashSet<_>>(),
             HashSet::from(["first", "second", "becoming-visible"])
         );
+    }
+
+    /// The session list rescans every couple of minutes, and a long-used machine holds
+    /// hundreds of sessions abandoned before their first turn. Reading each of those
+    /// twice per scan nearly doubled its cost.
+    #[test]
+    fn a_long_abandoned_hidden_session_is_not_read_again_by_the_second_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("session-state");
+        let abandoned = root.join("abandoned");
+        fs::create_dir_all(&abandoned).unwrap();
+        let workspace = abandoned.join("workspace.yaml");
+        let age_it = || {
+            fs::File::options()
+                .write(true)
+                .open(&workspace)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+                .unwrap();
+        };
+        fs::write(&workspace, "id: abandoned\ncwd: .\n").unwrap();
+        age_it();
+
+        let mut visited = HashSet::new();
+        let mut sessions = Vec::new();
+        load_session_directory_pass(&root, &mut visited, &mut HashMap::new(), &mut sessions)
+            .unwrap();
+        // Were the second pass to read it again, this name would make it visible.
+        fs::write(&workspace, "id: abandoned\ncwd: .\nname: Read twice\n").unwrap();
+        age_it();
+        load_session_directory_pass(&root, &mut visited, &mut HashMap::new(), &mut sessions)
+            .unwrap();
+
+        assert!(sessions.is_empty());
+        assert!(visited.contains(&abandoned));
     }
 
     #[test]

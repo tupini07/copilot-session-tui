@@ -226,6 +226,8 @@ fn build_cst(repo: &Path) -> Result<(), String> {
 enum Step {
     Size(u16, u16),
     Session { project: String, summary: String },
+    AddSession { project: String, summary: String },
+    DeleteSession(String),
     Project { name: String, git: bool },
     Env(String, String),
     Arg(String),
@@ -314,16 +316,19 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
                 rows.parse().map_err(|_| "bad row count")?,
             )
         }
-        "session" => {
+        "session" | "add_session" => {
             let text = need("a project name and a summary")?;
             let (project, summary) = text
                 .split_once(' ')
-                .ok_or("session wants a project name, then the summary")?;
-            Step::Session {
-                project: project.to_string(),
-                summary: summary.trim().to_string(),
+                .ok_or_else(|| format!("{command} wants a project name, then the summary"))?;
+            let (project, summary) = (project.to_string(), summary.trim().to_string());
+            if command == "session" {
+                Step::Session { project, summary }
+            } else {
+                Step::AddSession { project, summary }
             }
         }
+        "delete_session" => Step::DeleteSession(need("the session's summary")?),
         "project" => Step::Project {
             name: need("a name")?,
             git: false,
@@ -477,6 +482,19 @@ fn key_bytes(name: &str) -> Result<Vec<u8>, String> {
         "pageup" => b"\x1b[5~".to_vec(),
         "pagedown" => b"\x1b[6~".to_vec(),
         "delete" => b"\x1b[3~".to_vec(),
+        "f1" => b"\x1bOP".to_vec(),
+        "f2" => b"\x1bOQ".to_vec(),
+        "f3" => b"\x1bOR".to_vec(),
+        "f4" => b"\x1bOS".to_vec(),
+        // The gaps in the numbering (16, 22) are xterm's, not a mistake.
+        "f5" => b"\x1b[15~".to_vec(),
+        "f6" => b"\x1b[17~".to_vec(),
+        "f7" => b"\x1b[18~".to_vec(),
+        "f8" => b"\x1b[19~".to_vec(),
+        "f9" => b"\x1b[20~".to_vec(),
+        "f10" => b"\x1b[21~".to_vec(),
+        "f11" => b"\x1b[23~".to_vec(),
+        "f12" => b"\x1b[24~".to_vec(),
         _ if name.chars().count() == 1 => name.as_bytes().to_vec(),
         _ => {
             return Err(format!(
@@ -580,8 +598,48 @@ impl Driver {
                 Ok(())
             }
             Step::Dump(name) => self.dump(name),
+            // As if another CST, or `copilot` in another terminal, had done it while
+            // this one was running.
+            Step::AddSession { project, summary } => {
+                self.setup.sessions.push((project.clone(), summary.clone()));
+                self.write_session(self.setup.sessions.len() - 1)
+            }
+            Step::DeleteSession(summary) => {
+                let index = self
+                    .setup
+                    .sessions
+                    .iter()
+                    .position(|(_, existing)| existing == summary)
+                    .ok_or_else(|| format!("no session with the summary {summary:?}"))?;
+                let dir = self
+                    .run_dir
+                    .join("home")
+                    .join("session-state")
+                    .join(session_id(index));
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|error| format!("cannot delete {}: {error}", dir.display()))
+            }
             _ => unreachable!("setup steps are handled before launching"),
         }
+    }
+
+    /// Write the fake Copilot session declared `index`th, by `session` or `add_session`.
+    fn write_session(&self, index: usize) -> Result<(), String> {
+        let (project, summary) = &self.setup.sessions[index];
+        let number = index + 1;
+        let id = session_id(index);
+        let cwd = self.run_dir.join("projects").join(project);
+        std::fs::create_dir_all(&cwd).map_err(|error| error.to_string())?;
+        let dir = self.run_dir.join("home").join("session-state").join(&id);
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        // The first session declared is the most recently used.
+        let day = 28usize.saturating_sub(number).max(1);
+        let yaml = format!(
+            "id: {id}\ncwd: {}\nsummary: {}\ncreated_at: 2026-01-01T10:00:00Z\nupdated_at: 2026-01-{day:02}T10:00:00Z\n",
+            yaml_quote(&cwd.display().to_string()),
+            yaml_quote(summary),
+        );
+        std::fs::write(dir.join("workspace.yaml"), yaml).map_err(|error| error.to_string())
     }
 
     fn launch(&mut self) -> Result<(), String> {
@@ -608,21 +666,8 @@ impl Driver {
                 }
             }
         }
-        for (index, (project, summary)) in self.setup.sessions.iter().enumerate() {
-            let number = index + 1;
-            let id = format!("{number:08}-0000-4000-8000-{number:012}");
-            let cwd = projects.join(project);
-            std::fs::create_dir_all(&cwd).map_err(|error| error.to_string())?;
-            let dir = home.join("session-state").join(&id);
-            std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-            // The first session declared is the most recently used.
-            let day = 28usize.saturating_sub(number).max(1);
-            let yaml = format!(
-                "id: {id}\ncwd: {}\nsummary: {}\ncreated_at: 2026-01-01T10:00:00Z\nupdated_at: 2026-01-{day:02}T10:00:00Z\n",
-                yaml_quote(&cwd.display().to_string()),
-                yaml_quote(summary),
-            );
-            std::fs::write(dir.join("workspace.yaml"), yaml).map_err(|error| error.to_string())?;
+        for index in 0..self.setup.sessions.len() {
+            self.write_session(index)?;
         }
 
         let me = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -907,6 +952,12 @@ fn recovery_dir() -> PathBuf {
 }
 
 /// Single-quoted, where a backslash in a Windows path is just a backslash.
+/// `00000001-0000-4000-8000-000000000001` for the first session declared, and so on.
+fn session_id(index: usize) -> String {
+    let number = index + 1;
+    format!("{number:08}-0000-4000-8000-{number:012}")
+}
+
 fn yaml_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
@@ -970,6 +1021,26 @@ press enter
         assert_eq!(key_bytes("ctrl+b").unwrap(), vec![0x02]);
         assert_eq!(key_bytes("esc").unwrap(), vec![0x1b]);
         assert_eq!(key_bytes("?").unwrap(), b"?".to_vec());
+        assert_eq!(key_bytes("F5").unwrap(), b"\x1b[15~".to_vec());
         assert!(key_bytes("hyper+x").is_err());
+    }
+
+    /// Unlike `session`, these change the fake history under a running CST, so they
+    /// are steps rather than setup and may come after it has started.
+    #[test]
+    fn sessions_can_be_added_and_deleted_after_cst_has_started() {
+        let steps = parse_script(
+            "session app First
+press enter
+add_session app Started elsewhere
+delete_session First
+",
+        )
+        .unwrap();
+
+        assert!(matches!(&steps[2].1, Step::AddSession { project, summary }
+            if project == "app" && summary == "Started elsewhere"));
+        assert!(matches!(&steps[3].1, Step::DeleteSession(summary) if summary == "First"));
+        assert_eq!(session_id(1), "00000002-0000-4000-8000-000000000002");
     }
 }
