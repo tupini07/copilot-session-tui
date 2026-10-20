@@ -10,7 +10,7 @@
 //! not decide *how*: whether a session has a running pane, and whether that pane is
 //! mid-turn, is only knowable on the UI thread, so that judgement lives there.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use super::doorbell::{self, Ring, ThreadTransport, UreqTransport};
+use super::doorbell::{self, PollError, Ring, ThreadTransport, UreqTransport};
 use super::judge;
 use super::store::{self, ThreadState};
 use super::{
@@ -148,27 +148,30 @@ fn earliest_interest(state: &ThreadState, thread: &ThreadRef) -> Option<String> 
         .map(|moment| moment.to_rfc3339())
 }
 
-/// Ask one thread whether it has moved, and remember the answer for next time.
+/// Ask one thread whether it has moved since the stored cursor.
 ///
 /// Issues and pull requests are a conditional HTTP request: free when nothing changed.
 /// Discussions have no REST endpoint, so their `updatedAt` is fetched through GraphQL
 /// and compared against the stored value — the same idea, one round trip more expensive.
-fn thread_moved(
+///
+/// The new cursor is handed back rather than stored. Storing it here is what used to
+/// lose wake-ups: when the comment fetch that follows failed, the next poll already
+/// carried the new cursor, was told nothing had changed, and the comments were never
+/// looked at again. See [`remember_cursor`].
+fn poll_thread(
     transport: &impl ThreadTransport,
-    root: &std::path::Path,
+    root: &Path,
     thread: &ThreadRef,
     token: &str,
-) -> Result<bool, String> {
-    let key = thread.url();
-    let previous = store::load_in(root).cursors.get(&key).cloned();
+) -> Result<Ring, PollError> {
+    let previous = store::load_in(root).cursors.get(&thread.url()).cloned();
 
-    let cursor = match doorbell::thread_api_url(thread) {
+    match doorbell::thread_api_url(thread) {
         Some(url) => {
-            let response = transport.fetch(&url, token, previous.as_deref())?;
-            match doorbell::interpret(&response)? {
-                Ring::Quiet => return Ok(false),
-                Ring::Moved { cursor } => cursor,
-            }
+            let response = transport
+                .fetch(&url, token, previous.as_deref())
+                .map_err(PollError::Unreachable)?;
+            doorbell::interpret(&response)
         }
         None => {
             let stamp = crate::github::fetch_discussion_updated_at(
@@ -182,25 +185,86 @@ fn thread_moved(
                 },
                 Arc::new(AtomicBool::new(false)),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(PollError::from_github)?;
             if previous.as_deref() == Some(stamp.as_str()) {
-                return Ok(false);
+                return Ok(Ring::Quiet);
             }
-            Some(stamp)
+            Ok(Ring::Moved {
+                cursor: Some(stamp),
+            })
         }
-    };
+    }
+}
 
-    // Recorded even on the very first sighting, so a thread that never changes again is
-    // asked about for free from here on.
-    let _ = store::update_in(root, |state| match cursor {
+/// Accept a thread's new cursor, once whatever moved it has been accounted for.
+///
+/// Recorded even on the very first sighting, so a thread that never changes again is
+/// asked about for free from here on.
+fn remember_cursor(state: &mut ThreadState, thread: &ThreadRef, cursor: Option<String>) {
+    match cursor {
         Some(cursor) => {
-            state.cursors.insert(key, cursor);
+            state.cursors.insert(thread.url(), cursor);
         }
         None => {
-            state.cursors.remove(&key);
+            state.cursors.remove(&thread.url());
         }
-    });
-    Ok(true)
+    }
+}
+
+/// The longest the watcher waits between attempts while GitHub cannot be reached.
+///
+/// Long enough not to spin through a night offline, short enough that watching visibly
+/// resumes within minutes of the network coming back.
+const LONGEST_RETRY: Duration = Duration::from_secs(300);
+
+/// What a failed poll does to the rest of the round, and when the next one starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Setback {
+    /// Stop asking about the remaining threads this round, because they would fail the
+    /// same way.
+    abandon_round: bool,
+    /// Read the token again before the next request.
+    forget_token: bool,
+    /// When to try again, if the round was abandoned.
+    retry_in: Duration,
+}
+
+/// Decide what a failure means for the loop.
+///
+/// `misses` counts the rounds abandoned in a row before this one, so retries spread out
+/// while GitHub stays away and snap back once it answers.
+///
+/// None of these stop the watcher. A machine left overnight loses its network, and the
+/// watcher has to still be there in the morning.
+fn setback(error: &PollError, poll_interval: Duration, misses: u32) -> Setback {
+    match error {
+        PollError::Unreachable(_) => {
+            let base = doorbell::poll_delay(poll_interval);
+            Setback {
+                abandon_round: true,
+                // The token is not what failed, and reading it again is a `gh` process.
+                forget_token: false,
+                retry_in: base
+                    .saturating_mul(1 << misses.min(16))
+                    .min(LONGEST_RETRY)
+                    .max(base),
+            }
+        }
+        PollError::Refused(_) => Setback {
+            abandon_round: true,
+            // A rejected token will not fix itself; re-read it in case the user has
+            // logged in since.
+            forget_token: true,
+            retry_in: poll_interval.max(LONGEST_RETRY),
+        },
+        // One deleted or hidden thread must not hold up the others, which is what
+        // ending the round on it would do every minute for as long as it is watched.
+        PollError::Gone(_) => Setback {
+            abandon_round: false,
+            forget_token: false,
+            retry_in: poll_interval,
+        },
+    }
 }
 
 /// How the watcher is configured, resolved once so a reload is a restart of the loop.
@@ -218,19 +282,114 @@ pub struct ThreadWatcher {
     worker: Option<JoinHandle<()>>,
 }
 
+/// What every check in a round shares, so checking one thread can be its own function.
+struct Watch {
+    events: Sender<MuxEvent>,
+    root: PathBuf,
+    settings: WatchSettings,
+}
+
+impl Watch {
+    /// Look at one thread and record whatever it means.
+    ///
+    /// Any failure leaves the thread's cursor where it was, so the next round asks the
+    /// same question again instead of being told nothing has changed.
+    fn check_thread(
+        &self,
+        transport: &impl ThreadTransport,
+        state: &ThreadState,
+        thread: &ThreadRef,
+        token: &str,
+        our_login: &str,
+    ) -> Result<(), PollError> {
+        let Ring::Moved { cursor } = poll_thread(transport, &self.root, thread, token)? else {
+            return Ok(());
+        };
+
+        // Fetched here and not on the UI thread: this is a `gh` process and a network
+        // round trip, and the event loop draws the terminal.
+        let since = earliest_interest(state, thread);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let comments = fetch_comments(thread, self.root.clone(), since.as_deref(), cancelled)?;
+
+        // The cursor goes in the same write as the notices, so the thread counts as
+        // looked at exactly when what it said has been recorded.
+        let produced = store::update_in(&self.root, |state| {
+            remember_cursor(state, thread, cursor);
+            plan(
+                state,
+                thread,
+                &comments,
+                our_login,
+                &self.settings.trusted_authors,
+                self.settings.wakeups_per_hour,
+                Utc::now(),
+            )
+        });
+        // The notices are already on disk; this only asks the UI thread to look, since
+        // it is the side that knows which panes can take one. Nothing is sent when the
+        // batch was all our own comments, which is most of them: a wake CST posted
+        // itself moves every thread it is watching.
+        match produced {
+            Ok(true) => {
+                let _ = self.events.send(MuxEvent::ThreadNoticesChanged);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // Nothing was saved, the cursor included, so the next round sees the
+                // same comments again — but silence here would look exactly like a
+                // quiet thread.
+                let _ = self.events.send(MuxEvent::ThreadWatchFailed(format!(
+                    "Thread watching could not record notices: {error}"
+                )));
+            }
+        }
+
+        // Only after a burst, and only ever to report. A conversation that settles
+        // something takes a handful of turns; one that does not trips this within
+        // minutes.
+        if self.settings.stall_detection && judge::is_a_burst(&comments, Utc::now()) {
+            let checking = Arc::new(AtomicBool::new(false));
+            if judge::examine(thread, checking) == Some(judge::Stall::Circling) {
+                let _ = self
+                    .events
+                    .send(MuxEvent::ThreadStalled(judge::notice(thread)));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ThreadWatcher {
-    pub fn start(
-        events: Sender<MuxEvent>,
-        root: PathBuf,
-        our_login: String,
-        settings: WatchSettings,
-    ) -> Self {
+    /// Start watching. Never touches the network itself: the account is looked up by
+    /// the worker, once something is subscribed.
+    ///
+    /// Asking here, on the UI thread at startup, meant a CST started while GitHub was
+    /// out of reach — before the VPN, straight out of sleep — never watched anything
+    /// until it was restarted, and said nothing about it.
+    pub fn start(events: Sender<MuxEvent>, root: PathBuf, settings: WatchSettings) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             let transport = UreqTransport::new();
-            let mut delay = settings.poll_interval;
+            let watch = Watch {
+                events,
+                root,
+                settings,
+            };
+            let poll_interval = watch.settings.poll_interval;
+            let mut delay = poll_interval;
+            // Read once and kept: it decides whether a comment came from one of our own
+            // agents, and asking GitHub every poll would be a round trip for an answer
+            // that does not change.
+            let mut our_login: Option<String> = None;
             let mut token: Option<String> = None;
+            // Rounds abandoned in a row, which spreads the retries out.
+            let mut misses = 0;
+            // Whether the user was told watching is held up, so they can be told it is
+            // going again. Without that, a notice from the night before would be the
+            // last word on the subject.
+            let mut held_up = false;
 
             loop {
                 thread::park_timeout(delay);
@@ -238,114 +397,102 @@ impl ThreadWatcher {
                     return;
                 }
 
-                let state = store::load_in(&root);
+                let state = store::load_in(&watch.root);
                 if !state.has_active_subscription() {
                     // Nothing is subscribed, so there is nothing to ask about. An
                     // install that never uses this feature never touches the network.
-                    delay = settings.poll_interval;
+                    delay = poll_interval;
                     continue;
                 }
 
                 let watched = state.active_threads();
-                let host = watched
-                    .first()
-                    .map(|thread| thread.host.clone())
-                    .unwrap_or_else(|| "github.com".to_string());
-
-                if token.is_none() {
-                    match doorbell::token_for(&host) {
-                        Ok(value) => token = Some(value),
-                        Err(error) => {
-                            let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                            // Backing off hard: without a token every tick would spawn
-                            // another `gh` for the same certain failure.
-                            delay = settings.poll_interval.max(Duration::from_secs(300));
-                            continue;
-                        }
-                    }
-                }
-                let Some(active_token) = token.clone() else {
+                let Some(first) = watched.first() else {
                     continue;
                 };
 
-                delay = doorbell::poll_delay(settings.poll_interval);
+                // Before the first poll: what is said about a failure needs a thread
+                // to name, and these two have none of their own.
+                let early = if our_login.is_none() {
+                    // Only github.com: that is the account CST's agents post as.
+                    match doorbell::current_login("github.com") {
+                        Ok(login) => {
+                            our_login = Some(login);
+                            None
+                        }
+                        // `gh api user` fails the same way whether the network is down
+                        // or the login is, and only one of those mends itself, so it is
+                        // retried as if it might.
+                        Err(error) => Some(PollError::Unreachable(error)),
+                    }
+                } else {
+                    None
+                };
+                let early = early.or_else(|| {
+                    if token.is_some() {
+                        return None;
+                    }
+                    match doorbell::token_for(&first.host) {
+                        Ok(value) => {
+                            token = Some(value);
+                            None
+                        }
+                        // Without a token every tick would spawn another `gh` for the
+                        // same certain failure, so this waits the long way.
+                        Err(error) => Some(PollError::Refused(error)),
+                    }
+                });
+                if let Some(error) = early {
+                    let setback = setback(&error, poll_interval, misses);
+                    let _ = watch
+                        .events
+                        .send(MuxEvent::ThreadWatchFailed(error.describe(first)));
+                    held_up = true;
+                    misses += 1;
+                    delay = setback.retry_in;
+                    continue;
+                }
+                let (Some(login), Some(active_token)) = (our_login.as_deref(), token.clone())
+                else {
+                    continue;
+                };
+
+                delay = doorbell::poll_delay(poll_interval);
+                let mut abandoned = false;
 
                 // One conditional request per watched thread. More requests than asking
                 // the notifications inbox once, and the only version that works: GitHub
                 // does not notify you about your own activity, and every CST agent
                 // comments as the same account.
-                for thread in watched {
+                for thread in &watched {
                     if worker_stop.load(Ordering::Acquire) {
                         return;
                     }
-                    let moved = match thread_moved(&transport, &root, &thread, &active_token) {
-                        Ok(moved) => moved,
-                        Err(error) => {
-                            // A rejected token will not fix itself; re-read it next
-                            // time in case the user has just logged in.
-                            token = None;
-                            let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                            delay = settings.poll_interval.max(Duration::from_secs(300));
-                            break;
-                        }
-                    };
-                    if !moved {
+                    let Err(error) =
+                        watch.check_thread(&transport, &state, thread, &active_token, login)
+                    else {
                         continue;
+                    };
+                    let setback = setback(&error, poll_interval, misses);
+                    let _ = watch
+                        .events
+                        .send(MuxEvent::ThreadWatchFailed(error.describe(thread)));
+                    if setback.forget_token {
+                        token = None;
                     }
-
-                    // Fetched here and not on the UI thread: this is a `gh` process and
-                    // a network round trip, and the event loop draws the terminal.
-                    let since = earliest_interest(&state, &thread);
-                    let cancelled = Arc::new(AtomicBool::new(false));
-                    let comments =
-                        match fetch_comments(&thread, root.clone(), since.as_deref(), cancelled) {
-                            Ok(comments) => comments,
-                            Err(error) => {
-                                let _ = events.send(MuxEvent::ThreadWatchFailed(error));
-                                continue;
-                            }
-                        };
-
-                    let produced = store::update_in(&root, |state| {
-                        plan(
-                            state,
-                            &thread,
-                            &comments,
-                            &our_login,
-                            &settings.trusted_authors,
-                            settings.wakeups_per_hour,
-                            Utc::now(),
-                        )
-                    });
-                    // The notices are already on disk; this only asks the UI thread to
-                    // look, since it is the side that knows which panes can take one.
-                    // Nothing is sent when the batch was all our own comments, which is
-                    // most of them: a wake CST posted itself moves every thread it is
-                    // watching.
-                    match produced {
-                        Ok(true) => {
-                            let _ = events.send(MuxEvent::ThreadNoticesChanged);
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            // The comments are marked seen in the same write that records
-                            // the notices, so a failed write loses neither — but it does
-                            // mean nothing was saved, and silence here would look exactly
-                            // like a quiet thread.
-                            let _ = events.send(MuxEvent::ThreadWatchFailed(format!(
-                                "Could not record thread notices: {error}"
-                            )));
-                        }
+                    if setback.abandon_round {
+                        abandoned = true;
+                        delay = setback.retry_in;
+                        break;
                     }
+                }
 
-                    // Only after a burst, and only ever to report. A conversation that
-                    // settles something takes a handful of turns; one that does not
-                    // trips this within minutes.
-                    if settings.stall_detection && judge::is_a_burst(&comments, Utc::now()) {
-                        let checking = Arc::new(AtomicBool::new(false));
-                        if judge::examine(&thread, checking) == Some(judge::Stall::Circling) {
-                            let _ = events.send(MuxEvent::ThreadStalled(judge::notice(&thread)));
-                        }
+                if abandoned {
+                    held_up = true;
+                    misses += 1;
+                } else {
+                    misses = 0;
+                    if std::mem::take(&mut held_up) {
+                        let _ = watch.events.send(MuxEvent::ThreadWatchResumed);
                     }
                 }
             }
@@ -376,7 +523,7 @@ pub fn fetch_comments(
     cwd: PathBuf,
     since: Option<&str>,
     cancelled: Arc<AtomicBool>,
-) -> Result<Vec<CommentSighting>, String> {
+) -> Result<Vec<CommentSighting>, PollError> {
     let comments = crate::github::fetch_thread_comments(
         cwd,
         crate::github::CommentTarget {
@@ -389,7 +536,7 @@ pub fn fetch_comments(
         since,
         cancelled,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(PollError::from_github)?;
 
     let now = Utc::now();
     Ok(comments
@@ -463,6 +610,170 @@ mod tests {
             state.subscribe(session, thread());
         }
         state
+    }
+
+    /// Poll and accept the new cursor straight away, as the loop does once the comments
+    /// are recorded. The live tests use it to settle a thread before posting to it.
+    fn thread_moved(
+        transport: &impl ThreadTransport,
+        root: &Path,
+        thread: &ThreadRef,
+        token: &str,
+    ) -> Result<bool, PollError> {
+        match poll_thread(transport, root, thread, token)? {
+            Ring::Quiet => Ok(false),
+            Ring::Moved { cursor } => {
+                store::update_in(root, |state| remember_cursor(state, thread, cursor)).unwrap();
+                Ok(true)
+            }
+        }
+    }
+
+    /// GitHub as a scripted list of answers, one per request.
+    struct ScriptedTransport {
+        answers: std::sync::Mutex<Vec<Result<doorbell::DoorbellResponse, String>>>,
+        sent_cursors: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(answers: Vec<Result<doorbell::DoorbellResponse, String>>) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(answers),
+                sent_cursors: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ThreadTransport for ScriptedTransport {
+        fn fetch(
+            &self,
+            _url: &str,
+            _token: &str,
+            if_none_match: Option<&str>,
+        ) -> Result<doorbell::DoorbellResponse, String> {
+            self.sent_cursors
+                .lock()
+                .unwrap()
+                .push(if_none_match.map(str::to_string));
+            self.answers.lock().unwrap().remove(0)
+        }
+    }
+
+    fn answer(status: u16, etag: &str) -> Result<doorbell::DoorbellResponse, String> {
+        Ok(doorbell::DoorbellResponse {
+            status,
+            cursor: Some(etag.to_string()),
+            body: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_thread_that_moved_is_asked_again_until_its_comments_are_recorded() {
+        // The doorbell rang, then fetching the comments failed on a network that was
+        // going down. Had the poll stored the new cursor itself, the next poll would
+        // have been told "not modified" and the reply would never have been seen.
+        let root = tempfile::tempdir().unwrap();
+        let transport = ScriptedTransport::new(vec![
+            answer(200, "\"after-reply\""),
+            answer(200, "\"after-reply\""),
+        ]);
+
+        let first = poll_thread(&transport, root.path(), &thread(), "token").unwrap();
+        assert!(matches!(first, Ring::Moved { .. }));
+        // ...and the comment fetch fails here, so nothing is recorded.
+
+        let second = poll_thread(&transport, root.path(), &thread(), "token").unwrap();
+        assert!(
+            matches!(second, Ring::Moved { .. }),
+            "the thread must still read as moved, got: {second:?}"
+        );
+        assert_eq!(
+            *transport.sent_cursors.lock().unwrap(),
+            vec![None, None],
+            "the second poll must not carry a cursor nobody acted on"
+        );
+    }
+
+    #[test]
+    fn a_thread_whose_comments_were_recorded_is_not_asked_about_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let transport = ScriptedTransport::new(vec![answer(200, "\"v1\""), answer(304, "\"v1\"")]);
+
+        assert!(thread_moved(&transport, root.path(), &thread(), "token").unwrap());
+        assert!(!thread_moved(&transport, root.path(), &thread(), "token").unwrap());
+        assert_eq!(
+            transport.sent_cursors.lock().unwrap()[1].as_deref(),
+            Some("\"v1\"")
+        );
+    }
+
+    #[test]
+    fn a_network_that_is_down_is_reported_as_unreachable_and_not_as_a_bad_login() {
+        let root = tempfile::tempdir().unwrap();
+        let transport =
+            ScriptedTransport::new(vec![Err("Could not reach GitHub: io: timed out".into())]);
+
+        let error = poll_thread(&transport, root.path(), &thread(), "token").unwrap_err();
+
+        assert!(matches!(error, PollError::Unreachable(_)), "got: {error:?}");
+    }
+
+    #[test]
+    fn an_unreachable_github_is_retried_for_as_long_as_it_takes() {
+        // The watcher used to back off to five minutes and say it was paused. Retrying
+        // was right; what has to hold is that it never stops, never waits longer than
+        // the cap, and starts again at the normal pace.
+        let interval = Duration::from_secs(60);
+        let error = PollError::Unreachable("Could not reach GitHub".into());
+
+        let first = setback(&error, interval, 0);
+        assert!(first.abandon_round);
+        assert!(!first.forget_token, "the token is not what failed");
+        assert_eq!(
+            first.retry_in, interval,
+            "the first retry is an ordinary poll"
+        );
+
+        let mut previous = first.retry_in;
+        for misses in 1..200 {
+            let next = setback(&error, interval, misses).retry_in;
+            assert!(
+                next >= previous,
+                "retries only spread out while it stays away"
+            );
+            assert!(
+                next <= LONGEST_RETRY,
+                "a night offline must not mean an hour's wait"
+            );
+            previous = next;
+        }
+        assert_eq!(previous, LONGEST_RETRY);
+    }
+
+    #[test]
+    fn one_unreadable_thread_does_not_hold_up_the_others() {
+        // Ending the round on it would stall every thread behind it in the list, every
+        // minute, for as long as it stayed watched.
+        let gone = setback(
+            &PollError::Gone("deleted".into()),
+            Duration::from_secs(60),
+            0,
+        );
+
+        assert!(!gone.abandon_round);
+        assert!(!gone.forget_token);
+    }
+
+    #[test]
+    fn a_refused_token_is_read_again_before_the_next_try() {
+        let refused = setback(
+            &PollError::Refused("401".into()),
+            Duration::from_secs(60),
+            0,
+        );
+
+        assert!(refused.abandon_round);
+        assert!(refused.forget_token, "the user may have logged in since");
     }
 
     #[test]

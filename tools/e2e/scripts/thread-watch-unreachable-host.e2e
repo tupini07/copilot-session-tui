@@ -1,0 +1,14 @@
+# An issue is polled over HTTP rather than through `gh`, so its failure carries
+# a real network error, which can be long. The status line has to keep the part
+# that says watching goes on.
+
+size 110x30
+arg --mux
+fake_gh
+session app Waiting on a reply
+# Nothing listens on port 9, so the poll is refused.
+watch_thread https://127.0.0.1:9/o/r/issues/1
+timeout 150000
+
+wait_for Thread watching will keep retrying
+dump 01-refused-connection

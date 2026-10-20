@@ -1135,33 +1135,24 @@ impl MuxServices {
             app.config_revision_handle(),
             std::time::Duration::from_secs(1),
         );
-        // Only with the multiplexer, because without it there are no panes to wake. The
-        // login is read once: it is what decides whether a comment came from one of our
-        // own agents, and asking GitHub every poll would be a round trip for an answer
-        // that does not change.
-        let thread_watcher = app
-            .config
-            .threads_enabled
-            .then(|| threads::doorbell::current_login("github.com").ok())
-            .flatten()
-            .map(|login| {
-                threads::watcher::ThreadWatcher::start(
-                    mux.events.clone(),
-                    threads::store::state_root(),
-                    login,
-                    threads::watcher::WatchSettings {
-                        poll_interval: std::time::Duration::from_secs(
-                            threads::doorbell::DEFAULT_POLL_SECONDS,
-                        ),
-                        stall_detection: app.config.thread_stall_detection,
-                        trusted_authors: app.config.thread_trusted_authors.clone(),
-                        wakeups_per_hour: app
-                            .config
-                            .thread_wakeups_per_hour
-                            .unwrap_or(threads::DEFAULT_WAKEUPS_PER_HOUR),
-                    },
-                )
-            });
+        // Only with the multiplexer, because without it there are no panes to wake.
+        let thread_watcher = app.config.threads_enabled.then(|| {
+            threads::watcher::ThreadWatcher::start(
+                mux.events.clone(),
+                threads::store::state_root(),
+                threads::watcher::WatchSettings {
+                    poll_interval: std::time::Duration::from_secs(
+                        threads::doorbell::DEFAULT_POLL_SECONDS,
+                    ),
+                    stall_detection: app.config.thread_stall_detection,
+                    trusted_authors: app.config.thread_trusted_authors.clone(),
+                    wakeups_per_hour: app
+                        .config
+                        .thread_wakeups_per_hour
+                        .unwrap_or(threads::DEFAULT_WAKEUPS_PER_HOUR),
+                },
+            )
+        });
         Some(Self {
             _terminal_events: terminal_events,
             _config_watcher: config_watcher,
@@ -2335,7 +2326,8 @@ mod tests {
         assert!(mux_paint_due(&app, true, std::time::Instant::now()));
     }
 
-    /// No thread watcher, so switching modes in a test never asks `gh` who is logged in.
+    /// No thread watcher, so switching modes in a test never starts a worker that could
+    /// ask GitHub about the real machine's subscriptions.
     fn app_without_thread_watcher(mux: bool) -> App {
         let mut app = App::new(
             Vec::new(),
