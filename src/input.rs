@@ -545,6 +545,7 @@ fn handle_pane_list(app: &mut App, key: KeyEvent) {
                 .pane_selected
                 .min(app.pane_list_ids().len().saturating_sub(1));
             app.view = View::List;
+            app.rescan_on_return();
             app.status_message = Some(if persistent {
                 format!("Detached '{title}'; tmux session is still running")
             } else {
@@ -747,6 +748,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('.') => begin_project_settings(app),
         KeyCode::Char('u') => app.request_update(),
+        KeyCode::F(5) => app.request_session_refresh(),
         // Configured tmux shortcuts come last on purpose: whatever validation let
         // through, a configured key can shadow nothing — at worst it is inert.
         _ => handle_tmux_shortcut(app, key),
@@ -815,6 +817,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::ProjectSettings => KeyCode::Char('.'),
         CommandId::OpenHelp => KeyCode::Char('?'),
         CommandId::RecoverWorkspace => KeyCode::Char('R'),
+        CommandId::RefreshSessions => KeyCode::F(5),
         _ => return,
     };
     handle_normal(app, key);
@@ -1350,6 +1353,7 @@ fn handle_rename(app: &mut App, key: KeyCode) {
                 match manager::rename_session(&dir, &new_name) {
                     Ok(()) => {
                         app.sessions[idx].summary = Some(new_name);
+                        app.note_session_changed(&session_id);
                         if let Some((_, renamed)) = renamed_tmux {
                             app.replace_tmux_session(renamed);
                         }

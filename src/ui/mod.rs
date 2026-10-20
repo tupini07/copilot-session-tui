@@ -1090,6 +1090,51 @@ mod tests {
         );
     }
 
+    /// The list is already complete, so "loading more" would be wrong; and the timed
+    /// rescan says nothing at all, or the title would flash every two minutes.
+    #[test]
+    fn the_list_title_says_refreshing_for_f5_and_nothing_for_the_timed_rescan() {
+        let session = crate::session::Session {
+            id: "existing".to_string(),
+            cwd: "project".to_string(),
+            project_root: "project".to_string(),
+            summary: Some("Existing session".to_string()),
+            created_at: None,
+            updated_at: None,
+            is_active: false,
+            dir_path: std::path::PathBuf::from("existing"),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        };
+        let mut app = App::new(vec![session], UserConfig::default());
+        let screen = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| draw(frame, app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        let (_timed, receiver) = std::sync::mpsc::channel();
+        app.begin_session_refresh(receiver, false);
+        let text = screen(&mut app);
+        assert!(!text.contains("refreshing"), "got:\n{text}");
+        assert!(!text.contains("loading"), "got:\n{text}");
+
+        let (_requested, receiver) = std::sync::mpsc::channel();
+        app.begin_session_refresh(receiver, true);
+        let text = screen(&mut app);
+        assert!(text.contains("refreshing…"), "got:\n{text}");
+        assert!(!text.contains("loading more"), "got:\n{text}");
+    }
+
     #[test]
     fn update_confirmation_renders_above_full_screen_github_inspector() {
         let mut app = App::new(Vec::new(), UserConfig::default());

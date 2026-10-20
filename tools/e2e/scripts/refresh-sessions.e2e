@@ -1,0 +1,73 @@
+# The session list picks up sessions started and deleted outside this CST: on F5,
+# from the command palette, on coming back from a session, and on its own timer.
+# The last part waits out the two-minute timer, so the whole run takes about three.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+session existing-app Doomed session
+
+wait_for Existing app session
+expect Doomed session
+dump 01-list
+
+# Another terminal starts a session and another CST deletes one. Nothing has asked
+# this CST to look yet, so its list is still the one it started with.
+add_session other-app Started in another terminal
+delete_session Doomed session
+wait 1000
+expect_not Started in another terminal
+expect Doomed session
+
+press f5
+wait_for Started in another terminal
+wait_gone Doomed session
+expect Sessions refreshed: 1 new, 1 deleted elsewhere
+dump 02-after-f5
+
+# Nothing changed since, and saying so is the only way to tell it ran.
+press f5
+wait_for Sessions refreshed: none new or deleted
+dump 03-nothing-new
+
+press ?
+wait_for Keyboard Shortcuts
+press /
+type refresh
+wait_for Refresh the list (also every 2 min, and on return)
+dump 04-help
+press esc
+press esc
+wait_gone Keyboard Shortcuts
+
+add_session other-app Found from the palette
+press ctrl+b ctrl+b
+type refresh
+wait_for Refresh session list
+dump 05-palette
+press enter
+wait_for Found from the palette
+expect Sessions refreshed: 1 new
+dump 06-after-palette
+
+# Coming back from a session rescans, once the last scan is ten seconds old.
+press enter
+wait_for Fake Copilot is idling
+add_session other-app Started while attached
+wait 10000
+press ctrl+b d
+wait_gone Fake Copilot is idling
+timeout 15000
+wait_for Started while attached
+expect_not Sessions refreshed
+dump 07-back-to-list
+
+# Left alone, the list rescans every two minutes, silently.
+add_session other-app Found by the timer
+wait 2000
+expect_not Found by the timer
+timeout 150000
+wait_for Found by the timer
+expect_not Sessions refreshed
+expect_not refreshing
+dump 08-timer

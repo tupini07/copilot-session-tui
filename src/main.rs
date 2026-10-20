@@ -1263,7 +1263,8 @@ fn run_app(
         );
 
         input::maybe_load_details(app);
-        app.poll_session_load();
+        repaint |= app.poll_session_load();
+        app.poll_session_refresh();
         app.poll_external_sessions();
         repaint |= app.refresh_tmux_sessions();
         app.poll_update();

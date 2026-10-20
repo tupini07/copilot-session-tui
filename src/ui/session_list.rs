@@ -17,8 +17,13 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let loading = app.sessions_loading();
     let mut title = vec![Span::raw(" Sessions ")];
     if loading && !app.filtered_indices.is_empty() {
+        let doing = if app.session_refresh_requested() {
+            "refreshing"
+        } else {
+            "loading more"
+        };
         title.push(Span::styled(
-            format!("{} loading more… ", super::spinner_frame()),
+            format!("{} {doing}… ", super::spinner_frame()),
             Style::default()
                 .fg(super::semantic_foreground_on(
                     theme,

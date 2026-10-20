@@ -745,6 +745,26 @@ struct ResolvedReferences {
     generations: HashMap<u64, u64>,
 }
 
+/// How often the session list rescans Copilot's history while it is on screen.
+///
+/// Every scan reads each session's folder, thousands of them on a long-used machine:
+/// about a second of disk work here for 2,000. Returning to the list rescans as well,
+/// and `F5` is there for when even that is too long to wait.
+const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+/// Coming back to the list rescans too, but not if a scan finished this recently, or
+/// flicking between a session and the list would chain one scan after another.
+const SESSION_REFRESH_MIN_GAP: Duration = Duration::from_secs(10);
+
+/// What the session catalog scan in flight is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionLoad {
+    /// The first scan after starting; the list may be holding only favorites.
+    Startup,
+    /// A rescan of a complete list. `requested` is whether the user asked for it, and
+    /// so whether it is shown at all: a timed one changes rows silently or not at all.
+    Refresh { requested: bool },
+}
+
 struct PendingExternalSession {
     next_attempt: Instant,
     deadline: Instant,
@@ -795,6 +815,15 @@ pub struct App {
     pub update_receiver: Option<mpsc::Receiver<UpdateCheckResult>>,
     pub update_install_receiver: Option<mpsc::Receiver<UpdateInstallResult>>,
     session_load_receiver: Option<mpsc::Receiver<crate::session::loader::SessionLoadResult>>,
+    session_load_kind: SessionLoad,
+    /// When the last catalog scan finished; the timed rescan counts from here.
+    last_session_scan: Instant,
+    /// Set on returning to the list, which is when sessions started elsewhere are
+    /// most likely to be looked for.
+    session_refresh_on_return: bool,
+    /// Sessions CST changed itself while a rescan was in flight. The worker may have
+    /// read them before the change, so for these its copy is the stale one.
+    sessions_changed_during_scan: HashSet<String>,
     pub update_check_requested: bool,
     pub installed_update_version: Option<String>,
     pub update_notice: Option<String>,
@@ -1028,6 +1057,10 @@ impl App {
             update_receiver: None,
             update_install_receiver: None,
             session_load_receiver: None,
+            session_load_kind: SessionLoad::Startup,
+            last_session_scan: Instant::now(),
+            session_refresh_on_return: false,
+            sessions_changed_during_scan: HashSet::new(),
             update_check_requested: false,
             installed_update_version: None,
             update_notice: None,
@@ -3226,6 +3259,7 @@ impl App {
 
         let selected_id = self.selected_session().map(|session| session.id.clone());
         for session in sessions {
+            self.note_session_changed(&session.id);
             if let Some(index) = self
                 .sessions
                 .iter()
@@ -3310,10 +3344,81 @@ impl App {
         receiver: mpsc::Receiver<crate::session::loader::SessionLoadResult>,
     ) {
         self.session_load_receiver = Some(receiver);
+        self.session_load_kind = SessionLoad::Startup;
     }
 
+    /// Whether a scan the user is waiting on is in flight: the one at startup, or a
+    /// refresh they asked for. A timed rescan is deliberately not, so it neither puts a
+    /// spinner in the list's title every two minutes nor speeds up the redraw cadence.
     pub fn sessions_loading(&self) -> bool {
         self.session_load_receiver.is_some()
+            && self.session_load_kind != SessionLoad::Refresh { requested: false }
+    }
+
+    pub fn session_refresh_requested(&self) -> bool {
+        self.session_load_receiver.is_some()
+            && self.session_load_kind == SessionLoad::Refresh { requested: true }
+    }
+
+    /// Record that CST itself just changed a session's metadata, so a rescan already
+    /// in flight does not put back what it read before the change.
+    pub fn note_session_changed(&mut self, session_id: &str) {
+        if self.session_load_receiver.is_some() {
+            self.sessions_changed_during_scan
+                .insert(session_id.to_string());
+        }
+    }
+
+    /// `F5`: rescan Copilot's history for sessions started, renamed or deleted outside
+    /// this CST.
+    pub fn request_session_refresh(&mut self) {
+        match self.session_load_kind {
+            _ if self.session_load_receiver.is_none() => {
+                self.start_session_refresh(true);
+            }
+            SessionLoad::Startup => {
+                self.status_message = Some("Sessions are still loading".to_string());
+            }
+            // A timed rescan is already under way; it only has to start reporting.
+            SessionLoad::Refresh { .. } => {
+                self.session_load_kind = SessionLoad::Refresh { requested: true };
+            }
+        }
+    }
+
+    /// The timed rescan, run from the main loop. It only runs while the list is on
+    /// screen and idle: nobody is looking at it otherwise, and rows moving under a
+    /// search or a rename would be more surprising than a list a little out of date.
+    pub fn poll_session_refresh(&mut self) {
+        if self.session_load_receiver.is_some()
+            || self.view != View::List
+            || self.mode != Mode::Normal
+            || self.grabbed_favorite.is_some()
+        {
+            return;
+        }
+        let since = self.last_session_scan.elapsed();
+        if since >= SESSION_REFRESH_INTERVAL
+            || (self.session_refresh_on_return && since >= SESSION_REFRESH_MIN_GAP)
+        {
+            self.start_session_refresh(false);
+        }
+    }
+
+    fn start_session_refresh(&mut self, requested: bool) {
+        let receiver = crate::session::loader::load_sessions_async(self.copilot_home.clone());
+        self.begin_session_refresh(receiver, requested);
+    }
+
+    pub(crate) fn begin_session_refresh(
+        &mut self,
+        receiver: mpsc::Receiver<crate::session::loader::SessionLoadResult>,
+        requested: bool,
+    ) {
+        self.sessions_changed_during_scan.clear();
+        self.session_refresh_on_return = false;
+        self.session_load_receiver = Some(receiver);
+        self.session_load_kind = SessionLoad::Refresh { requested };
     }
 
     pub fn background_work_pending(&self) -> bool {
@@ -3472,26 +3577,96 @@ impl App {
         self.notification_drain_started = None;
     }
 
-    pub fn poll_session_load(&mut self) {
+    /// Take the catalog scan's result if it has arrived; true when the list changed.
+    pub fn poll_session_load(&mut self) -> bool {
         let Some(receiver) = self.session_load_receiver.as_ref() else {
-            return;
+            return false;
         };
-        match receiver.try_recv() {
-            Ok(Ok(sessions)) => {
-                self.apply_loaded_catalog(sessions);
-                self.session_load_receiver = None;
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Disconnected) => Err("background worker stopped".to_string()),
+            Err(mpsc::TryRecvError::Empty) => return false,
+        };
+        self.session_load_receiver = None;
+        self.last_session_scan = Instant::now();
+        let kind = self.session_load_kind;
+        match (result, kind) {
+            (Ok(sessions), SessionLoad::Startup) => self.apply_loaded_catalog(sessions),
+            (Ok(sessions), SessionLoad::Refresh { requested }) => {
+                let (added, removed) = self.apply_refreshed_catalog(sessions);
+                if requested {
+                    self.status_message = Some(refresh_summary(added, removed));
+                }
             }
-            Ok(Err(error)) => {
+            (Err(error), SessionLoad::Startup) => {
                 self.status_message = Some(format!("Cannot load sessions: {error}"));
-                self.session_load_receiver = None;
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.status_message =
-                    Some("Cannot load sessions: background worker stopped".to_string());
-                self.session_load_receiver = None;
+            (Err(error), SessionLoad::Refresh { requested }) => {
+                // A timed rescan that fails leaves the list as it was, which is what
+                // the user already had; a footer error every two minutes would only nag.
+                if requested {
+                    self.status_message = Some(format!("Cannot refresh sessions: {error}"));
+                }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
         }
+        self.sessions_changed_during_scan.clear();
+        true
+    }
+
+    /// Replace the list with a fresh scan, returning how many sessions it added and
+    /// removed.
+    ///
+    /// Unlike the startup scan, which only fills in around favorites, this is the disk
+    /// correcting the list: renames, activity and deletions from elsewhere all win.
+    fn apply_refreshed_catalog(&mut self, sessions: Vec<Session>) -> (usize, usize) {
+        let selected_id = self.selected_session().map(|session| session.id.clone());
+        let mut previous: HashMap<String, Session> = std::mem::take(&mut self.sessions)
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect();
+        let mut catalog = Vec::with_capacity(sessions.len() + previous.len());
+        let mut added = 0;
+        for mut session in sessions {
+            match previous.remove(&session.id) {
+                Some(current) if self.sessions_changed_during_scan.contains(&session.id) => {
+                    catalog.push(current);
+                }
+                Some(current) => {
+                    carry_session_details(&mut session, current);
+                    catalog.push(session);
+                }
+                // Deleted after the worker read it; it must not come back as a ghost.
+                None if !session.dir_path.join("workspace.yaml").is_file() => {}
+                None => {
+                    added += 1;
+                    catalog.push(session);
+                }
+            }
+        }
+        // What the scan did not return was either created after its snapshot, caught
+        // mid-rewrite so it failed to parse, or deleted. Only the last has no
+        // workspace.yaml, and only the last should leave the list.
+        let before = catalog.len() + previous.len();
+        catalog.extend(
+            previous
+                .into_values()
+                .filter(|session| session.dir_path.join("workspace.yaml").is_file()),
+        );
+        let removed = before - catalog.len();
+        let scroll_offset = self.scroll_offset;
+        self.sessions = catalog;
+        self.rebuild_unique_projects();
+        self.sort_sessions();
+        if let Some(session_id) = selected_id {
+            self.focus_session(&session_id);
+        }
+        // Re-filtering scrolls to the top. A rescan the user did not ask for must not
+        // move the rows they are reading, so keep the old view while it still shows
+        // the selection.
+        if (scroll_offset..scroll_offset + self.visible_rows.max(1)).contains(&self.selected) {
+            self.scroll_offset = scroll_offset;
+        }
+        (added, removed)
     }
 
     fn apply_loaded_catalog(&mut self, sessions: Vec<Session>) {
@@ -4595,6 +4770,13 @@ impl App {
             mux.prefix_state = PrefixState::Idle;
         }
         self.refresh_live_pane_sessions();
+        self.rescan_on_return();
+    }
+
+    /// Back on the list after a session: the moment someone looks for a session they
+    /// just started elsewhere, so the next idle tick rescans.
+    pub(crate) fn rescan_on_return(&mut self) {
+        self.session_refresh_on_return = true;
     }
 
     /// `prefix q` — quit CST, ending direct panes and detaching tmux-backed panes.
@@ -5543,6 +5725,18 @@ fn extract_unique_projects(sessions: &[Session], added: &[String]) -> Vec<String
         }
     }
     projects
+}
+
+/// Without the counts, a refresh that found nothing new looks like one that never ran.
+fn refresh_summary(added: usize, removed: usize) -> String {
+    match (added, removed) {
+        (0, 0) => "Sessions refreshed: none new or deleted".to_string(),
+        (added, 0) => format!("Sessions refreshed: {added} new"),
+        (0, removed) => format!("Sessions refreshed: {removed} deleted elsewhere"),
+        (added, removed) => {
+            format!("Sessions refreshed: {added} new, {removed} deleted elsewhere")
+        }
+    }
 }
 
 fn carry_session_details(session: &mut Session, old: Session) {
@@ -6644,6 +6838,211 @@ mod tests {
         app.apply_loaded_catalog(vec![deleted]);
 
         assert!(app.sessions.is_empty());
+    }
+
+    /// A session whose folder exists, which is what a refresh checks before keeping it.
+    fn session_on_disk(root: &Path, id: &str, updated_at: &str) -> Session {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("workspace.yaml"), format!("id: {id}\n")).unwrap();
+        Session {
+            dir_path: dir,
+            ..session(id, "project", updated_at)
+        }
+    }
+
+    fn ids(app: &App) -> Vec<&str> {
+        let mut ids: Vec<&str> = app
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn a_refresh_shows_what_changed_elsewhere_while_keeping_the_selection_and_its_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut kept = session_on_disk(temp.path(), "kept", "2026-08-21T10:00:00Z");
+        kept.summary = Some("Name when CST started".to_string());
+        kept.turn_count = 5;
+        kept.details_parsed_len = 789;
+        // Its folder is gone: deleted from another CST, or by hand.
+        let deleted = session("deleted-elsewhere", "project", "2026-08-21T11:00:00Z");
+        let mut app = App::new(vec![kept, deleted], UserConfig::default());
+        app.focus_session("kept");
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_refresh(receiver, true);
+        let renamed = Session {
+            summary: Some("Renamed in another CST".to_string()),
+            ..session_on_disk(temp.path(), "kept", "2026-08-21T12:00:00Z")
+        };
+        let started = session_on_disk(temp.path(), "started-elsewhere", "2026-08-21T09:00:00Z");
+        sender.send(Ok(vec![renamed, started])).unwrap();
+
+        assert!(app.poll_session_load(), "a finished scan must repaint");
+        assert_eq!(ids(&app), ["kept", "started-elsewhere"]);
+        let kept = app.selected_session().unwrap();
+        assert_eq!(kept.id, "kept");
+        assert_eq!(kept.display_name(), "Renamed in another CST");
+        assert_eq!(kept.turn_count, 5);
+        assert_eq!(kept.details_parsed_len, 789);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sessions refreshed: 1 new, 1 deleted elsewhere")
+        );
+    }
+
+    #[test]
+    fn a_refresh_does_not_undo_a_rename_made_while_it_ran_or_drop_a_session_it_missed() {
+        let temp = tempfile::tempdir().unwrap();
+        let renamed = session_on_disk(temp.path(), "renamed-here", "2026-08-21T10:00:00Z");
+        // Being rewritten when the worker read it, so it failed to parse and is absent
+        // from the scan, although it is still on disk.
+        let missed = session_on_disk(temp.path(), "mid-rewrite", "2026-08-21T11:00:00Z");
+        let mut app = App::new(vec![renamed, missed], UserConfig::default());
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_refresh(receiver, true);
+        let index = app
+            .sessions
+            .iter()
+            .position(|session| session.id == "renamed-here")
+            .unwrap();
+        app.sessions[index].summary = Some("Renamed while scanning".to_string());
+        app.note_session_changed("renamed-here");
+        let read_before_the_rename = Session {
+            summary: Some("Name before the rename".to_string()),
+            ..session_on_disk(temp.path(), "renamed-here", "2026-08-21T10:00:00Z")
+        };
+        sender.send(Ok(vec![read_before_the_rename])).unwrap();
+        app.poll_session_load();
+
+        assert_eq!(ids(&app), ["mid-rewrite", "renamed-here"]);
+        let renamed = app
+            .sessions
+            .iter()
+            .find(|session| session.id == "renamed-here")
+            .unwrap();
+        assert_eq!(renamed.display_name(), "Renamed while scanning");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sessions refreshed: none new or deleted")
+        );
+    }
+
+    #[test]
+    fn a_timed_refresh_is_silent_until_f5_asks_for_the_one_already_running() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_refresh(receiver, false);
+        // No spinner and no fast redraw cadence for a scan nobody asked for.
+        assert!(!app.sessions_loading());
+        sender.send(Ok(Vec::new())).unwrap();
+        app.poll_session_load();
+        assert_eq!(app.status_message, None);
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_refresh(receiver, false);
+        app.request_session_refresh();
+        assert!(app.session_refresh_requested());
+        assert!(app.sessions_loading());
+        sender.send(Ok(Vec::new())).unwrap();
+        app.poll_session_load();
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sessions refreshed: none new or deleted")
+        );
+    }
+
+    #[test]
+    fn f5_while_the_startup_scan_runs_neither_starts_another_nor_turns_it_into_a_refresh() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        let (_sender, receiver) = mpsc::channel();
+        app.begin_session_load(receiver);
+
+        app.request_session_refresh();
+
+        assert_eq!(app.session_load_kind, SessionLoad::Startup);
+        assert!(!app.session_refresh_requested());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Sessions are still loading")
+        );
+    }
+
+    #[test]
+    fn a_failed_f5_refresh_says_refresh_and_leaves_the_list_alone() {
+        let mut app = App::new(
+            vec![session("kept", "project", "2026-08-21T10:00:00Z")],
+            UserConfig::default(),
+        );
+        let (sender, receiver) = mpsc::channel();
+        app.begin_session_refresh(receiver, true);
+        sender.send(Err("disk unplugged".to_string())).unwrap();
+
+        app.poll_session_load();
+
+        assert_eq!(ids(&app), ["kept"]);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cannot refresh sessions: disk unplugged")
+        );
+    }
+
+    #[test]
+    fn the_timed_refresh_runs_only_while_the_list_is_on_screen_and_idle() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.copilot_home = home.path().to_path_buf();
+        app.last_session_scan = Instant::now() - SESSION_REFRESH_INTERVAL;
+
+        app.view = View::Attached(1);
+        app.poll_session_refresh();
+        assert!(app.session_load_receiver.is_none(), "nobody sees the list");
+
+        app.view = View::List;
+        app.mode = Mode::Search;
+        app.poll_session_refresh();
+        assert!(
+            app.session_load_receiver.is_none(),
+            "rows must not move under a search being typed"
+        );
+
+        app.mode = Mode::Normal;
+        app.grabbed_favorite = Some("favorite".to_string());
+        app.poll_session_refresh();
+        assert!(
+            app.session_load_receiver.is_none(),
+            "a re-sort must not move a favorite while it is being dragged"
+        );
+
+        app.grabbed_favorite = None;
+        app.poll_session_refresh();
+        assert!(app.session_load_receiver.is_some());
+        assert!(!app.sessions_loading());
+    }
+
+    #[test]
+    fn returning_to_the_list_rescans_unless_a_scan_has_only_just_finished() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.copilot_home = home.path().to_path_buf();
+        app.last_session_scan = Instant::now();
+
+        app.detach();
+        app.poll_session_refresh();
+        assert!(
+            app.session_load_receiver.is_none(),
+            "flicking between a session and the list must not chain scans"
+        );
+
+        app.last_session_scan = Instant::now() - SESSION_REFRESH_MIN_GAP;
+        app.poll_session_refresh();
+        assert!(app.session_load_receiver.is_some());
     }
 
     #[test]

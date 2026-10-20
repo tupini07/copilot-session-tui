@@ -918,7 +918,8 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
         | ReorderFavorite
         | OpenFavoriteTabs
         | RenameSelected
-        | DeleteSelected => crate::input::execute_palette_list_command(app, command),
+        | DeleteSelected
+        | RefreshSessions => crate::input::execute_palette_list_command(app, command),
     }
     sync_view(app);
 }
