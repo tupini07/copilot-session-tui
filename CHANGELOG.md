@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.36.0 - 2026-10-21
+
+- Note: comments on a watched thread from anyone but you are now ignored rather than queued for you.
+- Thread replies reach their session through long turns, with several CSTs open, and after reopening it.
+- Search the help popup with / and jump straight to the key you are looking for.
+- Create or add a project from the session picker with P.
+- The session list picks up sessions started or deleted outside CST.
+- Turn the multiplexer on or off in settings without a restart, and new installs start with it on.
+- Ctrl+click a link to an HTML file to open it in the browser.
+
 ## v0.35.0 - 2026-10-09
 
 - Note: in the session switcher, Delete closes a session and Shift+Delete ends a tmux one.
