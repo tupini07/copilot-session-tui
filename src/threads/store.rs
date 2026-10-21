@@ -24,7 +24,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::{Notice, NoticeStatus, PendingDelivery, Subscription, ThreadRef};
+use chrono::{DateTime, Utc};
+
+use super::{Notice, NoticeStatus, PendingDelivery, PendingReason, Subscription, ThreadRef};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadState {
@@ -225,6 +227,42 @@ impl ThreadState {
             }
         }
     }
+
+    /// Whether anything for this session is waiting only for it to be open.
+    pub fn holds_for_closed_session(&self, session_id: &str) -> bool {
+        self.notices
+            .iter()
+            .any(|notice| notice.session_id == session_id && Self::held_for_closed(notice))
+    }
+
+    /// Queue again what was held only because this session was not open.
+    ///
+    /// Reopening the session is the user choosing to work in it, which is the same
+    /// choice accepting the notice from the inbox records — without this, the replies
+    /// that arrived while it was closed stayed behind a badge until somebody thought to
+    /// open the inbox as well. Only that reason is released. A throttled thread is
+    /// still the runaway it was held for, and opening the session says nothing about it.
+    ///
+    /// The clock restarts, so the patience deadline measures this attempt rather than
+    /// how long the session was closed.
+    pub fn release_for_opened_session(&mut self, session_id: &str, now: DateTime<Utc>) -> bool {
+        let mut released = false;
+        for notice in &mut self.notices {
+            if notice.session_id == session_id && Self::held_for_closed(notice) {
+                notice.status = NoticeStatus::Planned;
+                notice.planned_at = now;
+                released = true;
+            }
+        }
+        released
+    }
+
+    fn held_for_closed(notice: &Notice) -> bool {
+        notice.status
+            == NoticeStatus::Waiting {
+                reason: PendingReason::SessionClosed,
+            }
+    }
 }
 
 /// Read the state, treating every failure as "nothing subscribed yet".
@@ -333,9 +371,8 @@ pub fn state_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{PendingReason, ThreadKind};
+    use super::super::ThreadKind;
     use super::*;
-    use chrono::{DateTime, Utc};
 
     fn thread(number: u64) -> ThreadRef {
         ThreadRef {
@@ -456,6 +493,49 @@ mod tests {
             assert!(current.comment_url.ends_with("-2"));
             assert!(state.waiting_for_user().is_empty());
         }
+    }
+
+    #[test]
+    fn reopening_a_session_queues_the_replies_held_while_it_was_closed_and_nothing_else() {
+        // Held replies used to stay behind the inbox badge after the session was opened
+        // again, so an agent resumed by hand never heard what arrived while it was off.
+        let held_at = Utc::now() - chrono::Duration::days(2);
+        let opened_at = Utc::now();
+        let closed = NoticeStatus::Waiting {
+            reason: PendingReason::SessionClosed,
+        };
+        let throttled = NoticeStatus::Waiting {
+            reason: PendingReason::Throttled,
+        };
+        let mut state = ThreadState::default();
+        state.record_notice(notice(1, closed, held_at));
+        state.record_notice(Notice {
+            thread: thread(2),
+            ..notice(2, throttled, held_at)
+        });
+        state.record_notice(Notice {
+            session_id: "session-b".to_string(),
+            ..notice(3, closed, held_at)
+        });
+
+        assert!(state.holds_for_closed_session("session-a"));
+        assert!(state.release_for_opened_session("session-a", opened_at));
+
+        let released = state.notice_mut("session-a", &thread(1)).unwrap();
+        assert_eq!(released.status, NoticeStatus::Planned);
+        // A two-day-old clock would be past the patience deadline before the session
+        // had finished starting, and the reply would go straight back to the inbox.
+        assert_eq!(released.planned_at, opened_at);
+        assert_eq!(
+            state.notice_mut("session-a", &thread(2)).unwrap().status,
+            throttled,
+            "a runaway thread is still a runaway after the session reopens"
+        );
+        assert!(
+            state.holds_for_closed_session("session-b"),
+            "another session's replies wait for that session"
+        );
+        assert!(!state.release_for_opened_session("session-a", opened_at));
     }
 
     #[test]

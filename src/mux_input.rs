@@ -4125,6 +4125,11 @@ mod tests {
     }
 
     fn push_test_pane_at(app: &mut App, id: u64, session_id: &str, cwd: std::path::PathBuf) {
+        let pane = spawn_test_pane(app, id, session_id, cwd);
+        push_drawn(app, pane);
+    }
+
+    fn spawn_test_pane(app: &App, id: u64, session_id: &str, cwd: std::path::PathBuf) -> Pane {
         let events = app.mux.as_ref().unwrap().events.clone();
         let (program, args) = if cfg!(windows) {
             (
@@ -4137,7 +4142,7 @@ mod tests {
                 vec!["-c".to_string(), "sleep 30".to_string()],
             )
         };
-        let pane = Pane::spawn(
+        Pane::spawn(
             PaneSpec {
                 id,
                 title: format!("Test session {id}"),
@@ -4153,7 +4158,15 @@ mod tests {
             80,
             events,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Push a pane that has finished starting up.
+    ///
+    /// The children these tests run never draw anything, and a pane that has drawn
+    /// nothing is a session still starting, which no wake-up is written to.
+    fn push_drawn(app: &mut App, mut pane: Pane) {
+        pane.feed_synthetic(b"Copilot ready");
         app.mux.as_mut().unwrap().push(pane);
     }
 
@@ -4696,6 +4709,48 @@ mod tests {
         );
     }
 
+    /// A reply is not written into a session that has not drawn its first frame.
+    ///
+    /// Reopening a session releases the replies held while it was closed at the moment
+    /// its pane is spawned, seconds before Copilot is reading its composer. Typed then,
+    /// the pointer would land in a program still starting, and the reply it stands for
+    /// is already marked seen, so it would never be mentioned again.
+    #[test]
+    fn a_reply_waits_for_a_reopened_session_to_finish_starting_before_it_is_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = App::new(Vec::new(), crate::config::UserConfig::default());
+        app.mux = Some(crate::mux::MuxState::new(crate::mux::KeyChord {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::CONTROL,
+        }));
+        app.thread_state_root = temp.path().to_path_buf();
+        let pane = spawn_test_pane(&app, 1, "session-a", temp.path().to_path_buf());
+        app.mux.as_mut().unwrap().push(pane);
+        app.view = crate::app::View::Attached(1);
+
+        plan_and_apply(&mut app, "session-a", &test_thread(12));
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Planned),
+            1,
+            "held in the queue while the session starts, got: {:?}",
+            notices_in(&app)
+        );
+
+        app.mux
+            .as_mut()
+            .and_then(|mux| mux.pane_mut(1))
+            .unwrap()
+            .feed_synthetic(b"Copilot ready");
+        app.flush_thread_wakes();
+
+        assert_eq!(
+            count_with_status(&app, crate::threads::NoticeStatus::Sent),
+            1,
+            "written once the session has drawn, got: {:?}",
+            notices_in(&app)
+        );
+    }
+
     /// A notice written into a composer that a restart threw away is written again.
     ///
     /// `Sent` means "sitting in a composer waiting for a turn". That composer does not
@@ -4774,7 +4829,7 @@ mod tests {
             events,
         )
         .unwrap();
-        app.mux.as_mut().unwrap().push(pane);
+        push_drawn(&mut app, pane);
         app.view = crate::app::View::Attached(1);
         app.thread_state_root = temp.path().to_path_buf();
 

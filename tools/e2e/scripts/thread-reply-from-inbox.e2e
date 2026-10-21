@@ -1,0 +1,42 @@
+# Two replies are held for a closed session: one because the session was closed when
+# it arrived, one because its thread had been waking the session too often. Accepting
+# the first from the inbox opens the session and delivers it, once the session has
+# drawn. Opening the session must not release the second: it is still a runaway
+# thread, and only the user decides on it.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+held_reply https://github.com/o/r/issues/12
+held_reply https://github.com/o/r/issues/13 throttled
+
+wait_for Existing app session
+press ctrl+b g m
+wait_for issues/12
+expect issues/13
+dump 01-inbox-with-both
+
+press enter
+wait_for Fake Copilot is idling
+# The inbox stays open over the session while anything is left in it, so the
+# throttled reply is still listed there and nowhere else.
+wait_gone its session is closed
+expect this thread has woken it repeatedly
+dump 02-accepted-inbox-still-open
+
+press esc
+wait_gone Waiting for you
+wait_for Fake Copilot received: A new comment arrived on https://github.com/o/r/issues/12
+wait 3000
+expect_not issues/13
+dump 03-accepted-and-woken
+
+# The stub has no hooks; an Enter stands in for the turn that takes the pointer.
+press enter
+wait 1500
+press ctrl+b d
+wait_gone Fake Copilot is idling
+press ctrl+b g m
+wait_for issues/13
+expect_not issues/12
+dump 04-inbox-keeps-the-throttled-one

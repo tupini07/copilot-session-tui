@@ -4599,7 +4599,27 @@ impl App {
         self.join_pending_split(id);
         self.view = View::Attached(id);
         self.restore_workspace_panels(id, &workspace_session_id);
+        self.release_thread_notices_for(&workspace_session_id);
         Ok(())
+    }
+
+    /// Hand a session that has just been opened the replies that arrived while it was
+    /// closed. See [`crate::threads::store::ThreadState::release_for_opened_session`].
+    ///
+    /// Done here because every way of opening a session — resuming it from the list,
+    /// reattaching tmux, a restored workspace, accepting from the inbox — comes through
+    /// this one function. The file is read before it is written: every CST notices a
+    /// rewrite of it, and most sessions opened have nothing held.
+    fn release_thread_notices_for(&mut self, session_id: &str) {
+        if !crate::threads::store::load_in(&self.thread_state_root)
+            .holds_for_closed_session(session_id)
+        {
+            return;
+        }
+        self.update_threads(|state| {
+            state.release_for_opened_session(session_id, chrono::Utc::now());
+        });
+        self.refresh_thread_pending();
     }
 
     /// Open the tab a worktree session will run in, and create the worktree behind it.
@@ -5058,6 +5078,11 @@ impl App {
             .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
             .is_some_and(|pane| {
                 pane.is_running()
+                    // A session that has just been opened has drawn nothing yet, and
+                    // what is written before Copilot is reading its composer has nowhere
+                    // to land. Reopening a session releases its held replies at the
+                    // moment the pane is spawned, so this is the normal case for them.
+                    && !pane.is_blank()
                     && !pane.is_working()
                     && !pane.requires_user_action()
                     // An idle agent is not the same as an idle pane. Writing while the
