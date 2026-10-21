@@ -54,6 +54,7 @@ checked before anything starts, so a typo fails at once.
 | `config <json>` | CST's settings file for this run, on one line, e.g. `config {"theme": "gruvbox"}`. Without it CST runs on its defaults. |
 | `fake_gh` | Put a stub `gh` first on CST's `PATH`, logged in as `cst-e2e`. It answers what thread watching asks about a discussion (who is logged in, a token, `updatedAt`, an empty comment list) and fails anything else. Discussion number 404 does not exist, like a deleted one. Without it CST uses your real `gh`. |
 | `watch_thread <url>` | Subscribe the first session to a thread, e.g. `https://github.com/o/r/discussions/7`. Any host works, including one nothing answers on, such as `https://127.0.0.1:9/o/r/issues/1`, to make an issue poll fail. The watcher needs `arg --mux`, and polls a minute apart, so raise `timeout`. |
+| `held_reply <url>` | A reply on that thread that CST is holding for the first session because it was closed when the reply arrived, as if it had come in while the session was off. It shows in the inbox; opening the session should deliver it. The stub `copilot` prints every line it is sent as `Fake Copilot received: ...`, so the delivery can be seen. |
 
 ### Driving
 

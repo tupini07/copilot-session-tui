@@ -33,6 +33,17 @@ pub fn main() {
     print!("> ");
     let _ = std::io::stdout().flush();
 
+    // Shown back on screen, so a script can see what CST wrote into the session —
+    // a thread wake-up, say — and not only that the session is open.
+    std::thread::spawn(|| {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            println!("Fake Copilot received: {}", line.trim_end());
+            print!("> ");
+            let _ = std::io::stdout().flush();
+        }
+    });
+
     let started = Instant::now();
     while started.elapsed() < LIFETIME {
         std::thread::sleep(Duration::from_secs(5));

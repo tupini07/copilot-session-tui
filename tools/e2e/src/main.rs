@@ -248,6 +248,7 @@ enum Step {
     Config(String),
     FakeGh,
     WatchThread(String),
+    HeldReply(String),
     /// The fake `gh` marker to leave in place, or `None` for GitHub working normally.
     Github(Option<&'static str>),
     Wait(Duration),
@@ -290,6 +291,7 @@ impl Step {
                 | Step::Config(_)
                 | Step::FakeGh
                 | Step::WatchThread(_)
+                | Step::HeldReply(_)
         )
     }
 }
@@ -375,6 +377,11 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             let url = need("a thread URL")?;
             thread_json(&url, "")?;
             Step::WatchThread(url)
+        }
+        "held_reply" => {
+            let url = need("a thread URL")?;
+            held_reply_json(&url, "")?;
+            Step::HeldReply(url)
         }
         "github" => match need("down, logged-out or up")?.as_str() {
             "down" => Step::Github(Some(gh_stub::DOWN_MARKER)),
@@ -552,6 +559,7 @@ struct Setup {
     config: Option<String>,
     fake_gh: bool,
     watched: Vec<String>,
+    held: Vec<String>,
 }
 
 struct Running {
@@ -589,6 +597,7 @@ impl Driver {
             Step::Config(json) => self.setup.config = Some(json.clone()),
             Step::FakeGh => self.setup.fake_gh = true,
             Step::WatchThread(url) => self.setup.watched.push(url.clone()),
+            Step::HeldReply(url) => self.setup.held.push(url.clone()),
             Step::Pace(pace) => self.pace = *pace,
             Step::Timeout(timeout) => self.timeout = *timeout,
             _ => {
@@ -743,13 +752,19 @@ impl Driver {
 
         // Watched by the first session, and subscribed as CST starts, so nothing
         // posted to the thread before then counts as news.
-        if !self.setup.watched.is_empty() {
+        if !self.setup.watched.is_empty() || !self.setup.held.is_empty() {
             let session = session_id(0);
             let subscriptions = self
                 .setup
                 .watched
                 .iter()
                 .map(|url| thread_json(url, &session))
+                .collect::<Result<Vec<_>, _>>()?;
+            let notices = self
+                .setup
+                .held
+                .iter()
+                .map(|url| held_reply_json(url, &session))
                 .collect::<Result<Vec<_>, _>>()?;
             let dir = self
                 .run_dir
@@ -759,7 +774,11 @@ impl Driver {
             std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
             std::fs::write(
                 dir.join("threads.json"),
-                format!(r#"{{"subscriptions":[{}]}}"#, subscriptions.join(",")),
+                format!(
+                    r#"{{"subscriptions":[{}],"notices":[{}]}}"#,
+                    subscriptions.join(","),
+                    notices.join(",")
+                ),
             )
             .map_err(|error| error.to_string())?;
         }
@@ -1046,11 +1065,31 @@ fn recovery_dir() -> PathBuf {
 /// `https://github.com/o/r/discussions/7`. The host can be anything, including one
 /// that answers nothing, which is how a script makes polling an issue fail.
 fn thread_json(url: &str, session: &str) -> Result<String, String> {
-    let bad = || {
-        format!(
-            "watch_thread wants https://HOST/OWNER/REPO/(issues|pull|discussions)/N, got {url:?}"
-        )
-    };
+    Ok(format!(
+        r#"{{"session_id":"{}","thread":{},"state":"active"}}"#,
+        json_quote(session),
+        thread_ref_json(url)?,
+    ))
+}
+
+/// A reply CST is holding for the first session because that session was closed when
+/// it arrived, as CST writes it in `threads.json`.
+fn held_reply_json(url: &str, session: &str) -> Result<String, String> {
+    Ok(format!(
+        r#"{{"session_id":"{}","thread":{},"comment_url":"{}#issuecomment-1","state":"waiting","reason":"session_closed"}}"#,
+        json_quote(session),
+        thread_ref_json(url)?,
+        json_quote(url),
+    ))
+}
+
+fn json_quote(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn thread_ref_json(url: &str) -> Result<String, String> {
+    let bad =
+        || format!("a thread is https://HOST/OWNER/REPO/(issues|pull|discussions)/N, got {url:?}");
     let path = url.strip_prefix("https://").ok_or_else(bad)?;
     let parts: Vec<&str> = path.split('/').collect();
     let [host, owner, repo, kind, number] = parts[..] else {
@@ -1063,13 +1102,11 @@ fn thread_json(url: &str, session: &str) -> Result<String, String> {
         _ => return Err(bad()),
     };
     let number: u64 = number.parse().map_err(|_| bad())?;
-    let quote = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(format!(
-        r#"{{"session_id":"{}","thread":{{"host":"{}","owner":"{}","repo":"{}","number":{number},"kind":"{kind}"}},"state":"active"}}"#,
-        quote(session),
-        quote(host),
-        quote(owner),
-        quote(repo),
+        r#"{{"host":"{}","owner":"{}","repo":"{}","number":{number},"kind":"{kind}"}}"#,
+        json_quote(host),
+        json_quote(owner),
+        json_quote(repo),
     ))
 }
 
@@ -1175,6 +1212,20 @@ delete_session First
         assert_eq!(
             json,
             r#"{"session_id":"00000001-0000-4000-8000-000000000001","thread":{"host":"127.0.0.1:9","owner":"o","repo":"r","number":12,"kind":"issue"},"state":"active"}"#
+        );
+    }
+
+    #[test]
+    fn a_held_reply_is_written_the_way_cst_reads_a_notice_for_a_closed_session() {
+        let json = held_reply_json(
+            "https://github.com/o/r/issues/12",
+            "00000001-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"session_id":"00000001-0000-4000-8000-000000000001","thread":{"host":"github.com","owner":"o","repo":"r","number":12,"kind":"issue"},"comment_url":"https://github.com/o/r/issues/12#issuecomment-1","state":"waiting","reason":"session_closed"}"#
         );
     }
 
