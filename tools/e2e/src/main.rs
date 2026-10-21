@@ -379,9 +379,9 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             Step::WatchThread(url)
         }
         "held_reply" => {
-            let url = need("a thread URL")?;
-            held_reply_json(&url, "")?;
-            Step::HeldReply(url)
+            let spec = need("a thread URL")?;
+            held_reply_json(&spec, "")?;
+            Step::HeldReply(spec)
         }
         "github" => match need("down, logged-out or up")?.as_str() {
             "down" => Step::Github(Some(gh_stub::DOWN_MARKER)),
@@ -1072,11 +1072,24 @@ fn thread_json(url: &str, session: &str) -> Result<String, String> {
     ))
 }
 
-/// A reply CST is holding for the first session because that session was closed when
-/// it arrived, as CST writes it in `threads.json`.
-fn held_reply_json(url: &str, session: &str) -> Result<String, String> {
+/// A reply CST is holding for the first session, as CST writes it in `threads.json`.
+///
+/// `spec` is the script's `<url> [throttled]`: held because the session was closed
+/// when it arrived, or because the thread had woken it too often.
+fn held_reply_json(spec: &str, session: &str) -> Result<String, String> {
+    let mut words = spec.split_whitespace();
+    let url = words.next().unwrap_or_default();
+    let reason = match words.next() {
+        None => "session_closed",
+        Some("throttled") => "throttled",
+        Some(other) => {
+            return Err(format!(
+                "held_reply takes `throttled` or nothing after the URL, not {other:?}"
+            ))
+        }
+    };
     Ok(format!(
-        r#"{{"session_id":"{}","thread":{},"comment_url":"{}#issuecomment-1","state":"waiting","reason":"session_closed"}}"#,
+        r#"{{"session_id":"{}","thread":{},"comment_url":"{}#issuecomment-1","state":"waiting","reason":"{reason}"}}"#,
         json_quote(session),
         thread_ref_json(url)?,
         json_quote(url),
@@ -1227,6 +1240,14 @@ delete_session First
             json,
             r#"{"session_id":"00000001-0000-4000-8000-000000000001","thread":{"host":"github.com","owner":"o","repo":"r","number":12,"kind":"issue"},"comment_url":"https://github.com/o/r/issues/12#issuecomment-1","state":"waiting","reason":"session_closed"}"#
         );
+    }
+
+    #[test]
+    fn a_held_reply_can_be_one_held_for_waking_its_session_too_often() {
+        let json = held_reply_json("https://github.com/o/r/issues/13 throttled", "s").unwrap();
+
+        assert!(json.ends_with(r#""reason":"throttled"}"#), "got {json}");
+        assert!(parse_script("held_reply https://github.com/o/r/issues/13 soon\n").is_err());
     }
 
     #[test]
