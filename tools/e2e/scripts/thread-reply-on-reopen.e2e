@@ -1,0 +1,36 @@
+# A reply arrived on a watched thread while the session was closed. Opening the
+# session the ordinary way, from the list, should hand it the reply rather than
+# leave it behind the inbox badge. Closing the session and opening it again must not
+# deliver the same reply a second time.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+held_reply https://github.com/o/r/issues/12
+
+wait_for Existing app session
+dump 01-list-with-held-reply
+
+press enter
+wait_for Fake Copilot is idling
+wait_for Fake Copilot received: A new comment arrived on https://github.com/o/r/issues/12
+dump 02-reopened-and-woken
+
+# CST keeps a delivered pointer on file until it sees the composer emptied, which
+# real Copilot reports through a hook as the turn starts. The stub has no hooks, so
+# an Enter typed into the pane stands in for it. Without one, closing the session
+# is closing it with the pointer unread, and CST rightly delivers it again.
+press enter
+wait 1500
+
+# Ends the session, not just leaves it: the next Enter has to start it again.
+press ctrl+b x
+wait_gone Fake Copilot is idling
+expect Existing app session
+dump 03-closed-back-at-list
+
+press enter
+wait_for Fake Copilot is idling
+wait 3000
+expect_not Fake Copilot received
+dump 04-reopened-again
