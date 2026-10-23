@@ -189,7 +189,9 @@ fn notification_message(request: &NotificationRequest) -> String {
     }
 }
 
-fn latest_assistant_message(path: &Path, cycle_start: u64, cycle_end: u64) -> Option<String> {
+/// The event log's lines for one work cycle, oldest first, bounded to the last two
+/// megabytes so a long-running session's log is never read whole.
+fn cycle_lines(path: &Path, cycle_start: u64, cycle_end: u64) -> Option<Vec<String>> {
     let mut file = std::fs::File::open(path).ok()?;
     let length = file.metadata().ok()?.len().min(cycle_end);
     let start = cycle_start.max(length.saturating_sub(EVENT_TAIL_BYTES));
@@ -212,7 +214,12 @@ fn latest_assistant_message(path: &Path, cycle_start: u64, cycle_end: u64) -> Op
     if skip_partial {
         lines.next();
     }
-    lines
+    Some(lines.map(str::to_string).collect())
+}
+
+fn latest_assistant_message(path: &Path, cycle_start: u64, cycle_end: u64) -> Option<String> {
+    cycle_lines(path, cycle_start, cycle_end)?
+        .iter()
         .rev()
         .filter(|line| line.contains("assistant.message"))
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -225,7 +232,129 @@ fn latest_assistant_message(path: &Path, cycle_start: u64, cycle_end: u64) -> Op
         })
 }
 
-fn sanitize_message(message: &str) -> String {
+/// Longest question, choice, or plan summary the phone is shown. The last message is
+/// bounded separately by the Telegram chunker.
+const MAX_PROMPT_CHARS: usize = 2_000;
+const MAX_CHOICES: usize = 20;
+
+/// The tool call of `tool_name` that this cycle started and has not completed.
+///
+/// Read on demand at send time, like [`latest_assistant_message`]; the lifecycle monitor
+/// deliberately keeps no payload text, and this does not change that.
+fn pending_tool_call(
+    path: &Path,
+    cycle_start: u64,
+    cycle_end: u64,
+    tool_name: &str,
+) -> Option<(String, Value)> {
+    let lines = cycle_lines(path, cycle_start, cycle_end)?;
+    let events: Vec<Value> = lines
+        .iter()
+        .filter(|line| line.contains("tool.execution_"))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let completed: std::collections::HashSet<&str> = events
+        .iter()
+        .filter(|event| event["type"].as_str() == Some("tool.execution_complete"))
+        .filter_map(|event| event["data"]["toolCallId"].as_str())
+        .collect();
+    events
+        .iter()
+        .rev()
+        .filter(|event| event["type"].as_str() == Some("tool.execution_start"))
+        .filter(|event| event["data"]["toolName"].as_str() == Some(tool_name))
+        .find_map(|event| {
+            let id = event["data"]["toolCallId"].as_str()?;
+            (!completed.contains(id)).then(|| (id.to_string(), event["data"]["arguments"].clone()))
+        })
+}
+
+fn bounded(text: &str) -> String {
+    truncate_utf8(&sanitize_message(text), MAX_PROMPT_CHARS)
+}
+
+/// The question a session is asking, with its choices.
+pub(crate) fn pending_question(
+    path: &Path,
+    cycle_start: u64,
+    cycle_end: u64,
+) -> Option<crate::telegram::Question> {
+    let (tool_call_id, arguments) = pending_tool_call(path, cycle_start, cycle_end, "ask_user")?;
+    let text = arguments["question"]
+        .as_str()
+        .map(bounded)
+        .unwrap_or_default();
+    let choices = arguments["choices"]
+        .as_array()
+        .map(|choices| {
+            choices
+                .iter()
+                .filter_map(Value::as_str)
+                .map(bounded)
+                .filter(|choice| !choice.is_empty())
+                .take(MAX_CHOICES)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(crate::telegram::Question {
+        tool_call_id,
+        text,
+        choices,
+    })
+}
+
+/// The plan a session wants approved, as the summary it gave.
+pub(crate) fn pending_plan_summary(
+    path: &Path,
+    cycle_start: u64,
+    cycle_end: u64,
+) -> Option<String> {
+    let (_, arguments) = pending_tool_call(path, cycle_start, cycle_end, "exit_plan_mode")?;
+    arguments["summary"]
+        .as_str()
+        .map(bounded)
+        .filter(|summary| !summary.is_empty())
+}
+
+/// Everything a Telegram notification says about a session, read from its event log.
+///
+/// Unlike ntfy's detailed mode this reads the last message for every kind, an error
+/// included: the user chose full content so they can act on what the session said, and
+/// a checkpoint report is plain text rather than a question.
+pub(crate) fn telegram_content(
+    kind: NotificationKind,
+    session_title: &str,
+    events_path: Option<&Path>,
+    cycle_start: Option<u64>,
+    cycle_end: Option<u64>,
+) -> crate::telegram::Content {
+    let window = match (events_path, cycle_start, cycle_end) {
+        (Some(path), Some(start), Some(end)) if end > start => Some((path, start, end)),
+        _ => None,
+    };
+    let body = window.and_then(|(path, start, end)| latest_assistant_message(path, start, end));
+    let question = match (kind, window) {
+        (NotificationKind::Question, Some((path, start, end))) => {
+            pending_question(path, start, end)
+        }
+        _ => None,
+    };
+    let plan_summary = match (kind, window) {
+        (NotificationKind::PlanApproval, Some((path, start, end))) => {
+            pending_plan_summary(path, start, end)
+        }
+        _ => None,
+    };
+    crate::telegram::Content {
+        kind,
+        title: session_title.to_string(),
+        body,
+        question,
+        plan_summary,
+    }
+}
+
+pub(crate) fn sanitize_message(message: &str) -> String {
     message
         .chars()
         .filter_map(|character| match character {
@@ -730,6 +859,86 @@ mod tests {
         let error = notification_message(&request);
         assert!(error.contains("No assistant response was persisted"));
         assert!(!error.contains("Current answer"));
+    }
+
+    #[test]
+    fn telegram_content_carries_the_open_question_with_its_choices_and_not_an_answered_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                serde_json::json!({"type": "assistant.message", "data": {"content": "I need a decision."}}),
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "ask_user", "toolCallId": "old", "arguments": {"question": "Old question?", "choices": ["x"]}}}),
+                serde_json::json!({"type": "tool.execution_complete", "data": {"toolCallId": "old", "result": {"content": "User responded: x"}}}),
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "bash", "toolCallId": "cmd", "arguments": {"command": "rm -rf /tmp/x"}}}),
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "ask_user", "toolCallId": "q2", "arguments": {"question": "Which <colour>?", "choices": ["Red", "Green", ""]}}}),
+            ),
+        )
+        .unwrap();
+        let end = std::fs::metadata(&events).unwrap().len();
+
+        let content = telegram_content(
+            NotificationKind::Question,
+            "Palette",
+            Some(&events),
+            Some(0),
+            Some(end),
+        );
+
+        assert_eq!(content.body.as_deref(), Some("I need a decision."));
+        let question = content.question.expect("the open question");
+        assert_eq!(question.tool_call_id, "q2");
+        assert_eq!(question.text, "Which <colour>?");
+        assert_eq!(question.choices, vec!["Red", "Green"]);
+        assert!(content.plan_summary.is_none());
+
+        // A ready event never carries a question, even with one in the log.
+        let ready = telegram_content(
+            NotificationKind::Ready,
+            "Palette",
+            Some(&events),
+            Some(0),
+            Some(end),
+        );
+        assert!(ready.question.is_none());
+        assert_eq!(ready.body.as_deref(), Some("I need a decision."));
+    }
+
+    #[test]
+    fn telegram_content_reads_a_plan_summary_and_nothing_without_a_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "exit_plan_mode", "toolCallId": "p1", "arguments": {"summary": "- do this\n- then that"}}}),
+            ),
+        )
+        .unwrap();
+        let end = std::fs::metadata(&events).unwrap().len();
+
+        let plan = telegram_content(
+            NotificationKind::PlanApproval,
+            "P",
+            Some(&events),
+            Some(0),
+            Some(end),
+        );
+        assert_eq!(plan.plan_summary.as_deref(), Some("- do this\n- then that"));
+        assert!(plan.body.is_none());
+
+        let none = telegram_content(
+            NotificationKind::PlanApproval,
+            "P",
+            Some(&events),
+            Some(end),
+            Some(end),
+        );
+        assert!(none.plan_summary.is_none() && none.body.is_none());
+        assert_eq!(none.title, "P");
     }
 
     #[test]

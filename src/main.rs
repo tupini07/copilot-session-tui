@@ -24,6 +24,7 @@ mod scratchpad;
 mod screenshots;
 mod session;
 mod snippets;
+mod telegram;
 mod terminal_pane;
 mod text;
 mod theme;
@@ -145,6 +146,11 @@ enum Commands {
         #[command(subcommand)]
         action: ThreadCommand,
     },
+    /// Set up and check notifications and replies through a Telegram bot
+    Telegram {
+        #[command(subcommand)]
+        action: TelegramCommand,
+    },
     /// Receive one lifecycle event from the Copilot hook plugin
     #[command(hide = true)]
     HookEvent {
@@ -204,6 +210,29 @@ enum ThreadCommand {
         #[arg(long, value_name = "ID")]
         session: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum TelegramCommand {
+    /// Run the whole checklist: token, pairing, test message
+    Setup {
+        /// The token @BotFather gave you, if it is not configured yet
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+        /// Pair a group with Topics (one topic per session) instead of a private chat
+        #[arg(long)]
+        group: bool,
+    },
+    /// Show a code to send the bot, and record who sent it from where
+    Pair {
+        /// Pair a group with Topics (one topic per session) instead of a private chat
+        #[arg(long)]
+        group: bool,
+    },
+    /// Send one test message to the paired chat
+    Test,
+    /// Show what is configured and whether the bot token answers
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -359,6 +388,33 @@ fn main() -> Result<()> {
             stdout.flush()?;
             return Ok(());
         }
+        Some(Commands::Telegram { action }) => {
+            let root = telegram::store::state_root();
+            let config_path = config::config_path();
+            let mut user_config = config::load();
+            let mut stdout = std::io::stdout();
+            match action {
+                TelegramCommand::Setup { token, group } => telegram::cli::setup(
+                    &root,
+                    &config_path,
+                    &mut user_config,
+                    token.as_deref(),
+                    *group,
+                    &mut stdout,
+                )?,
+                TelegramCommand::Pair { group } => {
+                    telegram::cli::pair(&root, &config_path, &mut user_config, *group, &mut stdout)?
+                }
+                TelegramCommand::Test => {
+                    telegram::cli::emit(&mut stdout, &telegram::cli::test(&user_config)?)?
+                }
+                TelegramCommand::Status => {
+                    telegram::cli::emit(&mut stdout, &telegram::cli::status(&user_config))?
+                }
+            }
+            stdout.flush()?;
+            return Ok(());
+        }
         Some(Commands::HookEvent { .. }) => unreachable!("handled before normal startup"),
         #[cfg(feature = "screenshots")]
         Some(Commands::Screenshots { out_dir }) => {
@@ -503,6 +559,9 @@ fn main() -> Result<()> {
         eprintln!("Could not resume thread notices: {error}");
     }
     app.refresh_thread_pending();
+    if let Err(error) = telegram::store::resume_in(&app.telegram_state_root, still_open) {
+        eprintln!("Could not resume Telegram replies: {error}");
+    }
     app.mux_on_disk = mux_on_disk;
     app.copilot_home = copilot_home;
     if let Some(receiver) = session_load_receiver {
@@ -1118,9 +1177,36 @@ struct MuxServices {
     _terminal_events: TerminalEventReader,
     _config_watcher: ConfigWatcher,
     _thread_watcher: Option<threads::watcher::ThreadWatcher>,
+    /// Polls Telegram, when the settings say to. Replaced whenever they change.
+    telegram_poller: Option<telegram::worker::TelegramWorker>,
+    /// What the running poller was started with, to notice a change.
+    telegram_settings: Option<telegram::worker::PollSettings>,
 }
 
 impl MuxServices {
+    /// Bring the Telegram poll loop in line with the settings.
+    ///
+    /// Unlike the thread watcher this has to follow a live change: pasting a token or
+    /// pairing happens in the settings screen, and the poll loop is what makes pairing
+    /// complete. Cheap when nothing changed, which is every pass but one.
+    fn refresh_telegram(&mut self, app: &App) {
+        let wanted = app.telegram_poll_settings();
+        if wanted == self.telegram_settings {
+            return;
+        }
+        // Dropping the old one first releases the poller lock as soon as its poll
+        // returns; the new one waits on the lock, so the two never both poll.
+        self.telegram_poller = None;
+        self.telegram_poller = wanted.as_ref().and_then(|settings| {
+            let events = app.mux.as_ref()?.events.clone();
+            Some(telegram::worker::TelegramWorker::start(
+                app.telegram_state_root.clone(),
+                Some((events, settings.clone())),
+            ))
+        });
+        self.telegram_settings = wanted;
+    }
+
     fn start(app: &App, config_path: &Path) -> Option<Self> {
         let mux = app.mux.as_ref()?;
         // A dedicated thread feeds terminal events into the same channel as PTY output,
@@ -1153,11 +1239,15 @@ impl MuxServices {
                 },
             )
         });
-        Some(Self {
+        let mut services = Self {
             _terminal_events: terminal_events,
             _config_watcher: config_watcher,
             _thread_watcher: thread_watcher,
-        })
+            telegram_poller: None,
+            telegram_settings: None,
+        };
+        services.refresh_telegram(app);
+        Some(services)
     }
 }
 
@@ -1227,6 +1317,10 @@ fn run_app(
     loop {
         repaint |= switch_mux_mode(app, &mut mux_services, &config_path)?;
         repaint |= app.poll_config_reload();
+        if let Some(services) = mux_services.as_mut() {
+            services.refresh_telegram(app);
+        }
+        repaint |= app.poll_telegram_wizard();
         if app.mux.is_none()
             && last_non_mux_config_check.elapsed() >= std::time::Duration::from_secs(1)
         {
@@ -1260,11 +1354,13 @@ fn run_app(
         repaint |= app.refresh_tmux_sessions();
         app.poll_update();
         app.poll_notifications();
+        app.poll_telegram_results();
         app.poll_github();
         // Also on the tick, not only when a pane reports a turn ending: a wake-up can be
         // waiting on a half-typed message, and a pane holding an abandoned draft emits
         // no events at all. Cheap — the queue is almost always empty.
         repaint |= app.flush_thread_wakes();
+        repaint |= app.flush_telegram_replies();
         app.cancel_orphaned_worktrees();
         // Covers every route into the Files tab — keys, mouse, or opening
         // straight onto it — rather than each one separately.

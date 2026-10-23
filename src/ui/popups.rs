@@ -1337,7 +1337,9 @@ fn help_line(theme: Theme, key: &str, desc: &str) -> Line<'static> {
 
 pub fn draw_settings(f: &mut Frame, app: &mut App) {
     let theme = app.theme();
-    let area = centered_rect(65, 78, f.area());
+    // Wide enough for seven section tabs on a 110-column terminal; at 65% the last
+    // two were cut off once Telegram joined the strip.
+    let area = centered_rect(80, 78, f.area());
     prepare_popup(f, area, theme);
 
     let block = Block::default()
@@ -1379,7 +1381,10 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     );
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut setting_lines = Vec::new();
+    // Keyed by row number: the rows are drawn in section order, which is not numeric
+    // order, and a position lookup here once scrolled every section one row off.
+    let mut setting_lines: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
     let general_start = lines.len();
 
     lines.push(Line::from(""));
@@ -1391,7 +1396,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.error
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(0, lines.len());
     lines.push(settings_row(
         theme,
         "Yolo Mode",
@@ -1423,7 +1428,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.muted
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(1, lines.len());
     lines.push(settings_row(
         theme,
         "Model",
@@ -1450,7 +1455,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.muted
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(2, lines.len());
     lines.push(settings_row(
         theme,
         "Reasoning Effort",
@@ -1482,7 +1487,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.muted
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(18, lines.len());
     lines.push(settings_row(
         theme,
         "Max Autopilot Continues",
@@ -1499,7 +1504,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     lines.push(Line::from(""));
 
     // Row 3: Theme
-    setting_lines.push(lines.len());
+    setting_lines.insert(3, lines.len());
     lines.push(settings_row(
         theme,
         "Theme",
@@ -1522,7 +1527,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.worktree.branch_prefix.clone()
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(4, lines.len());
     lines.push(settings_row(
         theme,
         "Branch Prefix",
@@ -1543,7 +1548,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.worktree.root.to_string_lossy().to_string()
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(5, lines.len());
     lines.push(settings_row(
         theme,
         "Worktree Root",
@@ -1566,7 +1571,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.error
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(6, lines.len());
     lines.push(settings_row(
         theme,
         "Multiplexer",
@@ -1587,7 +1592,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.mux_prefix.clone()
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(7, lines.len());
     lines.push(settings_row(
         theme,
         "Mux Prefix",
@@ -1630,7 +1635,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         theme.muted
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(8, lines.len());
     lines.push(settings_row(
         theme,
         "Terminal Shell",
@@ -1655,7 +1660,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(9, lines.len());
     let notifications_enabled = app.config.notifications.enabled;
     lines.push(settings_row(
         theme,
@@ -1675,7 +1680,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(10, lines.len());
     let server_editing = app.settings_editing == Some(SettingsEditField::NtfyServer);
     let server_display = if server_editing {
         format!("{}█", app.settings_input)
@@ -1696,7 +1701,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(11, lines.len());
     let topic_editing = app.settings_editing == Some(SettingsEditField::NtfyTopic);
     let topic_display = if topic_editing {
         format!("{}█", app.settings_input)
@@ -1723,7 +1728,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(12, lines.len());
     let token_editing = app.settings_editing == Some(SettingsEditField::NtfyAccessToken);
     let token_display = if token_editing {
         format!("{}█", app.settings_input)
@@ -1750,7 +1755,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(13, lines.len());
     lines.push(settings_row(
         theme,
         "Detailed Content",
@@ -1777,7 +1782,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(14, lines.len());
     lines.push(settings_row(
         theme,
         "Ready Events",
@@ -1800,7 +1805,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(15, lines.len());
     lines.push(settings_row(
         theme,
         "Error Events",
@@ -1823,6 +1828,9 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
     let notifications_end = lines.len();
+    let telegram_start = lines.len();
+    draw_telegram_rows(app, theme, &mut lines, &mut setting_lines);
+    let telegram_end = lines.len();
     let filters_start = lines.len();
     lines.push(Line::from(""));
     let prefixes_editing = app.settings_editing == Some(SettingsEditField::HiddenTitlePrefixes);
@@ -1833,7 +1841,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.hidden_title_prefixes.join(", ")
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(16, lines.len());
     lines.push(settings_row(
         theme,
         "Hidden Title Prefixes",
@@ -1859,7 +1867,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.hidden_path_prefixes.join(", ")
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(17, lines.len());
     lines.push(settings_row(
         theme,
         "Hidden Path Prefixes",
@@ -1878,7 +1886,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(19, lines.len());
     lines.push(settings_row(
         theme,
         "GitHub Comment Filter",
@@ -1905,7 +1913,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.config.thread_trusted_authors.join(", ")
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(20, lines.len());
     lines.push(settings_row(
         theme,
         "Trusted Authors",
@@ -1924,7 +1932,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(21, lines.len());
     lines.push(settings_row(
         theme,
         "Thread Wakes",
@@ -1956,7 +1964,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
             None => format!("{} (default)", crate::threads::DEFAULT_WAKEUPS_PER_HOUR),
         }
     };
-    setting_lines.push(lines.len());
+    setting_lines.insert(22, lines.len());
     lines.push(settings_row(
         theme,
         "Wakes Per Hour",
@@ -1975,7 +1983,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
 
-    setting_lines.push(lines.len());
+    setting_lines.insert(23, lines.len());
     lines.push(settings_row(
         theme,
         "Stall Detection",
@@ -2005,6 +2013,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         SettingsSection::Worktrees => (worktrees_start, worktrees_end),
         SettingsSection::Terminal => (terminal_start, terminal_end),
         SettingsSection::Notifications => (notifications_start, notifications_end),
+        SettingsSection::Telegram => (telegram_start, telegram_end),
         SettingsSection::Threads => (threads_start, threads_end),
     };
     let visible_lines = lines[section_start..section_end].to_vec();
@@ -2026,7 +2035,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
 
     let viewport = sections[2].height as usize;
     let selected_line = setting_lines
-        .get(app.settings_selected)
+        .get(&app.settings_selected)
         .copied()
         .unwrap_or(section_start)
         .saturating_sub(section_start);
@@ -2045,6 +2054,333 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     } else {
         app.set_theme_picker_hits(Vec::new());
     }
+    if app.telegram_wizard.is_some() {
+        draw_telegram_wizard(f, app);
+    } else {
+        app.telegram_wizard_link = None;
+    }
+}
+
+/// The Telegram section of Global Settings: rows 24 to 29.
+fn draw_telegram_rows(
+    app: &App,
+    theme: Theme,
+    lines: &mut Vec<Line<'static>>,
+    setting_lines: &mut std::collections::BTreeMap<usize, usize>,
+) {
+    let telegram = &app.config.telegram;
+    lines.push(Line::from(Span::styled(
+        "  Telegram (replies from your phone)",
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(24, lines.len());
+    lines.push(settings_row(
+        theme,
+        "Telegram",
+        if telegram.enabled { "ON" } else { "OFF" },
+        if telegram.enabled {
+            theme.success
+        } else {
+            theme.error
+        },
+        app.settings_selected == 24,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        if telegram.is_paired() {
+            "    Sends what each session said, and carries your replies back"
+        } else {
+            "    Not paired yet: run Set up… below to connect a bot"
+        },
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(25, lines.len());
+    let token_editing = app.settings_editing == Some(SettingsEditField::TelegramBotToken);
+    let token_display = if token_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.telegram_bot_token.is_empty() {
+        "(not configured)".to_string()
+    } else {
+        "•••••••••••• (configured)".to_string()
+    };
+    lines.push(settings_row(
+        theme,
+        "Bot Token",
+        &token_display,
+        if app.config.telegram_bot_token.is_empty() && app.settings_input.is_empty() {
+            theme.muted
+        } else {
+            theme.accent_alt
+        },
+        app.settings_selected == 25,
+        token_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    From @BotFather; a bot used by another program cannot be shared",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(26, lines.len());
+    let paired_display = match (telegram.chat_id, telegram.user_id) {
+        (Some(_), Some(_)) => telegram.chat_mode.label().to_string(),
+        _ => "(not paired)".to_string(),
+    };
+    lines.push(settings_row(
+        theme,
+        "Paired Chat",
+        &paired_display,
+        if telegram.is_paired() {
+            theme.success
+        } else {
+            theme.muted
+        },
+        app.settings_selected == 26,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Decided by pairing; Enter opens Set up… to pair or re-pair",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(27, lines.len());
+    let full = telegram.content == crate::config::TelegramContent::Full;
+    lines.push(settings_row(
+        theme,
+        "Content",
+        telegram.content.settings_label(),
+        if full { theme.warning } else { theme.success },
+        app.settings_selected == 27,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Last message, questions and plans; Telegram can read bot chats",
+        Style::default().fg(if full { theme.warning } else { theme.muted }),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(28, lines.len());
+    lines.push(settings_row(
+        theme,
+        "Replies",
+        if telegram.replies { "ON" } else { "OFF" },
+        if telegram.replies {
+            theme.success
+        } else {
+            theme.error
+        },
+        app.settings_selected == 28,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    A reply on the phone is typed into that session and sent",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+
+    setting_lines.insert(29, lines.len());
+    lines.push(settings_row(
+        theme,
+        "Set up…",
+        "",
+        theme.accent_alt,
+        app.settings_selected == 29,
+        false,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    A checked list: token, chat, pairing code, test message",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+}
+
+/// The setup checklist, over Global Settings.
+///
+/// Each row shows pending, running, done with a detail, or failed with the reason on a
+/// second line. Below the rows, what the current step asks the user to do. The deep
+/// link in those instructions is registered as a real hyperlink so a click opens it on
+/// the machine the user is sitting at.
+fn draw_telegram_wizard(f: &mut Frame, app: &mut App) {
+    use crate::telegram::wizard::StepState;
+
+    let theme = app.theme();
+    let Some(wizard) = app.telegram_wizard.as_ref() else {
+        return;
+    };
+    let area = centered_rect(72, 76, f.area());
+    f.render_widget(Clear, area);
+    fill_area(f.buffer_mut(), area, theme.chrome_bg);
+    let base = Style::default().fg(theme.text).bg(theme.chrome_bg);
+    let block = Block::default()
+        .title(" Telegram Setup ")
+        .borders(Borders::ALL)
+        .style(base)
+        .border_style(Style::default().fg(theme.accent_alt));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut rows: Vec<Line<'static>> = vec![Line::from("")];
+    for (index, step) in wizard.steps.iter().enumerate() {
+        let selected = index == wizard.cursor;
+        let (glyph, glyph_style, detail): (&str, Style, String) = match &step.state {
+            StepState::Pending => ("·", base.fg(theme.muted), String::new()),
+            StepState::Running => (
+                "…",
+                base.fg(theme.warning),
+                match step.kind {
+                    crate::telegram::wizard::StepKind::Pair => "waiting for the code",
+                    _ => "checking",
+                }
+                .to_string(),
+            ),
+            StepState::Done(detail) => ("✓", base.fg(theme.success), detail.clone()),
+            StepState::Failed(_) => ("✗", base.fg(theme.error), String::new()),
+        };
+        let row_style = if selected {
+            Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        let pointer = if selected { "▸" } else { " " };
+        rows.push(Line::from(vec![
+            Span::styled(format!("  {pointer} "), row_style),
+            Span::styled(
+                glyph.to_string(),
+                if selected { row_style } else { glyph_style },
+            ),
+            Span::styled(format!(" {:<16}", step.kind.label()), row_style),
+            Span::styled(
+                detail,
+                if selected {
+                    row_style
+                } else {
+                    base.fg(theme.muted)
+                },
+            ),
+        ]));
+        if let StepState::Failed(reason) = &step.state {
+            for line in wrap_text(reason, inner.width.saturating_sub(8) as usize) {
+                rows.push(Line::from(Span::styled(
+                    format!("        {line}"),
+                    base.fg(theme.error),
+                )));
+            }
+        }
+    }
+    rows.push(Line::from(""));
+
+    // The instructions for the current step, with the deep link found again afterwards
+    // so its cells can be reported as a hyperlink.
+    let instructions = wizard.instructions();
+    let link = wizard
+        .pairing
+        .as_ref()
+        .map(|prompt| prompt.deep_link.clone());
+    let mut link_row: Option<(usize, String)> = None;
+    for instruction in &instructions {
+        let is_link = link
+            .as_deref()
+            .is_some_and(|link| !link.is_empty() && instruction.trim() == link);
+        if is_link {
+            link_row = Some((rows.len(), instruction.clone()));
+            rows.push(Line::from(Span::styled(
+                instruction.clone(),
+                base.fg(theme.accent_alt).add_modifier(Modifier::UNDERLINED),
+            )));
+        } else if wizard.editing_token && instruction.starts_with("Enter:") {
+            rows.push(Line::from(vec![
+                Span::styled("  Token: ".to_string(), base.fg(theme.accent)),
+                Span::styled(format!("{}█", wizard.token_input), base.fg(theme.warning)),
+            ]));
+        } else {
+            for line in wrap_text(instruction, inner.width.saturating_sub(4) as usize) {
+                rows.push(Line::from(Span::styled(format!("  {line}"), base)));
+            }
+        }
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    let visible = sections[0].height as usize;
+    let offset = wizard
+        .cursor
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(rows.len());
+    let shown: Vec<Line<'static>> = rows.iter().skip(offset).take(visible).cloned().collect();
+    f.render_widget(Paragraph::new(shown).style(base), sections[0]);
+
+    app.telegram_wizard_link = link_row.and_then(|(row, text)| {
+        let screen_row = row.checked_sub(offset)?;
+        if screen_row >= visible {
+            return None;
+        }
+        let y = sections[0].y + screen_row as u16;
+        let x0 = sections[0].x;
+        let cells = text
+            .chars()
+            .enumerate()
+            .filter(|(column, _)| (*column as u16) < sections[0].width)
+            .map(|(column, character)| (x0 + column as u16, y, character.to_string()))
+            .collect();
+        Some(crate::ui::hyperlinks::HyperlinkRun {
+            target: text.trim().to_string(),
+            cells,
+        })
+    });
+
+    let finish = if wizard.can_finish() {
+        "Esc finish"
+    } else {
+        "Esc close, keeping what is done"
+    };
+    let hints = Line::from(vec![
+        Span::styled(
+            "  ↑/↓",
+            base.fg(theme.accent_alt).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" step · ", base),
+        Span::styled("Enter", base.fg(theme.success).add_modifier(Modifier::BOLD)),
+        Span::styled(" run or retry · ", base),
+        Span::styled(finish, base.fg(theme.error)),
+    ]);
+    f.render_widget(
+        Paragraph::new(vec![Line::from(""), hints]).style(base),
+        sections[1],
+    );
+}
+
+/// Word-wrap for the wizard's sentences. Ratatui's `Wrap` cannot be used, because the
+/// link line needs to stay whole for the hyperlink cells to be found again.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(16);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn draw_theme_picker(f: &mut Frame, app: &mut App) {
@@ -3037,6 +3373,12 @@ mod help_tests {
             (SettingsSection::Notifications, 13, "Detailed Content"),
             (SettingsSection::Notifications, 14, "Ready Events"),
             (SettingsSection::Notifications, 15, "Error Events"),
+            (SettingsSection::Telegram, 24, "Telegram"),
+            (SettingsSection::Telegram, 25, "Bot Token"),
+            (SettingsSection::Telegram, 26, "Paired Chat"),
+            (SettingsSection::Telegram, 27, "Content"),
+            (SettingsSection::Telegram, 28, "Replies"),
+            (SettingsSection::Telegram, 29, "Set up…"),
         ];
 
         for (section, selected, label) in cases {
@@ -3067,6 +3409,110 @@ mod help_tests {
             "GitHub comment filter default is missing:\n{}",
             rows.join("\n")
         );
+    }
+
+    #[test]
+    fn the_last_row_of_every_section_scrolls_into_view_when_selected() {
+        // The scroll offset used to be looked up by list position while rows are
+        // numbered as keys, so every section past General scrolled one row short and a
+        // row numbered past the old last one scrolled to the top of its section.
+        for section in SettingsSection::ALL {
+            let last = *section.rows().last().unwrap();
+            let mut app = App::new(Vec::new(), UserConfig::default());
+            app.settings_section = section;
+            app.settings_selected = last;
+            // Short enough that a section's rows do not all fit.
+            let rows = buffer_rows(&rendered_settings(&mut app, 100, 14));
+            assert!(
+                rows.iter().any(|row| row.contains('▸')),
+                "row {last} of {} is selected but off screen:\n{}",
+                section.label(),
+                rows.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_settings_mask_the_token_and_say_when_nothing_is_paired() {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_section = SettingsSection::Telegram;
+        app.settings_selected = 24;
+        app.config.telegram.enabled = true;
+        app.config.telegram_bot_token =
+            "123456:AAHsecretsecretsecretsecretsecretsecret".to_string();
+        let rows = buffer_rows(&rendered_settings(&mut app, 110, 30));
+        let text = rows.join("\n");
+        assert!(text.contains("(configured)"), "{text}");
+        assert!(!text.contains("AAHsecret"), "token leaked:\n{text}");
+        assert!(text.contains("(not paired)"), "{text}");
+        assert!(text.contains("Not paired yet"), "{text}");
+        assert!(text.contains("FULL"), "{text}");
+
+        app.config.telegram.chat_id = Some(-100);
+        app.config.telegram.user_id = Some(7);
+        app.config.telegram.chat_mode = crate::config::TelegramChatMode::Forum;
+        let text = buffer_rows(&rendered_settings(&mut app, 110, 30)).join("\n");
+        assert!(text.contains("group with topics"), "{text}");
+        assert!(!text.contains("(not paired)"), "{text}");
+    }
+
+    #[test]
+    fn the_wizard_draws_every_step_the_failure_reason_and_a_clickable_link() {
+        use crate::telegram::wizard::{Outcome, StepKind};
+
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_section = SettingsSection::Telegram;
+        app.settings_selected = 29;
+        app.open_telegram_wizard();
+        {
+            let wizard = app.telegram_wizard.as_mut().unwrap();
+            wizard.apply(Outcome::Identity {
+                id: 1,
+                username: "cst_bot".to_string(),
+            });
+            wizard.choose_mode(crate::config::TelegramChatMode::Forum);
+            wizard.await_pairing(
+                "ABC234".to_string(),
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            );
+            wizard.apply(Outcome::Failed(
+                StepKind::Rights,
+                "The bot is not an admin of the group. Promote it, with the Manage Topics right."
+                    .to_string(),
+            ));
+            wizard.cursor = 2;
+        }
+        let text = buffer_rows(&rendered_settings(&mut app, 110, 30)).join("\n");
+        for label in [
+            "Bot token",
+            "Chat type",
+            "Pair the chat",
+            "Topic rights",
+            "Test message",
+            "What is sent",
+        ] {
+            assert!(text.contains(label), "missing {label}:\n{text}");
+        }
+        assert!(text.contains("@cst_bot"), "{text}");
+        assert!(
+            text.contains("not an admin"),
+            "the failure reason is shown:\n{text}"
+        );
+        assert!(text.contains("ABC234"), "the code is shown:\n{text}");
+        let link = app
+            .telegram_wizard_link
+            .as_ref()
+            .expect("the deep link is a hyperlink");
+        assert_eq!(
+            link.target,
+            "https://t.me/cst_bot?startgroup=ABC234&admin=manage_topics"
+        );
+        assert!(!link.cells.is_empty());
+
+        // Closing the wizard takes the hyperlink with it.
+        app.close_telegram_wizard();
+        rendered_settings(&mut app, 110, 30);
+        assert!(app.telegram_wizard_link.is_none());
     }
 
     #[test]

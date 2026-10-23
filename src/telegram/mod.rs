@@ -1,0 +1,705 @@
+//! Two-way notifications over a Telegram bot.
+//!
+//! ntfy tells a phone that a session wants attention and stops there. This channel
+//! sends what the session actually said, and carries an answer back: a reply typed on
+//! the phone lands in that session's composer and is submitted. The user is often away
+//! from the PC with many sessions running, and Copilot's own remote steering is not
+//! available to them, so this has to be CST's.
+//!
+//! The design copies `crate::threads` where it can — a worker that polls, a locked shared
+//! state file, an apply pass on the UI thread that knows which panes can take input — and
+//! differs in the one place that matters: a reply **carries text**. Threads refuse that
+//! because anyone can comment on an issue. Here the sender is one Telegram user, written
+//! into the config by pairing and verified by Telegram on every update; a message from
+//! anyone else is dropped without a word. That is the same trust the user exercises by
+//! typing at the keyboard, through a different keyboard.
+//!
+//! Only the lock holder polls, because Telegram allows one `getUpdates` consumer per
+//! bot. Every CST sends. Whichever CST has the session open delivers, found through the
+//! state file's modification time exactly as thread notices are.
+//!
+//! This module is the model and the wording. Everything here is pure, so the security
+//! decisions and every sentence the phone sees can be tested without a network.
+
+pub mod bot;
+pub mod cli;
+pub mod store;
+pub mod wizard;
+pub mod worker;
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::config::TelegramChatMode;
+use crate::notifications::NotificationKind;
+
+/// How long one `getUpdates` waits for something to arrive.
+///
+/// A long poll still, so idle costs a request every ten seconds and nothing more. Not
+/// longer, because a ureq call cannot be interrupted: quitting CST or pasting a new
+/// token waits for the poll in flight to return, and ten seconds is the most that
+/// should cost.
+pub const POLL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Telegram's limit on one message's text.
+pub const MESSAGE_LIMIT: usize = 4_096;
+
+/// How many messages one notification may be split across before it is cut.
+///
+/// Three is a plan summary with room to spare. More would turn one event into a scroll
+/// of bubbles on the phone, and the point is to read enough to answer.
+pub const MAX_CHUNKS: usize = 3;
+
+/// How long a pairing code stays valid. Long enough to open Telegram and find the bot.
+pub const PAIRING_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
+
+/// The one chat and user whose messages are acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Paired {
+    pub chat_id: i64,
+    pub user_id: i64,
+    pub mode: TelegramChatMode,
+}
+
+/// What an incoming message means for CST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// From the paired user in the paired chat.
+    Act,
+    /// Anyone or anywhere else. Nothing runs, nothing is recorded, nobody is asked.
+    Ignore,
+}
+
+/// Decide whether a message may do anything at all.
+///
+/// Both ids have to match. The chat alone is not enough: the bot may have been added to
+/// a group, and a group has other people in it. The user alone is not enough either,
+/// because the same person writing to the bot from a chat that was never paired is not
+/// what they set up — and in a group, "which chat" is "which topic belongs to which
+/// session", so a stray chat would route nowhere sensible.
+pub fn classify(chat_id: i64, from_id: Option<i64>, paired: &Paired) -> Verdict {
+    match from_id {
+        Some(from) if chat_id == paired.chat_id && from == paired.user_id => Verdict::Act,
+        _ => Verdict::Ignore,
+    }
+}
+
+/// A message CST sent, kept so a reply to it can be routed to its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentRecord {
+    pub message_id: i64,
+    pub session_id: String,
+    /// Which kind of attention event this was part of, when it was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SentKind>,
+    /// The question this message put to the user, so an answer can be matched to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub sent_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SentKind {
+    Ready,
+    Question,
+    PlanApproval,
+    Error,
+}
+
+impl From<NotificationKind> for SentKind {
+    fn from(kind: NotificationKind) -> Self {
+        match kind {
+            NotificationKind::Ready => Self::Ready,
+            NotificationKind::Question => Self::Question,
+            NotificationKind::PlanApproval => Self::PlanApproval,
+            NotificationKind::Error => Self::Error,
+        }
+    }
+}
+
+/// A forum topic standing in for a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicRecord {
+    pub thread_id: i64,
+    /// The name the topic was given, so a renamed session renames its topic once.
+    pub title: String,
+}
+
+/// The parts of an incoming message that routing looks at.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Incoming {
+    pub message_thread_id: Option<i64>,
+    pub reply_to_message_id: Option<i64>,
+}
+
+/// Which session a message is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Session(String),
+    /// Nothing says which session. Answered with a hint, never guessed.
+    Unrouted,
+}
+
+/// Work out which session a message addresses.
+///
+/// In a forum the topic is the address, so a bare message typed into a topic goes to
+/// that session. A reply to one of CST's messages works in either mode, and inside a
+/// topic it says the same thing twice. A message with neither — in a private chat, or
+/// in the group's General topic — is unrouted, because guessing "the last session that
+/// spoke" would send text to the wrong agent exactly when several are busy.
+pub fn route(
+    incoming: &Incoming,
+    mode: TelegramChatMode,
+    sent: &[SentRecord],
+    topics: &BTreeMap<String, TopicRecord>,
+) -> Route {
+    if mode == TelegramChatMode::Forum {
+        if let Some(thread_id) = incoming.message_thread_id {
+            if let Some((session_id, _)) = topics
+                .iter()
+                .find(|(_, topic)| topic.thread_id == thread_id)
+            {
+                return Route::Session(session_id.clone());
+            }
+        }
+    }
+    if let Some(reply_to) = incoming.reply_to_message_id {
+        if let Some(record) = sent.iter().find(|record| record.message_id == reply_to) {
+            return Route::Session(record.session_id.clone());
+        }
+    }
+    Route::Unrouted
+}
+
+/// A question a session is asking, read from its event log at send time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    pub tool_call_id: String,
+    pub text: String,
+    pub choices: Vec<String>,
+}
+
+/// Everything one notification says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Content {
+    pub kind: NotificationKind,
+    pub title: String,
+    /// The session's last assistant message of this work cycle, when content is on.
+    pub body: Option<String>,
+    pub question: Option<Question>,
+    pub plan_summary: Option<String>,
+}
+
+/// Turn a notification into the HTML messages Telegram is sent, in order.
+///
+/// Every message starts with the session title in bold. Messages from several sessions
+/// arrive interleaved in one chat, and the title is what tells them apart, including in
+/// the quote Telegram shows above a reply. HTML rather than MarkdownV2: its escaping is
+/// three characters, and the body is whatever the agent wrote, which must read as text
+/// and never as markup.
+pub fn compose(content: &Content) -> Vec<String> {
+    let title = escape_html(&content.title);
+    let mut text = String::new();
+    text.push_str(&escape_html(kind_line(content.kind)));
+    if let Some(body) = content
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        text.push_str("\n\n");
+        text.push_str(&escape_html(body));
+    }
+    if let Some(question) = &content.question {
+        text.push_str("\n\n");
+        text.push_str(&escape_html("Question: "));
+        text.push_str(&escape_html(question.text.trim()));
+        for (index, choice) in question.choices.iter().enumerate() {
+            text.push_str(&escape_html(&format!(
+                "\n  {}. {}",
+                index + 1,
+                choice.trim()
+            )));
+        }
+    }
+    if let Some(summary) = content
+        .plan_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        text.push_str("\n\n");
+        text.push_str(&escape_html("Plan: "));
+        text.push_str(&escape_html(summary));
+    }
+    chunk(&title, &text)
+}
+
+fn kind_line(kind: NotificationKind) -> &'static str {
+    match kind {
+        NotificationKind::Ready => "Ready for attention",
+        NotificationKind::Question => "Question waiting for your response",
+        NotificationKind::PlanApproval => "Plan waiting for approval",
+        NotificationKind::Error => "Copilot reported an error",
+    }
+}
+
+/// Split escaped text into messages under Telegram's limit, each headed by the title.
+///
+/// Cuts fall on a line break where one is near, and never inside an HTML entity or a
+/// multi-byte character. After [`MAX_CHUNKS`] the rest is dropped and the last message
+/// says how much.
+fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
+    let header = |index: usize, total_hint: Option<usize>| match (index, total_hint) {
+        (0, _) => format!("<b>{title_html}</b>\n"),
+        (n, _) => format!("<b>{title_html}</b> (continued {})\n", n + 1),
+    };
+    // Room for the longest header plus a truncation note.
+    let reserve = header(MAX_CHUNKS, None).chars().count() + 64;
+    let budget = MESSAGE_LIMIT.saturating_sub(reserve).max(256);
+
+    let mut chunks = Vec::new();
+    let mut rest = text_html;
+    while !rest.is_empty() && chunks.len() < MAX_CHUNKS {
+        let last = chunks.len() + 1 == MAX_CHUNKS;
+        let (piece, remainder) = split_at_budget(rest, budget);
+        let mut message = header(chunks.len(), None);
+        message.push_str(piece);
+        if last && !remainder.is_empty() {
+            let cut = remainder.chars().count();
+            message.push_str(&format!(
+                "\n\n… {cut} more characters not shown; open the session to read the rest."
+            ));
+            chunks.push(message);
+            return chunks;
+        }
+        chunks.push(message);
+        rest = remainder;
+    }
+    if chunks.is_empty() {
+        chunks.push(header(0, None));
+    }
+    chunks
+}
+
+/// Cut `text` after at most `budget` characters, preferring a line break in the last
+/// fifth, and never between `&` and its `;`.
+fn split_at_budget(text: &str, budget: usize) -> (&str, &str) {
+    if text.chars().count() <= budget {
+        return (text, "");
+    }
+    let mut cut = text
+        .char_indices()
+        .nth(budget)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    let floor = text
+        .char_indices()
+        .nth(budget * 4 / 5)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    if let Some(newline) = text[floor..cut].rfind('\n') {
+        cut = floor + newline + 1;
+    }
+    // Inside an entity: back up to the `&` that opened it.
+    if let Some(amp) = text[..cut].rfind('&') {
+        if !text[amp..cut].contains(';') {
+            cut = amp;
+        }
+    }
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut == 0 {
+        cut = text
+            .char_indices()
+            .nth(budget)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len());
+    }
+    (&text[..cut], &text[cut..])
+}
+
+/// The three characters Telegram's HTML mode reads as markup.
+pub fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A short code the user sends the bot to prove the chat is theirs.
+///
+/// Letters and digits that survive a deep link's parameter and are hard to misread;
+/// six of them from a UUID is more than enough for a five-minute window.
+pub fn pairing_code() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    uuid::Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .take(6)
+        .map(|byte| ALPHABET[(*byte as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+/// Whether a message is the pairing code, allowing for Telegram's `/start <code>`.
+pub fn message_carries_code(text: &str, code: &str) -> bool {
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .any(|word| word.eq_ignore_ascii_case(code))
+}
+
+/// The link that opens Telegram on the bot with the code already filled in.
+///
+/// Pressing Start on a private chat sends `/start <code>` for the user, so following
+/// the link *is* the pairing. For a group the link asks which group to add the bot to
+/// and requests the Manage Topics right on the way in, which is what creating a topic
+/// per session needs.
+pub fn deep_link(bot_username: &str, code: &str, mode: TelegramChatMode) -> String {
+    let username = bot_username.trim_start_matches('@');
+    match mode {
+        TelegramChatMode::Private => format!("https://t.me/{username}?start={code}"),
+        TelegramChatMode::Forum => {
+            format!("https://t.me/{username}?startgroup={code}&admin=manage_topics")
+        }
+    }
+}
+
+/// Read the chat mode off the chat Telegram described.
+pub fn chat_mode_of(chat_type: &str, is_forum: bool) -> Option<TelegramChatMode> {
+    match chat_type {
+        "private" => Some(TelegramChatMode::Private),
+        "supergroup" if is_forum => Some(TelegramChatMode::Forum),
+        _ => None,
+    }
+}
+
+/// Everything the phone is told, in one place so the sentences can be read together.
+///
+/// Plain sentences that name the consequence. Sent as text, not HTML, so nothing here
+/// needs escaping.
+pub mod wording {
+    use crate::config::TelegramChatMode;
+
+    pub fn paired(mode: TelegramChatMode) -> String {
+        match mode {
+            TelegramChatMode::Private => {
+                "CST is paired with this chat. Each session's messages will \
+                                          arrive here; reply to one to answer that session."
+                    .to_string()
+            }
+            TelegramChatMode::Forum => "CST is paired with this group. Each session gets its own \
+                                        topic; type in a topic to answer that session."
+                .to_string(),
+        }
+    }
+
+    pub fn group_without_topics() -> String {
+        "This group does not have Topics turned on. Turn them on in the group's settings, \
+         then send the code again, or pair a private chat instead."
+            .to_string()
+    }
+
+    pub fn test_message() -> String {
+        "Test message from CST. If you can read this, notifications will arrive here.".to_string()
+    }
+
+    pub fn not_open(title: &str) -> String {
+        format!("Not delivered: {title} is not open in CST. Open it on the PC and reply again.")
+    }
+
+    pub fn deleted() -> String {
+        "Not delivered: that session no longer exists.".to_string()
+    }
+
+    pub fn has_draft(title: &str) -> String {
+        format!(
+            "Not delivered: {title} has unsent text in its composer. Finish or clear it at the \
+             PC, then reply again."
+        )
+    }
+
+    pub fn queued(title: &str) -> String {
+        format!("Queued: {title} is working. Your reply goes in when this turn ends.")
+    }
+
+    pub fn permission_wait(title: &str) -> String {
+        format!(
+            "Not delivered: {title} is waiting for a tool permission, which cannot be answered \
+             from Telegram."
+        )
+    }
+
+    pub fn question_not_supported(title: &str) -> String {
+        format!(
+            "Not delivered: {title} is waiting on a question. Answering questions from Telegram \
+             is not supported yet; answer it at the PC."
+        )
+    }
+
+    pub fn plan_not_supported(title: &str) -> String {
+        format!(
+            "Not delivered: {title} is waiting for a plan to be approved, which is done at the PC."
+        )
+    }
+
+    pub fn answered_elsewhere(title: &str) -> String {
+        format!("Not delivered: that question in {title} was already answered.")
+    }
+
+    pub fn replies_off() -> String {
+        "Replies are turned off in CST's Telegram settings.".to_string()
+    }
+
+    pub fn unrouted_hint(mode: TelegramChatMode) -> String {
+        match mode {
+            TelegramChatMode::Private => {
+                "Reply to a session's message to answer that session.".to_string()
+            }
+            TelegramChatMode::Forum => {
+                "Type in a session's topic to answer that session.".to_string()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paired(mode: TelegramChatMode) -> Paired {
+        Paired {
+            chat_id: 1000,
+            user_id: 77,
+            mode,
+        }
+    }
+
+    #[test]
+    fn a_message_from_any_other_chat_or_user_is_ignored_and_never_surfaces() {
+        // The security property of the whole channel: only the paired person in the
+        // paired chat can put text into a session. A stranger in the group, the paired
+        // user writing from somewhere else, and a message with no sender all do nothing.
+        let paired = paired(TelegramChatMode::Forum);
+
+        assert_eq!(classify(1000, Some(77), &paired), Verdict::Act);
+        assert_eq!(classify(1000, Some(78), &paired), Verdict::Ignore);
+        assert_eq!(classify(1001, Some(77), &paired), Verdict::Ignore);
+        assert_eq!(classify(1000, None, &paired), Verdict::Ignore);
+    }
+
+    fn sent(message_id: i64, session: &str) -> SentRecord {
+        SentRecord {
+            message_id,
+            session_id: session.to_string(),
+            kind: Some(SentKind::Ready),
+            tool_call_id: None,
+            sent_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_reply_to_a_sent_message_routes_to_that_session_and_a_bare_message_is_not_guessed() {
+        let sent = vec![sent(5, "session-a"), sent(9, "session-b")];
+        let topics = BTreeMap::new();
+
+        let reply = Incoming {
+            reply_to_message_id: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            route(&reply, TelegramChatMode::Private, &sent, &topics),
+            Route::Session("session-b".to_string())
+        );
+        // Replying to a confirmation CST sent must work too; it is recorded like any other.
+        let stale = Incoming {
+            reply_to_message_id: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            route(&stale, TelegramChatMode::Private, &sent, &topics),
+            Route::Unrouted
+        );
+        assert_eq!(
+            route(
+                &Incoming::default(),
+                TelegramChatMode::Private,
+                &sent,
+                &topics
+            ),
+            Route::Unrouted,
+            "guessing the last session would hit the wrong agent exactly when several are busy"
+        );
+    }
+
+    #[test]
+    fn in_a_forum_the_topic_is_the_address_and_general_is_unrouted() {
+        let sent = vec![sent(5, "session-a")];
+        let mut topics = BTreeMap::new();
+        topics.insert(
+            "session-c".to_string(),
+            TopicRecord {
+                thread_id: 300,
+                title: "C".to_string(),
+            },
+        );
+
+        let in_topic = Incoming {
+            message_thread_id: Some(300),
+            reply_to_message_id: None,
+        };
+        assert_eq!(
+            route(&in_topic, TelegramChatMode::Forum, &sent, &topics),
+            Route::Session("session-c".to_string())
+        );
+        // A reply inside a topic says the same thing twice; the topic wins and agrees.
+        let reply_in_topic = Incoming {
+            message_thread_id: Some(300),
+            reply_to_message_id: Some(5),
+        };
+        assert_eq!(
+            route(&reply_in_topic, TelegramChatMode::Forum, &sent, &topics),
+            Route::Session("session-c".to_string())
+        );
+        // General has no topic id of its own that CST recorded, so it is unrouted
+        // unless the message replies to something CST sent.
+        let general = Incoming {
+            message_thread_id: None,
+            reply_to_message_id: None,
+        };
+        assert_eq!(
+            route(&general, TelegramChatMode::Forum, &sent, &topics),
+            Route::Unrouted
+        );
+        let reply_in_general = Incoming {
+            message_thread_id: None,
+            reply_to_message_id: Some(5),
+        };
+        assert_eq!(
+            route(&reply_in_general, TelegramChatMode::Forum, &sent, &topics),
+            Route::Session("session-a".to_string())
+        );
+    }
+
+    fn content(body: Option<&str>) -> Content {
+        Content {
+            kind: NotificationKind::Ready,
+            title: "Plan <review> & more".to_string(),
+            body: body.map(str::to_string),
+            question: None,
+            plan_summary: None,
+        }
+    }
+
+    #[test]
+    fn every_message_starts_with_the_bold_title_and_agent_text_can_never_become_markup() {
+        let messages = compose(&content(Some("Use <b>bold</b> & co.")));
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].starts_with("<b>Plan &lt;review&gt; &amp; more</b>\n"));
+        assert!(messages[0].contains("Ready for attention"));
+        assert!(messages[0].contains("Use &lt;b&gt;bold&lt;/b&gt; &amp; co."));
+        assert!(!messages[0].contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn a_question_lists_its_choices_and_a_plan_carries_its_summary() {
+        let mut content = content(Some("Context"));
+        content.kind = NotificationKind::Question;
+        content.question = Some(Question {
+            tool_call_id: "q1".to_string(),
+            text: "Which colour?".to_string(),
+            choices: vec!["Red".to_string(), "Green".to_string()],
+        });
+        let messages = compose(&content);
+        assert!(messages[0].contains("Question waiting for your response"));
+        assert!(messages[0].contains("Question: Which colour?\n  1. Red\n  2. Green"));
+
+        let mut plan = self::content(None);
+        plan.kind = NotificationKind::PlanApproval;
+        plan.plan_summary = Some("- do this\n- then that".to_string());
+        let messages = compose(&plan);
+        assert!(messages[0].contains("Plan waiting for approval\n\nPlan: - do this\n- then that"));
+    }
+
+    #[test]
+    fn long_content_is_split_under_the_limit_capped_at_three_and_the_cut_is_announced() {
+        let long = (0..600)
+            .map(|i| format!("line {i} with an entity & some text to fill the message"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let messages = compose(&content(Some(&long)));
+
+        assert_eq!(messages.len(), MAX_CHUNKS);
+        for (index, message) in messages.iter().enumerate() {
+            assert!(
+                message.chars().count() <= MESSAGE_LIMIT,
+                "chunk {index} is {} chars",
+                message.chars().count()
+            );
+            assert!(message.starts_with("<b>Plan &lt;review&gt; &amp; more</b>"));
+            // No entity is ever cut in half across a boundary.
+            let tail = &message[message.rfind('&').unwrap_or(0)..];
+            assert!(tail.contains(';'), "entity split at a chunk edge: {tail:?}");
+        }
+        assert!(messages[1].contains("(continued 2)"));
+        assert!(messages[2].contains("more characters not shown"));
+    }
+
+    #[test]
+    fn multibyte_text_is_never_cut_inside_a_character() {
+        let long = "🚀é".repeat(5_000);
+        let messages = compose(&content(Some(&long)));
+        for message in &messages {
+            assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+            assert!(message.chars().count() <= MESSAGE_LIMIT);
+        }
+    }
+
+    #[test]
+    fn the_pairing_code_is_found_inside_a_start_command_and_survives_a_deep_link() {
+        let code = pairing_code();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(message_carries_code(&format!("/start {code}"), &code));
+        assert!(message_carries_code(&code.to_lowercase(), &code));
+        assert!(!message_carries_code("/start OTHER1", &code));
+
+        let link = deep_link("@cst_bot", &code, TelegramChatMode::Forum);
+        assert_eq!(
+            link,
+            format!("https://t.me/cst_bot?startgroup={code}&admin=manage_topics")
+        );
+        assert_eq!(
+            deep_link("cst_bot", &code, TelegramChatMode::Private),
+            format!("https://t.me/cst_bot?start={code}")
+        );
+    }
+
+    #[test]
+    fn only_a_private_chat_or_a_forum_supergroup_can_be_paired() {
+        assert_eq!(
+            chat_mode_of("private", false),
+            Some(TelegramChatMode::Private)
+        );
+        assert_eq!(
+            chat_mode_of("supergroup", true),
+            Some(TelegramChatMode::Forum)
+        );
+        // A group without topics has no address per session, so it is refused with a
+        // sentence saying what to turn on.
+        assert_eq!(chat_mode_of("supergroup", false), None);
+        assert_eq!(chat_mode_of("group", false), None);
+        assert_eq!(chat_mode_of("channel", false), None);
+    }
+}
