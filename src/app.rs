@@ -337,6 +337,7 @@ pub enum SettingsEditField {
     NtfyServer,
     NtfyTopic,
     NtfyAccessToken,
+    TelegramBotToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,15 +347,17 @@ pub enum SettingsSection {
     Worktrees,
     Terminal,
     Notifications,
+    Telegram,
     Threads,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::General,
         Self::Worktrees,
         Self::Terminal,
         Self::Notifications,
+        Self::Telegram,
         Self::Threads,
         Self::Filters,
     ];
@@ -366,6 +369,7 @@ impl SettingsSection {
             Self::Worktrees => "Worktrees",
             Self::Terminal => "Terminal",
             Self::Notifications => "Notifications",
+            Self::Telegram => "Telegram",
             Self::Threads => "Threads",
         }
     }
@@ -380,6 +384,7 @@ impl SettingsSection {
             // Numbered after everything else rather than renumbering: the indices are
             // keys, not positions.
             Self::Threads => &[20, 21, 22, 23],
+            Self::Telegram => &[24, 25, 26, 27, 28, 29],
         }
     }
 
@@ -866,6 +871,25 @@ pub struct App {
     /// Kept so it can be said once. The watcher already backs off; a status line
     /// repeating the same failure every minute would only train the user to ignore it.
     pub thread_watch_notice: Option<String>,
+
+    /// Where the Telegram channel keeps its state. A field for the same reason as
+    /// `thread_state_root`: tests point it at a temporary directory.
+    pub telegram_state_root: PathBuf,
+    /// When `telegram.json` had last been written as of this process last reading it.
+    telegram_state_seen: Option<std::time::SystemTime>,
+    /// Replies on disk as of that reading, so the idle tick can skip the file.
+    telegram_live_replies: usize,
+    /// Sends to Telegram from this process. Polling lives with the mux services.
+    telegram_worker: Option<crate::telegram::worker::TelegramWorker>,
+    telegram_pending: usize,
+    /// The last reason the Telegram channel gave for not working, said once.
+    pub telegram_notice: Option<String>,
+    /// The setup wizard, while it is open over Global Settings.
+    pub telegram_wizard: Option<crate::telegram::wizard::Wizard>,
+    /// Where the wizard drew its deep link this frame, to make it a real hyperlink.
+    pub telegram_wizard_link: Option<crate::ui::hyperlinks::HyperlinkRun>,
+    #[cfg(test)]
+    pub telegram_outbound: Vec<crate::telegram::worker::Outbound>,
     pub restart_after_update: Option<UpdateRestartRequest>,
     update_restart_requested: bool,
     notification_worker: Option<NotificationWorker>,
@@ -1072,6 +1096,16 @@ impl App {
             thread_live_notices: 0,
             thread_state_seen: None,
             thread_watch_notice: None,
+            telegram_state_root: crate::telegram::store::state_root(),
+            telegram_state_seen: None,
+            telegram_live_replies: 0,
+            telegram_worker: None,
+            telegram_pending: 0,
+            telegram_notice: None,
+            telegram_wizard: None,
+            telegram_wizard_link: None,
+            #[cfg(test)]
+            telegram_outbound: Vec::new(),
             restart_after_update: None,
             update_restart_requested: false,
             notification_worker: None,
@@ -1662,6 +1696,7 @@ impl App {
         self.settings_editing = None;
         self.settings_input.clear();
         self.theme_picker = None;
+        self.telegram_wizard = None;
         let current = config::config_revision(&self.global_config_path).ok();
         self.settings_config_revision = (current == self.applied_config_revision)
             .then_some(current)
@@ -2098,14 +2133,21 @@ impl App {
 
     /// Web links in whatever panes are showing, to be drawn as real hyperlinks.
     pub fn visible_hyperlinks(&self) -> Vec<crate::ui::hyperlinks::HyperlinkRun> {
-        let (View::Attached(_), Some(mux)) = (self.view, self.mux.as_ref()) else {
-            return Vec::new();
-        };
-        mux.panes
-            .iter()
-            .filter(|pane| self.pane_on_screen(pane.id))
-            .flat_map(crate::mux::Pane::web_hyperlinks)
-            .collect()
+        let mut links: Vec<crate::ui::hyperlinks::HyperlinkRun> =
+            match (self.view, self.mux.as_ref()) {
+                (View::Attached(_), Some(mux)) => mux
+                    .panes
+                    .iter()
+                    .filter(|pane| self.pane_on_screen(pane.id))
+                    .flat_map(crate::mux::Pane::web_hyperlinks)
+                    .collect(),
+                _ => Vec::new(),
+            };
+        // The wizard's deep link is the one link CST itself draws. Clickable for the
+        // same reason a pane's links are: it has to open on the machine the user is
+        // sitting at, which over SSH only the outer terminal can do.
+        links.extend(self.telegram_wizard_link.iter().cloned());
+        links
     }
 
     pub fn inspect_github_item(&mut self, number: u64) {
@@ -3427,6 +3469,11 @@ impl App {
             || self.update_install_receiver.is_some()
             || self.update_restart_ready()
             || self.notification_pending > 0
+            || self.telegram_pending > 0
+            || self
+                .telegram_wizard
+                .as_ref()
+                .is_some_and(crate::telegram::wizard::Wizard::is_busy)
             || self.github_request_receiver.is_some()
             || self.github_patch_receiver.is_some()
             || self.github_review_receiver.is_some()
@@ -3492,6 +3539,37 @@ impl App {
             self.request_config_reload();
             self.config.clone()
         };
+        // Two channels, each gated on its own settings: ntfy being off or misconfigured
+        // must not silence Telegram, or the other way round.
+        self.enqueue_ntfy(&effective, kind, &session_title, session_id);
+        self.enqueue_telegram(&effective, kind, &session_title, session_id);
+    }
+
+    /// Where a session's event log is, with the bounds of its current work cycle.
+    fn cycle_window(
+        &self,
+        session_id: Option<&str>,
+    ) -> (Option<PathBuf>, Option<u64>, Option<u64>) {
+        let events_path = session_id
+            .filter(|session_id| !session_id.is_empty())
+            .map(|session_id| self.notification_events_path(session_id));
+        let events_start = session_id
+            .and_then(|session_id| self.notification_cycle_offsets.get(session_id))
+            .copied();
+        let events_end = events_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len());
+        (events_path, events_start, events_end)
+    }
+
+    fn enqueue_ntfy(
+        &mut self,
+        effective: &UserConfig,
+        kind: NotificationKind,
+        session_title: &str,
+        session_id: Option<&str>,
+    ) {
         let configured = &effective.notifications;
         let event_enabled = match kind {
             NotificationKind::Ready
@@ -3502,25 +3580,20 @@ impl App {
         if !configured.enabled || !event_enabled {
             return;
         }
-        if let Err(error) = config::validate_user_notification_config(&effective) {
+        if let Err(error) = config::validate_user_notification_config(effective) {
             self.status_message = Some(format!("Notifications disabled: {error}"));
             return;
         }
-        let events_path = session_id
-            .filter(|session_id| effective.ntfy_verbose && !session_id.is_empty())
-            .map(|session_id| self.notification_events_path(session_id));
-        let events_start = session_id
-            .and_then(|session_id| self.notification_cycle_offsets.get(session_id))
-            .copied();
-        let events_end = events_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| metadata.len());
+        let (events_path, events_start, events_end) = if effective.ntfy_verbose {
+            self.cycle_window(session_id)
+        } else {
+            (None, None, None)
+        };
         let request = NotificationRequest {
             config: configured.clone(),
-            access_token: effective.ntfy_access_token,
+            access_token: effective.ntfy_access_token.clone(),
             verbose: effective.ntfy_verbose,
-            session_title,
+            session_title: session_title.to_string(),
             kind,
             events_path,
             events_start,
@@ -3544,6 +3617,652 @@ impl App {
         }
     }
 
+    /// The Telegram half of a notification: what the session said, to the paired chat.
+    fn enqueue_telegram(
+        &mut self,
+        effective: &UserConfig,
+        kind: NotificationKind,
+        session_title: &str,
+        session_id: Option<&str>,
+    ) {
+        use crate::config::TelegramContent;
+        use crate::telegram::worker::{Outbound, OutboundJob};
+
+        let configured = &effective.telegram;
+        if !configured.enabled {
+            return;
+        }
+        let (Some(chat_id), Some(_)) = (configured.chat_id, configured.user_id) else {
+            // Enabled but never paired: the settings row says to run Set up. Nothing to
+            // send anything to.
+            return;
+        };
+        if let Err(error) = config::validate_telegram_config(effective) {
+            self.status_message = Some(format!("Telegram disabled: {error}"));
+            return;
+        }
+        let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+            return;
+        };
+        // The name the session list shows, when the session is known; the pane title
+        // is what the terminal set, which before Copilot names the window is the
+        // executable's path.
+        let title = self
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.display_name().to_string())
+            .unwrap_or_else(|| session_title.to_string());
+        let content = match configured.content {
+            TelegramContent::Status => crate::telegram::Content {
+                kind,
+                title,
+                body: None,
+                question: None,
+                plan_summary: None,
+            },
+            TelegramContent::Full => {
+                let (events_path, events_start, events_end) = self.cycle_window(Some(session_id));
+                crate::notifications::telegram_content(
+                    kind,
+                    &title,
+                    events_path.as_deref(),
+                    events_start,
+                    events_end,
+                )
+            }
+        };
+        let outbound = Outbound {
+            token: effective.telegram_bot_token.trim().to_string(),
+            api_base: configured.api_base.clone(),
+            chat_id,
+            mode: configured.chat_mode,
+            job: OutboundJob::Notify {
+                session_id: session_id.to_string(),
+                content,
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
+    /// Hand one job to the sending thread, starting it on first use.
+    pub(crate) fn send_telegram(&mut self, outbound: crate::telegram::worker::Outbound) {
+        #[cfg(test)]
+        {
+            self.telegram_outbound.push(outbound);
+        }
+        #[cfg(not(test))]
+        {
+            let root = self.telegram_state_root.clone();
+            let worker = self
+                .telegram_worker
+                .get_or_insert_with(|| crate::telegram::worker::TelegramWorker::start(root, None));
+            match worker.enqueue(outbound) {
+                Ok(()) => self.telegram_pending += 1,
+                Err(error) => {
+                    self.status_message = Some(format!("Telegram failed: {error}"));
+                }
+            }
+        }
+    }
+
+    pub fn poll_telegram_results(&mut self) {
+        let Some(worker) = self.telegram_worker.as_ref() else {
+            return;
+        };
+        while let Some(result) = worker.try_result() {
+            self.telegram_pending = self.telegram_pending.saturating_sub(1);
+            if let Err(error) = result.result {
+                self.status_message = Some(format!("Telegram failed: {error}"));
+            }
+        }
+    }
+
+    /// What the poll loop needs from the settings, or `None` when it should not run.
+    pub fn telegram_poll_settings(&self) -> Option<crate::telegram::worker::PollSettings> {
+        let configured = &self.config.telegram;
+        // Pairing needs the poll loop before the channel is on: the code is seen by
+        // polling. So a wizard waiting for its code counts as a reason to poll.
+        let pairing = self
+            .telegram_wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.pairing.is_some());
+        if !(configured.enabled || pairing)
+            || config::validate_telegram_bot_token(&self.config.telegram_bot_token).is_err()
+            || config::normalize_telegram_api_base(&configured.api_base).is_err()
+        {
+            return None;
+        }
+        let paired = match (configured.chat_id, configured.user_id) {
+            (Some(chat_id), Some(user_id)) => Some(crate::telegram::Paired {
+                chat_id,
+                user_id,
+                mode: configured.chat_mode,
+            }),
+            _ => None,
+        };
+        Some(crate::telegram::worker::PollSettings {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: configured.api_base.clone(),
+            paired,
+            replies: configured.replies,
+        })
+    }
+
+    /// Act on anything the Telegram state file says, now that pane state is knowable.
+    ///
+    /// Cheap on the idle tick: one `stat` unless the file changed. The file is how a CST
+    /// that is not polling learns what arrived, so this runs whether or not this
+    /// process's own poller announced anything.
+    pub fn flush_telegram_replies(&mut self) -> bool {
+        let modified = crate::telegram::store::modified_in(&self.telegram_state_root);
+        let discovered = modified != self.telegram_state_seen;
+        if discovered {
+            self.telegram_state_seen = modified;
+            self.telegram_live_replies = crate::telegram::store::load_in(&self.telegram_state_root)
+                .replies
+                .len();
+        }
+        let mut changed = discovered && self.telegram_pairing_arrived();
+        if self.telegram_live_replies > 0 {
+            changed |= self.deliver_telegram_replies();
+        }
+        changed
+    }
+
+    /// What is said to the phone about a session: its name as the list shows it.
+    fn telegram_session_title(&self, session_id: &str) -> String {
+        self.sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.display_name().to_string())
+            .or_else(|| {
+                self.mux.as_ref().and_then(|mux| {
+                    mux.pane_for_session(session_id)
+                        .and_then(|id| mux.pane(id))
+                        .map(|pane| pane.title.clone())
+                })
+            })
+            .unwrap_or_else(|| format!("session {}", session_id.get(..8).unwrap_or(session_id)))
+    }
+
+    /// Send words back to the paired chat about a session, as a reply to the user's
+    /// message when there is one.
+    fn telegram_say(&mut self, session_id: &str, reply_to: Option<i64>, text: String) {
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let thread_id = crate::telegram::store::load_in(&self.telegram_state_root)
+            .topics
+            .get(session_id)
+            .map(|topic| topic.thread_id);
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Say {
+                session_id: Some(session_id.to_string()),
+                thread_id,
+                reply_to,
+                text,
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
+    fn telegram_react(&mut self, message_id: i64) {
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::React { message_id },
+        };
+        self.send_telegram(outbound);
+    }
+
+    fn update_telegram(&self, change: impl FnOnce(&mut crate::telegram::store::TelegramState)) {
+        let _ = crate::telegram::store::update_in(&self.telegram_state_root, change);
+    }
+
+    /// Whether CST itself has text sitting in this session's composer.
+    ///
+    /// `note_injection` keeps `has_draft()` true until a turn starts, so without this a
+    /// reply arriving just after a thread wake-up would be refused as "the user's
+    /// draft", which it is not.
+    fn injection_outstanding(&self, session_id: &str) -> bool {
+        crate::threads::store::load_in(&self.thread_state_root)
+            .notices
+            .iter()
+            .any(|notice| {
+                notice.session_id == session_id
+                    && notice.status == crate::threads::NoticeStatus::Sent
+            })
+            || crate::telegram::store::load_in(&self.telegram_state_root)
+                .replies
+                .iter()
+                .any(|reply| {
+                    reply.session_id == session_id
+                        && reply.status == crate::telegram::store::ReplyStatus::Sent
+                })
+    }
+
+    /// Deliver what the phone sent, refuse what cannot be delivered, and say which.
+    ///
+    /// Shaped like `flush_thread_wakes`, with one deliberate difference: nothing is held
+    /// for the user. A reply is an answer to something they just read on the phone, so
+    /// when it cannot land they are told there and then, and the message stays in
+    /// Telegram to send again.
+    fn deliver_telegram_replies(&mut self) -> bool {
+        use crate::telegram::store::ReplyStatus;
+        use crate::telegram::wording;
+
+        let replies = crate::telegram::store::load_in(&self.telegram_state_root).replies;
+        if replies.is_empty() {
+            self.telegram_live_replies = 0;
+            return false;
+        }
+        let mut changed = false;
+        let mut hosted = None;
+        for reply in replies {
+            let session_id = reply.session_id.clone();
+            let title = self.telegram_session_title(&session_id);
+            if reply.status == ReplyStatus::Sent {
+                // In a composer. Held until it empties, which is the evidence a turn took
+                // it; a second reply typed on top would arrive as one garbled message.
+                if self.pane_for_session(&session_id).is_some()
+                    && self.composer_is_free(&session_id)
+                {
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                }
+                continue;
+            }
+
+            let session_exists = self.sessions.iter().any(|session| session.id == session_id)
+                || self.pane_for_session(&session_id).is_some();
+            if !session_exists {
+                self.telegram_say(&session_id, Some(reply.user_message_id), wording::deleted());
+                let topic = crate::telegram::store::load_in(&self.telegram_state_root)
+                    .topics
+                    .contains_key(&session_id);
+                if topic {
+                    if let Some(chat_id) = self.config.telegram.chat_id {
+                        let outbound = crate::telegram::worker::Outbound {
+                            token: self.config.telegram_bot_token.trim().to_string(),
+                            api_base: self.config.telegram.api_base.clone(),
+                            chat_id,
+                            mode: self.config.telegram.chat_mode,
+                            job: crate::telegram::worker::OutboundJob::CloseTopic {
+                                session_id: session_id.clone(),
+                            },
+                        };
+                        self.send_telegram(outbound);
+                    }
+                }
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+
+            if !self.has_running_pane_for(&session_id) {
+                // Another CST with the session in a tab delivers it. Only a tab counts:
+                // a session running in a bare terminal has nobody to type into it, and
+                // the phone should not wait five minutes to hear that.
+                let in_another_tab = hosted
+                    .get_or_insert_with(|| self.sessions_hosted_elsewhere())
+                    .contains(&session_id);
+                if in_another_tab && reply.age_seconds() < Self::WAKE_PATIENCE_SECS {
+                    continue;
+                }
+                self.telegram_say(
+                    &session_id,
+                    Some(reply.user_message_id),
+                    wording::not_open(&title),
+                );
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+
+            let pane_state = self.mux.as_ref().and_then(|mux| {
+                mux.pane_for_session(&session_id)
+                    .and_then(|id| mux.pane(id))
+                    .map(|pane| {
+                        (
+                            pane.is_working(),
+                            pane.awaiting_tool_permission(),
+                            pane.requires_user_action(),
+                            pane.has_draft(),
+                        )
+                    })
+            });
+            let Some((working, permission_wait, user_action, draft)) = pane_state else {
+                continue;
+            };
+
+            if working {
+                if !reply.queued_told {
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::queued(&title),
+                    );
+                    self.update_telegram(|state| {
+                        if let Some(held) = state.reply_mut(reply.update_id) {
+                            held.queued_told = true;
+                        }
+                    });
+                    changed = true;
+                }
+                if reply.age_seconds() >= Self::WORKING_CLOCK_SLACK_SECS {
+                    self.update_telegram(|state| {
+                        if let Some(held) = state.reply_mut(reply.update_id) {
+                            held.planned_at = chrono::Utc::now();
+                        }
+                    });
+                }
+                continue;
+            }
+
+            if permission_wait {
+                self.telegram_say(
+                    &session_id,
+                    Some(reply.user_message_id),
+                    wording::permission_wait(&title),
+                );
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+            if user_action || reply.tool_call_id.is_some() {
+                // A question or a plan approval is open, or this reply was written for
+                // one. Neither is answered from the phone yet: typing into Copilot's
+                // question prompt has only been seen in an event log, not driven, and
+                // an Enter landing on a highlighted choice would answer the wrong thing.
+                // The phone is told which it was and that the PC is where to answer.
+                let plan = self
+                    .mux
+                    .as_ref()
+                    .and_then(|mux| {
+                        mux.pane_for_session(&session_id)
+                            .and_then(|id| mux.pane(id))
+                    })
+                    .is_some_and(|pane| {
+                        pane.pending_inputs().any(|(_, kind)| {
+                            kind == crate::events::lifecycle::InputKind::PlanApproval
+                        })
+                    });
+                let text = if !user_action {
+                    wording::answered_elsewhere(&title)
+                } else if plan {
+                    wording::plan_not_supported(&title)
+                } else {
+                    wording::question_not_supported(&title)
+                };
+                self.telegram_say(&session_id, Some(reply.user_message_id), text);
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+
+            if draft {
+                if self.injection_outstanding(&session_id) {
+                    // CST's own text, not the user's. Queue behind it, as thread
+                    // notices queue behind each other.
+                    if !reply.queued_told {
+                        self.telegram_say(
+                            &session_id,
+                            Some(reply.user_message_id),
+                            wording::queued(&title),
+                        );
+                        self.update_telegram(|state| {
+                            if let Some(held) = state.reply_mut(reply.update_id) {
+                                held.queued_told = true;
+                            }
+                        });
+                        changed = true;
+                    }
+                    continue;
+                }
+                self.telegram_say(
+                    &session_id,
+                    Some(reply.user_message_id),
+                    wording::has_draft(&title),
+                );
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+
+            if self.session_ready_for_wake(&session_id)
+                && self.paste_ready(&session_id, &reply.text)
+            {
+                self.deliver_telegram_text(&reply, &title);
+                changed = true;
+            } else if reply.age_seconds() >= Self::WAKE_PATIENCE_SECS {
+                // Blank for five minutes, or never came to accept a paste: say so
+                // rather than keep the user waiting in silence.
+                self.telegram_say(
+                    &session_id,
+                    Some(reply.user_message_id),
+                    wording::not_open(&title),
+                );
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+            }
+        }
+        if changed {
+            self.telegram_live_replies = crate::telegram::store::load_in(&self.telegram_state_root)
+                .replies
+                .len();
+        }
+        changed
+    }
+
+    /// Multi-line text needs bracketed paste, which Copilot turns on once it is reading
+    /// its composer; before that a newline would submit the first line alone.
+    fn paste_ready(&self, session_id: &str, text: &str) -> bool {
+        if !text.contains('\n') {
+            return true;
+        }
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
+            .is_some_and(crate::mux::Pane::bracketed_paste)
+    }
+
+    /// Type a reply into its session and tell the phone it landed.
+    fn deliver_telegram_text(&mut self, reply: &crate::telegram::store::Reply, title: &str) {
+        let text = crate::notifications::sanitize_message(&reply.text);
+        match self.inject_prompt(&reply.session_id, &text) {
+            Ok(()) => {
+                self.update_telegram(|state| {
+                    if let Some(held) = state.reply_mut(reply.update_id) {
+                        held.status = crate::telegram::store::ReplyStatus::Sent;
+                    }
+                });
+                self.telegram_react(reply.user_message_id);
+            }
+            Err(error) => {
+                // The pane went away between the check and the write.
+                self.telegram_say(
+                    &reply.session_id,
+                    Some(reply.user_message_id),
+                    crate::telegram::wording::not_open(title),
+                );
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                self.status_message = Some(format!("Could not deliver a Telegram reply: {error}"));
+            }
+        }
+    }
+
+    /// Whether the poller has recorded a pairing the open wizard is waiting for.
+    pub fn telegram_pairing_arrived(&mut self) -> bool {
+        let waiting = self
+            .telegram_wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.pairing.is_some());
+        if !waiting {
+            return false;
+        }
+        let state = crate::telegram::store::load_in(&self.telegram_state_root);
+        let Some(paired) = state.paired() else {
+            return false;
+        };
+        if let Some(wizard) = self.telegram_wizard.as_mut() {
+            wizard.pairing_arrived(paired);
+        }
+        self.telegram_wizard_to_config();
+        true
+    }
+
+    pub fn open_telegram_wizard(&mut self) {
+        self.settings_editing = None;
+        self.settings_input.clear();
+        self.telegram_wizard = Some(crate::telegram::wizard::Wizard::from_config(&self.config));
+    }
+
+    /// Copy what the wizard has established into the settings being edited.
+    ///
+    /// In memory only; the settings screen saves on close as it does for every toggle.
+    /// Done after every step rather than at the end, so the poll loop — which follows
+    /// `config` — starts as soon as a token checks out, which pairing needs.
+    fn telegram_wizard_to_config(&mut self) {
+        use crate::telegram::wizard::{StepKind, StepState};
+        let Some(wizard) = self.telegram_wizard.as_ref() else {
+            return;
+        };
+        if matches!(wizard.state_of(StepKind::Token), Some(StepState::Done(_))) {
+            self.config.telegram_bot_token = wizard.token_input.trim().to_string();
+        }
+        if wizard.paired_now {
+            self.config.telegram.enabled = true;
+        }
+        if let Some(paired) = wizard.paired {
+            self.config.telegram.chat_id = Some(paired.chat_id);
+            self.config.telegram.user_id = Some(paired.user_id);
+            self.config.telegram.chat_mode = paired.mode;
+        }
+        self.config.telegram.content = wizard.content;
+        self.config.telegram.replies = wizard.replies;
+    }
+
+    /// Close the wizard, keeping whatever it established.
+    pub fn close_telegram_wizard(&mut self) {
+        self.telegram_wizard_to_config();
+        // A code nobody sent must not pair the next stranger who finds it later.
+        let _ = crate::telegram::store::update_in(&self.telegram_state_root, |state| {
+            if matches!(
+                state.pairing,
+                Some(crate::telegram::store::Pairing::Armed { .. })
+            ) {
+                state.pairing = None;
+            }
+        });
+        self.telegram_wizard = None;
+    }
+
+    /// Enter on the wizard's current row.
+    pub fn telegram_wizard_enter(&mut self) {
+        use crate::telegram::wizard::StepKind;
+        let api_base = self.config.telegram.api_base.clone();
+        let Some(wizard) = self.telegram_wizard.as_mut() else {
+            return;
+        };
+        let kind = wizard.current().kind;
+        match kind {
+            StepKind::Token => {
+                // With a token in hand, Enter checks it; `e` is for changing it. Only an
+                // empty field makes Enter start typing.
+                if wizard.editing_token || !wizard.token_input.trim().is_empty() {
+                    wizard.editing_token = false;
+                    if let Some(message) = wizard.run_step(kind, &api_base) {
+                        self.status_message = Some(message);
+                    }
+                } else {
+                    wizard.editing_token = true;
+                }
+            }
+            StepKind::Pair => self.telegram_wizard_arm_pairing(),
+            StepKind::Rights | StepKind::Test => {
+                if let Some(message) = wizard.run_step(kind, &api_base) {
+                    self.status_message = Some(message);
+                }
+            }
+            StepKind::Mode | StepKind::Content => {}
+        }
+        self.telegram_wizard_to_config();
+    }
+
+    /// Show a code and wait for it. The poller, in whichever CST holds the lock, is what
+    /// sees it arrive; this only writes the code where that poller will look.
+    fn telegram_wizard_arm_pairing(&mut self) {
+        use crate::telegram::wizard::StepKind;
+        let Some(wizard) = self.telegram_wizard.as_mut() else {
+            return;
+        };
+        if let Some(blocker) = wizard.blocker(StepKind::Pair) {
+            self.status_message = Some(blocker);
+            return;
+        }
+        let code = crate::telegram::pairing_code();
+        let expires_at = chrono::Utc::now() + crate::telegram::PAIRING_WINDOW;
+        let armed = crate::telegram::store::update_in(&self.telegram_state_root, |state| {
+            state.pairing = Some(crate::telegram::store::Pairing::Armed {
+                code: code.clone(),
+                expires_at,
+            });
+        });
+        match armed {
+            Ok(()) => wizard.await_pairing(code, expires_at),
+            Err(error) => {
+                self.status_message = Some(format!("Could not start pairing: {error}"));
+            }
+        }
+    }
+
+    /// Collect finished checks and notice an expired code. Called on the tick.
+    pub fn poll_telegram_wizard(&mut self) -> bool {
+        let Some(wizard) = self.telegram_wizard.as_mut() else {
+            return false;
+        };
+        let mut changed = wizard.poll();
+        if let Some(prompt) = wizard.pairing.as_ref() {
+            if prompt.expires_at <= chrono::Utc::now() {
+                wizard.pairing_expired();
+                changed = true;
+            }
+        }
+        if changed {
+            self.telegram_wizard_to_config();
+        }
+        changed || self.telegram_pairing_arrived()
+    }
+
+    pub fn report_telegram_failure(&mut self, reason: String) -> bool {
+        if self.telegram_notice.as_deref() == Some(reason.as_str()) {
+            return false;
+        }
+        self.status_message = Some(reason.clone());
+        self.telegram_notice = Some(reason);
+        true
+    }
+
+    pub fn report_telegram_resumed(&mut self) -> bool {
+        if self.telegram_notice.take().is_none() {
+            return false;
+        }
+        self.status_message = Some("Telegram answered again".to_string());
+        true
+    }
+
     pub fn poll_notifications(&mut self) {
         let Some(worker) = self.notification_worker.as_ref() else {
             return;
@@ -3558,7 +4277,7 @@ impl App {
 
     pub fn exit_waits_for_notifications(&mut self) -> bool {
         const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-        if self.notification_pending == 0 {
+        if self.notification_pending == 0 && self.telegram_pending == 0 {
             return false;
         }
         let started = *self
@@ -5103,6 +5822,14 @@ impl App {
         thread: &crate::threads::ThreadRef,
     ) -> Result<()> {
         let pointer = crate::threads::wake_pointer(thread);
+        self.inject_prompt(session_id, &pointer)
+    }
+
+    /// Type text into a session's composer and submit it.
+    ///
+    /// Shared by thread wake-ups and Telegram replies. The caller has decided the pane
+    /// can take it; this only does the typing.
+    fn inject_prompt(&mut self, session_id: &str, text: &str) -> Result<()> {
         let Some(pane_id) = self.pane_for_session(session_id) else {
             anyhow::bail!("the session is no longer open");
         };
@@ -5112,7 +5839,7 @@ impl App {
         let Some(pane) = mux.pane_mut(pane_id) else {
             anyhow::bail!("the session is no longer open");
         };
-        pane.send_prompt_snippet(&pointer)?;
+        pane.send_prompt_snippet(text)?;
         pane.send_key(&crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
@@ -6522,6 +7249,227 @@ mod tests {
             app.notification_requests.is_empty(),
             "the current disk snapshot disabled notifications"
         );
+    }
+
+    fn telegram_paired_app() -> App {
+        let mut app = app_with(false);
+        // Otherwise enqueueing reloads the config from disk, which in a test is the
+        // user's real file.
+        app.disable_config_persistence();
+        app.config.telegram.enabled = true;
+        app.config.telegram.chat_id = Some(-100);
+        app.config.telegram.user_id = Some(7);
+        app.config.telegram.chat_mode = crate::config::TelegramChatMode::Forum;
+        app.config.telegram_bot_token =
+            "123456:AAHsecretsecretsecretsecretsecretsecret".to_string();
+        app
+    }
+
+    #[test]
+    fn a_telegram_notification_goes_out_whether_or_not_ntfy_is_configured() {
+        use crate::telegram::worker::OutboundJob;
+
+        let mut app = telegram_paired_app();
+        app.config.notifications.enabled = false;
+
+        app.enqueue_notification(
+            NotificationKind::Ready,
+            "Plan review".to_string(),
+            Some("sid-1"),
+        );
+
+        assert!(app.notification_requests.is_empty(), "ntfy is off");
+        assert_eq!(app.telegram_outbound.len(), 1);
+        let outbound = &app.telegram_outbound[0];
+        assert_eq!(outbound.chat_id, -100);
+        assert_eq!(outbound.mode, crate::config::TelegramChatMode::Forum);
+        assert_eq!(
+            outbound.token,
+            "123456:AAHsecretsecretsecretsecretsecretsecret"
+        );
+        match &outbound.job {
+            OutboundJob::Notify {
+                session_id,
+                content,
+            } => {
+                assert_eq!(session_id, "sid-1");
+                assert_eq!(content.title, "Plan review");
+                assert_eq!(content.kind, NotificationKind::Ready);
+                assert!(content.body.is_none(), "no event log, so no last message");
+            }
+            other => panic!("expected a notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telegram_sends_nothing_while_off_unpaired_or_without_a_session() {
+        let mut app = telegram_paired_app();
+        app.config.telegram.chat_id = None;
+        app.enqueue_notification(NotificationKind::Ready, "Unpaired".to_string(), Some("sid"));
+        assert!(
+            app.telegram_outbound.is_empty(),
+            "enabled but unpaired has nowhere to send"
+        );
+
+        let mut app = telegram_paired_app();
+        app.config.telegram.enabled = false;
+        app.enqueue_notification(NotificationKind::Ready, "Off".to_string(), Some("sid"));
+        assert!(app.telegram_outbound.is_empty());
+
+        let mut app = telegram_paired_app();
+        app.enqueue_notification(NotificationKind::Ready, "No session".to_string(), None);
+        assert!(
+            app.telegram_outbound.is_empty(),
+            "a reply would have nowhere to route"
+        );
+
+        assert!(app.telegram_poll_settings().is_some());
+        app.config.telegram.enabled = false;
+        assert!(
+            app.telegram_poll_settings().is_none(),
+            "no poller while off"
+        );
+    }
+
+    #[test]
+    fn arming_a_pairing_code_writes_it_for_the_poller_and_the_answer_lands_in_the_settings() {
+        use crate::telegram::store::{self, Pairing};
+        use crate::telegram::wizard::{Outcome, StepKind, StepState};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with(false);
+        app.telegram_state_root = temp.path().to_path_buf();
+        app.config.telegram_bot_token =
+            "123456:AAHsecretsecretsecretsecretsecretsecret".to_string();
+        app.open_telegram_wizard();
+        app.telegram_wizard
+            .as_mut()
+            .unwrap()
+            .apply(Outcome::Identity {
+                id: 1,
+                username: "cst_bot".to_string(),
+            });
+        // Move to the Pair row and press Enter.
+        app.telegram_wizard.as_mut().unwrap().cursor = 2;
+        app.telegram_wizard_enter();
+
+        let state = store::load_in(temp.path());
+        let Some(Pairing::Armed { code, .. }) = state.pairing else {
+            panic!("the code should be on disk for whichever CST polls: {state:?}");
+        };
+        assert_eq!(code.len(), 6);
+        assert!(app.telegram_wizard.as_ref().unwrap().pairing.is_some());
+        assert!(
+            !app.config.telegram.enabled && !app.config.telegram_bot_token.is_empty(),
+            "a checked token is kept, but only a completed pairing turns the channel on"
+        );
+        assert!(
+            app.telegram_poll_settings().is_some(),
+            "the poll loop runs while a code is armed, or nobody would see it arrive"
+        );
+
+        // The poller (in some CST) records who sent it.
+        store::update_in(temp.path(), |state| {
+            state.pairing = Some(Pairing::Paired(crate::telegram::Paired {
+                chat_id: -42,
+                user_id: 7,
+                mode: crate::config::TelegramChatMode::Forum,
+            }));
+        })
+        .unwrap();
+
+        assert!(
+            app.flush_telegram_replies(),
+            "the changed file is noticed on the tick"
+        );
+        assert!(
+            app.config.telegram.enabled,
+            "paired now, so the channel is on"
+        );
+        assert_eq!(app.config.telegram.chat_id, Some(-42));
+        assert_eq!(app.config.telegram.user_id, Some(7));
+        assert_eq!(
+            app.config.telegram.chat_mode,
+            crate::config::TelegramChatMode::Forum
+        );
+        let wizard = app.telegram_wizard.as_ref().unwrap();
+        assert!(matches!(
+            wizard.state_of(StepKind::Pair),
+            Some(StepState::Done(_))
+        ));
+        assert!(wizard.pairing.is_none());
+
+        // Closing with a code still armed would leave it for a stranger to find later.
+        // Pressing Enter on the Pair row again arms a fresh one, as re-pairing does.
+        app.telegram_wizard.as_mut().unwrap().cursor = 2;
+        app.telegram_wizard_enter();
+        assert!(matches!(
+            store::load_in(temp.path()).pairing,
+            Some(Pairing::Armed { .. })
+        ));
+        app.close_telegram_wizard();
+        assert!(store::load_in(temp.path()).pairing.is_none());
+        assert!(app.telegram_wizard.is_none());
+    }
+
+    #[test]
+    fn a_reply_for_a_session_that_is_not_open_is_refused_at_once_and_dropped() {
+        use crate::telegram::store::{self, Reply, ReplyStatus};
+        use crate::telegram::worker::OutboundJob;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = telegram_paired_app();
+        app.telegram_state_root = temp.path().to_path_buf();
+        let mut closed = session("sid-closed", "proj", "2026-01-01T10:00:00Z");
+        closed.summary = Some("Closed one".to_string());
+        app.sessions.push(closed);
+        store::update_in(temp.path(), |state| {
+            state.record_reply(Reply {
+                update_id: 1,
+                user_message_id: 10,
+                session_id: "sid-closed".to_string(),
+                text: "go".to_string(),
+                tool_call_id: None,
+                received_at: chrono::Utc::now(),
+                planned_at: chrono::Utc::now(),
+                queued_told: false,
+                status: ReplyStatus::Planned,
+            });
+            state.record_reply(Reply {
+                update_id: 2,
+                user_message_id: 20,
+                session_id: "sid-gone".to_string(),
+                text: "anyone?".to_string(),
+                tool_call_id: None,
+                received_at: chrono::Utc::now(),
+                planned_at: chrono::Utc::now(),
+                queued_told: false,
+                status: ReplyStatus::Planned,
+            });
+        })
+        .unwrap();
+
+        assert!(app.flush_telegram_replies());
+
+        assert!(
+            store::load_in(temp.path()).replies.is_empty(),
+            "nothing is held"
+        );
+        let said: Vec<(Option<i64>, String)> = app
+            .telegram_outbound
+            .iter()
+            .filter_map(|outbound| match &outbound.job {
+                OutboundJob::Say { reply_to, text, .. } => Some((*reply_to, text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said
+            .iter()
+            .any(|(to, text)| *to == Some(10) && text.contains("Closed one is not open in CST")));
+        assert!(said
+            .iter()
+            .any(|(to, text)| *to == Some(20) && text.contains("no longer exists")));
     }
 
     #[test]

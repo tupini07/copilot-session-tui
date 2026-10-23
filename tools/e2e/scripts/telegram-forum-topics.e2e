@@ -1,0 +1,40 @@
+# Paired with a group that has Topics. The first notification for a session opens a
+# topic named after it and lands there. A message typed into General gets a hint; a
+# message typed into the session's topic reaches the session without any Reply.
+
+size 110x30
+arg --mux
+fake_telegram forum
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 1500 Checkpoint reached. Waiting for a go-ahead before deploying.
+press enter
+press ctrl+b d
+wait_for Existing app session
+
+telegram_wait topic: Existing app session
+telegram_wait message in Existing app session: Checkpoint reached
+telegram_wait Checkpoint reached
+telegram_dump 01-topic-made
+
+telegram_say_bare which one of you is this for?
+telegram_wait Type in a session's topic to answer that session.
+
+telegram_say Go ahead and deploy
+press enter
+wait_for Fake Copilot is idling
+wait_for Fake Copilot received: Go ahead and deploy
+telegram_wait reaction on
+dump 02-topic-reply-delivered
+telegram_dump 02-topic-reply-delivered
+
+# A second turn reuses the topic rather than opening another.
+type e2e:work 1000
+press enter
+press ctrl+b d
+wait_for Existing app session
+wait 2000
+telegram_dump 03-second-turn

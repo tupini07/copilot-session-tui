@@ -1,0 +1,67 @@
+# The setup checklist, driven end to end against the stub: a token that checks out,
+# the group chosen, a pairing code sent, the topic rights refused once and then
+# granted, a test message, and the settings showing the paired chat afterwards.
+
+size 110x30
+arg --mux
+fake_telegram forum unpaired
+session existing-app Existing app session
+
+wait_for Existing app session
+press ,
+wait_for Global Settings
+# General, Worktrees, Terminal, Notifications, then Telegram.
+press tab tab tab tab
+wait_for Bot Token
+expect (not paired)
+dump 01-telegram-tab
+
+# Down to Set up… (the last row) and open the wizard.
+press down down down down down
+press enter
+wait_for Telegram Setup
+dump 02-wizard-opened
+
+# The token is already in the settings; Enter checks it.
+press enter
+wait_for @cst_e2e_bot
+dump 03-token-checked
+
+press down
+press g
+wait_for group with topics
+press down
+press enter
+wait_for Waiting for it to arrive
+expect startgroup=
+dump 04-waiting-for-code
+
+telegram_pair_code
+wait_for (chat -1000)
+telegram_wait CST is paired with this group
+dump 05-paired
+
+# Rights: refused first, then granted and retried.
+press down
+telegram_rights off
+press enter
+wait_for not an admin
+dump 06-rights-refused
+telegram_rights on
+press enter
+wait_for may manage topics
+dump 07-rights-ok
+
+press down
+press enter
+wait_for delivered
+telegram_wait topic: CST test
+telegram_wait closed topic: CST test
+dump 08-test-sent
+
+press esc
+wait_gone Telegram Setup
+expect group with topics
+dump 09-settings-paired
+press esc
+wait_for Global settings saved

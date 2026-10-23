@@ -14,6 +14,7 @@ pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 /// unlike chords that depend on the keyboard-enhancement protocol.
 pub const DEFAULT_MUX_PREFIX: &str = "C-b";
 pub const DEFAULT_NTFY_SERVER: &str = "https://ntfy.sh";
+pub const DEFAULT_TELEGRAM_API: &str = "https://api.telegram.org";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +81,82 @@ pub struct NotificationConfig {
     pub ready: bool,
     #[serde(default = "default_true")]
     pub error: bool,
+}
+
+/// Which kind of Telegram chat the bot was paired with. Decided by pairing, not typed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramChatMode {
+    /// One conversation with the bot; a reply to a session's message answers it.
+    #[default]
+    Private,
+    /// A group with Topics turned on; each session gets a topic and is typed into directly.
+    Forum,
+}
+
+impl TelegramChatMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Private => "private chat",
+            Self::Forum => "group with topics",
+        }
+    }
+}
+
+/// How much of a session's output goes to the phone.
+///
+/// Full is the default, the opposite of `ntfy_verbose`: this channel exists to let the
+/// user act on what the session said without opening the PC, and a status line does not
+/// allow that. Telegram can read bot chats, so the README says what this sends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramContent {
+    #[default]
+    Full,
+    Status,
+}
+
+impl TelegramContent {
+    pub const fn settings_label(self) -> &'static str {
+        match self {
+            Self::Full => "FULL",
+            Self::Status => "STATUS ONLY",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Full => Self::Status,
+            Self::Status => Self::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The one chat whose messages are acted on. Written by pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<i64>,
+    /// The one Telegram user whose messages are acted on. Written by pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    #[serde(default)]
+    pub chat_mode: TelegramChatMode,
+    #[serde(default = "default_true")]
+    pub replies: bool,
+    #[serde(default)]
+    pub content: TelegramContent,
+    /// Where the Bot API lives. Only tests point this anywhere but Telegram.
+    #[serde(default = "default_telegram_api")]
+    pub api_base: String,
+}
+
+impl TelegramConfig {
+    pub fn is_paired(&self) -> bool {
+        self.chat_id.is_some() && self.user_id.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +285,14 @@ pub struct UserConfig {
     #[serde(default)]
     pub ntfy_verbose: bool,
 
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+
+    /// Kept at the root so older CST versions preserve it through `extra` when saving,
+    /// for the same reason as `ntfy_access_token`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub telegram_bot_token: String,
+
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }
@@ -318,6 +403,24 @@ impl Default for NotificationConfig {
     }
 }
 
+fn default_telegram_api() -> String {
+    DEFAULT_TELEGRAM_API.to_string()
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chat_id: None,
+            user_id: None,
+            chat_mode: TelegramChatMode::Private,
+            replies: true,
+            content: TelegramContent::Full,
+            api_base: default_telegram_api(),
+        }
+    }
+}
+
 /// Drop repeated entries while preserving first-seen order.
 ///
 /// The file is hand-editable and a duplicate favorite would otherwise show the same
@@ -418,6 +521,8 @@ impl Default for UserConfig {
             notifications: NotificationConfig::default(),
             ntfy_access_token: String::new(),
             ntfy_verbose: false,
+            telegram: TelegramConfig::default(),
+            telegram_bot_token: String::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -864,12 +969,23 @@ pub fn validate_ntfy_access_token(token: &str) -> Result<()> {
 }
 
 pub fn normalize_ntfy_server(server: &str) -> Result<String> {
+    normalize_http_origin(server, "ntfy server")
+}
+
+/// Where CST talks to the Bot API. Normally Telegram itself; a test points it at a stub.
+pub fn normalize_telegram_api_base(server: &str) -> Result<String> {
+    normalize_http_origin(server, "Telegram API address")
+}
+
+/// An `http(s)://host[:port]` with nothing after it, so a path cannot route a request
+/// somewhere the user did not mean (an ntfy path is a topic; a Bot API path is a method).
+fn normalize_http_origin(server: &str, what: &str) -> Result<String> {
     let server = server.trim().trim_end_matches('/');
     let uri: ureq::http::Uri = server
         .parse()
-        .map_err(|_| anyhow::anyhow!("ntfy server is not a valid URL"))?;
+        .map_err(|_| anyhow::anyhow!("{what} is not a valid URL"))?;
     if !matches!(uri.scheme_str(), Some("http" | "https")) {
-        anyhow::bail!("ntfy server must start with http:// or https://");
+        anyhow::bail!("{what} must start with http:// or https://");
     }
     if uri.host().is_none_or(str::is_empty)
         || uri
@@ -879,9 +995,48 @@ pub fn normalize_ntfy_server(server: &str) -> Result<String> {
         || uri.query().is_some()
         || server.contains('#')
     {
-        anyhow::bail!("ntfy server must contain a valid host and no path, query, or fragment");
+        anyhow::bail!("{what} must contain a valid host and no path, query, or fragment");
     }
     Ok(server.to_string())
+}
+
+/// The shape BotFather hands out: a numeric bot id, a colon, and a long secret.
+///
+/// Checked for shape only. Whether it is *the* token is the wizard's and `cst doctor`'s
+/// business, by asking Telegram; this catches a paste that grabbed the wrong line.
+pub fn validate_telegram_bot_token(token: &str) -> Result<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("Telegram bot token is required when Telegram is enabled");
+    }
+    let Some((id, secret)) = token.split_once(':') else {
+        anyhow::bail!(
+            "Telegram bot token should look like 123456789:AAH...; paste what BotFather sent"
+        );
+    };
+    let id_ok = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit());
+    let secret_ok = secret.len() >= 30
+        && secret.len() <= 128
+        && secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !id_ok || !secret_ok {
+        anyhow::bail!(
+            "Telegram bot token should look like 123456789:AAH...; paste what BotFather sent"
+        );
+    }
+    Ok(())
+}
+
+/// Whether the Telegram settings can be saved. Pairing is deliberately not required:
+/// the user pastes a token, saves, and runs the wizard in whatever order suits them.
+pub fn validate_telegram_config(config: &UserConfig) -> Result<()> {
+    if !config.telegram.enabled {
+        return Ok(());
+    }
+    validate_telegram_bot_token(&config.telegram_bot_token)?;
+    let _ = normalize_telegram_api_base(&config.telegram.api_base)?;
+    Ok(())
 }
 
 fn valid_http_authority(authority: &str) -> bool {
@@ -1398,6 +1553,92 @@ mod tests {
         // silent switch for everyone who had it on.
         let saved = serde_json::to_value(UserConfig::default()).unwrap();
         assert_eq!(saved["mux"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn telegram_defaults_are_off_unpaired_and_full_content() {
+        let config: UserConfig = serde_json::from_str("{}").unwrap();
+
+        assert!(!config.telegram.enabled);
+        assert!(!config.telegram.is_paired());
+        assert_eq!(config.telegram.chat_mode, TelegramChatMode::Private);
+        assert_eq!(config.telegram.content, TelegramContent::Full);
+        assert!(config.telegram.replies);
+        assert_eq!(config.telegram.api_base, DEFAULT_TELEGRAM_API);
+        assert!(config.telegram_bot_token.is_empty());
+        // A fresh file should not carry pairing keys that mean nothing yet.
+        let saved = serde_json::to_value(UserConfig::default()).unwrap();
+        assert!(saved["telegram"].get("chat_id").is_none());
+        assert!(saved.get("telegram_bot_token").is_none());
+    }
+
+    #[test]
+    fn older_root_flattening_preserves_the_telegram_token_and_section() {
+        // An older CST rewriting the file keeps unknown root keys through `extra`, so
+        // the token lives at the root and the whole `telegram` section is one key.
+        #[derive(Serialize, Deserialize)]
+        struct OlderConfig {
+            #[serde(default)]
+            notifications: NotificationConfig,
+            #[serde(flatten)]
+            extra: BTreeMap<String, Value>,
+        }
+
+        let current = UserConfig {
+            telegram: TelegramConfig {
+                enabled: true,
+                chat_id: Some(42),
+                user_id: Some(7),
+                chat_mode: TelegramChatMode::Forum,
+                ..TelegramConfig::default()
+            },
+            telegram_bot_token: "123456:AAHexampleexampleexampleexampleexample".to_string(),
+            ..UserConfig::default()
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        let old: OlderConfig = serde_json::from_str(&json).unwrap();
+        let rewritten = serde_json::to_string(&old).unwrap();
+        let restored: UserConfig = serde_json::from_str(&rewritten).unwrap();
+
+        assert_eq!(restored.telegram, current.telegram);
+        assert_eq!(restored.telegram_bot_token, current.telegram_bot_token);
+    }
+
+    #[test]
+    fn telegram_token_shape_catches_a_wrong_paste_but_pairing_is_not_required_to_save() {
+        assert!(
+            validate_telegram_bot_token("123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw").is_ok()
+        );
+        for wrong in [
+            "",
+            "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+            "abc:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+            "123456789:short",
+            "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw with spaces",
+        ] {
+            assert!(validate_telegram_bot_token(wrong).is_err(), "{wrong:?}");
+        }
+
+        let mut config = UserConfig::default();
+        assert!(
+            validate_telegram_config(&config).is_ok(),
+            "disabled needs nothing"
+        );
+        config.telegram.enabled = true;
+        assert!(
+            validate_telegram_config(&config).is_err(),
+            "enabled needs a token"
+        );
+        config.telegram_bot_token = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw".to_string();
+        assert!(
+            validate_telegram_config(&config).is_ok(),
+            "unpaired but enabled saves, so the wizard can run afterwards"
+        );
+        config.telegram.api_base = "https://api.telegram.org/bot123".to_string();
+        assert!(
+            validate_telegram_config(&config).is_err(),
+            "a path would misroute every call"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod gh_stub;
 mod screen;
 mod stub;
+mod telegram_stub;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -159,6 +160,7 @@ fn run() -> Result<bool, String> {
         browser,
         dumps: Vec::new(),
         config_before: None,
+        telegram: None,
     };
 
     let mut failure = None;
@@ -251,6 +253,26 @@ enum Step {
     HeldReply(String),
     /// The fake `gh` marker to leave in place, or `None` for GitHub working normally.
     Github(Option<&'static str>),
+    /// A stub Bot API, with CST configured against it: paired, or with a token only.
+    FakeTelegram {
+        mode: telegram_stub::Mode,
+        paired: bool,
+    },
+    /// A message into the chat: from the paired user unless `from` says otherwise, as
+    /// a reply to CST's last message (or in its topic) unless `bare`.
+    TelegramSay {
+        from: i64,
+        text: String,
+        bare: bool,
+    },
+    /// Send the pairing code CST armed, as pressing Start would.
+    TelegramPairCode,
+    TelegramWait(String),
+    TelegramExpect(String),
+    TelegramExpectNot(String),
+    TelegramDump(String),
+    /// Whether the stub says the bot may manage topics.
+    TelegramRights(bool),
     Wait(Duration),
     WaitFor(String),
     WaitGone(String),
@@ -292,6 +314,7 @@ impl Step {
                 | Step::FakeGh
                 | Step::WatchThread(_)
                 | Step::HeldReply(_)
+                | Step::FakeTelegram { .. }
         )
     }
 }
@@ -388,6 +411,56 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             "logged-out" => Step::Github(Some(gh_stub::LOGGED_OUT_MARKER)),
             "up" => Step::Github(None),
             other => return Err(format!("github goes down, logged-out or up, not {other:?}")),
+        },
+        "fake_telegram" => {
+            let mut mode = telegram_stub::Mode::Private;
+            let mut paired = true;
+            for word in rest.split_whitespace() {
+                match word {
+                    "private" => mode = telegram_stub::Mode::Private,
+                    "forum" => mode = telegram_stub::Mode::Forum,
+                    "unpaired" => paired = false,
+                    other => {
+                        return Err(format!(
+                            "fake_telegram takes `private` or `forum`, and `unpaired`, not {other:?}"
+                        ))
+                    }
+                }
+            }
+            Step::FakeTelegram { mode, paired }
+        }
+        "telegram_say" => Step::TelegramSay {
+            from: telegram_stub::USER_ID,
+            text: need("text")?,
+            bare: false,
+        },
+        "telegram_say_bare" => Step::TelegramSay {
+            from: telegram_stub::USER_ID,
+            text: need("text")?,
+            bare: true,
+        },
+        "telegram_say_from" => {
+            let text = need("a user id, then text")?;
+            let (from, text) = text
+                .split_once(' ')
+                .ok_or("telegram_say_from wants a user id, then the text")?;
+            Step::TelegramSay {
+                from: from
+                    .parse()
+                    .map_err(|_| format!("telegram_say_from wants a numeric user id, got {from:?}"))?,
+                text: text.trim().to_string(),
+                bare: false,
+            }
+        }
+        "telegram_pair_code" => Step::TelegramPairCode,
+        "telegram_wait" => Step::TelegramWait(need("text")?),
+        "telegram_expect" => Step::TelegramExpect(need("text")?),
+        "telegram_expect_not" => Step::TelegramExpectNot(need("text")?),
+        "telegram_dump" => Step::TelegramDump(need("a name")?),
+        "telegram_rights" => match need("on or off")?.as_str() {
+            "on" => Step::TelegramRights(true),
+            "off" => Step::TelegramRights(false),
+            other => return Err(format!("telegram_rights goes on or off, not {other:?}")),
         },
         "wait" => Step::Wait(millis(need("milliseconds")?)?),
         "wait_for" => Step::WaitFor(need("text")?),
@@ -560,6 +633,7 @@ struct Setup {
     fake_gh: bool,
     watched: Vec<String>,
     held: Vec<String>,
+    telegram: Option<(telegram_stub::Mode, bool)>,
 }
 
 struct Running {
@@ -582,6 +656,7 @@ struct Driver {
     browser: Option<PathBuf>,
     dumps: Vec<PathBuf>,
     config_before: Option<Option<Vec<u8>>>,
+    telegram: Option<telegram_stub::TelegramStub>,
 }
 
 impl Driver {
@@ -598,6 +673,7 @@ impl Driver {
             Step::FakeGh => self.setup.fake_gh = true,
             Step::WatchThread(url) => self.setup.watched.push(url.clone()),
             Step::HeldReply(url) => self.setup.held.push(url.clone()),
+            Step::FakeTelegram { mode, paired } => self.setup.telegram = Some((*mode, *paired)),
             Step::Pace(pace) => self.pace = *pace,
             Step::Timeout(timeout) => self.timeout = *timeout,
             _ => {
@@ -689,7 +765,124 @@ impl Driver {
                 }
                 Ok(())
             }
+            Step::TelegramSay { from, text, bare } => {
+                let stub = self.telegram_stub()?;
+                let (reply_to, thread_id) = if *bare {
+                    (None, None)
+                } else {
+                    match stub.last_notification() {
+                        Some(sent) => match stub.mode {
+                            // In a forum the topic is the address; a reply inside it
+                            // would say the same thing twice.
+                            telegram_stub::Mode::Forum if sent.thread_id.is_some() => {
+                                (None, sent.thread_id)
+                            }
+                            _ => (Some(sent.message_id), None),
+                        },
+                        None => {
+                            return Err(
+                                "telegram_say replies to CST's last message, and CST has sent nothing yet; use telegram_say_bare"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                };
+                stub.say(*from, text, reply_to, thread_id);
+                std::thread::sleep(self.pace);
+                Ok(())
+            }
+            Step::TelegramPairCode => {
+                let code = self.armed_pairing_code()?;
+                let stub = self.telegram_stub()?;
+                stub.say(telegram_stub::USER_ID, &format!("/start {code}"), None, None);
+                std::thread::sleep(self.pace);
+                Ok(())
+            }
+            Step::TelegramWait(text) => {
+                let started = Instant::now();
+                loop {
+                    if self.telegram_stub()?.outbox().iter().any(|line| line.contains(text.as_str())) {
+                        return Ok(());
+                    }
+                    if started.elapsed() > self.timeout {
+                        return Err(format!(
+                            "waited {}ms for Telegram to receive {text:?}; it has:\n{}",
+                            self.timeout.as_millis(),
+                            self.telegram_stub()?.outbox().join("\n")
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            Step::TelegramExpect(text) => {
+                let outbox = self.telegram_stub()?.outbox();
+                if outbox.iter().any(|line| line.contains(text.as_str())) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected Telegram to have received {text:?}; it has:\n{}",
+                        outbox.join("\n")
+                    ))
+                }
+            }
+            Step::TelegramExpectNot(text) => {
+                let outbox = self.telegram_stub()?.outbox();
+                match outbox.iter().find(|line| line.contains(text.as_str())) {
+                    None => Ok(()),
+                    Some(line) => Err(format!(
+                        "did not expect Telegram to receive {text:?}, found {line:?}"
+                    )),
+                }
+            }
+            Step::TelegramDump(name) => {
+                let stub = self.telegram_stub()?;
+                let mut text = stub.outbox().join("\n");
+                text.push_str("\n\n--- requests ---\n");
+                text.push_str(&stub.requests().join("\n"));
+                let path = self.run_dir.join(format!("{name}.telegram.txt"));
+                std::fs::write(&path, text).map_err(|error| error.to_string())?;
+                println!("dumped {name}.telegram.txt");
+                Ok(())
+            }
+            Step::TelegramRights(admin) => {
+                self.telegram_stub()?.set_admin(*admin);
+                Ok(())
+            }
             _ => unreachable!("setup steps are handled before launching"),
+        }
+    }
+
+    fn telegram_stub(&self) -> Result<&telegram_stub::TelegramStub, String> {
+        self.telegram
+            .as_ref()
+            .ok_or_else(|| "this needs `fake_telegram` in the setup".to_string())
+    }
+
+    /// The code CST wrote for the poller to look for, read from its state file.
+    fn armed_pairing_code(&self) -> Result<String, String> {
+        let path = self
+            .run_dir
+            .join("cst-home")
+            .join("data")
+            .join("copilot-session-tui")
+            .join("telegram.json");
+        let started = Instant::now();
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Some(at) = text.find("\"code\":") {
+                    let rest = &text[at + 7..];
+                    if let Some(start) = rest.find('"') {
+                        let rest = &rest[start + 1..];
+                        if let Some(end) = rest.find('"') {
+                            return Ok(rest[..end].to_string());
+                        }
+                    }
+                }
+            }
+            if started.elapsed() > self.timeout {
+                return Err("CST has not armed a pairing code; open Set up… and press Enter on the Pair row first".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -781,6 +974,39 @@ impl Driver {
                 ),
             )
             .map_err(|error| error.to_string())?;
+        }
+
+        // The stub Bot API, and CST pointed at it. Merged into the script's own settings
+        // by text, since the crate has no JSON library: the script's object loses its
+        // closing brace and gains the Telegram keys.
+        if let Some((mode, paired)) = self.setup.telegram {
+            let stub = telegram_stub::TelegramStub::start(mode)?;
+            let pairing = if paired {
+                format!(
+                    r#""chat_id": {}, "user_id": {}, "chat_mode": "{}", "#,
+                    mode.chat_id(),
+                    telegram_stub::USER_ID,
+                    mode.label()
+                )
+            } else {
+                String::new()
+            };
+            let telegram = format!(
+                r#""telegram": {{"enabled": true, {pairing}"api_base": "{}"}}, "telegram_bot_token": "{}""#,
+                stub.api_base(),
+                telegram_stub::TOKEN
+            );
+            let merged = match self.setup.config.as_deref().map(str::trim) {
+                Some(json) if json != "{}" => {
+                    let body = json
+                        .strip_suffix('}')
+                        .ok_or("the `config` JSON must be one object")?;
+                    format!("{body}, {telegram}}}")
+                }
+                _ => format!("{{{telegram}}}"),
+            };
+            self.setup.config = Some(merged);
+            self.telegram = Some(stub);
         }
 
         // Where CST looks for its settings under CST_HOME; without a `config` line

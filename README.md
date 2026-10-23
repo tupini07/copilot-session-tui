@@ -685,8 +685,119 @@ existing session event log and does not make an additional model call. Delivery 
 on a background worker with bounded timeout/retry behavior, so it cannot block typing or
 Copilot output.
 
-This integration is outbound only. Replies, Telegram bots, remote approvals, arbitrary
-keypresses, and remote session control are intentionally unsupported.
+ntfy is outbound only: nothing you do on the phone reaches a session. For that, see the
+Telegram channel below.
+
+### Replies from your phone with Telegram
+
+CST can also talk to a Telegram bot of your own. Every attention event is sent as a
+message carrying what the session last said; a question comes with its choices, a plan
+with its summary, and those, like an error, are captioned in italics with what the
+session is waiting for. A finished turn with its text needs no caption and gets none. In
+a private chat the message starts with the session's name in brackets, since every
+session shares that one conversation; in a group with topics the topic is the name.
+**Reply to it on the
+phone and the reply is typed into that session and sent**, so you can read what an agent
+did and tell it what to do next without opening the PC.
+
+Only one person and one chat are ever listened to: the ones that paired. Anyone else who
+reaches the bot is ignored without a word, and nothing is held for you to approve. The
+sender is checked on every message against the Telegram user id that pairing recorded,
+which Telegram itself verifies.
+
+#### Setting it up
+
+1. In Telegram, open **@BotFather**, send `/newbot`, give the bot a name and a username
+   ending in `bot`, and copy the token it sends you. A bot that another program already
+   uses cannot be shared: Telegram allows one reader per bot, and both would see
+   `409 Conflict`. Make one just for CST.
+2. In CST, press `,` for Global Settings, go to the **Telegram** tab, and choose
+   **Set up…**. The wizard is a checklist: paste the token and it is checked against
+   Telegram; choose a private chat or a group with Topics; follow the link it shows, or
+   send the code it shows, and the chat is paired; a test message proves delivery. Each
+   row says what failed and why, and can be redone on its own. Open it again later and a
+   working setup shows every row done.
+3. Or from a shell: `cst telegram setup --token <TOKEN>`, with `--group` for a group.
+   `cst telegram status`, `pair` and `test` do the pieces. `cst doctor` reports the
+   state of the bot afterwards.
+
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "chat_id": 123456789,
+    "user_id": 123456789,
+    "chat_mode": "forum",
+    "content": "full",
+    "replies": true
+  },
+  "telegram_bot_token": "123456789:AAH..."
+}
+```
+
+`chat_id`, `user_id` and `chat_mode` are written by pairing, never typed. The token is
+masked outside edit mode and kept at the root of the file so older CST versions preserve
+it; protect the file as you would any credential.
+
+#### Two kinds of chat
+
+- **A private chat with the bot.** Every session's messages arrive in one conversation,
+  interleaved, each starting with its name. To answer a session, use Telegram's *Reply*
+  on one of its messages. A message that replies to nothing is answered with a hint, never
+  guessed at.
+- **A group with Topics turned on.** CST opens one topic per session, named after it, and
+  everything about that session lands in its topic. Type in the topic to answer the
+  session; no Reply needed. You are notified for every topic unless you mute one, and the
+  notification names the topic. The bot must be an admin of the group with the **Manage
+  Topics** right; the wizard's link requests that on the way in, and checks it. This is
+  the mode for running many sessions at once.
+
+The wizard reads which kind you paired from the chat itself, so there is nothing to
+configure. Pairing again with a fresh code is how you move the bot from one to the other.
+
+#### What a reply does
+
+A reply is typed into the session's composer and submitted, as if you had typed it. CST
+confirms with a 👍 on your message. When it cannot deliver, it says so at once, and the
+message stays in Telegram to send again:
+
+- the session is **not open in CST**: open it on the PC and reply again. Nothing is
+  queued for a closed session;
+- the session has **unsent text in its composer**: finish or clear it at the PC first;
+- the session is **working**: you are told once that the reply is queued, and it goes in
+  when the turn ends;
+- the session is waiting for a **tool permission**: that is answered at the keyboard only;
+- the session is waiting on a **question or a plan approval**: in this version those are
+  answered at the PC. The message still shows the question and its choices, or the plan,
+  so you know what it is waiting for. Answering them from the phone is next, once how
+  Copilot's question prompt takes typed text has been checked against the real thing.
+
+A reply sent while no CST was running is seen on the next start and gets the "not open"
+answer, since the session is not open yet either. Telegram keeps undelivered messages for
+24 hours. Telegram needs the multiplexer (`mux`), as threads do: without it there is no
+pane to type into.
+
+Arbitrary keypresses, shell commands, tool-permission approvals, file uploads and
+streaming the transcript are not supported and not planned. A reply is text, addressed
+to one session.
+
+#### What is sent, and privacy
+
+**Full** content is the default: the session's last message of the current work cycle,
+plus the question and its choices or the plan summary when there is one. Nothing is cut:
+content longer than one Telegram message is split into as many parts as it takes, at a
+paragraph break where there is one, else a line break, a sentence end or a word, and each
+part says which of how many it is. Choose **Status
+only** in the Telegram tab to send the session's name and the kind of attention it wants
+and nothing else, like ntfy.
+
+Full content is conversation content, and Telegram can read bot chats; they are not
+end-to-end encrypted. If that is not acceptable for a repository, use status only, or turn
+Telegram off and keep ntfy.
+
+Only the CST holding the poller lock reads from Telegram, so several CSTs on one machine
+share one bot without conflict; whichever one has the session open delivers the reply.
+Two machines need two bots.
 
 Input and Copilot output wake the mux immediately. Established idle panes do not redraw
 continuously: CST uses a five-second maintenance cadence when nothing is changing, while

@@ -418,6 +418,18 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
             .filter(|character| !character.is_control())
             .collect::<String>();
         match app.mode {
+            // The wizard swallows keys before the settings rows do, so a pasted token
+            // has to reach its own buffer here.
+            Mode::Settings
+                if app
+                    .telegram_wizard
+                    .as_ref()
+                    .is_some_and(|wizard| wizard.editing_token) =>
+            {
+                if let Some(wizard) = app.telegram_wizard.as_mut() {
+                    wizard.token_input.push_str(text.trim());
+                }
+            }
             Mode::Settings if app.settings_editing.is_some() => app.settings_input.push_str(&text),
             Mode::ProjectSettings if app.project_settings_editing => {
                 app.project_settings_input.push_str(&text);
@@ -1751,6 +1763,10 @@ fn handle_help(app: &mut App, key: KeyCode) {
 }
 
 fn handle_settings(app: &mut App, key: KeyCode) {
+    if app.telegram_wizard.is_some() {
+        handle_telegram_wizard(app, key);
+        return;
+    }
     if app.theme_picker.is_some() {
         match key {
             KeyCode::Up => app.move_theme_picker(-1),
@@ -1793,6 +1809,10 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 return;
             }
             if let Err(error) = config::validate_user_notification_config(&app.config) {
+                app.status_message = Some(error.to_string());
+                return;
+            }
+            if let Err(error) = config::validate_telegram_config(&app.config) {
                 app.status_message = Some(error.to_string());
                 return;
             }
@@ -1926,8 +1946,99 @@ fn handle_settings(app: &mut App, key: KeyCode) {
             15 => {
                 app.config.notifications.error = !app.config.notifications.error;
             }
+            24 => {
+                app.config.telegram.enabled = !app.config.telegram.enabled;
+            }
+            25 => begin_global_edit(
+                app,
+                SettingsEditField::TelegramBotToken,
+                app.config.telegram_bot_token.clone(),
+            ),
+            26 | 29 => app.open_telegram_wizard(),
+            27 => {
+                app.config.telegram.content = app.config.telegram.content.next();
+            }
+            28 => {
+                app.config.telegram.replies = !app.config.telegram.replies;
+            }
             _ => {}
         },
+        _ => {}
+    }
+}
+
+/// The Telegram setup wizard, open over Global Settings.
+///
+/// Esc closes the wizard and keeps what it established; the settings screen itself is
+/// still open underneath, and saves on its own Esc as it does for every other row.
+fn handle_telegram_wizard(app: &mut App, key: KeyCode) {
+    use crate::config::TelegramChatMode;
+    use crate::telegram::wizard::StepKind;
+
+    let editing_token = app
+        .telegram_wizard
+        .as_ref()
+        .is_some_and(|wizard| wizard.editing_token);
+    if editing_token {
+        let Some(wizard) = app.telegram_wizard.as_mut() else {
+            return;
+        };
+        match key {
+            KeyCode::Esc => wizard.editing_token = false,
+            KeyCode::Enter => app.telegram_wizard_enter(),
+            KeyCode::Backspace => {
+                wizard.token_input.pop();
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                wizard.token_input.push(character);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let current = app
+        .telegram_wizard
+        .as_ref()
+        .map(|wizard| wizard.current().kind);
+    match key {
+        KeyCode::Esc => app.close_telegram_wizard(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.move_cursor(-1);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.move_cursor(1);
+            }
+        }
+        KeyCode::Enter => app.telegram_wizard_enter(),
+        KeyCode::Char('e') if current == Some(StepKind::Token) => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.editing_token = true;
+            }
+        }
+        KeyCode::Char('p') if current == Some(StepKind::Mode) => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.choose_mode(TelegramChatMode::Private);
+            }
+        }
+        KeyCode::Char('g') if current == Some(StepKind::Mode) => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.choose_mode(TelegramChatMode::Forum);
+            }
+        }
+        KeyCode::Char('c') if current == Some(StepKind::Content) => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.cycle_content();
+            }
+        }
+        KeyCode::Char('r') if current == Some(StepKind::Content) => {
+            if let Some(wizard) = app.telegram_wizard.as_mut() {
+                wizard.toggle_replies();
+            }
+        }
         _ => {}
     }
 }
@@ -2028,6 +2139,16 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
                 return;
             }
             app.config.ntfy_access_token = value;
+        }
+        SettingsEditField::TelegramBotToken => {
+            // Blank clears it, so a bot can be removed without editing the file.
+            if !value.is_empty() {
+                if let Err(error) = config::validate_telegram_bot_token(&value) {
+                    app.status_message = Some(error.to_string());
+                    return;
+                }
+            }
+            app.config.telegram_bot_token = value;
         }
         SettingsEditField::MaxAutopilotContinues => {
             // Blank clears the override rather than meaning zero, which would pin

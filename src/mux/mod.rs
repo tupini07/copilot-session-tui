@@ -33,6 +33,16 @@ pub enum MuxEvent {
     ThreadWatchResumed,
     /// A watched thread looks like it is going in circles. Reported, never acted on.
     ThreadStalled(String),
+    /// The Telegram poller in this process wrote replies to disk. A local wake-up only:
+    /// another CST's poller cannot reach this channel, so the apply pass also watches
+    /// the file's modification time.
+    TelegramRepliesChanged,
+    /// Somebody sent the pairing code; the poller recorded who and where.
+    TelegramPaired,
+    /// The Telegram channel could not do its job, with a sentence saying why.
+    TelegramFailed(String),
+    /// Telegram answered again after a failure.
+    TelegramResumed,
     /// The worktree a tab was opened for has been created, or could not be.
     WorktreeReady(PaneId, Box<crate::app::WorktreeOutcome>),
     Term(crossterm::event::Event),

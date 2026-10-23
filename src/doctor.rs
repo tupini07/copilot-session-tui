@@ -127,12 +127,21 @@ pub fn gather(copilot_home: &Path) -> Report {
     let config_path = crate::config::config_path();
     let config = crate::config::load_existing_base_config(&config_path);
 
+    // Only asked when Telegram is on: an install that never uses it must not wait on
+    // a network call for it. Never `getUpdates`, which would steal a running CST's poll.
+    let telegram = config
+        .as_ref()
+        .ok()
+        .and_then(|config| config.as_ref())
+        .map(probe_telegram);
+
     Report {
         cst_version: env!("CARGO_PKG_VERSION"),
         checks: vec![
             copilot_check(copilot.as_ref()),
             gh_installed_check(&auth),
             gh_auth_check(&auth),
+            telegram_check(telegram.as_ref()),
             git_check(crate::session::worktree::git_version()),
             tmux_check(crate::session::tmux::TmuxSupport::detect()),
             hooks_check(hooks),
@@ -383,6 +392,117 @@ fn hooks_check(status: Option<anyhow::Result<PluginStatus>>) -> Check {
             format!("could not be checked: {error:#}"),
             Some(HOOKS_FEATURE),
             "Run `cst hooks status` yourself to see what it reports.".to_string(),
+        ),
+    }
+}
+
+/// What the Telegram probes found. Pure data, so the wording can be tested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramProbe {
+    Disabled,
+    /// On, but the token is missing or misshapen.
+    BadToken(String),
+    /// The token answered as this bot; pairing and rights as found.
+    Bot {
+        username: String,
+        paired: Option<crate::config::TelegramChatMode>,
+        /// Group only: the bot may manage topics, or why not.
+        rights: Option<Result<(), String>>,
+    },
+    /// The token did not answer.
+    Unreachable(String),
+}
+
+fn probe_telegram(config: &crate::config::UserConfig) -> TelegramProbe {
+    use crate::telegram::bot::UreqBot;
+    use crate::telegram::wizard::{check_identity, check_rights, Outcome};
+
+    let telegram = &config.telegram;
+    if !telegram.enabled {
+        return TelegramProbe::Disabled;
+    }
+    if let Err(error) = crate::config::validate_telegram_bot_token(&config.telegram_bot_token) {
+        return TelegramProbe::BadToken(error.to_string());
+    }
+    let bot = UreqBot::new(&telegram.api_base, &config.telegram_bot_token, GH_TIMEOUT);
+    let (id, username) = match check_identity(&bot) {
+        Ok(Outcome::Identity { id, username }) => (id, username),
+        Ok(_) => return TelegramProbe::Unreachable("unexpected answer".to_string()),
+        Err((_, reason)) => return TelegramProbe::Unreachable(reason),
+    };
+    let paired = telegram.is_paired().then_some(telegram.chat_mode);
+    let rights = match (telegram.chat_id, paired) {
+        (Some(chat_id), Some(crate::config::TelegramChatMode::Forum)) => Some(
+            check_rights(&bot, chat_id, id)
+                .map(|_| ())
+                .map_err(|(_, why)| why),
+        ),
+        _ => None,
+    };
+    TelegramProbe::Bot {
+        username,
+        paired,
+        rights,
+    }
+}
+
+fn telegram_check(probe: Option<&TelegramProbe>) -> Check {
+    const NAME: &str = "Telegram";
+    const FEATURE: &str = "notifications and replies on your phone through Telegram";
+    match probe {
+        None | Some(TelegramProbe::Disabled) => Check::ok(
+            NAME,
+            Importance::Optional,
+            "off; turn it on in Global Settings (,) or run `cst telegram setup`.",
+        ),
+        Some(TelegramProbe::BadToken(why)) => Check::unhealthy(
+            NAME,
+            Importance::Optional,
+            Health::Degraded,
+            format!("on, but {why}"),
+            Some(FEATURE),
+            "Paste the token from @BotFather into Global Settings, or run `cst telegram setup --token <TOKEN>`.",
+        ),
+        Some(TelegramProbe::Unreachable(why)) => Check::unhealthy(
+            NAME,
+            Importance::Optional,
+            Health::Degraded,
+            format!("on, but the bot token did not work: {why}"),
+            Some(FEATURE),
+            "Check the network and the token. A bot shared with another program answers 409 to one of them.",
+        ),
+        Some(TelegramProbe::Bot {
+            username,
+            paired: None,
+            ..
+        }) => Check::unhealthy(
+            NAME,
+            Importance::Optional,
+            Health::Degraded,
+            format!("@{username} answers, but no chat is paired yet"),
+            Some(FEATURE),
+            "Run `cst telegram pair`, or Set up... in Global Settings.",
+        ),
+        Some(TelegramProbe::Bot {
+            username,
+            paired: Some(mode),
+            rights: Some(Err(why)),
+        }) => Check::unhealthy(
+            NAME,
+            Importance::Optional,
+            Health::Degraded,
+            format!("@{username} is paired with a {} but cannot manage its topics: {why}", mode.label()),
+            Some("one topic per session; messages cannot be delivered to the group"),
+            "Make the bot a group admin with the Manage Topics right.",
+        ),
+        Some(TelegramProbe::Bot {
+            username,
+            paired: Some(mode),
+            rights: _,
+        }) => Check::ok(
+            NAME,
+            Importance::Optional,
+            format!("@{username} is paired with a {}.", mode.label()),
         ),
     }
 }

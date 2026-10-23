@@ -1,0 +1,32 @@
+# The user left half a message in the session's composer and walked away. A reply
+# from the phone must not be glued onto it and sent; the phone is told why instead.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 1000
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait message: <b>(Existing app session)</b>
+
+# Back into the pane, start typing, and leave without sending.
+press enter
+wait_for Fake Copilot is idling
+type half a thought
+press ctrl+b d
+wait_for Existing app session
+
+telegram_say and here is the other half
+telegram_wait Not delivered: Existing app session has unsent text in its composer
+telegram_expect_not reaction on
+press enter
+wait_for Fake Copilot is idling
+expect_not Fake Copilot received: and here is the other half
+dump 01-draft-kept
+telegram_dump 01-draft-kept

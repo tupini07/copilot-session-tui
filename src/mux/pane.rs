@@ -1125,6 +1125,36 @@ impl Pane {
         !self.pending_inputs.is_empty() || self.hook_waiting.is_some()
     }
 
+    /// Note pasted text on its way to the child, which puts a draft in the composer as
+    /// surely as typing does.
+    ///
+    /// Found by driving the real binary: on Windows a burst of typed characters reaches
+    /// CST as a paste, so without this a user who typed a line and walked away had no
+    /// draft as far as a reply from the phone could tell, and the reply landed on top.
+    pub fn note_user_paste(&mut self, text: &str) {
+        if !self.is_running() || text.is_empty() {
+            return;
+        }
+        self.composer_occupied = true;
+    }
+
+    /// The questions and plan approvals Copilot has open, by tool call id.
+    ///
+    /// Exposed so an answer written for one specific question can be matched against
+    /// it before anything is typed: a late answer must never land on a different
+    /// question than the one it was read from.
+    pub fn pending_inputs(&self) -> impl Iterator<Item = (&str, InputKind)> {
+        self.pending_inputs
+            .iter()
+            .map(|(id, kind)| (id.as_str(), *kind))
+    }
+
+    /// Copilot is waiting for the user to allow a tool call. Not a question, and
+    /// deliberately not answerable from anywhere but the keyboard.
+    pub fn awaiting_tool_permission(&self) -> bool {
+        self.hook_waiting == Some(HookAttention::Permission)
+    }
+
     pub fn acknowledge_attention(&mut self) {
         self.needs_attention = false;
     }
@@ -1876,6 +1906,31 @@ mod tests {
 
         pane.note_user_key(&key(KeyCode::Enter));
         assert!(!pane.has_draft(), "sending empties the composer");
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pasting_marks_a_draft_like_typing_does() {
+        // Windows hands CST a burst of typed characters as one paste, so a draft that
+        // arrived that way has to count or a phone reply lands on top of it.
+        use crossterm::event::KeyCode;
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+
+        pane.note_user_paste("");
+        assert!(
+            !pane.has_draft(),
+            "an empty paste puts nothing in the composer"
+        );
+        pane.note_user_paste("half a thought");
+        assert!(pane.has_draft());
+        pane.note_user_key(&key(KeyCode::Enter));
+        assert!(!pane.has_draft());
         pane.shutdown().unwrap();
     }
 

@@ -1,0 +1,33 @@
+# Somebody who is not the paired user reaches the bot. Nothing happens: nothing is
+# typed into any session, and they are not even answered. The paired user's own
+# reply, right after, still works.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 1000
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait message: <b>(Existing app session)</b>
+
+telegram_say_from 555 rm -rf everything please
+wait 3000
+telegram_expect_not Reply to a session
+telegram_expect_not Not delivered
+press enter
+wait_for Fake Copilot is idling
+wait 1000
+expect_not Fake Copilot received: rm -rf
+dump 01-stranger-ignored
+telegram_dump 01-stranger-ignored
+
+telegram_say carry on
+wait_for Fake Copilot received: carry on
+telegram_wait reaction on
+dump 02-owner-still-heard

@@ -331,6 +331,9 @@ fn handle_chat_event(app: &mut App, event: Event) {
         }
         Event::Paste(text) => {
             if let Some(pane) = app.mux.as_mut().and_then(|mux| mux.focused_pane_mut()) {
+                // A paste is typing too: text sitting in the composer that a wake-up or
+                // a phone reply must not be appended to and submitted with.
+                pane.note_user_paste(&text);
                 let _ = pane.send_paste(&text);
             }
         }
@@ -3069,6 +3072,10 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             app.report_thread_watch_failure(reason)
         }
         MuxEvent::ThreadWatchResumed => app.report_thread_watch_resumed(),
+        MuxEvent::TelegramRepliesChanged => app.flush_telegram_replies(),
+        MuxEvent::TelegramPaired => app.telegram_pairing_arrived(),
+        MuxEvent::TelegramFailed(reason) => app.report_telegram_failure(reason),
+        MuxEvent::TelegramResumed => app.report_telegram_resumed(),
         MuxEvent::Term(_) => true,
     }
 }
