@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.37.0 - 2026-10-23
+
+- Get each session's attention events on your phone through a Telegram bot, with the full text it said.
+- Reply on the phone and the reply is typed into that session and sent, confirmed with a thumbs-up.
+- Pair a private chat, or a group with topics where every session gets its own topic.
+- A checklist in Global Settings sets the bot up step by step; cst telegram does the same from a shell.
+- A reply that cannot be delivered is refused at once with the reason, instead of waiting somewhere.
+- Settings sections scroll to the row you select instead of stopping one row short.
+- Text pasted into a session now counts as a draft, so a wake-up cannot be sent on top of it.
+
 ## v0.36.0 - 2026-10-21
 
 - Note: comments on a watched thread from anyone but you are now ignored rather than queued for you.
