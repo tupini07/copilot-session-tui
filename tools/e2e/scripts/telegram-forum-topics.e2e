@@ -16,7 +16,7 @@ press ctrl+b d
 wait_for Existing app session
 
 telegram_wait topic: Existing app session
-telegram_wait message in Existing app session: <i>Ready for attention</i>
+telegram_wait message in Existing app session: Checkpoint reached
 telegram_wait Checkpoint reached
 telegram_dump 01-topic-made
 

@@ -20,7 +20,7 @@ press ctrl+b d
 wait_for Existing app session
 
 telegram_wait message: <b>(Existing app session)</b>
-telegram_wait Ready for attention
+telegram_expect_not Ready for attention
 telegram_wait Finished the refactor and the tests pass
 telegram_dump 01-notified
 dump 01-list-after-turn

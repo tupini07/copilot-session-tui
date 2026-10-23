@@ -209,15 +209,22 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         TelegramChatMode::Private => format!("<b>({})</b>", escape_html(&content.title)),
         TelegramChatMode::Forum => String::new(),
     };
-    let mut text = String::new();
-    text.push_str(&format!("<i>{}</i>", escape_html(kind_line(content.kind))));
-    if let Some(body) = content
+    let body = content
         .body
         .as_deref()
         .map(str::trim)
-        .filter(|b| !b.is_empty())
-    {
-        text.push_str("\n\n");
+        .filter(|b| !b.is_empty());
+    let mut text = String::new();
+    // A finished turn with its text needs no caption: what the session said is the
+    // news. The line stays where it carries something the text does not — a question,
+    // a plan, an error — or when there is no text to show.
+    if content.kind != NotificationKind::Ready || body.is_none() {
+        text.push_str(&format!("<i>{}</i>", escape_html(kind_line(content.kind))));
+    }
+    if let Some(body) = body {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
         text.push_str(&escape_html(body));
     }
     if let Some(question) = &content.question {
@@ -622,20 +629,30 @@ mod tests {
         assert_eq!(messages.len(), 1);
         // Brackets, so the name reads as a label rather than as something the session said.
         assert!(messages[0].starts_with("<b>(Plan &lt;review&gt; &amp; more)</b>\n"));
-        assert!(messages[0].contains("<i>Ready for attention</i>"));
+        // A finished turn with its text is captioned by the text itself.
+        assert!(!messages[0].contains("Ready for attention"));
         assert!(messages[0].contains("Use &lt;b&gt;bold&lt;/b&gt; &amp; co."));
         assert!(!messages[0].contains("<b>bold</b>"));
     }
 
     #[test]
-    fn a_forum_message_carries_no_name_because_the_topic_already_does() {
-        let messages = compose(&content(Some("Done.")), TelegramChatMode::Forum);
+    fn a_ready_message_with_nothing_to_show_keeps_its_caption_and_an_error_always_has_one() {
+        let messages = compose(&content(None), TelegramChatMode::Forum);
+        assert_eq!(messages[0], "<i>Ready for attention</i>");
+
+        let mut error = content(Some("Traceback: boom"));
+        error.kind = NotificationKind::Error;
+        let messages = compose(&error, TelegramChatMode::Forum);
         assert_eq!(
             messages[0],
-            "<i>Ready for attention</i>
-
-Done."
+            "<i>Copilot reported an error</i>\n\nTraceback: boom"
         );
+    }
+
+    #[test]
+    fn a_forum_message_carries_no_name_because_the_topic_already_does() {
+        let messages = compose(&content(Some("Done.")), TelegramChatMode::Forum);
+        assert_eq!(messages[0], "Done.");
     }
 
     #[test]
