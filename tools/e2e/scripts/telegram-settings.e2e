@@ -1,0 +1,95 @@
+# The Telegram tab of Global Settings, row by row: turn it off and on, paste a token into
+# the row and have it checked on Enter, cycle the content level, turn replies off, save,
+# and see every value again when the settings are reopened. Then the wizard's token
+# editor: a malformed token is refused before Telegram is asked, a well-formed one that
+# Telegram does not know is refused with Telegram's answer, and `e` edits in place.
+
+size 110x30
+arg --mux
+fake_telegram forum unpaired
+session existing-app Existing app session
+
+wait_for Existing app session
+press ,
+wait_for Global Settings
+press tab tab tab tab
+wait_for Bot Token
+expect (configured)
+dump 01-tab
+
+# Row 24: Telegram is on from the stub's config; off and on again.
+press enter
+expect OFF
+press enter
+expect ON
+
+# Row 25: replace the token by pasting. Enter saves after checking its shape.
+press down
+press enter
+wait_for █
+press backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace 
+paste 123456:STUBTOKENSTUBTOKENSTUBTOKENSTUB
+dump 02-token-pasted
+press enter
+wait_for (configured)
+expect_not STUBTOKEN
+
+# A malformed paste is refused and stays in the field to be corrected.
+press enter
+wait_for █
+press backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace 
+paste not-a-token
+press enter
+wait_for should look like 123456789
+dump 03-token-refused
+press esc
+
+# Row 27: content cycles; row 28: replies off.
+press down down
+press enter
+expect STATUS ONLY
+press down
+press enter
+dump 04-rows-changed
+
+# Save, reopen, and the values are still there.
+press esc
+wait_for Global settings saved
+press ,
+wait_for Global Settings
+press tab tab tab tab
+wait_for Bot Token
+expect STATUS ONLY
+expect (configured)
+dump 05-reopened
+
+# The wizard's token editor.
+press down down down down down
+press enter
+wait_for Telegram Setup
+press e
+wait_for Token:
+press backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace 
+type oops
+press enter
+wait_for should look like 123456789
+dump 06-wizard-malformed
+press e
+wait_for Token:
+press backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace 
+paste 999999:WRONGTOKENWRONGTOKENWRONGTOKEN
+press enter
+wait_for does not recognise this token
+dump 07-wizard-unknown-token
+press e
+wait_for Token:
+press backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace backspace 
+paste 123456:STUBTOKENSTUBTOKENSTUBTOKENSTUB
+press enter
+wait_for @cst_e2e_bot
+dump 08-wizard-token-ok
+press esc
+wait_gone Telegram Setup
+expect Global Settings
+press esc
+wait_for Global settings saved
