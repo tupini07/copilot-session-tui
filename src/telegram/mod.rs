@@ -47,11 +47,11 @@ pub const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Telegram's limit on one message's text.
 pub const MESSAGE_LIMIT: usize = 4_096;
 
-/// How many messages one notification may be split across before it is cut.
-///
-/// Three is a plan summary with room to spare. More would turn one event into a scroll
-/// of bubbles on the phone, and the point is to read enough to answer.
-pub const MAX_CHUNKS: usize = 3;
+/// The most messages one notification may become. A safety valve against a runaway,
+/// not a length anyone should meet: Telegram lets a bot send about twenty messages a
+/// minute to one group, and a hundred thousand characters is not a message to read on
+/// a phone.
+pub const MAX_MESSAGES: usize = 25;
 
 /// How long a pairing code stays valid. Long enough to open Telegram and find the bot.
 pub const PAIRING_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
@@ -261,67 +261,104 @@ fn kind_line(kind: NotificationKind) -> &'static str {
     }
 }
 
-/// Split escaped text into messages under Telegram's limit, each headed by the title.
+/// Split escaped text into messages under Telegram's limit, each headed by the label.
 ///
-/// Cuts fall on a line break where one is near, and never inside an HTML entity or a
-/// multi-byte character. After [`MAX_CHUNKS`] the rest is dropped and the last message
-/// says how much.
+/// The whole message goes, in as many parts as it takes: the text is what the user
+/// opened Telegram to read, and a note saying "the rest is on the PC" is what they
+/// came to avoid. Cuts fall on a paragraph break where one is near, then a line break,
+/// then the end of a sentence, then a word boundary, so each part reads whole; never
+/// inside an HTML entity or a multi-byte character. When there is more than one part,
+/// each says which it is. [`MAX_MESSAGES`] is a safety valve against a runaway, not a
+/// length anyone should meet.
 fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
-    // `title_html` is already a complete label (bold, bracketed) or empty for a forum,
-    // where the topic names the session.
-    let header = |index: usize, total_hint: Option<usize>| match (index, total_hint) {
-        (0, _) if title_html.is_empty() => String::new(),
-        (0, _) => format!("{title_html}\n"),
-        (n, _) if title_html.is_empty() => format!("<i>(continued {})</i>\n", n + 1),
-        (n, _) => format!("{title_html} <i>(continued {})</i>\n", n + 1),
+    let header = |index: usize, total: usize| -> String {
+        let label = if title_html.is_empty() {
+            String::new()
+        } else {
+            format!("{title_html} ")
+        };
+        match total {
+            0 | 1 if title_html.is_empty() => String::new(),
+            0 | 1 => format!("{title_html}\n"),
+            total => format!("{label}<i>(part {} of {total})</i>\n", index + 1),
+        }
     };
-    // Room for the longest header plus a truncation note.
-    let reserve = header(MAX_CHUNKS, None).chars().count() + 64;
+    // Room for the longest header plus the note a truncation would add.
+    let reserve = header(MAX_MESSAGES, MAX_MESSAGES).chars().count() + 80;
     let budget = MESSAGE_LIMIT.saturating_sub(reserve).max(256);
 
-    let mut chunks = Vec::new();
+    let mut pieces: Vec<&str> = Vec::new();
     let mut rest = text_html;
-    while !rest.is_empty() && chunks.len() < MAX_CHUNKS {
-        let last = chunks.len() + 1 == MAX_CHUNKS;
+    while !rest.is_empty() && pieces.len() < MAX_MESSAGES {
         let (piece, remainder) = split_at_budget(rest, budget);
-        let mut message = header(chunks.len(), None);
-        message.push_str(piece);
-        if last && !remainder.is_empty() {
-            let cut = remainder.chars().count();
-            message.push_str(&format!(
-                "\n\n… {cut} more characters not shown; open the session to read the rest."
-            ));
-            chunks.push(message);
-            return chunks;
-        }
-        chunks.push(message);
+        pieces.push(piece);
         rest = remainder;
     }
-    if chunks.is_empty() {
-        chunks.push(header(0, None));
+    if pieces.is_empty() {
+        pieces.push("");
     }
-    chunks
+    let total = pieces.len();
+    let mut messages: Vec<String> = pieces
+        .iter()
+        .enumerate()
+        .map(|(index, piece)| {
+            let mut message = header(index, total);
+            message.push_str(piece.trim());
+            message
+        })
+        .collect();
+    if !rest.is_empty() {
+        let cut = rest.chars().count();
+        if let Some(last) = messages.last_mut() {
+            last.push_str(&format!(
+                "\n\n… {cut} more characters not shown; open the session to read the rest."
+            ));
+        }
+    }
+    messages
 }
 
-/// Cut `text` after at most `budget` characters, preferring a line break in the last
-/// fifth, and never between `&` and its `;`.
+/// Cut `text` after at most `budget` characters, at the best boundary available.
+///
+/// Preference, each looked for in the tail of the budget so a part is never much
+/// shorter than it could be: a blank line, a line break, the end of a sentence, a
+/// space. Never between `&` and its `;`, and never inside a character.
 fn split_at_budget(text: &str, budget: usize) -> (&str, &str) {
     if text.chars().count() <= budget {
         return (text, "");
     }
-    let mut cut = text
-        .char_indices()
-        .nth(budget)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
-    let floor = text
-        .char_indices()
-        .nth(budget * 4 / 5)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    if let Some(newline) = text[floor..cut].rfind('\n') {
-        cut = floor + newline + 1;
+    let byte_at = |characters: usize| {
+        text.char_indices()
+            .nth(characters)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len())
+    };
+    let limit = byte_at(budget);
+    let window = |fraction_kept: usize| &text[byte_at(budget * fraction_kept / 10)..limit];
+
+    // A paragraph break anywhere in the last half; a line break in the last third;
+    // a sentence end in the last third; a space in the last fifth.
+    let mut cut = None;
+    if let Some(at) = window(5).rfind("\n\n") {
+        cut = Some(byte_at(budget * 5 / 10) + at + 2);
     }
+    if cut.is_none() {
+        if let Some(at) = window(7).rfind('\n') {
+            cut = Some(byte_at(budget * 7 / 10) + at + 1);
+        }
+    }
+    if cut.is_none() {
+        let tail = window(7);
+        if let Some(at) = sentence_end(tail) {
+            cut = Some(byte_at(budget * 7 / 10) + at);
+        }
+    }
+    if cut.is_none() {
+        if let Some(at) = window(8).rfind(' ') {
+            cut = Some(byte_at(budget * 8 / 10) + at + 1);
+        }
+    }
+    let mut cut = cut.unwrap_or(limit).min(limit);
     // Inside an entity: back up to the `&` that opened it.
     if let Some(amp) = text[..cut].rfind('&') {
         if !text[amp..cut].contains(';') {
@@ -332,13 +369,21 @@ fn split_at_budget(text: &str, budget: usize) -> (&str, &str) {
         cut -= 1;
     }
     if cut == 0 {
-        cut = text
-            .char_indices()
-            .nth(budget)
-            .map(|(index, _)| index)
-            .unwrap_or(text.len());
+        cut = limit;
     }
     (&text[..cut], &text[cut..])
+}
+
+/// The byte just after the last sentence end in `text`: `.`, `!` or `?` followed by
+/// whitespace, or one of them closing the text.
+fn sentence_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    (1..bytes.len())
+        .rev()
+        .find(|&i| {
+            matches!(bytes[i - 1], b'.' | b'!' | b'?') && (bytes[i] == b' ' || bytes[i] == b'\n')
+        })
+        .map(|i| i + 1)
 }
 
 /// The three characters Telegram's HTML mode reads as markup.
@@ -678,27 +723,79 @@ mod tests {
     }
 
     #[test]
-    fn long_content_is_split_under_the_limit_capped_at_three_and_the_cut_is_announced() {
+    fn long_content_is_sent_whole_in_numbered_parts_cut_at_line_breaks() {
+        // Nothing is thrown away: the user opened Telegram to read what the session
+        // said, and "the rest is on the PC" is what they came to avoid.
         let long = (0..600)
             .map(|i| format!("line {i} with an entity & some text to fill the message"))
             .collect::<Vec<_>>()
             .join("\n");
         let messages = compose(&content(Some(&long)), TelegramChatMode::Private);
 
-        assert_eq!(messages.len(), MAX_CHUNKS);
+        assert!(messages.len() > 3, "{} parts", messages.len());
+        let total = messages.len();
+        let mut rebuilt = String::new();
         for (index, message) in messages.iter().enumerate() {
             assert!(
                 message.chars().count() <= MESSAGE_LIMIT,
-                "chunk {index} is {} chars",
+                "part {index} is {} chars",
                 message.chars().count()
             );
-            assert!(message.starts_with("<b>(Plan &lt;review&gt; &amp; more)</b>"));
+            let header = format!(
+                "<b>(Plan &lt;review&gt; &amp; more)</b> <i>(part {} of {total})</i>\n",
+                index + 1
+            );
+            assert!(message.starts_with(&header), "part {index}: {message:.80}");
             // No entity is ever cut in half across a boundary.
             let tail = &message[message.rfind('&').unwrap_or(0)..];
-            assert!(tail.contains(';'), "entity split at a chunk edge: {tail:?}");
+            assert!(tail.contains(';'), "entity split at a part edge: {tail:?}");
+            let body = &message[header.len()..];
+            // Each part ends where a line ended, not mid-sentence.
+            assert!(
+                body.ends_with("fill the message"),
+                "part {index} ends mid-line: {:?}",
+                &body[body.len().saturating_sub(40)..]
+            );
+            rebuilt.push_str(body);
+            rebuilt.push('\n');
         }
-        assert!(messages[1].contains("(continued 2)"));
-        assert!(messages[2].contains("more characters not shown"));
+        assert!(!messages
+            .last()
+            .unwrap()
+            .contains("more characters not shown"));
+        assert_eq!(
+            rebuilt.trim_end(),
+            escape_html(&long),
+            "every line arrived once"
+        );
+    }
+
+    #[test]
+    fn prose_without_line_breaks_is_cut_at_a_sentence_end_and_a_paragraph_break_is_preferred() {
+        let sentence = "This sentence fills some of the message with words. ";
+        let paragraph = sentence.repeat(30);
+        let prose = format!("{paragraph}\n\n{paragraph}\n\n{paragraph}");
+        let messages = compose(&content(Some(&prose)), TelegramChatMode::Forum);
+
+        assert!(messages.len() >= 2);
+        for message in &messages[..messages.len() - 1] {
+            assert!(message.chars().count() <= MESSAGE_LIMIT);
+            assert!(
+                message.ends_with("words."),
+                "a part ends mid-sentence: {:?}",
+                &message[message.len().saturating_sub(40)..]
+            );
+        }
+        // One long paragraph with no break at all still cuts between sentences.
+        let unbroken = sentence.repeat(120);
+        let messages = compose(&content(Some(&unbroken)), TelegramChatMode::Forum);
+        assert!(messages.len() >= 2);
+        assert!(
+            messages[0].ends_with("words."),
+            "{:?}",
+            &messages[0][messages[0].len() - 40..]
+        );
+        assert!(messages[0].contains("<i>(part 1 of"));
     }
 
     #[test]

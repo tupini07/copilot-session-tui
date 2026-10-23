@@ -784,8 +784,10 @@ to one session.
 #### What is sent, and privacy
 
 **Full** content is the default: the session's last message of the current work cycle,
-plus the question and its choices or the plan summary when there is one. Long content is
-split across up to three messages and then cut, with a note saying so. Choose **Status
+plus the question and its choices or the plan summary when there is one. Nothing is cut:
+content longer than one Telegram message is split into as many parts as it takes, at a
+paragraph break where there is one, else a line break, a sentence end or a word, and each
+part says which of how many it is. Choose **Status
 only** in the Telegram tab to send the session's name and the kind of attention it wants
 and nothing else, like ntfy.
 
