@@ -1,0 +1,37 @@
+# The user replies to a session that has since been closed in CST. Nothing is held
+# for it: the phone is told at once that the session is not open, and the reply is
+# gone from CST's side (it is still in Telegram to send again).
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 1000
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait message: <b>Existing app session</b>
+
+# Close the session for real, then answer the old message.
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b x
+wait_gone Fake Copilot is idling
+expect Existing app session
+
+telegram_say go ahead then
+telegram_wait Not delivered: Existing app session is not open in CST
+telegram_expect_not reaction on
+dump 01-told-not-open
+telegram_dump 01-told-not-open
+
+# Opening the session afterwards delivers nothing: the reply was refused, not held.
+press enter
+wait_for Fake Copilot is idling
+wait 2000
+expect_not Fake Copilot received: go ahead
+dump 02-reopened-nothing-queued

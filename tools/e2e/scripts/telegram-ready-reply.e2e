@@ -1,0 +1,37 @@
+# A session finishes a turn while the user is away from its pane. Telegram gets a
+# message headed by the session's name with what the session last said. The user
+# replies to it on the phone; the reply is typed into the session and sent, and the
+# phone sees a thumbs-up on its message.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# What the real Copilot would have persisted as its last message, then a turn that
+# ends while we are back at the list: that is what makes it an attention event.
+type e2e:work 1500 Finished the refactor and the tests pass. Shall I open the PR?
+press enter
+press ctrl+b d
+wait_for Existing app session
+
+telegram_wait message: <b>Existing app session</b>
+telegram_wait Ready for attention
+telegram_wait Finished the refactor and the tests pass
+telegram_dump 01-notified
+dump 01-list-after-turn
+
+telegram_say Yes, open it and request a review
+wait 4000
+telegram_dump 02-after-say
+press enter
+wait_for Fake Copilot is idling
+wait_for Fake Copilot received: Yes, open it and request a review
+telegram_wait reaction on
+telegram_expect_not Not delivered
+dump 02-reply-delivered
+telegram_dump 02-reply-delivered

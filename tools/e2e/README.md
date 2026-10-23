@@ -55,6 +55,7 @@ checked before anything starts, so a typo fails at once.
 | `fake_gh` | Put a stub `gh` first on CST's `PATH`, logged in as `cst-e2e`. It answers what thread watching asks about a discussion (who is logged in, a token, `updatedAt`, an empty comment list) and fails anything else. Discussion number 404 does not exist, like a deleted one. Without it CST uses your real `gh`. |
 | `watch_thread <url>` | Subscribe the first session to a thread, e.g. `https://github.com/o/r/discussions/7`. Any host works, including one nothing answers on, such as `https://127.0.0.1:9/o/r/issues/1`, to make an issue poll fail. The watcher needs `arg --mux`, and polls a minute apart, so raise `timeout`. |
 | `held_reply <url> [throttled]` | A reply on that thread that CST is holding for the first session because it was closed when the reply arrived, as if it had come in while the session was off. It shows in the inbox; opening the session should deliver it. With `throttled`, held instead because the thread had woken the session too often, which opening the session does not release. The stub `copilot` prints every line it is sent as `Fake Copilot received: ...`, so the delivery can be seen. |
+| `fake_telegram [private\|forum] [unpaired]` | Serve a stub Telegram Bot API on a loopback port and point CST's settings at it (merged into any `config` line). Paired by default with user `77` in chat `1000` (private) or `-1000` (a group with topics); `unpaired` leaves only the token, for driving the wizard. The stub answers `getMe` as `@cst_e2e_bot`, long-polls `getUpdates`, records every message, topic and reaction, and says the bot is an admin unless `telegram_rights off`. Needs `arg --mux`. |
 
 ### Driving
 
@@ -79,6 +80,21 @@ reads anything sent too soon as Alt+key.
 | `add_session <project> <summary...>` | Write another session, as `session` does, while CST is running: one started from another terminal. Its id continues the numbering. |
 | `delete_session <summary...>` | Delete the folder of the session with that summary, as another CST deleting it would. |
 | `github down\|logged-out\|up` | Make the `fake_gh` stub fail every call as `gh` does with no network, or as it does with nobody logged in, or answer again. Only `gh` is affected; an issue poll goes over HTTP and is not. |
+| `telegram_say <text>` | A message from the paired user, as a reply to the last message CST sent, or typed into its topic in forum mode. Fails if CST has sent nothing yet. |
+| `telegram_say_bare <text>` | The same with no reply and no topic: General, or a bare message in a private chat. |
+| `telegram_say_from <user id> <text>` | A message from somebody else, placed like `telegram_say`. CST must ignore it. |
+| `telegram_pair_code` | Send the pairing code CST has armed (read from its `telegram.json`) as `/start <code>`, which is what pressing Start on the deep link does. |
+| `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `incoming from <user>: …`. |
+| `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |
+| `telegram_rights on\|off` | Whether the stub says the bot may manage topics. |
+
+The stub `copilot` also takes stage directions, typed into its pane like any prompt, so a
+script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a turn over
+OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as
+an assistant message while it runs (which is what a Telegram notification carries);
+`e2e:say <text>` writes such a message without a turn; `e2e:bell` rings the bell. A turn
+that ends while the script is back at the list is an attention event, which is what
+sends a notification.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |
 | `pace <ms>`, `timeout <ms>` | Change the pause after inputs, and the `wait_for` limit (default 10 s). |
 
