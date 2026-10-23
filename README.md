@@ -691,8 +691,10 @@ Telegram channel below.
 ### Replies from your phone with Telegram
 
 CST can also talk to a Telegram bot of your own. Every attention event is sent as a
-message that starts with the session's name in bold, followed by what the session last
-said; a question comes with its choices, a plan with its summary. **Reply to it on the
+message saying, in italics, what kind of attention the session wants, followed by what
+the session last said; a question comes with its choices, a plan with its summary. In a
+private chat the message starts with the session's name in brackets, since every session
+shares that one conversation; in a group with topics the topic is the name. **Reply to it on the
 phone and the reply is typed into that session and sent**, so you can read what an agent
 did and tell it what to do next without opening the PC.
 

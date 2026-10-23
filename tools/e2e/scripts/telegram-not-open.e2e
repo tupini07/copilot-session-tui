@@ -14,7 +14,7 @@ type e2e:work 1000
 press enter
 press ctrl+b d
 wait_for Existing app session
-telegram_wait message: <b>Existing app session</b>
+telegram_wait message: <b>(Existing app session)</b>
 
 # Close the session for real, then answer the old message.
 press enter

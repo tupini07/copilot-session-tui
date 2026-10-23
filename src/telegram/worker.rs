@@ -433,7 +433,7 @@ fn perform(root: &Path, outbound: &Outbound) -> Result<(), BotError> {
                 .as_ref()
                 .map(|question| question.tool_call_id.clone());
             let mut records = Vec::new();
-            for chunk in compose(content) {
+            for chunk in compose(content, outbound.mode) {
                 let message_id = bot.send_message(outbound.chat_id, thread_id, None, &chunk)?;
                 records.push(SentRecord {
                     message_id,

@@ -201,10 +201,16 @@ pub struct Content {
 /// the quote Telegram shows above a reply. HTML rather than MarkdownV2: its escaping is
 /// three characters, and the body is whatever the agent wrote, which must read as text
 /// and never as markup.
-pub fn compose(content: &Content) -> Vec<String> {
-    let title = escape_html(&content.title);
+pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
+    // In a forum the topic already carries the name, so repeating it would read as
+    // part of what the session said. In a private chat it is the only thing telling
+    // interleaved sessions apart, kept in brackets so it reads as a label.
+    let title = match mode {
+        TelegramChatMode::Private => format!("<b>({})</b>", escape_html(&content.title)),
+        TelegramChatMode::Forum => String::new(),
+    };
     let mut text = String::new();
-    text.push_str(&escape_html(kind_line(content.kind)));
+    text.push_str(&format!("<i>{}</i>", escape_html(kind_line(content.kind))));
     if let Some(body) = content
         .body
         .as_deref()
@@ -254,9 +260,13 @@ fn kind_line(kind: NotificationKind) -> &'static str {
 /// multi-byte character. After [`MAX_CHUNKS`] the rest is dropped and the last message
 /// says how much.
 fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
+    // `title_html` is already a complete label (bold, bracketed) or empty for a forum,
+    // where the topic names the session.
     let header = |index: usize, total_hint: Option<usize>| match (index, total_hint) {
-        (0, _) => format!("<b>{title_html}</b>\n"),
-        (n, _) => format!("<b>{title_html}</b> (continued {})\n", n + 1),
+        (0, _) if title_html.is_empty() => String::new(),
+        (0, _) => format!("{title_html}\n"),
+        (n, _) if title_html.is_empty() => format!("<i>(continued {})</i>\n", n + 1),
+        (n, _) => format!("{title_html} <i>(continued {})</i>\n", n + 1),
     };
     // Room for the longest header plus a truncation note.
     let reserve = header(MAX_CHUNKS, None).chars().count() + 64;
@@ -602,14 +612,30 @@ mod tests {
     }
 
     #[test]
-    fn every_message_starts_with_the_bold_title_and_agent_text_can_never_become_markup() {
-        let messages = compose(&content(Some("Use <b>bold</b> & co.")));
+    fn a_private_chat_message_is_labelled_with_the_session_and_agent_text_can_never_become_markup()
+    {
+        let messages = compose(
+            &content(Some("Use <b>bold</b> & co.")),
+            TelegramChatMode::Private,
+        );
 
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].starts_with("<b>Plan &lt;review&gt; &amp; more</b>\n"));
-        assert!(messages[0].contains("Ready for attention"));
+        // Brackets, so the name reads as a label rather than as something the session said.
+        assert!(messages[0].starts_with("<b>(Plan &lt;review&gt; &amp; more)</b>\n"));
+        assert!(messages[0].contains("<i>Ready for attention</i>"));
         assert!(messages[0].contains("Use &lt;b&gt;bold&lt;/b&gt; &amp; co."));
         assert!(!messages[0].contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn a_forum_message_carries_no_name_because_the_topic_already_does() {
+        let messages = compose(&content(Some("Done.")), TelegramChatMode::Forum);
+        assert_eq!(
+            messages[0],
+            "<i>Ready for attention</i>
+
+Done."
+        );
     }
 
     #[test]
@@ -621,15 +647,17 @@ mod tests {
             text: "Which colour?".to_string(),
             choices: vec!["Red".to_string(), "Green".to_string()],
         });
-        let messages = compose(&content);
+        let messages = compose(&content, TelegramChatMode::Forum);
         assert!(messages[0].contains("Question waiting for your response"));
         assert!(messages[0].contains("Question: Which colour?\n  1. Red\n  2. Green"));
 
         let mut plan = self::content(None);
         plan.kind = NotificationKind::PlanApproval;
         plan.plan_summary = Some("- do this\n- then that".to_string());
-        let messages = compose(&plan);
-        assert!(messages[0].contains("Plan waiting for approval\n\nPlan: - do this\n- then that"));
+        let messages = compose(&plan, TelegramChatMode::Forum);
+        assert!(
+            messages[0].contains("Plan waiting for approval</i>\n\nPlan: - do this\n- then that")
+        );
     }
 
     #[test]
@@ -638,7 +666,7 @@ mod tests {
             .map(|i| format!("line {i} with an entity & some text to fill the message"))
             .collect::<Vec<_>>()
             .join("\n");
-        let messages = compose(&content(Some(&long)));
+        let messages = compose(&content(Some(&long)), TelegramChatMode::Private);
 
         assert_eq!(messages.len(), MAX_CHUNKS);
         for (index, message) in messages.iter().enumerate() {
@@ -647,7 +675,7 @@ mod tests {
                 "chunk {index} is {} chars",
                 message.chars().count()
             );
-            assert!(message.starts_with("<b>Plan &lt;review&gt; &amp; more</b>"));
+            assert!(message.starts_with("<b>(Plan &lt;review&gt; &amp; more)</b>"));
             // No entity is ever cut in half across a boundary.
             let tail = &message[message.rfind('&').unwrap_or(0)..];
             assert!(tail.contains(';'), "entity split at a chunk edge: {tail:?}");
@@ -659,7 +687,7 @@ mod tests {
     #[test]
     fn multibyte_text_is_never_cut_inside_a_character() {
         let long = "🚀é".repeat(5_000);
-        let messages = compose(&content(Some(&long)));
+        let messages = compose(&content(Some(&long)), TelegramChatMode::Forum);
         for message in &messages {
             assert!(std::str::from_utf8(message.as_bytes()).is_ok());
             assert!(message.chars().count() <= MESSAGE_LIMIT);

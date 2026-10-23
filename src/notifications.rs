@@ -280,12 +280,26 @@ pub(crate) fn pending_question(
     cycle_end: u64,
 ) -> Option<crate::telegram::Question> {
     let (tool_call_id, arguments) = pending_tool_call(path, cycle_start, cycle_end, "ask_user")?;
-    let text = arguments["question"]
+    // Two shapes, both seen in real logs. Older Copilots: `question` and `choices`.
+    // Current ones (1.0.104): an elicitation with `message` and a `requestedSchema`
+    // whose first property carries a `title` and an `enum` of the choices.
+    let schema_field = arguments["requestedSchema"]["properties"]
+        .as_object()
+        .and_then(|properties| properties.values().next().cloned())
+        .unwrap_or(Value::Null);
+    let mut text = arguments["question"]
         .as_str()
+        .or_else(|| arguments["message"].as_str())
         .map(bounded)
         .unwrap_or_default();
+    if let Some(title) = schema_field["title"].as_str().map(bounded) {
+        if !title.is_empty() && !text.contains(&title) {
+            text = format!("{text}\n{title}:");
+        }
+    }
     let choices = arguments["choices"]
         .as_array()
+        .or_else(|| schema_field["enum"].as_array())
         .map(|choices| {
             choices
                 .iter()
@@ -904,6 +918,40 @@ mod tests {
         );
         assert!(ready.question.is_none());
         assert_eq!(ready.body.as_deref(), Some("I need a decision."));
+    }
+
+    #[test]
+    fn telegram_content_reads_the_current_copilots_elicitation_shaped_question() {
+        // Seen live with Copilot 1.0.104: the question is `message`, and the choices
+        // live in the first property's `enum` of a requested schema. The first version
+        // read `question`/`choices` only and sent "Question:" with nothing after it.
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "ask_user", "toolCallId": "call_1", "arguments": {"message": "Which colour do you prefer?", "requestedSchema": {"properties": {"colour": {"type": "string", "title": "Preferred colour", "enum": ["Red", "Green", "Blue"]}}}}}}),
+            ),
+        )
+        .unwrap();
+        let end = std::fs::metadata(&events).unwrap().len();
+
+        let content = telegram_content(
+            NotificationKind::Question,
+            "Colours",
+            Some(&events),
+            Some(0),
+            Some(end),
+        );
+
+        let question = content.question.expect("the open question");
+        assert_eq!(question.tool_call_id, "call_1");
+        assert_eq!(
+            question.text,
+            "Which colour do you prefer?\nPreferred colour:"
+        );
+        assert_eq!(question.choices, vec!["Red", "Green", "Blue"]);
     }
 
     #[test]
