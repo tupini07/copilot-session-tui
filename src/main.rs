@@ -230,7 +230,12 @@ enum TelegramCommand {
         group: bool,
     },
     /// Send one test message to the paired chat
-    Test,
+    Test {
+        /// Send this Markdown file as a session's message would be sent, to see how it
+        /// renders on the phone
+        #[arg(long, value_name = "FILE")]
+        markdown: Option<std::path::PathBuf>,
+    },
     /// Show what is configured and whether the bot token answers
     Status,
 }
@@ -405,9 +410,10 @@ fn main() -> Result<()> {
                 TelegramCommand::Pair { group } => {
                     telegram::cli::pair(&root, &config_path, &mut user_config, *group, &mut stdout)?
                 }
-                TelegramCommand::Test => {
-                    telegram::cli::emit(&mut stdout, &telegram::cli::test(&user_config)?)?
-                }
+                TelegramCommand::Test { markdown } => telegram::cli::emit(
+                    &mut stdout,
+                    &telegram::cli::test(&user_config, markdown.as_deref())?,
+                )?,
                 TelegramCommand::Status => {
                     telegram::cli::emit(&mut stdout, &telegram::cli::status(&user_config))?
                 }

@@ -23,6 +23,7 @@
 
 pub mod bot;
 pub mod cli;
+pub mod markdown;
 pub mod store;
 pub mod wizard;
 pub mod worker;
@@ -52,6 +53,11 @@ pub const MESSAGE_LIMIT: usize = 4_096;
 /// minute to one group, and a hundred thousand characters is not a message to read on
 /// a phone.
 pub const MAX_MESSAGES: usize = 25;
+
+/// Room kept in each part for the tags that close a run cut by the split and reopen it
+/// in the next part: a quote holding a code block with its language, with bold and
+/// italic inside, and the closers the next part hands back.
+const TAG_RESERVE: usize = 200;
 
 /// How long a pairing code stays valid. Long enough to open Telegram and find the bot.
 pub const PAIRING_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
@@ -199,8 +205,8 @@ pub struct Content {
 /// Every message starts with the session title in bold. Messages from several sessions
 /// arrive interleaved in one chat, and the title is what tells them apart, including in
 /// the quote Telegram shows above a reply. HTML rather than MarkdownV2: its escaping is
-/// three characters, and the body is whatever the agent wrote, which must read as text
-/// and never as markup.
+/// three characters, and what the agent wrote is Markdown, which [`markdown`] turns into
+/// the tags Telegram knows and shows everything else as text.
 pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
     // In a forum the topic already carries the name, so repeating it would read as
     // part of what the session said. In a private chat it is the only thing telling
@@ -225,7 +231,7 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str(&escape_html(body));
+        text.push_str(&markdown::to_telegram_html(body));
     }
     if let Some(question) = &content.question {
         text.push_str("\n\n");
@@ -245,9 +251,16 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        // A plan is Markdown too, usually several paragraphs; a one-line summary stays
+        // on the label's line.
+        let html = markdown::to_telegram_html(summary);
         text.push_str("\n\n");
-        text.push_str(&escape_html("Plan: "));
-        text.push_str(&escape_html(summary));
+        text.push_str(if html.contains('\n') {
+            "Plan:\n"
+        } else {
+            "Plan: "
+        });
+        text.push_str(&html);
     }
     chunk(&title, &text)
 }
@@ -267,9 +280,12 @@ fn kind_line(kind: NotificationKind) -> &'static str {
 /// opened Telegram to read, and a note saying "the rest is on the PC" is what they
 /// came to avoid. Cuts fall on a paragraph break where one is near, then a line break,
 /// then the end of a sentence, then a word boundary, so each part reads whole; never
-/// inside an HTML entity or a multi-byte character. When there is more than one part,
-/// each says which it is. [`MAX_MESSAGES`] is a safety valve against a runaway, not a
-/// length anyone should meet.
+/// inside an HTML entity, a tag or a multi-byte character. A cut inside formatting — a
+/// code block, a bold run, a quote — closes it at the end of one part and opens it
+/// again at the start of the next, because Telegram rejects a message whose tags do not
+/// balance, and rejects the whole of it. When there is more than one part, each says
+/// which it is. [`MAX_MESSAGES`] is a safety valve against a runaway, not a length
+/// anyone should meet.
 fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
     let header = |index: usize, total: usize| -> String {
         let label = if title_html.is_empty() {
@@ -283,19 +299,32 @@ fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
             total => format!("{label}<i>(part {} of {total})</i>\n", index + 1),
         }
     };
-    // Room for the longest header plus the note a truncation would add.
-    let reserve = header(MAX_MESSAGES, MAX_MESSAGES).chars().count() + 80;
+    // Room for the longest header, the note a truncation would add, and the tags that
+    // close a cut-open run and reopen it.
+    let reserve = header(MAX_MESSAGES, MAX_MESSAGES).chars().count() + 80 + TAG_RESERVE;
     let budget = MESSAGE_LIMIT.saturating_sub(reserve).max(256);
 
-    let mut pieces: Vec<&str> = Vec::new();
-    let mut rest = text_html;
+    let mut pieces: Vec<String> = Vec::new();
+    let mut rest = text_html.to_string();
     while !rest.is_empty() && pieces.len() < MAX_MESSAGES {
-        let (piece, remainder) = split_at_budget(rest, budget);
-        pieces.push(piece);
-        rest = remainder;
+        let (piece, remainder) = split_at_budget(&rest, budget);
+        let open = open_tags(piece);
+        let mut part = piece.trim().to_string();
+        for (_, tag) in open.iter().rev() {
+            part.push_str(&closing_tag(tag));
+        }
+        let mut next = String::new();
+        if !remainder.trim().is_empty() {
+            for (_, tag) in &open {
+                next.push_str(tag);
+            }
+            next.push_str(remainder.trim_start_matches('\n'));
+        }
+        pieces.push(part);
+        rest = next;
     }
     if pieces.is_empty() {
-        pieces.push("");
+        pieces.push(String::new());
     }
     let total = pieces.len();
     let mut messages: Vec<String> = pieces
@@ -303,7 +332,7 @@ fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
         .enumerate()
         .map(|(index, piece)| {
             let mut message = header(index, total);
-            message.push_str(piece.trim());
+            message.push_str(piece);
             message
         })
         .collect();
@@ -365,13 +394,87 @@ fn split_at_budget(text: &str, budget: usize) -> (&str, &str) {
             cut = amp;
         }
     }
+    cut = clear_of_tags(text, cut);
     while !text.is_char_boundary(cut) {
         cut -= 1;
+    }
+    if cut == 0 {
+        cut = clear_of_tags(text, limit);
     }
     if cut == 0 {
         cut = limit;
     }
     (&text[..cut], &text[cut..])
+}
+
+/// Move a cut so neither side is left with markup it cannot show.
+///
+/// Never inside a tag. Not inside a link: its address would be repeated in the next
+/// part, and a link is short enough to move whole. Not right after an opening tag,
+/// which would close again with nothing inside. And when the next part would begin
+/// with closing tags, they belong to this one, rather than closing a run here to
+/// reopen it there for nothing.
+fn clear_of_tags(text: &str, mut cut: usize) -> usize {
+    if let Some(open) = text[..cut].rfind('<') {
+        if !text[open..cut].contains('>') {
+            cut = open;
+        }
+    }
+    if let Some((at, _)) = open_tags(&text[..cut])
+        .into_iter()
+        .find(|(_, tag)| tag_name(tag) == "a")
+    {
+        cut = at;
+    }
+    loop {
+        let head = text[..cut].trim_end();
+        let Some(open) = head.rfind('<') else { break };
+        if head.ends_with('>') && !head[open..].starts_with("</") {
+            cut = open;
+        } else {
+            break;
+        }
+    }
+    while text[cut..].starts_with("</") {
+        match text[cut..].find('>') {
+            Some(end) => cut += end + 1,
+            None => break,
+        }
+    }
+    cut
+}
+
+/// The tags still open at the end of `html`, with where each starts.
+fn open_tags(html: &str) -> Vec<(usize, &str)> {
+    let mut open: Vec<(usize, &str)> = Vec::new();
+    let mut from = 0;
+    while let Some(start) = html[from..].find('<').map(|at| from + at) {
+        let Some(end) = html[start..].find('>').map(|at| start + at + 1) else {
+            break;
+        };
+        let tag = &html[start..end];
+        if let Some(name) = tag.strip_prefix("</") {
+            let name = name.trim_end_matches('>');
+            if open.last().is_some_and(|(_, last)| tag_name(last) == name) {
+                open.pop();
+            }
+        } else {
+            open.push((start, tag));
+        }
+        from = end;
+    }
+    open
+}
+
+fn tag_name(tag: &str) -> &str {
+    tag.trim_start_matches('<')
+        .split([' ', '>'])
+        .next()
+        .unwrap_or("")
+}
+
+fn closing_tag(tag: &str) -> String {
+    format!("</{}>", tag_name(tag))
 }
 
 /// The byte just after the last sentence end in `text`: `.`, `!` or `?` followed by
@@ -713,13 +816,139 @@ mod tests {
         assert!(messages[0].contains("Question waiting for your response"));
         assert!(messages[0].contains("Question: Which colour?\n  1. Red\n  2. Green"));
 
+        // A plan is Markdown like the body, and a multi-line one starts under its label.
         let mut plan = self::content(None);
         plan.kind = NotificationKind::PlanApproval;
-        plan.plan_summary = Some("- do this\n- then that".to_string());
+        plan.plan_summary = Some("- do this\n- then **that**".to_string());
         let messages = compose(&plan, TelegramChatMode::Forum);
         assert!(
-            messages[0].contains("Plan waiting for approval</i>\n\nPlan: - do this\n- then that")
+            messages[0]
+                .contains("Plan waiting for approval</i>\n\nPlan:\n• do this\n• then <b>that</b>"),
+            "{}",
+            messages[0]
         );
+        plan.plan_summary = Some("Rename the module.".to_string());
+        let messages = compose(&plan, TelegramChatMode::Forum);
+        assert!(messages[0].ends_with("Plan: Rename the module."));
+    }
+
+    #[test]
+    fn markdown_in_the_body_arrives_as_telegram_formatting() {
+        let body = "## Done\n\nChanged `src/main.rs`:\n\n- **bold** item\n- [link](https://e.com)\n\n```rust\nlet a = 1 < 2;\n```";
+        let messages = compose(&content(Some(body)), TelegramChatMode::Forum);
+        assert_eq!(
+            messages[0],
+            "<b>Done</b>\n\nChanged <code>src/main.rs</code>:\n\n• <b>bold</b> item\n\
+             • <a href=\"https://e.com\">link</a>\n\n\
+             <pre><code class=\"language-rust\">let a = 1 &lt; 2;</code></pre>"
+        );
+    }
+
+    /// What Telegram would accept: only its tags, every one closed in order, a quote
+    /// never inside a quote, nothing that is not an entity left bare. Checked against
+    /// the real API once: code inside bold or a link is accepted despite the
+    /// documentation, so that is not refused here. The e2e stub does not check any of
+    /// this, so this is the only oracle short of Telegram itself.
+    fn assert_valid_telegram_html(html: &str) {
+        const KNOWN: [&str; 8] = ["b", "i", "s", "u", "code", "pre", "a", "blockquote"];
+        let mut open: Vec<&str> = Vec::new();
+        let mut rest = html;
+        while let Some(start) = rest.find('<') {
+            let text = &rest[..start];
+            assert!(!text.contains('>'), "bare > in {text:?}");
+            let end = rest[start..].find('>').expect("unclosed tag") + start;
+            let tag = &rest[start + 1..end];
+            if let Some(name) = tag.strip_prefix('/') {
+                assert_eq!(
+                    open.pop(),
+                    Some(name),
+                    "closing {name} out of order in {html}"
+                );
+            } else {
+                let name = tag.split(' ').next().unwrap();
+                assert!(KNOWN.contains(&name), "unknown tag {name} in {html}");
+                if name == "blockquote" {
+                    assert!(!open.contains(&"blockquote"), "nested quote in {html}");
+                }
+                open.push(name);
+            }
+            rest = &rest[end + 1..];
+        }
+        assert!(open.is_empty(), "left open: {open:?} in {html}");
+        for (index, _) in html.match_indices('&') {
+            let entity = &html[index..html.len().min(index + 6)];
+            assert!(
+                ["&amp;", "&lt;", "&gt;", "&quot;"]
+                    .iter()
+                    .any(|known| entity.starts_with(known)),
+                "bare & in {entity:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_split_inside_a_code_block_or_a_bold_run_closes_it_and_reopens_it_in_the_next_part() {
+        // Telegram rejects the whole message when a tag is left open, so the cut must
+        // leave each part balanced and the next one picking up where the first stopped.
+        let code = (0..300)
+            .map(|i| {
+                format!("    let value_{i} = compute(&input[{i}]) < limit; // bold **not** here")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prose = "This **bold sentence runs on and on** with words. ".repeat(120);
+        let body = format!("## Report\n\n> quoted **{prose}**\n\n```rust\n{code}\n```\n\n{prose}");
+        let messages = compose(&content(Some(&body)), TelegramChatMode::Private);
+
+        assert!(messages.len() >= 4, "{} parts", messages.len());
+        for (index, message) in messages.iter().enumerate() {
+            assert!(
+                message.chars().count() <= MESSAGE_LIMIT,
+                "part {index} is {} chars",
+                message.chars().count()
+            );
+            assert_valid_telegram_html(message);
+        }
+        // The code block was long enough to need more than one part, each of them a
+        // code block of its own, and no line of code was lost.
+        let in_code: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("<pre><code class=\"language-rust\">"))
+            .collect();
+        assert!(
+            in_code.len() >= 2,
+            "code block was not split: {}",
+            in_code.len()
+        );
+        let joined = messages.join("\n");
+        for i in [0, 150, 299] {
+            assert!(
+                joined.contains(&format!("let value_{i} = ")),
+                "line {i} lost"
+            );
+        }
+        assert!(!joined.contains("more characters not shown"));
+    }
+
+    #[test]
+    fn every_message_the_channel_composes_is_html_telegram_accepts() {
+        let bodies = [
+            "plain & simple < text >",
+            "- a\n- b\n  - c\n\n1. one\n2. two",
+            "| a | b |\n|---|---|\n| 1 | **2** |",
+            "> quote with `code` and [x](https://e.com/?a=1&b=2)",
+            "Broken **bold and *italic\n\nnew paragraph* end**",
+            "<div>raw</div> and <br> and </b> stray",
+            "```\nunterminated fence",
+            "![](https://e.com/i.png) ![alt](https://e.com/j.png)",
+        ];
+        for body in bodies {
+            for mode in [TelegramChatMode::Private, TelegramChatMode::Forum] {
+                for message in compose(&content(Some(body)), mode) {
+                    assert_valid_telegram_html(&message);
+                }
+            }
+        }
     }
 
     #[test]
