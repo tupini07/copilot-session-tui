@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.38.0 - 2026-10-26
+
+- Headings, lists, bold and code a session writes arrive on your phone as Telegram formatting.
+- A question shows every one of its fields with numbered choices on the phone, not only the first.
+- Answer a question from the phone, by choice number or in your own words, and it goes into the form.
+- Watch a session live with /follow: one message that keeps updating, then ends and says so.
+- A reply waiting for a turn to end has a Cancel button, and /queue lists everything still waiting.
+- A turn that CST itself started for a GitHub thread wake-up no longer rings the phone when it ends.
+- Telegram recovering from a failure no longer leaves a stale line in the status bar.
+
 ## v0.37.0 - 2026-10-23
 
 - Get each session's attention events on your phone through a Telegram bot, with the full text it said.
