@@ -691,9 +691,10 @@ Telegram channel below.
 ### Replies from your phone with Telegram
 
 CST can also talk to a Telegram bot of your own. Every attention event is sent as a
-message carrying what the session last said; a question comes with its choices, a plan
-with its summary, and those, like an error, are captioned in italics with what the
-session is waiting for. A finished turn with its text needs no caption and gets none. In
+message carrying what the session last said; a question comes with each of its fields
+and their choices, numbered, a plan with its summary, and those, like an error, are
+captioned in italics with what the session is waiting for. A finished turn with its text
+needs no caption and gets none. In
 a private chat the message starts with the session's name in brackets, since every
 session shares that one conversation; in a group with topics the topic is the name.
 **Reply to it on the
@@ -768,10 +769,11 @@ message stays in Telegram to send again:
 - the session is **working**: you are told once that the reply is queued, and it goes in
   when the turn ends;
 - the session is waiting for a **tool permission**: that is answered at the keyboard only;
-- the session is waiting on a **question or a plan approval**: in this version those are
-  answered at the PC. The message still shows the question and its choices, or the plan,
-  so you know what it is waiting for. Answering them from the phone is next, once how
-  Copilot's question prompt takes typed text has been checked against the real thing.
+- the session is waiting on a **question or a plan approval**: those are answered at the
+  PC in this version. The message still shows the question with every field and its
+  choices, or the plan, so you know what it is waiting for. You are told this at once
+  rather than left waiting. Answering a question from the phone is coming separately,
+  once driving Copilot's answer form has been proven against the real thing.
 
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for

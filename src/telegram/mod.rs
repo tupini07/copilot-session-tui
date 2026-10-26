@@ -182,11 +182,36 @@ pub fn route(
 }
 
 /// A question a session is asking, read from its event log at send time.
+///
+/// Copilot's `ask_user` is a form: one message, then one or more fields, each a list
+/// of choices or a free-text entry with a default. A single-choice question is a form
+/// with one field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
     pub tool_call_id: String,
     pub text: String,
+    pub fields: Vec<QuestionField>,
+}
+
+impl Question {
+    /// Every choice offered, across fields, in the order the phone numbers them.
+    #[cfg(test)]
+    pub fn choices(&self) -> impl Iterator<Item = &str> {
+        self.fields
+            .iter()
+            .flat_map(|field| field.choices.iter().map(String::as_str))
+    }
+}
+
+/// One field of a question form.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuestionField {
+    /// Empty for the older single-question shape, which has no field titles.
+    pub title: String,
+    pub description: Option<String>,
+    /// Empty for a free-text field.
     pub choices: Vec<String>,
+    pub default: Option<String>,
 }
 
 /// Everything one notification says.
@@ -237,12 +262,31 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         text.push_str("\n\n");
         text.push_str(&escape_html("Question: "));
         text.push_str(&escape_html(question.text.trim()));
-        for (index, choice) in question.choices.iter().enumerate() {
-            text.push_str(&escape_html(&format!(
-                "\n  {}. {}",
-                index + 1,
-                choice.trim()
-            )));
+        // Choices are numbered straight through the form, so "2" means one thing
+        // whichever field it belongs to. A free-text field shows what it is for and
+        // what it takes when nothing is said.
+        let mut number = 0;
+        for field in &question.fields {
+            if !field.title.trim().is_empty() {
+                text.push_str(&format!("\n<b>{}</b>", escape_html(field.title.trim())));
+                if field.choices.is_empty() {
+                    if let Some(description) = field.description.as_deref() {
+                        text.push_str(&escape_html(&format!(" — {}", description.trim())));
+                    }
+                }
+            }
+            for choice in &field.choices {
+                number += 1;
+                text.push_str(&escape_html(&format!("\n  {number}. {}", choice.trim())));
+            }
+            if field.choices.is_empty() {
+                let default = field.default.as_deref().map(str::trim).unwrap_or("");
+                text.push_str(&escape_html(&if default.is_empty() {
+                    "\n  (free text)".to_string()
+                } else {
+                    format!("\n  (free text; default: {default})")
+                }));
+            }
         }
     }
     if let Some(summary) = content
@@ -607,8 +651,8 @@ pub mod wording {
 
     pub fn question_not_supported(title: &str) -> String {
         format!(
-            "Not delivered: {title} is waiting on a question. Answering questions from Telegram \
-             is not supported yet; answer it at the PC."
+            "Not delivered: {title} is waiting on a question. Answering questions from \
+             Telegram is not supported yet; answer it at the PC."
         )
     }
 
@@ -616,10 +660,6 @@ pub mod wording {
         format!(
             "Not delivered: {title} is waiting for a plan to be approved, which is done at the PC."
         )
-    }
-
-    pub fn answered_elsewhere(title: &str) -> String {
-        format!("Not delivered: that question in {title} was already answered.")
     }
 
     pub fn replies_off() -> String {
@@ -810,11 +850,43 @@ mod tests {
         content.question = Some(Question {
             tool_call_id: "q1".to_string(),
             text: "Which colour?".to_string(),
-            choices: vec!["Red".to_string(), "Green".to_string()],
+            fields: vec![QuestionField {
+                choices: vec!["Red".to_string(), "Green".to_string()],
+                ..QuestionField::default()
+            }],
         });
         let messages = compose(&content, TelegramChatMode::Forum);
         assert!(messages[0].contains("Question waiting for your response"));
         assert!(messages[0].contains("Question: Which colour?\n  1. Red\n  2. Green"));
+
+        // A form: each field titled, choices numbered straight through, a free-text
+        // field saying what it is for and what it takes by default.
+        content.question = Some(Question {
+            tool_call_id: "q2".to_string(),
+            text: "Approve the weekend plan?".to_string(),
+            fields: vec![
+                QuestionField {
+                    title: "Policy".to_string(),
+                    choices: vec!["Preserve <all>".to_string(), "Propose".to_string()],
+                    ..QuestionField::default()
+                },
+                QuestionField {
+                    title: "Finish time".to_string(),
+                    description: Some("Local time.".to_string()),
+                    default: Some("Monday 09:00".to_string()),
+                    ..QuestionField::default()
+                },
+            ],
+        });
+        let messages = compose(&content, TelegramChatMode::Forum);
+        assert!(
+            messages[0].contains(
+                "Question: Approve the weekend plan?\n<b>Policy</b>\n  1. Preserve &lt;all&gt;\n  2. Propose\n\
+                 <b>Finish time</b> — Local time.\n  (free text; default: Monday 09:00)"
+            ),
+            "{}",
+            messages[0]
+        );
 
         // A plan is Markdown like the body, and a multi-line one starts under its label.
         let mut plan = self::content(None);

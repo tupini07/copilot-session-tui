@@ -1,0 +1,51 @@
+# A session asks a question while the user is away. The phone gets the question with
+# its field and choices, numbered. A reply is refused at once with where to answer,
+# not queued behind a turn: the turn cannot end until the question is answered, so
+# "when this turn ends" would never come. Once the question is answered at the PC, an
+# ordinary reply goes into the composer as before. (Answering from the phone itself is
+# a separate piece of work.)
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+type e2e:ask 1500 Which colour should the header be? | Red | Green | Blue
+press enter
+press ctrl+b d
+wait_for Existing app session
+
+telegram_wait Question waiting for your response
+telegram_wait Question: Which colour should the header be?
+telegram_wait <b>Your answer</b>
+telegram_wait 1. Red
+telegram_wait 3. Blue
+telegram_dump 01-question
+dump 01-list-with-question
+
+telegram_say Blue please
+wait 4000
+telegram_wait Not delivered: Existing app session is waiting on a question
+telegram_expect_not Queued
+telegram_expect_not reaction on
+telegram_dump 02-refused
+
+# Answered at the PC: the turn ends and the session takes ordinary replies again.
+press enter
+wait_for Fake Copilot asked
+type e2e:answered Blue
+press enter
+wait_for Fake Copilot finished a turn.
+press ctrl+b d
+wait_for Existing app session
+telegram_say Thanks, now write the footer
+wait 4000
+press enter
+wait_for Fake Copilot received: Thanks, now write the footer
+telegram_wait reaction on
+telegram_dump 03-after-answer
+dump 03-reply-delivered

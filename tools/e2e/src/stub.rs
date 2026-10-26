@@ -41,6 +41,11 @@ pub fn main() {
     //   e2e:say <text>          write an assistant message to the session's event log
     //   e2e:work <ms> [<text>]  report a turn over OSC progress that ends after <ms>,
     //                           saying <text> while it runs
+    //   e2e:ask <ms> <text> | <choice> | <choice>...
+    //                    start a turn and, after <ms>, ask the user <text> with those
+    //                    choices through the ask_user tool, as the real Copilot's
+    //                    event log records it; the turn stays open until e2e:answered
+    //   e2e:answered <text>  record the answer to the open question and end the turn
     //   e2e:bell         ring the bell, which is how a turn's end is also reported
     let events_path = events_path(&args);
     std::thread::spawn(move || {
@@ -107,6 +112,57 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             println!("Fake Copilot finished a turn.");
             let _ = std::io::stdout().flush();
         }
+        "ask" => {
+            let (millis, spec) = rest.trim().split_once(' ').unwrap_or(("0", rest.trim()));
+            let millis: u64 = millis.parse().unwrap_or(0);
+            let mut parts = spec.split('|').map(str::trim);
+            let text = parts.next().unwrap_or("");
+            let choices: Vec<String> = parts
+                .filter(|choice| !choice.is_empty())
+                .map(crate::telegram_stub::json_string)
+                .collect();
+            // The turn is open while the question is: the real Copilot asks from
+            // inside a tool call, so progress stays on until the answer arrives.
+            print!("\x1b]9;4;3;0\x1b\\");
+            let _ = std::io::stdout().flush();
+            std::thread::sleep(Duration::from_millis(millis));
+            let Some(path) = events_path else { return };
+            // A fresh id each time: CST's lifecycle monitor ignores a start record
+            // whose id it has already seen.
+            let number = ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let id = format!("call_e2e_question_{number}");
+            let record = format!(
+                r#"{{"type":"tool.execution_start","data":{{"toolCallId":"{id}","toolName":"ask_user","arguments":{{"message":{},"requestedSchema":{{"properties":{{"answer":{{"type":"string","title":"Your answer","enum":[{}]}}}}}}}}}}}}"#,
+                crate::telegram_stub::json_string(text),
+                choices.join(",")
+            );
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            {
+                let _ = writeln!(file, "{record}");
+            }
+            println!("Fake Copilot asked: {text}");
+            let _ = std::io::stdout().flush();
+        }
+        "answered" => {
+            if let Some(path) = events_path {
+                let id = format!(
+                    "call_e2e_question_{}",
+                    ASKED.load(std::sync::atomic::Ordering::SeqCst)
+                );
+                let record = format!(
+                    r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"{id}","result":{{"content":{}}}}}}}"#,
+                    crate::telegram_stub::json_string(&format!("User responded: {}", rest.trim()))
+                );
+                if let Ok(mut file) =
+                    std::fs::OpenOptions::new().create(true).append(true).open(path)
+                {
+                    let _ = writeln!(file, "{record}");
+                }
+            }
+            print!("\x1b]9;4;0;0\x1b\\");
+            println!("Fake Copilot finished a turn.");
+            let _ = std::io::stdout().flush();
+        }
         "bell" => {
             print!("\x07");
             let _ = std::io::stdout().flush();
@@ -114,3 +170,6 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
         _ => {}
     }
 }
+
+/// How many questions have been asked, so each gets a new tool call id.
+static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

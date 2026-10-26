@@ -273,47 +273,89 @@ fn bounded(text: &str) -> String {
     truncate_utf8(&sanitize_message(text), MAX_PROMPT_CHARS)
 }
 
-/// The question a session is asking, with its choices.
+/// The question a session is asking, with every field and its choices.
 pub(crate) fn pending_question(
     path: &Path,
     cycle_start: u64,
     cycle_end: u64,
 ) -> Option<crate::telegram::Question> {
+    use crate::telegram::QuestionField;
+
     let (tool_call_id, arguments) = pending_tool_call(path, cycle_start, cycle_end, "ask_user")?;
-    // Two shapes, both seen in real logs. Older Copilots: `question` and `choices`.
-    // Current ones (1.0.104): an elicitation with `message` and a `requestedSchema`
-    // whose first property carries a `title` and an `enum` of the choices.
-    let schema_field = arguments["requestedSchema"]["properties"]
-        .as_object()
-        .and_then(|properties| properties.values().next().cloned())
-        .unwrap_or(Value::Null);
-    let mut text = arguments["question"]
+    let text = arguments["question"]
         .as_str()
         .or_else(|| arguments["message"].as_str())
         .map(bounded)
         .unwrap_or_default();
-    if let Some(title) = schema_field["title"].as_str().map(bounded) {
-        if !title.is_empty() && !text.contains(&title) {
-            text = format!("{text}\n{title}:");
-        }
-    }
-    let choices = arguments["choices"]
-        .as_array()
-        .or_else(|| schema_field["enum"].as_array())
-        .map(|choices| {
-            choices
-                .iter()
-                .filter_map(Value::as_str)
-                .map(bounded)
-                .filter(|choice| !choice.is_empty())
-                .take(MAX_CHOICES)
+    let strings = |values: Option<&Vec<Value>>| -> Vec<String> {
+        values
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(bounded)
+                    .filter(|choice| !choice.is_empty())
+                    .take(MAX_CHOICES)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Three shapes, all seen in real logs. Older Copilots: `question` and `choices`.
+    // Current ones (1.0.104): an elicitation with `message` and a `requestedSchema`
+    // whose properties are the fields, in order; a field's choices are an `enum` of
+    // strings or a `oneOf` of `{const, title}` where the title is what the user sees,
+    // and a field with neither is free text, with a `description` and a `default`.
+    let mut fields: Vec<QuestionField> = arguments["requestedSchema"]["properties"]
+        .as_object()
+        .map(|properties| {
+            properties
+                .values()
+                .map(|field| {
+                    let mut choices = strings(field["enum"].as_array());
+                    if choices.is_empty() {
+                        if let Some(options) = field["oneOf"].as_array() {
+                            choices = options
+                                .iter()
+                                .filter_map(|option| {
+                                    option["title"]
+                                        .as_str()
+                                        .or_else(|| option["const"].as_str())
+                                })
+                                .map(bounded)
+                                .filter(|choice| !choice.is_empty())
+                                .take(MAX_CHOICES)
+                                .collect();
+                        }
+                    }
+                    QuestionField {
+                        title: field["title"].as_str().map(bounded).unwrap_or_default(),
+                        description: field["description"]
+                            .as_str()
+                            .map(bounded)
+                            .filter(|text| !text.is_empty()),
+                        choices,
+                        default: field["default"]
+                            .as_str()
+                            .map(bounded)
+                            .filter(|text| !text.is_empty()),
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
+    if fields.is_empty() {
+        let choices = strings(arguments["choices"].as_array());
+        if !choices.is_empty() {
+            fields.push(QuestionField {
+                choices,
+                ..QuestionField::default()
+            });
+        }
+    }
     Some(crate::telegram::Question {
         tool_call_id,
         text,
-        choices,
+        fields,
     })
 }
 
@@ -905,7 +947,9 @@ mod tests {
         let question = content.question.expect("the open question");
         assert_eq!(question.tool_call_id, "q2");
         assert_eq!(question.text, "Which <colour>?");
-        assert_eq!(question.choices, vec!["Red", "Green"]);
+        assert_eq!(question.choices().collect::<Vec<_>>(), vec!["Red", "Green"]);
+        assert_eq!(question.fields.len(), 1);
+        assert!(question.fields[0].title.is_empty());
         assert!(content.plan_summary.is_none());
 
         // A ready event never carries a question, even with one in the log.
@@ -947,11 +991,61 @@ mod tests {
 
         let question = content.question.expect("the open question");
         assert_eq!(question.tool_call_id, "call_1");
+        assert_eq!(question.text, "Which colour do you prefer?");
+        assert_eq!(question.fields.len(), 1);
+        assert_eq!(question.fields[0].title, "Preferred colour");
+        assert_eq!(question.fields[0].choices, vec!["Red", "Green", "Blue"]);
+    }
+
+    #[test]
+    fn a_two_field_form_with_one_of_choices_and_a_free_text_default_is_read_whole() {
+        // The record a real session wrote on 2026-10-24, trimmed: two fields, the
+        // first with `oneOf` options whose `title` is what the user sees, the second
+        // free text with a description and a default. The first version read the
+        // first field's `enum` only and sent its title with nothing under it.
+        let temp = tempfile::tempdir().unwrap();
+        let events = temp.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "tool.execution_start", "data": {"toolName": "ask_user", "toolCallId": "call_yZ6", "arguments": {"message": "What should your approval mean for dataset splits?", "requestedSchema": {"properties": {"allocation_policy": {"type": "string", "title": "Building-level allocation policy", "oneOf": [{"const": "preserve", "title": "Preserve existing assignments (recommended)"}, {"const": "propose", "title": "Authorize a new allocation"}], "default": "preserve"}, "finish_time": {"type": "string", "title": "Weekend campaign finish time", "description": "Local time.", "default": "Monday, October 26, 2026 at 09:00 PDT"}}}}}}),
+            ),
+        )
+        .unwrap();
+        let end = std::fs::metadata(&events).unwrap().len();
+
+        let question = telegram_content(
+            NotificationKind::Question,
+            "Floor plans",
+            Some(&events),
+            Some(0),
+            Some(end),
+        )
+        .question
+        .expect("the open question");
+
+        assert_eq!(question.tool_call_id, "call_yZ6");
+        assert_eq!(question.fields.len(), 2);
+        assert_eq!(question.fields[0].title, "Building-level allocation policy");
         assert_eq!(
-            question.text,
-            "Which colour do you prefer?\nPreferred colour:"
+            question.fields[0].choices,
+            vec![
+                "Preserve existing assignments (recommended)",
+                "Authorize a new allocation"
+            ]
         );
-        assert_eq!(question.choices, vec!["Red", "Green", "Blue"]);
+        assert_eq!(question.fields[1].title, "Weekend campaign finish time");
+        assert!(question.fields[1].choices.is_empty());
+        assert_eq!(
+            question.fields[1].description.as_deref(),
+            Some("Local time.")
+        );
+        assert_eq!(
+            question.fields[1].default.as_deref(),
+            Some("Monday, October 26, 2026 at 09:00 PDT")
+        );
+        assert_eq!(question.choices().count(), 2);
     }
 
     #[test]
