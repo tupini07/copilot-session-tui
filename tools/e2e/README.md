@@ -92,7 +92,10 @@ The stub `copilot` also takes stage directions, typed into its pane like any pro
 script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a turn over
 OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as
 an assistant message while it runs (which is what a Telegram notification carries);
-`e2e:say <text>` writes such a message without a turn; `e2e:bell` rings the bell. A turn
+`e2e:say <text>` writes such a message without a turn; `e2e:ask <ms> <text> | <choice> | …`
+starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as the real
+Copilot records it, leaving the turn open until `e2e:answered <text>` records the answer
+and ends it; `e2e:bell` rings the bell. A turn
 that ends while the script is back at the list is an attention event, which is what
 sends a notification.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |

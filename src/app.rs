@@ -879,6 +879,8 @@ pub struct App {
     telegram_state_seen: Option<std::time::SystemTime>,
     /// Replies on disk as of that reading, so the idle tick can skip the file.
     telegram_live_replies: usize,
+    /// Keys still to play into a question form, one per pump pass so the form has
+    /// time to redraw between them and the UI never waits on a sleep.
     /// Sends to Telegram from this process. Polling lives with the mux services.
     telegram_worker: Option<crate::telegram::worker::TelegramWorker>,
     telegram_pending: usize,
@@ -3947,7 +3949,13 @@ impl App {
                 continue;
             };
 
-            if working {
+            // A question, a plan approval or a permission prompt all happen in the
+            // middle of a turn, so the pane counts as working then too. They come
+            // first: "queued until this turn ends" would be a promise about a turn
+            // that cannot end until somebody answers. Seen live, with a reply left
+            // waiting behind an open question.
+            let blocked_on_user = permission_wait || user_action;
+            if working && !blocked_on_user {
                 if !reply.queued_told {
                     self.telegram_say(
                         &session_id,
@@ -3981,17 +3989,19 @@ impl App {
                 changed = true;
                 continue;
             }
-            if user_action || reply.tool_call_id.is_some() {
-                // A question or a plan approval is open, or this reply was written for
-                // one. Neither is answered from the phone yet: typing into Copilot's
-                // question prompt has only been seen in an event log, not driven, and
-                // an Enter landing on a highlighted choice would answer the wrong thing.
-                // The phone is told which it was and that the PC is where to answer.
+            if user_action {
+                // A question or a plan approval is open. Both are answered at the PC
+                // for now: Copilot's question is an arrow-driven form, not a prompt
+                // that takes typed text, so a reply cannot be delivered into it yet.
+                // The phone is told which it is, at once rather than left queued
+                // behind a turn that cannot end until the question is answered. The
+                // message already showed the question and its fields, so the user
+                // knows what is waiting.
                 let plan = self
                     .mux
                     .as_ref()
                     .and_then(|mux| {
-                        mux.pane_for_session(&session_id)
+                        self.pane_for_session(&session_id)
                             .and_then(|id| mux.pane(id))
                     })
                     .is_some_and(|pane| {
@@ -3999,9 +4009,7 @@ impl App {
                             kind == crate::events::lifecycle::InputKind::PlanApproval
                         })
                     });
-                let text = if !user_action {
-                    wording::answered_elsewhere(&title)
-                } else if plan {
+                let text = if plan {
                     wording::plan_not_supported(&title)
                 } else {
                     wording::question_not_supported(&title)
@@ -4256,10 +4264,16 @@ impl App {
     }
 
     pub fn report_telegram_resumed(&mut self) -> bool {
-        if self.telegram_notice.take().is_none() {
+        let Some(reason) = self.telegram_notice.take() else {
             return false;
+        };
+        // Recovery is not news, only the failure was. Saying "reachable again" every time
+        // read as noise, and next to a reply confirmation it read as one. The failure line
+        // is taken down if it is still up, so a fixed problem does not look current, and
+        // nothing is put in its place.
+        if self.status_message.as_deref() == Some(reason.as_str()) {
+            self.status_message = None;
         }
-        self.status_message = Some("Telegram answered again".to_string());
         true
     }
 
