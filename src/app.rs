@@ -5822,7 +5822,16 @@ impl App {
         thread: &crate::threads::ThreadRef,
     ) -> Result<()> {
         let pointer = crate::threads::wake_pointer(thread);
-        self.inject_prompt(session_id, &pointer)
+        self.inject_prompt(session_id, &pointer)?;
+        // Only after the typing succeeded: a refused injection must not leave the next
+        // turn the user starts marked as CST's and so end in silence.
+        if let Some(pane) = self
+            .pane_for_session(session_id)
+            .and_then(|id| self.mux.as_mut()?.pane_mut(id))
+        {
+            pane.note_automated_turn();
+        }
+        Ok(())
     }
 
     /// Type text into a session's composer and submit it.
@@ -5849,6 +5858,9 @@ impl App {
         // run working through background agents, say. The composer counts as occupied
         // until a turn actually starts, so the next notice waits rather than stacking.
         pane.note_injection();
+        // An injection is the user's unless the caller says otherwise afterwards (a
+        // thread wake-up does); a Telegram reply is the user speaking and must end loud.
+        pane.clear_automated_turn();
         Ok(())
     }
 

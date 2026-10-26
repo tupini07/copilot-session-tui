@@ -50,6 +50,11 @@ pub fn main() {
             println!("Fake Copilot received: {line}");
             if let Some(direction) = line.strip_prefix("e2e:") {
                 act(direction, events_path.as_deref());
+            } else if line.starts_with("A new comment arrived on") {
+                // A thread wake-up. The real Copilot reads the thread and works for a
+                // while; acting that out is what lets a script see how CST treats the
+                // turn's end. Long enough for the script to look away first.
+                act("work 3000 Handled the comment.", events_path.as_deref());
             }
             print!("> ");
             let _ = std::io::stdout().flush();
