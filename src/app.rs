@@ -4264,11 +4264,16 @@ impl App {
     }
 
     pub fn report_telegram_resumed(&mut self) -> bool {
-        if self.telegram_notice.take().is_none() {
+        let Some(reason) = self.telegram_notice.take() else {
             return false;
+        };
+        // Recovery is not news, only the failure was. Saying "reachable again" every time
+        // read as noise, and next to a reply confirmation it read as one. The failure line
+        // is taken down if it is still up, so a fixed problem does not look current, and
+        // nothing is put in its place.
+        if self.status_message.as_deref() == Some(reason.as_str()) {
+            self.status_message = None;
         }
-        // Not "answered": next to a reply confirmation that word reads as one.
-        self.status_message = Some("Telegram is reachable again".to_string());
         true
     }
 
