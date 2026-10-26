@@ -3872,6 +3872,59 @@ impl App {
         self.telegram_key_due = Some(now + gap);
     }
 
+    /// Tell the phone a reply is waiting for the turn to end, with a Cancel under it.
+    fn telegram_queued_notice(
+        &mut self,
+        session_id: &str,
+        reply: &crate::telegram::store::Reply,
+        title: &str,
+    ) {
+        use crate::telegram::queue::{cancel_button, CancelSource};
+        use crate::telegram::wording;
+
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let thread_id = crate::telegram::store::load_in(&self.telegram_state_root)
+            .topics
+            .get(session_id)
+            .map(|topic| topic.thread_id);
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Notice {
+                session_id: Some(session_id.to_string()),
+                thread_id,
+                reply_to: Some(reply.user_message_id),
+                text: wording::queued(title),
+                buttons: vec![cancel_button(reply.update_id, CancelSource::Notice)],
+                queued_for: Some(reply.update_id),
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
+    fn telegram_edit(&mut self, message_id: i64, text: String) {
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Edit {
+                message_id,
+                html: crate::telegram::escape_html(&text),
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
     fn telegram_react(&mut self, message_id: i64) {
         let telegram = &self.config.telegram;
         let Some(chat_id) = telegram.chat_id else {
@@ -4061,11 +4114,7 @@ impl App {
             let blocked_on_user = permission_wait || user_action;
             if working && !blocked_on_user {
                 if !reply.queued_told {
-                    self.telegram_say(
-                        &session_id,
-                        Some(reply.user_message_id),
-                        wording::queued(&title),
-                    );
+                    self.telegram_queued_notice(&session_id, &reply, &title);
                     self.update_telegram(|state| {
                         if let Some(held) = state.reply_mut(reply.update_id) {
                             held.queued_told = true;
@@ -4171,11 +4220,7 @@ impl App {
                     // CST's own text, not the user's. Queue behind it, as thread
                     // notices queue behind each other.
                     if !reply.queued_told {
-                        self.telegram_say(
-                            &session_id,
-                            Some(reply.user_message_id),
-                            wording::queued(&title),
-                        );
+                        self.telegram_queued_notice(&session_id, &reply, &title);
                         self.update_telegram(|state| {
                             if let Some(held) = state.reply_mut(reply.update_id) {
                                 held.queued_told = true;
@@ -4234,15 +4279,35 @@ impl App {
 
     /// Type a reply into its session and tell the phone it landed.
     fn deliver_telegram_text(&mut self, reply: &crate::telegram::store::Reply, title: &str) {
+        use crate::telegram::store::ReplyStatus;
+
+        // Claim before typing. A Cancel tapped on the phone takes a reply out under
+        // the same lock, so whichever of the two gets there first is the one that
+        // counts: a reply marked Sent here cannot be cancelled, and one already
+        // cancelled is not typed. Without this the text could go in and the phone
+        // still hear "Cancelled".
+        let claimed = crate::telegram::store::update_in(&self.telegram_state_root, |state| {
+            match state.reply_mut(reply.update_id) {
+                Some(held) if held.status == ReplyStatus::Planned => {
+                    held.status = ReplyStatus::Sent;
+                    true
+                }
+                _ => false,
+            }
+        })
+        .unwrap_or(false);
+        if !claimed {
+            return;
+        }
         let text = crate::notifications::sanitize_message(&reply.text);
         match self.inject_prompt(&reply.session_id, &text) {
             Ok(()) => {
-                self.update_telegram(|state| {
-                    if let Some(held) = state.reply_mut(reply.update_id) {
-                        held.status = crate::telegram::store::ReplyStatus::Sent;
-                    }
-                });
                 self.telegram_react(reply.user_message_id);
+                // The "Queued" notice, if there was one, now says so and loses its
+                // Cancel; a button that can only answer "already delivered" misleads.
+                if let Some(notice) = reply.queued_message_id {
+                    self.telegram_edit(notice, crate::telegram::queue::wording::delivered(title));
+                }
             }
             Err(error) => {
                 // The pane went away between the check and the write.
@@ -7589,6 +7654,7 @@ mod tests {
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
                 answering: false,
+                queued_message_id: None,
                 status: ReplyStatus::Planned,
             });
             state.record_reply(Reply {
@@ -7601,6 +7667,7 @@ mod tests {
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
                 answering: false,
+                queued_message_id: None,
                 status: ReplyStatus::Planned,
             });
         })

@@ -26,6 +26,7 @@ pub mod bot;
 pub mod cli;
 pub mod follow;
 pub mod markdown;
+pub mod queue;
 pub mod store;
 pub mod wizard;
 pub mod worker;
