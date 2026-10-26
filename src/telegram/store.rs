@@ -62,6 +62,14 @@ pub struct Reply {
     pub queued_told: bool,
     #[serde(default)]
     pub status: ReplyStatus,
+    /// A `Sent` reply that was keyed into a question's form rather than a composer.
+    /// Dropped once the question is no longer pending, which is the evidence the form
+    /// took it. A flag beside `Sent` rather than a third status, because this file is
+    /// shared with every CST on the machine and an older one reading a status it does
+    /// not know would throw the whole state away; a flag it does not know is ignored,
+    /// and it treats the reply as any other sent one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answering: bool,
 }
 
 impl Reply {
@@ -289,6 +297,7 @@ mod tests {
             received_at: Utc::now(),
             planned_at: Utc::now(),
             queued_told: false,
+            answering: false,
             status,
         }
     }

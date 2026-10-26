@@ -1367,6 +1367,7 @@ fn run_app(
         // no events at all. Cheap — the queue is almost always empty.
         repaint |= app.flush_thread_wakes();
         repaint |= app.flush_telegram_replies();
+        app.pump_telegram_keys();
         app.cancel_orphaned_worktrees();
         // Covers every route into the Files tab — keys, mouse, or opening
         // straight onto it — rather than each one separately.
@@ -1840,7 +1841,11 @@ fn terminal_event_needs_repaint(app: &App, event: &crossterm::event::Event) -> b
 }
 
 fn mux_wait_timeout(app: &App, animating: bool) -> u64 {
-    if animating || app.attached_terminal_visible() || app.detail_load_pending() {
+    if animating
+        || app.attached_terminal_visible()
+        || app.detail_load_pending()
+        || app.telegram_keys_pending()
+    {
         100
     } else if app.background_work_pending() {
         250

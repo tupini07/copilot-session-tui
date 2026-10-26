@@ -269,6 +269,7 @@ pub fn plan_batch(
                     received_at: now,
                     planned_at: now,
                     queued_told: false,
+                    answering: false,
                     status: ReplyStatus::Planned,
                 });
             }

@@ -273,6 +273,32 @@ fn bounded(text: &str) -> String {
     truncate_utf8(&sanitize_message(text), MAX_PROMPT_CHARS)
 }
 
+/// What Copilot recorded as the answer to a question, once the call completed.
+///
+/// The form is answered with keys played blind after its first field, so Copilot's
+/// own record — `User responded: Medium`, or `User responded: colour=Red,
+/// finish_time=…` — is the only trustworthy account of what was chosen, and what the
+/// phone is shown as confirmation.
+pub(crate) fn recorded_answer(
+    path: &Path,
+    cycle_start: u64,
+    cycle_end: u64,
+    tool_call_id: &str,
+) -> Option<String> {
+    let lines = cycle_lines(path, cycle_start, cycle_end)?;
+    lines
+        .iter()
+        .rev()
+        .filter(|line| line.contains("tool.execution_complete") && line.contains(tool_call_id))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["data"]["toolCallId"].as_str() == Some(tool_call_id))
+        .and_then(|event| {
+            event["data"]["result"]["content"]
+                .as_str()
+                .map(|content| bounded(content.trim()))
+        })
+}
+
 /// The question a session is asking, with every field and its choices.
 pub(crate) fn pending_question(
     path: &Path,

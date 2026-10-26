@@ -21,6 +21,7 @@
 //! This module is the model and the wording. Everything here is pure, so the security
 //! decisions and every sentence the phone sees can be tested without a network.
 
+pub mod answer;
 pub mod bot;
 pub mod cli;
 pub mod markdown;
@@ -287,6 +288,12 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
                     format!("\n  (free text; default: {default})")
                 }));
             }
+        }
+        if !question.fields.is_empty() {
+            text.push_str(&format!(
+                "\n<i>{}</i>",
+                escape_html(&wording::how_to_answer(question))
+            ));
         }
     }
     if let Some(summary) = content
@@ -598,6 +605,7 @@ pub fn chat_mode_of(chat_type: &str, is_forum: bool) -> Option<TelegramChatMode>
 /// Plain sentences that name the consequence. Sent as text, not HTML, so nothing here
 /// needs escaping.
 pub mod wording {
+    use super::Question;
     use crate::config::TelegramChatMode;
 
     pub fn paired(mode: TelegramChatMode) -> String {
@@ -649,10 +657,39 @@ pub mod wording {
         )
     }
 
+    /// A question is open but its record could not be read, so the keys that would
+    /// answer it cannot be planned.
     pub fn question_not_supported(title: &str) -> String {
         format!(
-            "Not delivered: {title} is waiting on a question. Answering questions from \
-             Telegram is not supported yet; answer it at the PC."
+            "Not delivered: {title} is waiting on a question CST could not read; answer it \
+             at the PC."
+        )
+    }
+
+    /// Under a question: how a reply is read. Short, because it is sent with every
+    /// question.
+    pub fn how_to_answer(question: &Question) -> String {
+        let has_choices = question
+            .fields
+            .iter()
+            .any(|field| !field.choices.is_empty());
+        match (question.fields.len(), has_choices) {
+            (1, true) => "Reply with a number, or type another answer.".to_string(),
+            (1, false) => "Reply with your answer.".to_string(),
+            (_, _) => "Reply with one line per field, in order: a number or text; \
+                       a dash keeps the default."
+                .to_string(),
+        }
+    }
+
+    pub fn answered(title: &str, recorded: &str) -> String {
+        format!("{title} took the answer: {recorded}")
+    }
+
+    pub fn answer_not_taken(title: &str) -> String {
+        format!(
+            "Not delivered: the answer did not take in {title}. The question is still open; \
+             answer it at the PC."
         )
     }
 
