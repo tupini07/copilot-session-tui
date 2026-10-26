@@ -49,6 +49,8 @@ impl Mode {
 pub struct Sent {
     pub message_id: i64,
     pub thread_id: Option<i64>,
+    /// Inline buttons under it, as (label, callback data), for `telegram_tap`.
+    pub buttons: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +109,46 @@ impl TelegramStub {
     }
 
     /// Put a text message from `from` into the chat, as a reply or inside a topic.
+    /// Tap the button with this label under the latest message that has one, as the
+    /// paired user would. Fails if no message carries such a button.
+    pub fn tap(&self, label: &str) -> Result<(), String> {
+        let (lock, wake) = &*self.state;
+        let mut state = lock.lock().unwrap();
+        let Some((message_id, thread_id, data)) = state.sent.iter().rev().find_map(|sent| {
+            sent.buttons
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, data)| (sent.message_id, sent.thread_id, data.clone()))
+        }) else {
+            return Err(format!("no message CST sent has a button labelled {label:?}"));
+        };
+        let update_id = state.next_update_id;
+        state.next_update_id += 1;
+        let chat = match self.mode {
+            Mode::Private => format!(r#"{{"id":{PRIVATE_CHAT_ID},"type":"private"}}"#),
+            Mode::Forum => {
+                format!(r#"{{"id":{FORUM_CHAT_ID},"type":"supergroup","is_forum":true}}"#)
+            }
+        };
+        let mut message = format!(r#"{{"message_id":{message_id},"chat":{chat}"#);
+        if let Some(thread_id) = thread_id {
+            message.push_str(&format!(
+                r#","message_thread_id":{thread_id},"is_topic_message":true"#
+            ));
+        }
+        message.push('}');
+        state.updates.push_back((
+            update_id,
+            format!(
+                r#"{{"update_id":{update_id},"callback_query":{{"id":"tap{update_id}","from":{{"id":{USER_ID},"is_bot":false}},"message":{message},"data":{}}}}}"#,
+                json_string(&data)
+            ),
+        ));
+        state.outbox.push(format!("tap: {label}"));
+        wake.notify_all();
+        Ok(())
+    }
+
     pub fn say(&self, from: i64, text: &str, reply_to: Option<i64>, thread_id: Option<i64>) {
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap();
@@ -249,9 +291,14 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
                 Some(name) => format!("message in {name}: {text}"),
                 None => format!("message: {text}"),
             });
+            let buttons = buttons_in(body);
+            for (label, _) in &buttons {
+                state.outbox.push(format!("button on {message_id}: {label}"));
+            }
             let sent = Sent {
                 message_id,
                 thread_id,
+                buttons,
             };
             if !is_reply {
                 state.last_notification = Some(sent.clone());
@@ -306,6 +353,19 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
             } else {
                 r#"{"status":"member"}"#.to_string()
             })
+        }
+        "answerCallbackQuery" => {
+            let text = string(body, "text").unwrap_or_default();
+            let mut state = lock.lock().unwrap();
+            state.outbox.push(format!("answered tap: {text}"));
+            ok("true".to_string())
+        }
+        "editMessageText" => {
+            let message_id = number(body, "message_id").unwrap_or(0);
+            let text = string(body, "text").unwrap_or_default();
+            let mut state = lock.lock().unwrap();
+            state.outbox.push(format!("edited {message_id}: {text}"));
+            ok(format!(r#"{{"message_id":{message_id}}}"#))
         }
         "setMessageReaction" => {
             let message_id = number(body, "message_id").unwrap_or(0);
@@ -363,6 +423,39 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
 }
 
 /// The number after `"key":` in a JSON object, if it is there.
+/// The inline buttons in a `sendMessage` body, as (label, callback data). Each button
+/// is `{"text":…,"callback_data":…}`, so the label is the nearest `"text"` before its
+/// data; the message's own `"text"` comes earlier and is never the nearest.
+fn buttons_in(body: &str) -> Vec<(String, String)> {
+    // CST writes its bodies pretty-printed, so a key is followed by a colon, maybe
+    // whitespace, then the opening quote; `string` tolerates the same.
+    fn value_after(json: &str, key_at: usize, key: &str) -> Option<(String, usize)> {
+        let rest = json[key_at + key.len()..].trim_start().strip_prefix(':')?;
+        let rest = rest.trim_start().strip_prefix('"')?;
+        let len = rest.find('"')?;
+        let start = json.len() - rest.len();
+        Some((rest[..len].to_string(), start + len))
+    }
+    const DATA: &str = "\"callback_data\"";
+    const TEXT: &str = "\"text\"";
+    let mut buttons = Vec::new();
+    let mut from = 0;
+    while let Some(at) = body[from..].find(DATA) {
+        let key_at = from + at;
+        let Some((data, after)) = value_after(body, key_at, DATA) else {
+            break;
+        };
+        let label = body[..key_at]
+            .rfind(TEXT)
+            .and_then(|text_at| value_after(body, text_at, TEXT))
+            .map(|(label, _)| label)
+            .unwrap_or_default();
+        buttons.push((label, data));
+        from = after;
+    }
+    buttons
+}
+
 fn number(json: &str, key: &str) -> Option<i64> {
     let needle = format!("\"{key}\":");
     let at = json.find(&needle)? + needle.len();
@@ -430,6 +523,22 @@ pub fn json_string(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buttons_are_read_from_a_send_body_with_each_label_taken_from_its_own_button() {
+        // The body as CST really sends it — pretty-printed, a space after each colon —
+        // and the message's own "text" comes first and must not be taken for a label.
+        let pretty = "{\n  \"chat_id\": 1000,\n  \"text\": \"Queued: a reply\",\n  \"reply_markup\": {\n    \"inline_keyboard\": [\n      [\n        {\n          \"text\": \"Cancel\",\n          \"callback_data\": \"c:5\"\n        }\n      ],\n      [\n        {\n          \"text\": \"Cancel 2\",\n          \"callback_data\": \"q:6\"\n        }\n      ]\n    ]\n  }\n}";
+        let expected = vec![
+            ("Cancel".to_string(), "c:5".to_string()),
+            ("Cancel 2".to_string(), "q:6".to_string()),
+        ];
+        assert_eq!(buttons_in(pretty), expected);
+        // The compact form, should a body ever arrive that way.
+        let compact = r#"{"chat_id":1000,"text":"Queued: a reply","reply_markup":{"inline_keyboard":[[{"text":"Cancel","callback_data":"c:5"}],[{"text":"Cancel 2","callback_data":"q:6"}]]}}"#;
+        assert_eq!(buttons_in(compact), expected);
+        assert!(buttons_in("{\n  \"chat_id\": 1000,\n  \"text\": \"plain\"\n}").is_empty());
+    }
 
     #[test]
     fn the_scanner_reads_numbers_and_escaped_strings_the_way_serde_writes_them() {

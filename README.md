@@ -691,9 +691,9 @@ Telegram channel below.
 ### Replies from your phone with Telegram
 
 CST can also talk to a Telegram bot of your own. Every attention event is sent as a
-message carrying what the session last said; a question comes with its choices, a plan
-with its summary, and those, like an error, are captioned in italics with what the
-session is waiting for. A finished turn with its text needs no caption and gets none. In
+message carrying what the session last said; a question comes with each of its fields
+and their choices, numbered, a plan with its summary, and those, like an error, are
+captioned in italics with what the session is waiting for. A finished turn with its text needs no caption and gets none. In
 a private chat the message starts with the session's name in brackets, since every
 session shares that one conversation; in a group with topics the topic is the name.
 **Reply to it on the
@@ -718,8 +718,9 @@ which Telegram itself verifies.
    row says what failed and why, and can be redone on its own. Open it again later and a
    working setup shows every row done.
 3. Or from a shell: `cst telegram setup --token <TOKEN>`, with `--group` for a group.
-   `cst telegram status`, `pair` and `test` do the pieces. `cst doctor` reports the
-   state of the bot afterwards.
+   `cst telegram status`, `pair` and `test` do the pieces; `cst telegram test --markdown
+   FILE` sends a Markdown file the way a session's message is sent, to see how it renders
+   on your phone. `cst doctor` reports the state of the bot afterwards.
 
 ```json
 {
@@ -765,12 +766,33 @@ message stays in Telegram to send again:
   queued for a closed session;
 - the session has **unsent text in its composer**: finish or clear it at the PC first;
 - the session is **working**: you are told once that the reply is queued, and it goes in
-  when the turn ends;
+  when the turn ends. The notice has a **Cancel** button for as long as the reply waits,
+  and `/queue` — sent to a session, or bare for every session — lists what is waiting
+  with a Cancel on each line. When a queued reply goes in, its notice becomes
+  "Delivered" and the button goes with it;
 - the session is waiting for a **tool permission**: that is answered at the keyboard only;
-- the session is waiting on a **question or a plan approval**: in this version those are
-  answered at the PC. The message still shows the question and its choices, or the plan,
-  so you know what it is waiting for. Answering them from the phone is next, once how
-  Copilot's question prompt takes typed text has been checked against the real thing.
+- the session is waiting on a **question**: your reply answers it. Copilot's question is
+  a form, so the reply is played into it as keys: a number picks that choice, any other
+  text goes in as "Other", and for a form with several fields you reply with one line per
+  field, in order, a dash keeping a field's default. The phone is then told what Copilot
+  recorded as the answer, which is the only reliable account of what the form took;
+- the session is waiting on a **plan approval**: that is answered at the PC. The message
+  still shows the plan so you know what it is waiting for.
+
+#### Watching a session live
+
+While a turn runs the phone hears nothing, and sometimes you want to know what the agent
+is up to before deciding whether to wait. Send `/follow` the way you would a reply — in
+the session's topic, or as a reply to one of its messages — and CST answers with one
+message holding the session's latest words, whatever tool is running, and whether it is
+waiting on a question. For the next five minutes (`/follow 10` for ten, up to thirty)
+that one message is edited in place as the log grows, at most every ten seconds, so the
+chat does not fill with copies. When the time is up, or you send `/unfollow`, or the
+session closes, the message is edited one last time to say so, in a way that cannot be
+read as current. At most three sessions can be followed at once, which keeps the edits
+under what Telegram allows one chat. A follow shows session text, so under **Status
+only** it is refused rather than honoured. Copilot's own slash commands, like
+`/compact`, are not intercepted; only `/follow` and `/unfollow` are CST's.
 
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for
@@ -784,7 +806,10 @@ to one session.
 #### What is sent, and privacy
 
 **Full** content is the default: the session's last message of the current work cycle,
-plus the question and its choices or the plan summary when there is one. Nothing is cut:
+plus the question and its choices or the plan summary when there is one. Copilot writes
+Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
+themselves, a heading as a bold line, lists as indented bullets, a table as an aligned
+block in monospace, and a raw HTML tag as the text it is. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a
 paragraph break where there is one, else a line break, a sentence end or a word, and each
 part says which of how many it is. Choose **Status

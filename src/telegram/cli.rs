@@ -15,8 +15,10 @@ use anyhow::{Context, Result};
 use super::bot::UreqBot;
 use super::store::{self, Pairing};
 use super::wizard::{check_identity, check_rights, check_test, Outcome, StepKind};
-use super::{deep_link, pairing_code, Paired, PAIRING_WINDOW};
+use super::worker::send_part;
+use super::{compose, deep_link, pairing_code, Content, Paired, PAIRING_WINDOW};
 use crate::config::{self, TelegramChatMode, UserConfig};
+use crate::notifications::NotificationKind;
 
 /// How long a Bot API call may take from the command line.
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -107,6 +109,8 @@ pub fn pair(
                 api_base: config.telegram.api_base.clone(),
                 paired: None,
                 replies: config.telegram.replies,
+                content_full: config.telegram.content == crate::config::TelegramContent::Full,
+                copilot_home: crate::session::loader::copilot_home(),
             },
         )),
     );
@@ -165,7 +169,12 @@ fn wait_for_pairing(root: &Path, window: chrono::Duration) -> Option<Paired> {
 }
 
 /// `cst telegram test`: one message, and in a group one topic made and closed.
-pub fn test(config: &UserConfig) -> Result<String> {
+///
+/// With `--markdown FILE`, the file is sent instead, exactly as a session's message
+/// is: through the same Markdown conversion and the same splitting. How Markdown
+/// renders can only be judged on the phone, and this is the way to look without
+/// waiting for a session to say something.
+pub fn test(config: &UserConfig, markdown: Option<&Path>) -> Result<String> {
     let telegram = &config.telegram;
     let (Some(chat_id), Some(_)) = (telegram.chat_id, telegram.user_id) else {
         anyhow::bail!("Not paired yet. Run `cst telegram pair` first.");
@@ -178,6 +187,39 @@ pub fn test(config: &UserConfig) -> Result<String> {
         if let Err((_, reason)) = check_rights(&bot, chat_id, id) {
             anyhow::bail!("{reason}");
         }
+    }
+    if let Some(path) = markdown {
+        let body = std::fs::read_to_string(path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        let content = Content {
+            kind: NotificationKind::Ready,
+            title: "Formatting test".to_string(),
+            body: Some(body),
+            question: None,
+            plan_summary: None,
+        };
+        let parts = compose(&content, telegram.chat_mode);
+        let total = parts.len();
+        let mut plain = 0;
+        for part in &parts {
+            let (_, fell_back) =
+                send_part(&bot, chat_id, None, part).map_err(|error| anyhow::anyhow!("{error}"))?;
+            plain += usize::from(fell_back);
+        }
+        let mut report = format!(
+            "Sent {} as {total} message{} to the paired {}.",
+            path.display(),
+            if total == 1 { "" } else { "s" },
+            telegram.chat_mode.label()
+        );
+        // Worth knowing: the text arrived, but Telegram refused the markup, which is
+        // a conversion bug worth reporting.
+        if plain > 0 {
+            report.push_str(&format!(
+                " Telegram refused the formatting of {plain} of them, which went out as plain text."
+            ));
+        }
+        return Ok(report);
     }
     match check_test(&bot, chat_id, telegram.chat_mode) {
         Ok(_) => Ok(format!(
@@ -231,7 +273,7 @@ pub fn setup(
             config.telegram.chat_mode.label()
         )?;
     }
-    writeln!(out, "Test message: {}", test(config)?)?;
+    writeln!(out, "Test message: {}", test(config, None)?)?;
     writeln!(
         out,
         "Content: {}; replies {}. Change either in Global Settings (,).",

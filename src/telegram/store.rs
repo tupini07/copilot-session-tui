@@ -62,6 +62,18 @@ pub struct Reply {
     pub queued_told: bool,
     #[serde(default)]
     pub status: ReplyStatus,
+    /// A `Sent` reply that was keyed into a question's form rather than a composer.
+    /// Dropped once the question is no longer pending, which is the evidence the form
+    /// took it. A flag beside `Sent` rather than a third status, because this file is
+    /// shared with every CST on the machine and an older one reading a status it does
+    /// not know would throw the whole state away; a flag it does not know is ignored,
+    /// and it treats the reply as any other sent one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answering: bool,
+    /// The "Queued …" notice this reply got, Cancel button and all, so that delivery
+    /// can turn it into "Delivered" and take the button away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_message_id: Option<i64>,
 }
 
 impl Reply {
@@ -95,9 +107,37 @@ pub struct TelegramState {
     pub topics: BTreeMap<String, TopicRecord>,
     #[serde(default)]
     pub replies: Vec<Reply>,
+    /// Live views in progress, one per session at most. Serviced by whichever CST is
+    /// polling, so a takeover carries each on with the same message.
+    #[serde(default)]
+    pub follows: Vec<Follow>,
     /// Anything a newer CST wrote that this one does not understand.
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+/// A `/follow` being honoured: the message that is edited, and until when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Follow {
+    pub session_id: String,
+    pub chat_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i64>,
+    /// The user's `/follow`, quoted by the view so it is clear what it answers.
+    pub user_message_id: i64,
+    /// The view itself, once sent. `None` until the first rendering goes out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<i64>,
+    pub started_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    /// What was last sent, so an unchanged view is not sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hash: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_edit_at: Option<DateTime<Utc>>,
+    /// Set by `/unfollow`; the next service pass ends the view and drops it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stop_requested: bool,
 }
 
 impl TelegramState {
@@ -150,6 +190,37 @@ impl TelegramState {
     }
 
     /// Forget a session's topic, for when the session is gone.
+    /// Start following a session, or extend the follow already running for it.
+    ///
+    /// One view per session: a second `/follow` moves the deadline rather than opening
+    /// a second message to edit. Returns `false` when the cap on concurrent follows is
+    /// reached, so the caller can say so instead of silently doing nothing.
+    pub fn start_follow(&mut self, follow: Follow) -> bool {
+        if let Some(existing) = self
+            .follows
+            .iter_mut()
+            .find(|f| f.session_id == follow.session_id)
+        {
+            existing.expires_at = follow.expires_at;
+            existing.user_message_id = follow.user_message_id;
+            existing.stop_requested = false;
+            return true;
+        }
+        if self.follows.len() >= super::follow::MAX_FOLLOWS {
+            return false;
+        }
+        self.follows.push(follow);
+        true
+    }
+
+    pub fn follow_mut(&mut self, session_id: &str) -> Option<&mut Follow> {
+        self.follows.iter_mut().find(|f| f.session_id == session_id)
+    }
+
+    pub fn drop_follow(&mut self, session_id: &str) {
+        self.follows.retain(|f| f.session_id != session_id);
+    }
+
     pub fn forget_topic(&mut self, session_id: &str) -> Option<TopicRecord> {
         self.topics.remove(session_id)
     }
@@ -279,6 +350,46 @@ mod tests {
         }
     }
 
+    fn follow(session_id: &str, minutes: i64) -> Follow {
+        let now = Utc::now();
+        Follow {
+            session_id: session_id.to_string(),
+            chat_id: 7,
+            thread_id: None,
+            user_message_id: 1,
+            message_id: None,
+            started_at: now,
+            expires_at: now + chrono::Duration::minutes(minutes),
+            last_hash: None,
+            last_edit_at: None,
+            stop_requested: false,
+        }
+    }
+
+    #[test]
+    fn one_follow_per_session_a_second_extends_it_and_the_cap_holds() {
+        // A second /follow moves the deadline of the view already open rather than
+        // starting another message to edit; the cap keeps the edits under what
+        // Telegram allows one chat.
+        let mut state = TelegramState::default();
+        assert!(state.start_follow(follow("a", 5)));
+        let later = follow("a", 20);
+        let extended_to = later.expires_at;
+        assert!(state.start_follow(later));
+        assert_eq!(state.follows.len(), 1);
+        assert_eq!(state.follows[0].expires_at, extended_to);
+
+        assert!(state.start_follow(follow("b", 5)));
+        assert!(state.start_follow(follow("c", 5)));
+        assert!(!state.start_follow(follow("d", 5)), "the fourth is refused");
+        assert_eq!(state.follows.len(), super::super::follow::MAX_FOLLOWS);
+
+        state.follow_mut("b").unwrap().stop_requested = true;
+        state.drop_follow("b");
+        assert!(state.follow_mut("b").is_none());
+        assert!(state.start_follow(follow("d", 5)), "room again");
+    }
+
     fn reply(update_id: i64, status: ReplyStatus) -> Reply {
         Reply {
             update_id,
@@ -289,6 +400,8 @@ mod tests {
             received_at: Utc::now(),
             planned_at: Utc::now(),
             queued_told: false,
+            answering: false,
+            queued_message_id: None,
             status,
         }
     }

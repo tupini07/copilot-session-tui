@@ -14,14 +14,16 @@ wait_for Fake Copilot is idling
 
 # What the real Copilot would have persisted as its last message, then a turn that
 # ends while we are back at the list: that is what makes it an attention event.
-type e2e:work 1500 Finished the refactor and the tests pass. Shall I open the PR?
+# Copilot writes Markdown; the phone gets it as Telegram formatting, not as asterisks.
+type e2e:work 1500 Finished the **refactor** and the tests pass. Run `cargo test` to see. Shall I open the PR?
 press enter
 press ctrl+b d
 wait_for Existing app session
 
 telegram_wait message: <b>(Existing app session)</b>
 telegram_expect_not Ready for attention
-telegram_wait Finished the refactor and the tests pass
+telegram_wait Finished the <b>refactor</b> and the tests pass. Run <code>cargo test</code> to see.
+telegram_expect_not **refactor**
 telegram_dump 01-notified
 dump 01-list-after-turn
 

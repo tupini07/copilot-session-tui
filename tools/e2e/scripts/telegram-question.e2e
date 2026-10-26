@@ -1,0 +1,63 @@
+# A session asks a question while the user is away. The phone gets the question with
+# its choices numbered and how to answer. A reply is played into Copilot's form as
+# keys, and the phone is told what Copilot recorded, because that record is the only
+# account of what the form took. Nothing is "queued until this turn ends": the turn
+# cannot end until the question is answered, so that would never come.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+type e2e:ask 1500 Which colour should the header be? | Red | Green | Blue
+press enter
+press ctrl+b d
+wait_for Existing app session
+
+telegram_wait Question waiting for your response
+telegram_wait Question: Which colour should the header be?
+telegram_wait <b>Your answer</b>
+telegram_wait 1. Red
+telegram_wait 3. Blue
+telegram_wait Reply with a number, or type another answer.
+telegram_dump 01-question
+dump 01-list-with-question
+
+# A number picks that choice; the stub plays the form and records the answer.
+telegram_say 3
+wait 6000
+telegram_wait took the answer: User responded: Blue
+telegram_wait reaction on
+telegram_expect_not Queued
+telegram_expect_not Not delivered
+telegram_dump 02-answered
+press enter
+wait_for Fake Copilot answered: Blue
+dump 02-form-answered
+
+# Text that is no choice goes through the Other row.
+type e2e:ask 1500 Which font? | Serif | Sans
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Which font?
+telegram_say Comic Sans, obviously
+wait 6000
+telegram_wait took the answer: User responded: Comic Sans, obviously
+telegram_dump 03-other-answered
+press enter
+wait_for Fake Copilot answered: Comic Sans, obviously
+
+# With the question answered, an ordinary reply goes into the composer as before.
+press ctrl+b d
+wait_for Existing app session
+telegram_say Thanks, now write the footer
+wait 4000
+press enter
+wait_for Fake Copilot received: Thanks, now write the footer
+telegram_dump 04-after-answer
+dump 04-reply-delivered

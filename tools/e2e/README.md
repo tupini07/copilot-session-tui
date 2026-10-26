@@ -67,7 +67,7 @@ reads anything sent too soon as Alt+key.
 | Command | Effect |
 | --- | --- |
 | `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `f1` to `f12`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
-| `type <text>` | The text exactly as written, trailing spaces included. |
+| `type <text>` | The text exactly as written, trailing spaces included. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
 | `key <bytes>` | Raw bytes, with `\e`, `\r`, `\n`, `\t`, `\s` (space), `\\` and `\xHH`. |
 | `paste <text>` | A bracketed paste. |
 | `click [left\|middle\|right] COLUMN ROW` | A mouse click. |
@@ -83,8 +83,9 @@ reads anything sent too soon as Alt+key.
 | `telegram_say <text>` | A message from the paired user, as a reply to the last message CST sent, or typed into its topic in forum mode. Fails if CST has sent nothing yet. |
 | `telegram_say_bare <text>` | The same with no reply and no topic: General, or a bare message in a private chat. |
 | `telegram_say_from <user id> <text>` | A message from somebody else, placed like `telegram_say`. CST must ignore it. |
+| `telegram_tap <label>` | Tap the inline button with that label under the latest message CST sent that has one, as the paired user. The stub records `tap: <label>`, `button on <id>: <label>` when a message is sent with buttons, and `answered tap: <text>` when CST acknowledges one. |
 | `telegram_pair_code` | Send the pairing code CST has armed (read from its `telegram.json`) as `/start <code>`, which is what pressing Start on the deep link does. |
-| `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `incoming from <user>: …`. |
+| `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `edited <id>: …`, `incoming from <user>: …`. |
 | `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |
 | `telegram_rights on\|off` | Whether the stub says the bot may manage topics. |
 
@@ -92,9 +93,14 @@ The stub `copilot` also takes stage directions, typed into its pane like any pro
 script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a turn over
 OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as
 an assistant message while it runs (which is what a Telegram notification carries);
-`e2e:say <text>` writes such a message without a turn; `e2e:bell` rings the bell. A thread
-wake-up pointer (`A new comment arrived on …`) is acted out as a 3 s turn on its own, as
-the real Copilot would, so a script can see how CST treats that turn's end. A turn
+`e2e:say <text>` writes such a message without a turn; `e2e:ask <ms> <text> | <choice> | …`
+starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as the real
+Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
+<text>`, or by playing the form as CST does for a phone reply (arrows move the highlight
+from the first choice, text typed on the Other row is the answer, Enter accepts),
+which ends the turn; `e2e:bell` rings the bell. A thread wake-up pointer (`A new comment
+arrived on …`) is acted out as a 3 s turn on its own, as the real Copilot would, so a
+script can see how CST treats that turn's end. A turn
 that ends while the script is back at the list is an attention event, which is what
 sends a notification.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |

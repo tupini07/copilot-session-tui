@@ -1,0 +1,68 @@
+# A reply sent while the session is working is queued, and the user can see and take
+# it back. The "Queued" notice carries a Cancel button: tapping it drops the reply and
+# the notice says so, and the turn ending delivers nothing. /queue lists what is
+# waiting. When a queued reply does go in, its notice turns into "Delivered".
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+# The stub bot's long poll returns every ten seconds; taps ride on that.
+timeout 40000
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# A first turn, so the phone has a message of this session's to reply to.
+type e2e:work 1500 Setup is done.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Setup is done.
+
+# A long turn. A reply during it is queued, and the notice has a Cancel under it.
+press enter
+type e2e:work 14000 First long task finished.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_say Stop, do the other thing instead
+telegram_wait Queued
+telegram_dump 01-queued
+telegram_wait button on
+
+# Tapping Cancel takes the reply back; the notice becomes "Cancelled".
+telegram_tap Cancel
+telegram_wait answered tap: Cancelled
+telegram_wait Cancelled: your reply
+telegram_dump 02-cancelled
+
+# The turn ends with nothing to deliver: the cancelled words never reach the session.
+wait 14000
+press enter
+wait_for First long task finished
+expect_not Fake Copilot received: Stop, do the other thing
+dump 03-session-untouched
+
+# Another long turn and another queued reply. /queue, sent bare, lists it with its
+# own Cancel; the turn ending delivers it and the notice turns into "Delivered".
+type e2e:work 10000 Second long task finished.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_say Then write the summary
+telegram_wait Queued
+telegram_say_bare /queue
+telegram_wait Waiting to be delivered
+telegram_wait Then write the summary
+telegram_wait button on
+telegram_dump 04-listing
+wait 10000
+press enter
+wait_for Fake Copilot received: Then write the summary
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Delivered to Existing app session
+telegram_dump 05-delivered
+dump 05-list

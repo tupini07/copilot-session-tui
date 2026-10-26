@@ -1254,6 +1254,25 @@ impl Pane {
         }
     }
 
+    /// Write characters as typed, with no paste markers around them.
+    ///
+    /// For Copilot's question form: its text inputs take typed characters and were
+    /// not seen to strip bracketed-paste markers, which the composer does. Control
+    /// characters are refused, so nothing here can be a key.
+    pub fn send_text(&mut self, text: &str) -> Result<()> {
+        if !self.is_running() {
+            return Ok(());
+        }
+        if text.chars().any(char::is_control) {
+            anyhow::bail!("typed text cannot contain control characters");
+        }
+        self.return_to_live_screen();
+        match &mut self.pty {
+            Some(pty) => pty.write(text.as_bytes()),
+            None => Ok(()),
+        }
+    }
+
     /// Paste a snippet without allowing a line break to become an Enter keypress.
     pub fn send_prompt_snippet(&mut self, text: &str) -> Result<()> {
         if !self.is_running() {

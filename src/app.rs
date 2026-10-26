@@ -879,6 +879,10 @@ pub struct App {
     telegram_state_seen: Option<std::time::SystemTime>,
     /// Replies on disk as of that reading, so the idle tick can skip the file.
     telegram_live_replies: usize,
+    /// Keys still to play into a question form, one per pump pass so the form has
+    /// time to redraw between them and the UI never waits on a sleep.
+    telegram_keys: std::collections::VecDeque<(crate::mux::PaneId, crate::telegram::answer::Key)>,
+    telegram_key_due: Option<std::time::Instant>,
     /// Sends to Telegram from this process. Polling lives with the mux services.
     telegram_worker: Option<crate::telegram::worker::TelegramWorker>,
     telegram_pending: usize,
@@ -1099,6 +1103,8 @@ impl App {
             telegram_state_root: crate::telegram::store::state_root(),
             telegram_state_seen: None,
             telegram_live_replies: 0,
+            telegram_keys: std::collections::VecDeque::new(),
+            telegram_key_due: None,
             telegram_worker: None,
             telegram_pending: 0,
             telegram_notice: None,
@@ -3746,6 +3752,8 @@ impl App {
             api_base: configured.api_base.clone(),
             paired,
             replies: configured.replies,
+            content_full: configured.content == crate::config::TelegramContent::Full,
+            copilot_home: self.copilot_home.clone(),
         })
     }
 
@@ -3812,6 +3820,111 @@ impl App {
         self.send_telegram(outbound);
     }
 
+    /// How long an answer may stay pending in the form after its last key before the
+    /// phone is told it did not take. The form redraws within a second; this is slack
+    /// for a loaded machine, not a wait for anything.
+    const ANSWER_PATIENCE_SECS: i64 = 20;
+
+    pub fn telegram_keys_pending(&self) -> bool {
+        !self.telegram_keys.is_empty()
+    }
+
+    /// Play the next key of a phone answer into its form.
+    ///
+    /// One key per pass, with a short gap, and a longer one where the form moves to
+    /// its next field: the keys after the first field are played blind, so the form
+    /// must have redrawn before the next lands. The pump loop runs at its fast
+    /// cadence while keys are waiting, so this never needs to sleep.
+    pub fn pump_telegram_keys(&mut self) {
+        use crate::telegram::answer::Key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let now = std::time::Instant::now();
+        if self.telegram_key_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let Some((pane_id, key)) = self.telegram_keys.pop_front() else {
+            return;
+        };
+        let Some(pane) = self.mux.as_mut().and_then(|mux| mux.pane_mut(pane_id)) else {
+            self.telegram_keys.retain(|(id, _)| *id != pane_id);
+            return;
+        };
+        let gap = match key {
+            Key::Settle => std::time::Duration::from_millis(400),
+            _ => std::time::Duration::from_millis(60),
+        };
+        let press = |pane: &mut crate::mux::Pane, code: KeyCode, modifiers: KeyModifiers| {
+            pane.send_key(&KeyEvent::new(code, modifiers))
+        };
+        let result = match key {
+            Key::Down => press(pane, KeyCode::Down, KeyModifiers::NONE),
+            Key::Enter => press(pane, KeyCode::Enter, KeyModifiers::NONE),
+            Key::ClearLine => press(pane, KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Key::Text(text) => pane.send_text(&text),
+            Key::Settle => Ok(()),
+        };
+        if result.is_err() {
+            // The pane is gone or refused the write; the rest of the answer cannot
+            // land, and the reply ages out into "did not take".
+            self.telegram_keys.retain(|(id, _)| *id != pane_id);
+        }
+        self.telegram_key_due = Some(now + gap);
+    }
+
+    /// Tell the phone a reply is waiting for the turn to end, with a Cancel under it.
+    fn telegram_queued_notice(
+        &mut self,
+        session_id: &str,
+        reply: &crate::telegram::store::Reply,
+        title: &str,
+    ) {
+        use crate::telegram::queue::{cancel_button, CancelSource};
+        use crate::telegram::wording;
+
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let thread_id = crate::telegram::store::load_in(&self.telegram_state_root)
+            .topics
+            .get(session_id)
+            .map(|topic| topic.thread_id);
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Notice {
+                session_id: Some(session_id.to_string()),
+                thread_id,
+                reply_to: Some(reply.user_message_id),
+                text: wording::queued(title),
+                buttons: vec![cancel_button(reply.update_id, CancelSource::Notice)],
+                queued_for: Some(reply.update_id),
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
+    fn telegram_edit(&mut self, message_id: i64, text: String) {
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Edit {
+                message_id,
+                html: crate::telegram::escape_html(&text),
+            },
+        };
+        self.send_telegram(outbound);
+    }
+
     fn telegram_react(&mut self, message_id: i64) {
         let telegram = &self.config.telegram;
         let Some(chat_id) = telegram.chat_id else {
@@ -3873,12 +3986,58 @@ impl App {
         for reply in replies {
             let session_id = reply.session_id.clone();
             let title = self.telegram_session_title(&session_id);
-            if reply.status == ReplyStatus::Sent {
+            if reply.status == ReplyStatus::Sent && !reply.answering {
                 // In a composer. Held until it empties, which is the evidence a turn took
                 // it; a second reply typed on top would arrive as one garbled message.
                 if self.pane_for_session(&session_id).is_some()
                     && self.composer_is_free(&session_id)
                 {
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                }
+                continue;
+            }
+            if reply.status == ReplyStatus::Sent && reply.answering {
+                // Keyed into the form. The question leaving the pane's pending inputs
+                // is the evidence it took; what Copilot recorded is what the phone is
+                // told, because the keys after the first field were played blind.
+                let Some(pane_id) = self.pane_for_session(&session_id) else {
+                    continue;
+                };
+                let Some(tool_call_id) = reply.tool_call_id.clone() else {
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                    continue;
+                };
+                let still_pending = self
+                    .mux
+                    .as_ref()
+                    .and_then(|mux| mux.pane(pane_id))
+                    .is_some_and(|pane| pane.pending_inputs().any(|(id, _)| id == tool_call_id));
+                let keys_outstanding = self.telegram_keys.iter().any(|(id, _)| *id == pane_id);
+                if !still_pending {
+                    let (events_path, start, end) = self.cycle_window(Some(&session_id));
+                    let recorded = match (events_path, start, end) {
+                        (Some(path), Some(start), Some(end)) => {
+                            crate::notifications::recorded_answer(&path, start, end, &tool_call_id)
+                        }
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| "(not recorded)".to_string());
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::answered(&title, &recorded),
+                    );
+                    self.telegram_react(reply.user_message_id);
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                } else if !keys_outstanding && reply.age_seconds() >= Self::ANSWER_PATIENCE_SECS {
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::answer_not_taken(&title),
+                    );
                     self.update_telegram(|state| state.drop_reply(reply.update_id));
                     changed = true;
                 }
@@ -3947,13 +4106,15 @@ impl App {
                 continue;
             };
 
-            if working {
+            // A question, a plan approval or a permission prompt all happen in the
+            // middle of a turn, so the pane counts as working then too. They come
+            // first: "queued until this turn ends" would be a promise about a turn
+            // that cannot end until somebody answers. Seen live, with a reply left
+            // waiting behind an open question.
+            let blocked_on_user = permission_wait || user_action;
+            if working && !blocked_on_user {
                 if !reply.queued_told {
-                    self.telegram_say(
-                        &session_id,
-                        Some(reply.user_message_id),
-                        wording::queued(&title),
-                    );
+                    self.telegram_queued_notice(&session_id, &reply, &title);
                     self.update_telegram(|state| {
                         if let Some(held) = state.reply_mut(reply.update_id) {
                             held.queued_told = true;
@@ -3981,33 +4142,75 @@ impl App {
                 changed = true;
                 continue;
             }
-            if user_action || reply.tool_call_id.is_some() {
-                // A question or a plan approval is open, or this reply was written for
-                // one. Neither is answered from the phone yet: typing into Copilot's
-                // question prompt has only been seen in an event log, not driven, and
-                // an Enter landing on a highlighted choice would answer the wrong thing.
-                // The phone is told which it was and that the PC is where to answer.
-                let plan = self
+            if user_action {
+                // A question or a plan approval is open. A question is answered by
+                // playing the reply into Copilot's form as keys, whatever the reply
+                // was written against: the phone was shown this question, and a
+                // reply written for an earlier one that has since been answered at
+                // the PC is an ordinary message and goes in as one. A plan approval
+                // is still done at the PC.
+                let pane_id = self.pane_for_session(&session_id);
+                let open: Vec<(String, crate::events::lifecycle::InputKind)> = self
                     .mux
                     .as_ref()
-                    .and_then(|mux| {
-                        mux.pane_for_session(&session_id)
-                            .and_then(|id| mux.pane(id))
+                    .and_then(|mux| pane_id.and_then(|id| mux.pane(id)))
+                    .map(|pane| {
+                        pane.pending_inputs()
+                            .map(|(id, kind)| (id.to_string(), kind))
+                            .collect()
                     })
-                    .is_some_and(|pane| {
-                        pane.pending_inputs().any(|(_, kind)| {
-                            kind == crate::events::lifecycle::InputKind::PlanApproval
-                        })
-                    });
-                let text = if !user_action {
-                    wording::answered_elsewhere(&title)
-                } else if plan {
-                    wording::plan_not_supported(&title)
-                } else {
-                    wording::question_not_supported(&title)
+                    .unwrap_or_default();
+                let plan = open
+                    .iter()
+                    .any(|(_, kind)| *kind == crate::events::lifecycle::InputKind::PlanApproval);
+                let pending_question = open
+                    .iter()
+                    .find(|(_, kind)| *kind == crate::events::lifecycle::InputKind::Question)
+                    .map(|(id, _)| id.clone());
+                if plan {
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::plan_not_supported(&title),
+                    );
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                    continue;
+                }
+                let (events_path, start, end) = self.cycle_window(Some(&session_id));
+                let question = match (events_path, start, end) {
+                    (Some(path), Some(start), Some(end)) => {
+                        crate::notifications::pending_question(&path, start, end)
+                    }
+                    _ => None,
                 };
-                self.telegram_say(&session_id, Some(reply.user_message_id), text);
-                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                match (question, pending_question, pane_id) {
+                    (Some(question), Some(tool_call_id), Some(pane_id))
+                        if question.tool_call_id == tool_call_id =>
+                    {
+                        let (keys, _) = crate::telegram::answer::plan(&question, &reply.text);
+                        self.telegram_keys
+                            .extend(keys.into_iter().map(|key| (pane_id, key)));
+                        self.update_telegram(|state| {
+                            if let Some(held) = state.reply_mut(reply.update_id) {
+                                held.status = ReplyStatus::Sent;
+                                held.answering = true;
+                                held.tool_call_id = Some(tool_call_id);
+                                held.planned_at = chrono::Utc::now();
+                            }
+                        });
+                        self.status_message =
+                            Some(format!("Telegram answered a question in {title}"));
+                    }
+                    _ => {
+                        self.telegram_say(
+                            &session_id,
+                            Some(reply.user_message_id),
+                            wording::question_not_supported(&title),
+                        );
+                        self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    }
+                }
                 changed = true;
                 continue;
             }
@@ -4017,11 +4220,7 @@ impl App {
                     // CST's own text, not the user's. Queue behind it, as thread
                     // notices queue behind each other.
                     if !reply.queued_told {
-                        self.telegram_say(
-                            &session_id,
-                            Some(reply.user_message_id),
-                            wording::queued(&title),
-                        );
+                        self.telegram_queued_notice(&session_id, &reply, &title);
                         self.update_telegram(|state| {
                             if let Some(held) = state.reply_mut(reply.update_id) {
                                 held.queued_told = true;
@@ -4080,15 +4279,35 @@ impl App {
 
     /// Type a reply into its session and tell the phone it landed.
     fn deliver_telegram_text(&mut self, reply: &crate::telegram::store::Reply, title: &str) {
+        use crate::telegram::store::ReplyStatus;
+
+        // Claim before typing. A Cancel tapped on the phone takes a reply out under
+        // the same lock, so whichever of the two gets there first is the one that
+        // counts: a reply marked Sent here cannot be cancelled, and one already
+        // cancelled is not typed. Without this the text could go in and the phone
+        // still hear "Cancelled".
+        let claimed = crate::telegram::store::update_in(&self.telegram_state_root, |state| {
+            match state.reply_mut(reply.update_id) {
+                Some(held) if held.status == ReplyStatus::Planned => {
+                    held.status = ReplyStatus::Sent;
+                    true
+                }
+                _ => false,
+            }
+        })
+        .unwrap_or(false);
+        if !claimed {
+            return;
+        }
         let text = crate::notifications::sanitize_message(&reply.text);
         match self.inject_prompt(&reply.session_id, &text) {
             Ok(()) => {
-                self.update_telegram(|state| {
-                    if let Some(held) = state.reply_mut(reply.update_id) {
-                        held.status = crate::telegram::store::ReplyStatus::Sent;
-                    }
-                });
                 self.telegram_react(reply.user_message_id);
+                // The "Queued" notice, if there was one, now says so and loses its
+                // Cancel; a button that can only answer "already delivered" misleads.
+                if let Some(notice) = reply.queued_message_id {
+                    self.telegram_edit(notice, crate::telegram::queue::wording::delivered(title));
+                }
             }
             Err(error) => {
                 // The pane went away between the check and the write.
@@ -4256,10 +4475,16 @@ impl App {
     }
 
     pub fn report_telegram_resumed(&mut self) -> bool {
-        if self.telegram_notice.take().is_none() {
+        let Some(reason) = self.telegram_notice.take() else {
             return false;
+        };
+        // Recovery is not news, only the failure was. Saying "reachable again" every time
+        // read as noise, and next to a reply confirmation it read as one. The failure line
+        // is taken down if it is still up, so a fixed problem does not look current, and
+        // nothing is put in its place.
+        if self.status_message.as_deref() == Some(reason.as_str()) {
+            self.status_message = None;
         }
-        self.status_message = Some("Telegram answered again".to_string());
         true
     }
 
@@ -7445,6 +7670,8 @@ mod tests {
                 received_at: chrono::Utc::now(),
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
+                answering: false,
+                queued_message_id: None,
                 status: ReplyStatus::Planned,
             });
             state.record_reply(Reply {
@@ -7456,6 +7683,8 @@ mod tests {
                 received_at: chrono::Utc::now(),
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
+                answering: false,
+                queued_message_id: None,
                 status: ReplyStatus::Planned,
             });
         })

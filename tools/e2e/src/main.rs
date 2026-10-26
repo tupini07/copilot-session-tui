@@ -265,6 +265,8 @@ enum Step {
         text: String,
         bare: bool,
     },
+    /// Tap the button with this label under the latest message that has one.
+    TelegramTap(String),
     /// Send the pairing code CST armed, as pressing Start would.
     TelegramPairCode,
     TelegramWait(String),
@@ -452,6 +454,7 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
                 bare: false,
             }
         }
+        "telegram_tap" => Step::TelegramTap(need("a button label")?),
         "telegram_pair_code" => Step::TelegramPairCode,
         "telegram_wait" => Step::TelegramWait(need("text")?),
         "telegram_expect" => Step::TelegramExpect(need("text")?),
@@ -788,6 +791,11 @@ impl Driver {
                     }
                 };
                 stub.say(*from, text, reply_to, thread_id);
+                std::thread::sleep(self.pace);
+                Ok(())
+            }
+            Step::TelegramTap(label) => {
+                self.telegram_stub()?.tap(label)?;
                 std::thread::sleep(self.pace);
                 Ok(())
             }
