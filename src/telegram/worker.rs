@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use fs4::{FileExt, TryLockError};
 
 use super::bot::{BotApi, BotError, Update, UreqBot};
+use super::markdown;
 use super::store::{self, Pairing, Reply, ReplyStatus, TelegramState};
 use super::{
     chat_mode_of, classify, compose, escape_html, message_carries_code, route, wording, Content,
@@ -413,6 +414,34 @@ fn describe(error: &BotError) -> String {
 /// Do one outbound job. Runs on the drain thread.
 fn perform(root: &Path, outbound: &Outbound) -> Result<(), BotError> {
     let bot = UreqBot::new(&outbound.api_base, &outbound.token, Duration::from_secs(15));
+    perform_with(&bot, root, outbound)
+}
+
+/// Send one part of a notification, and send it plain if Telegram refuses its markup.
+///
+/// The HTML comes from the agent's Markdown through rules checked against Telegram's
+/// own, but Telegram's parser is the final word and refuses the whole message when it
+/// disagrees. The text, with its tags removed, is what the user came to read; losing
+/// it over formatting is the one failure that is not acceptable. Returns the message
+/// id and whether the plain copy is what went out.
+pub(crate) fn send_part(
+    bot: &impl BotApi,
+    chat_id: i64,
+    thread_id: Option<i64>,
+    html: &str,
+) -> Result<(i64, bool), BotError> {
+    match bot.send_message(chat_id, thread_id, None, html) {
+        Err(BotError::Rejected(description))
+            if description.to_lowercase().contains("parse entities") =>
+        {
+            bot.send_message(chat_id, thread_id, None, &markdown::strip_tags(html))
+                .map(|id| (id, true))
+        }
+        other => other.map(|id| (id, false)),
+    }
+}
+
+fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(), BotError> {
     match &outbound.job {
         OutboundJob::Notify {
             session_id,
@@ -420,7 +449,7 @@ fn perform(root: &Path, outbound: &Outbound) -> Result<(), BotError> {
         } => {
             let thread_id = match outbound.mode {
                 TelegramChatMode::Forum => Some(ensure_topic(
-                    &bot,
+                    bot,
                     root,
                     outbound.chat_id,
                     session_id,
@@ -434,7 +463,7 @@ fn perform(root: &Path, outbound: &Outbound) -> Result<(), BotError> {
                 .map(|question| question.tool_call_id.clone());
             let mut records = Vec::new();
             for chunk in compose(content, outbound.mode) {
-                let message_id = bot.send_message(outbound.chat_id, thread_id, None, &chunk)?;
+                let (message_id, _) = send_part(bot, outbound.chat_id, thread_id, &chunk)?;
                 records.push(SentRecord {
                     message_id,
                     session_id: session_id.clone(),
@@ -743,6 +772,125 @@ mod tests {
         );
         assert_eq!(batch.next_offset, Some(10));
         assert!(batch.replies.is_empty() && batch.says.is_empty());
+    }
+
+    #[test]
+    fn a_part_telegram_refuses_to_parse_is_sent_again_as_plain_text() {
+        use std::cell::RefCell;
+
+        // Telegram's parser is the final word on markup; the text must arrive even
+        // when it disagrees with ours, so the second attempt carries no tags at all.
+        struct Picky {
+            sent: RefCell<Vec<String>>,
+        }
+        impl BotApi for Picky {
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                html: &str,
+            ) -> Result<i64, BotError> {
+                self.sent.borrow_mut().push(html.to_string());
+                if html.contains('<') {
+                    return Err(BotError::Rejected(
+                        "Bad Request: can't parse entities: Unsupported start tag".to_string(),
+                    ));
+                }
+                Ok(self.sent.borrow().len() as i64)
+            }
+            fn create_forum_topic(&self, _: i64, _: &str) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+
+        let bot = Picky {
+            sent: RefCell::new(Vec::new()),
+        };
+        let sent = send_part(
+            &bot,
+            -100,
+            None,
+            "<b>Done</b> &amp; tested\n• <code>x</code>",
+        )
+        .expect("the plain retry is accepted");
+        assert_eq!(sent, (2, true));
+        assert_eq!(
+            bot.sent.borrow().as_slice(),
+            [
+                "<b>Done</b> &amp; tested\n• <code>x</code>",
+                "Done &amp; tested\n• x"
+            ]
+        );
+
+        // Any other refusal is reported as it is, not retried.
+        struct Down;
+        impl BotApi for Down {
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+            ) -> Result<i64, BotError> {
+                Err(BotError::Rejected(
+                    "Bad Request: chat not found".to_string(),
+                ))
+            }
+            fn create_forum_topic(&self, _: i64, _: &str) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+        assert_eq!(
+            send_part(&Down, -100, None, "<b>x</b>"),
+            Err(BotError::Rejected(
+                "Bad Request: chat not found".to_string()
+            ))
+        );
     }
 
     #[test]

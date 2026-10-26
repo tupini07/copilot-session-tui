@@ -718,8 +718,9 @@ which Telegram itself verifies.
    row says what failed and why, and can be redone on its own. Open it again later and a
    working setup shows every row done.
 3. Or from a shell: `cst telegram setup --token <TOKEN>`, with `--group` for a group.
-   `cst telegram status`, `pair` and `test` do the pieces. `cst doctor` reports the
-   state of the bot afterwards.
+   `cst telegram status`, `pair` and `test` do the pieces; `cst telegram test --markdown
+   FILE` sends a Markdown file the way a session's message is sent, to see how it renders
+   on your phone. `cst doctor` reports the state of the bot afterwards.
 
 ```json
 {
@@ -784,7 +785,10 @@ to one session.
 #### What is sent, and privacy
 
 **Full** content is the default: the session's last message of the current work cycle,
-plus the question and its choices or the plan summary when there is one. Nothing is cut:
+plus the question and its choices or the plan summary when there is one. Copilot writes
+Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
+themselves, a heading as a bold line, lists as indented bullets, a table as an aligned
+block in monospace, and a raw HTML tag as the text it is. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a
 paragraph break where there is one, else a line break, a sentence end or a word, and each
 part says which of how many it is. Choose **Status
