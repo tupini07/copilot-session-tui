@@ -881,6 +881,8 @@ pub struct App {
     telegram_live_replies: usize,
     /// Keys still to play into a question form, one per pump pass so the form has
     /// time to redraw between them and the UI never waits on a sleep.
+    telegram_keys: std::collections::VecDeque<(crate::mux::PaneId, crate::telegram::answer::Key)>,
+    telegram_key_due: Option<std::time::Instant>,
     /// Sends to Telegram from this process. Polling lives with the mux services.
     telegram_worker: Option<crate::telegram::worker::TelegramWorker>,
     telegram_pending: usize,
@@ -1101,6 +1103,8 @@ impl App {
             telegram_state_root: crate::telegram::store::state_root(),
             telegram_state_seen: None,
             telegram_live_replies: 0,
+            telegram_keys: std::collections::VecDeque::new(),
+            telegram_key_due: None,
             telegram_worker: None,
             telegram_pending: 0,
             telegram_notice: None,
@@ -3814,6 +3818,58 @@ impl App {
         self.send_telegram(outbound);
     }
 
+    /// How long an answer may stay pending in the form after its last key before the
+    /// phone is told it did not take. The form redraws within a second; this is slack
+    /// for a loaded machine, not a wait for anything.
+    const ANSWER_PATIENCE_SECS: i64 = 20;
+
+    pub fn telegram_keys_pending(&self) -> bool {
+        !self.telegram_keys.is_empty()
+    }
+
+    /// Play the next key of a phone answer into its form.
+    ///
+    /// One key per pass, with a short gap, and a longer one where the form moves to
+    /// its next field: the keys after the first field are played blind, so the form
+    /// must have redrawn before the next lands. The pump loop runs at its fast
+    /// cadence while keys are waiting, so this never needs to sleep.
+    pub fn pump_telegram_keys(&mut self) {
+        use crate::telegram::answer::Key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let now = std::time::Instant::now();
+        if self.telegram_key_due.is_some_and(|due| now < due) {
+            return;
+        }
+        let Some((pane_id, key)) = self.telegram_keys.pop_front() else {
+            return;
+        };
+        let Some(pane) = self.mux.as_mut().and_then(|mux| mux.pane_mut(pane_id)) else {
+            self.telegram_keys.retain(|(id, _)| *id != pane_id);
+            return;
+        };
+        let gap = match key {
+            Key::Settle => std::time::Duration::from_millis(400),
+            _ => std::time::Duration::from_millis(60),
+        };
+        let press = |pane: &mut crate::mux::Pane, code: KeyCode, modifiers: KeyModifiers| {
+            pane.send_key(&KeyEvent::new(code, modifiers))
+        };
+        let result = match key {
+            Key::Down => press(pane, KeyCode::Down, KeyModifiers::NONE),
+            Key::Enter => press(pane, KeyCode::Enter, KeyModifiers::NONE),
+            Key::ClearLine => press(pane, KeyCode::Char('u'), KeyModifiers::CONTROL),
+            Key::Text(text) => pane.send_text(&text),
+            Key::Settle => Ok(()),
+        };
+        if result.is_err() {
+            // The pane is gone or refused the write; the rest of the answer cannot
+            // land, and the reply ages out into "did not take".
+            self.telegram_keys.retain(|(id, _)| *id != pane_id);
+        }
+        self.telegram_key_due = Some(now + gap);
+    }
+
     fn telegram_react(&mut self, message_id: i64) {
         let telegram = &self.config.telegram;
         let Some(chat_id) = telegram.chat_id else {
@@ -3875,12 +3931,58 @@ impl App {
         for reply in replies {
             let session_id = reply.session_id.clone();
             let title = self.telegram_session_title(&session_id);
-            if reply.status == ReplyStatus::Sent {
+            if reply.status == ReplyStatus::Sent && !reply.answering {
                 // In a composer. Held until it empties, which is the evidence a turn took
                 // it; a second reply typed on top would arrive as one garbled message.
                 if self.pane_for_session(&session_id).is_some()
                     && self.composer_is_free(&session_id)
                 {
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                }
+                continue;
+            }
+            if reply.status == ReplyStatus::Sent && reply.answering {
+                // Keyed into the form. The question leaving the pane's pending inputs
+                // is the evidence it took; what Copilot recorded is what the phone is
+                // told, because the keys after the first field were played blind.
+                let Some(pane_id) = self.pane_for_session(&session_id) else {
+                    continue;
+                };
+                let Some(tool_call_id) = reply.tool_call_id.clone() else {
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                    continue;
+                };
+                let still_pending = self
+                    .mux
+                    .as_ref()
+                    .and_then(|mux| mux.pane(pane_id))
+                    .is_some_and(|pane| pane.pending_inputs().any(|(id, _)| id == tool_call_id));
+                let keys_outstanding = self.telegram_keys.iter().any(|(id, _)| *id == pane_id);
+                if !still_pending {
+                    let (events_path, start, end) = self.cycle_window(Some(&session_id));
+                    let recorded = match (events_path, start, end) {
+                        (Some(path), Some(start), Some(end)) => {
+                            crate::notifications::recorded_answer(&path, start, end, &tool_call_id)
+                        }
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| "(not recorded)".to_string());
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::answered(&title, &recorded),
+                    );
+                    self.telegram_react(reply.user_message_id);
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                } else if !keys_outstanding && reply.age_seconds() >= Self::ANSWER_PATIENCE_SECS {
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::answer_not_taken(&title),
+                    );
                     self.update_telegram(|state| state.drop_reply(reply.update_id));
                     changed = true;
                 }
@@ -3990,32 +4092,74 @@ impl App {
                 continue;
             }
             if user_action {
-                // A question or a plan approval is open. Both are answered at the PC
-                // for now: Copilot's question is an arrow-driven form, not a prompt
-                // that takes typed text, so a reply cannot be delivered into it yet.
-                // The phone is told which it is, at once rather than left queued
-                // behind a turn that cannot end until the question is answered. The
-                // message already showed the question and its fields, so the user
-                // knows what is waiting.
-                let plan = self
+                // A question or a plan approval is open. A question is answered by
+                // playing the reply into Copilot's form as keys, whatever the reply
+                // was written against: the phone was shown this question, and a
+                // reply written for an earlier one that has since been answered at
+                // the PC is an ordinary message and goes in as one. A plan approval
+                // is still done at the PC.
+                let pane_id = self.pane_for_session(&session_id);
+                let open: Vec<(String, crate::events::lifecycle::InputKind)> = self
                     .mux
                     .as_ref()
-                    .and_then(|mux| {
-                        self.pane_for_session(&session_id)
-                            .and_then(|id| mux.pane(id))
+                    .and_then(|mux| pane_id.and_then(|id| mux.pane(id)))
+                    .map(|pane| {
+                        pane.pending_inputs()
+                            .map(|(id, kind)| (id.to_string(), kind))
+                            .collect()
                     })
-                    .is_some_and(|pane| {
-                        pane.pending_inputs().any(|(_, kind)| {
-                            kind == crate::events::lifecycle::InputKind::PlanApproval
-                        })
-                    });
-                let text = if plan {
-                    wording::plan_not_supported(&title)
-                } else {
-                    wording::question_not_supported(&title)
+                    .unwrap_or_default();
+                let plan = open
+                    .iter()
+                    .any(|(_, kind)| *kind == crate::events::lifecycle::InputKind::PlanApproval);
+                let pending_question = open
+                    .iter()
+                    .find(|(_, kind)| *kind == crate::events::lifecycle::InputKind::Question)
+                    .map(|(id, _)| id.clone());
+                if plan {
+                    self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::plan_not_supported(&title),
+                    );
+                    self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    changed = true;
+                    continue;
+                }
+                let (events_path, start, end) = self.cycle_window(Some(&session_id));
+                let question = match (events_path, start, end) {
+                    (Some(path), Some(start), Some(end)) => {
+                        crate::notifications::pending_question(&path, start, end)
+                    }
+                    _ => None,
                 };
-                self.telegram_say(&session_id, Some(reply.user_message_id), text);
-                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                match (question, pending_question, pane_id) {
+                    (Some(question), Some(tool_call_id), Some(pane_id))
+                        if question.tool_call_id == tool_call_id =>
+                    {
+                        let (keys, _) = crate::telegram::answer::plan(&question, &reply.text);
+                        self.telegram_keys
+                            .extend(keys.into_iter().map(|key| (pane_id, key)));
+                        self.update_telegram(|state| {
+                            if let Some(held) = state.reply_mut(reply.update_id) {
+                                held.status = ReplyStatus::Sent;
+                                held.answering = true;
+                                held.tool_call_id = Some(tool_call_id);
+                                held.planned_at = chrono::Utc::now();
+                            }
+                        });
+                        self.status_message =
+                            Some(format!("Telegram answered a question in {title}"));
+                    }
+                    _ => {
+                        self.telegram_say(
+                            &session_id,
+                            Some(reply.user_message_id),
+                            wording::question_not_supported(&title),
+                        );
+                        self.update_telegram(|state| state.drop_reply(reply.update_id));
+                    }
+                }
                 changed = true;
                 continue;
             }
@@ -7447,6 +7591,7 @@ mod tests {
                 received_at: chrono::Utc::now(),
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
+                answering: false,
                 status: ReplyStatus::Planned,
             });
             state.record_reply(Reply {
@@ -7458,6 +7603,7 @@ mod tests {
                 received_at: chrono::Utc::now(),
                 planned_at: chrono::Utc::now(),
                 queued_told: false,
+                answering: false,
                 status: ReplyStatus::Planned,
             });
         })

@@ -94,8 +94,10 @@ OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.j
 an assistant message while it runs (which is what a Telegram notification carries);
 `e2e:say <text>` writes such a message without a turn; `e2e:ask <ms> <text> | <choice> | …`
 starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as the real
-Copilot records it, leaving the turn open until `e2e:answered <text>` records the answer
-and ends it; `e2e:bell` rings the bell. A turn
+Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
+<text>`, or by playing the form as CST does for a phone reply (arrows move the highlight
+from the first choice, text typed on the Other row is the answer, Enter accepts),
+which ends the turn; `e2e:bell` rings the bell. A turn
 that ends while the script is back at the list is an attention event, which is what
 sends a notification.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |

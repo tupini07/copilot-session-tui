@@ -15,7 +15,10 @@ ratatui = "0.30"
 crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-serde_json = "1"
+# preserve_order: a question form's fields must arrive in the order Copilot shows them,
+# not sorted by key. Without it serde_json's object is a BTreeMap and `properties`
+# {size, note} becomes {note, size}, so a reply's lines land on the wrong fields.
+serde_json = { version = "1", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
