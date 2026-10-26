@@ -794,6 +794,9 @@ under what Telegram allows one chat. A follow shows session text, so under **Sta
 only** it is refused rather than honoured. Copilot's own slash commands, like
 `/compact`, are not intercepted; only `/follow` and `/unfollow` are CST's.
 
+CST publishes its commands to the bot's menu, so typing `/` in the chat, or in the
+group, offers `/follow`, `/unfollow` and `/queue` with a line on what each does.
+
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for
 24 hours. Telegram needs the multiplexer (`mux`), as threads do: without it there is no

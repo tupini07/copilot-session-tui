@@ -373,6 +373,12 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
             state.outbox.push(format!("reaction on {message_id}"));
             ok("true".to_string())
         }
+        "setMyCommands" => {
+            let names = all_strings(body, "command");
+            let mut state = lock.lock().unwrap();
+            state.outbox.push(format!("commands: {}", names.join(" ")));
+            ok("true".to_string())
+        }
         other => (
             404,
             format!(r#"{{"ok":false,"error_code":404,"description":"Not Found: {other}"}}"#),
@@ -464,6 +470,22 @@ fn number(json: &str, key: &str) -> Option<i64> {
         .find(|c: char| !(c.is_ascii_digit() || c == '-'))
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
+}
+
+/// Every value of `key` in the body, in order: a list of objects sharing one key, such
+/// as the command menu. The same pretty-printing tolerance as `string`.
+fn all_strings(json: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let mut values = Vec::new();
+    let mut from = 0;
+    while let Some(at) = json[from..].find(&needle) {
+        let after_key = from + at + needle.len();
+        if let Some(value) = string(&json[from + at..], key) {
+            values.push(value);
+        }
+        from = after_key;
+    }
+    values
 }
 
 /// The string after `"key":`, with JSON escapes undone.

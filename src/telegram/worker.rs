@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use fs4::{FileExt, TryLockError};
 
 use super::bot::{BotApi, BotError, Button, Update, UreqBot};
+use super::bot_commands;
 use super::follow::{self, EndReason, FollowCommand, FollowView, LogTail};
 use super::markdown;
 use super::queue::{self, CancelSource, QueuedEntry};
@@ -435,6 +436,7 @@ fn poll_loop(
     );
     let mut lock: Option<std::fs::File> = None;
     let mut held_up: Option<String> = None;
+    let mut menu_published = false;
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -446,6 +448,12 @@ fn poll_loop(
                 thread::park_timeout(LOCK_RETRY);
                 continue;
             }
+        }
+        // The menu is a property of the bot, so the one CST that polls publishes it,
+        // once, rather than every instance on every start. A failure here is not worth
+        // a status line: the commands still work untyped, and the next pass retries.
+        if !menu_published {
+            menu_published = bot.set_my_commands(bot_commands()).is_ok();
         }
 
         let offset = store::load_in(&root).offset;
@@ -1301,6 +1309,9 @@ mod tests {
             fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
                 unreachable!()
             }
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }
@@ -1380,6 +1391,9 @@ mod tests {
             }
             fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
                 unreachable!()
+            }
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
             }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()

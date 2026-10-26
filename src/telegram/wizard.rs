@@ -719,6 +719,9 @@ mod tests {
             fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
                 Ok(())
             }
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }

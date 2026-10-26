@@ -111,6 +111,15 @@ impl ChatMember {
     }
 }
 
+/// One entry of the bot's command menu, the list Telegram offers when the user types `/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotCommand {
+    /// Without the slash: 1 to 32 lowercase letters, digits and underscores.
+    pub command: &'static str,
+    /// 3 to 256 characters, shown beside the name in the menu.
+    pub description: &'static str,
+}
+
 /// Why a call failed, in words that never include the token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BotError {
@@ -179,6 +188,9 @@ pub trait BotApi {
     /// Acknowledge a tap so the button stops spinning on the phone; `text` shows as a
     /// small notice there. Every tap is answered, including ones that are ignored.
     fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError>;
+    /// Publish the command menu. Per bot, not per chat: one call with the default scope
+    /// reaches the private chat and every group the bot is in.
+    fn set_my_commands(&self, commands: &[BotCommand]) -> Result<(), BotError>;
 }
 
 /// The real thing.
@@ -344,6 +356,15 @@ impl BotApi for UreqBot {
             },
         )
         .map(|_| ())
+    }
+
+    fn set_my_commands(&self, commands: &[BotCommand]) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            commands: &'a [BotCommand],
+        }
+        self.call::<Value>("setMyCommands", &Body { commands })
+            .map(|_| ())
     }
 
     fn edit_message_text(&self, chat_id: i64, message_id: i64, html: &str) -> Result<(), BotError> {
@@ -642,6 +663,28 @@ pub(crate) mod tests {
         assert_eq!(me.username, "cst_bot");
         let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(request.starts_with("POST /bot123:SECRET/getMe HTTP/1.1"));
+    }
+
+    #[test]
+    fn the_command_menu_goes_up_in_one_call_without_a_scope_so_groups_see_it_too() {
+        let (base, requests) = mock_server(vec![(200, r#"{"ok":true,"result":true}"#.to_string())]);
+        let bot = UreqBot::new(&base, "123:SECRET", Duration::from_secs(2));
+
+        bot.set_my_commands(&[BotCommand {
+            command: "follow",
+            description: "Watch a session live",
+        }])
+        .unwrap();
+
+        let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(request.starts_with("POST /bot123:SECRET/setMyCommands HTTP/1.1"));
+        let body = request_body(&request);
+        assert_eq!(body["commands"][0]["command"], "follow");
+        assert_eq!(body["commands"][0]["description"], "Watch a session live");
+        assert!(
+            body.get("scope").is_none(),
+            "a scoped list would hide the menu from chats of the other kind"
+        );
     }
 
     #[test]

@@ -542,6 +542,28 @@ fn sentence_end(text: &str) -> Option<usize> {
         .map(|i| i + 1)
 }
 
+/// The commands CST answers itself, for Telegram's `/` menu.
+///
+/// Only CST's own: Copilot's slash commands pass through untouched and are not CST's to
+/// advertise. The aliases (`/tail`, `/untail`) still work but stay out of the menu,
+/// which is meant to be read, not completed.
+pub fn bot_commands() -> &'static [bot::BotCommand] {
+    &[
+        bot::BotCommand {
+            command: "follow",
+            description: "Watch a session live for a few minutes (add a number of minutes)",
+        },
+        bot::BotCommand {
+            command: "unfollow",
+            description: "Stop the live view",
+        },
+        bot::BotCommand {
+            command: "queue",
+            description: "List replies waiting for a turn to end, each with a Cancel",
+        },
+    ]
+}
+
 /// The three characters Telegram's HTML mode reads as markup.
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -720,6 +742,37 @@ pub mod wording {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_menu_names_only_what_cst_answers_and_fits_telegrams_rules() {
+        let commands = bot_commands();
+        for command in commands {
+            assert!(
+                follow::parse_command(&format!("/{}", command.command)).is_some()
+                    || queue::is_queue_command(&format!("/{}", command.command)),
+                "/{} is in the menu but nothing answers it",
+                command.command
+            );
+            assert!(
+                (1..=32).contains(&command.command.len())
+                    && command
+                        .command
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "Telegram rejects the whole list over one bad name: {}",
+                command.command
+            );
+            assert!(
+                (3..=256).contains(&command.description.chars().count()),
+                "description out of Telegram's bounds for /{}",
+                command.command
+            );
+        }
+        assert!(
+            !commands.iter().any(|c| c.command == "tail"),
+            "aliases exist for typing, not for the menu"
+        );
+    }
 
     fn paired(mode: TelegramChatMode) -> Paired {
         Paired {
