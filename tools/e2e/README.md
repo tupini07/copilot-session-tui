@@ -98,7 +98,9 @@ starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as th
 Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
 <text>`, or by playing the form as CST does for a phone reply (arrows move the highlight
 from the first choice, text typed on the Other row is the answer, Enter accepts),
-which ends the turn; `e2e:bell` rings the bell. A turn
+which ends the turn; `e2e:bell` rings the bell. A thread wake-up pointer (`A new comment
+arrived on …`) is acted out as a 3 s turn on its own, as the real Copilot would, so a
+script can see how CST treats that turn's end. A turn
 that ends while the script is back at the list is an attention event, which is what
 sends a notification.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |

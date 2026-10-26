@@ -93,6 +93,17 @@ pub struct Pane {
     /// evidence it is gone — a submit, or a turn starting.
     composer_occupied: bool,
 
+    /// The turn now running was started by CST itself — a thread wake-up — and not by
+    /// the user. Its ending is not news the user asked for: a watched issue that gets
+    /// seventeen comments in a morning wakes the session seventeen times, and each
+    /// turn ends with a "Ready for attention" on the phone for work nobody at the
+    /// keyboard began. The tab still marks itself unread so the result can be read;
+    /// only the notification is held back. A question, an error or a plan approval
+    /// during such a turn still goes out, because then the session really does need
+    /// the user. Set only by a wake-up; cleared by any turn the user starts and by the
+    /// turn's own ending.
+    automated_turn: bool,
+
     working: bool,
     progress_state: crate::host_terminal::ProgressState,
     raw_progress_generation: u64,
@@ -272,6 +283,7 @@ impl Pane {
                 cols: size.cols,
             },
             composer_occupied: false,
+            automated_turn: false,
             working: false,
             progress_state: crate::host_terminal::ProgressState::Clear,
             raw_progress_generation: 0,
@@ -469,6 +481,17 @@ impl Pane {
         self.composer_occupied = true;
     }
 
+    /// The prompt just injected was CST's own doing, so the turn it starts should end
+    /// quietly. See `automated_turn`.
+    pub fn note_automated_turn(&mut self) {
+        self.automated_turn = true;
+    }
+
+    /// Whatever turn follows was asked for by the user, so its ending is theirs to hear.
+    pub fn clear_automated_turn(&mut self) {
+        self.automated_turn = false;
+    }
+
     /// Note a key on its way to the child, to track whether a draft is being composed.
     ///
     /// Only a plain Enter clears it. Everything else that could be editing — backspace,
@@ -488,6 +511,8 @@ impl Pane {
         // only the bare one means the composer is now empty.
         if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
             self.composer_occupied = false;
+            // The user submitted something, so whatever runs next is theirs.
+            self.automated_turn = false;
             return;
         }
         let composes = match key.code {
@@ -751,7 +776,10 @@ impl Pane {
                     self.needs_attention = !attended;
                     if !self.error_sent_in_cycle && !self.ready_sent_in_cycle {
                         self.ready_sent_in_cycle = true;
-                        if !attended {
+                        // A turn CST started ends without a word to the user; either
+                        // way its ending puts the mark down.
+                        let automated = std::mem::take(&mut self.automated_turn);
+                        if !attended && !automated {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -777,7 +805,10 @@ impl Pane {
                         && !self.ready_sent_in_cycle
                     {
                         self.ready_sent_in_cycle = true;
-                        if !attended {
+                        // A turn CST started ends without a word to the user; either
+                        // way its ending puts the mark down.
+                        let automated = std::mem::take(&mut self.automated_turn);
+                        if !attended && !automated {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -810,7 +841,10 @@ impl Pane {
                         && !self.ready_sent_in_cycle
                     {
                         self.ready_sent_in_cycle = true;
-                        if !attended {
+                        // A turn CST started ends without a word to the user; either
+                        // way its ending puts the mark down.
+                        let automated = std::mem::take(&mut self.automated_turn);
+                        if !attended && !automated {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -1061,10 +1095,12 @@ impl Pane {
             self.hook_completion_window = false;
             self.needs_attention = !attended;
             self.ready_sent_in_cycle = true;
-            // Nothing to tell you about a turn you watched finish. The marker and the
-            // notification now answer the same question — "does this pane want you?" —
-            // so a turn that leaves no `●` sends nothing either.
-            (!attended).then_some(PaneNotification::Ready)
+            // Nothing to tell you about a turn you watched finish, nor about one CST
+            // started for you. The marker and the notification otherwise answer the
+            // same question — "does this pane want you?" — so a turn that leaves no `●`
+            // sends nothing either.
+            let automated = std::mem::take(&mut self.automated_turn);
+            (!attended && !automated).then_some(PaneNotification::Ready)
         } else {
             self.needs_attention = false;
             None
@@ -2697,6 +2733,103 @@ mod tests {
         );
         assert_eq!(pane.confirm_hook_ready(2, true), None);
         assert!(!pane.needs_attention());
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_turn_cst_started_does_not_report_itself_ready_but_the_users_next_one_does() {
+        // A thread wake-up begins a turn nobody at the keyboard asked for. Its end is
+        // marked on the tab, so the result can be read, but not reported: a watched
+        // issue with a comment every few minutes would otherwise ring the phone for
+        // every one. The turn after it is the user's and must be reported as before —
+        // the wake-up may not leave the pane mute.
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(73, program, args), 24, 80, tx).unwrap();
+
+        pane.note_automated_turn();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(notifications.is_empty());
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(ready.ready_confirmation, Some(2));
+        assert_eq!(
+            pane.confirm_hook_ready(2, false),
+            None,
+            "a turn CST started does not report itself ready"
+        );
+        assert!(
+            pane.needs_attention(),
+            "the tab still says there is something to read"
+        );
+
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 3 }, false);
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(notifications.is_empty());
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 4 }, false);
+        assert_eq!(ready.ready_confirmation, Some(4));
+        assert_eq!(
+            pane.confirm_hook_ready(4, false),
+            Some(PaneNotification::Ready),
+            "the user's own turn is reported as before"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_bare_enter_from_the_user_reclaims_a_turn_cst_started() {
+        // The user typed and submitted while the wake-up's turn was still running, so
+        // whatever ends next is theirs to hear about.
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(74, program, args), 24, 80, tx).unwrap();
+
+        pane.note_automated_turn();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.note_user_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let (_, notifications) = pane.apply_signals(
+            PaneSignals {
+                events: vec![PaneSignalEvent::Progress(
+                    crate::host_terminal::ProgressState::Clear,
+                )],
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(notifications.is_empty());
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(ready.ready_confirmation, Some(2));
+        assert_eq!(
+            pane.confirm_hook_ready(2, false),
+            Some(PaneNotification::Ready)
+        );
         pane.shutdown().unwrap();
     }
 

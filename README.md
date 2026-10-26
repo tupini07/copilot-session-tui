@@ -943,6 +943,12 @@ participant like any other, so both wake and read what you wrote.
 If a thread starts going round in circles, CST says so and leaves it to you. It never
 stops a conversation on its own.
 
+A turn that a wake-up started ends quietly. The tab marks itself unread so you can read
+what the session did, but nothing is sent to ntfy or Telegram: a watched issue that
+gets a comment every few minutes would otherwise ring your phone for every one, about
+work nobody at the keyboard began. A turn you started still notifies when it ends, as do
+a question, an error and a plan approval, whoever started the turn.
+
 ### Closing CST does not lose a message
 
 Every notice is written down — whether it is still queued, already in a session's
