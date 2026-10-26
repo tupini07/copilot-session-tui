@@ -109,6 +109,8 @@ pub fn pair(
                 api_base: config.telegram.api_base.clone(),
                 paired: None,
                 replies: config.telegram.replies,
+                content_full: config.telegram.content == crate::config::TelegramContent::Full,
+                copilot_home: crate::session::loader::copilot_home(),
             },
         )),
     );

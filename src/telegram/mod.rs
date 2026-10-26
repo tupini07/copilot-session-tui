@@ -24,6 +24,7 @@
 pub mod answer;
 pub mod bot;
 pub mod cli;
+pub mod follow;
 pub mod markdown;
 pub mod store;
 pub mod wizard;

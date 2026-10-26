@@ -26,8 +26,9 @@ use chrono::{DateTime, Utc};
 use fs4::{FileExt, TryLockError};
 
 use super::bot::{BotApi, BotError, Update, UreqBot};
+use super::follow::{self, EndReason, FollowCommand, FollowView, LogTail};
 use super::markdown;
-use super::store::{self, Pairing, Reply, ReplyStatus, TelegramState};
+use super::store::{self, Follow, Pairing, Reply, ReplyStatus, TelegramState};
 use super::{
     chat_mode_of, classify, compose, escape_html, message_carries_code, route, wording, Content,
     Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict, POLL_TIMEOUT,
@@ -50,6 +51,11 @@ pub struct PollSettings {
     /// Who may act, from the config. `None` until the wizard has copied a pairing in.
     pub paired: Option<Paired>,
     pub replies: bool,
+    /// Whether session text may go to Telegram at all. A follow shows the session's
+    /// words, so under "Status only" it is refused rather than honoured.
+    pub content_full: bool,
+    /// Where Copilot keeps session logs, which a follow reads.
+    pub copilot_home: PathBuf,
 }
 
 /// One thing to send. Carries its own credentials, resolved by the UI thread from the
@@ -161,6 +167,18 @@ pub struct Batch {
     /// A pairing completed by this batch.
     pub paired: Option<Paired>,
     pub next_offset: Option<i64>,
+    /// `/follow`s to start or extend. Serviced by the poll loop, never typed anywhere.
+    pub follows: Vec<Follow>,
+    /// `/unfollow`s: the session, and where to answer if nothing was being followed.
+    pub unfollows: Vec<FollowEnd>,
+}
+
+/// A `/unfollow` as planned: which session, and where it was said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowEnd {
+    pub session_id: String,
+    pub thread_id: Option<i64>,
+    pub user_message_id: i64,
 }
 
 /// Decide what a batch of updates means.
@@ -244,6 +262,43 @@ pub fn plan_batch(
         };
         match route(&incoming, paired.mode, &state.sent, &state.topics) {
             Route::Session(session_id) => {
+                // CST's own commands are acted on here and never typed into the
+                // session. Copilot has slash commands too, so only these two are taken.
+                match follow::parse_command(text) {
+                    Some(FollowCommand::Follow { minutes }) => {
+                        if !settings.content_full {
+                            batch.says.push(OutboundJob::Say {
+                                session_id: Some(session_id),
+                                thread_id: message.topic_id(),
+                                reply_to: Some(message.message_id),
+                                text: follow::wording::needs_full_content(),
+                            });
+                            continue;
+                        }
+                        batch.follows.push(Follow {
+                            session_id,
+                            chat_id: paired.chat_id,
+                            thread_id: message.topic_id(),
+                            user_message_id: message.message_id,
+                            message_id: None,
+                            started_at: now,
+                            expires_at: now + chrono::Duration::minutes(i64::from(minutes)),
+                            last_hash: None,
+                            last_edit_at: None,
+                            stop_requested: false,
+                        });
+                        continue;
+                    }
+                    Some(FollowCommand::Unfollow) => {
+                        batch.unfollows.push(FollowEnd {
+                            session_id,
+                            thread_id: message.topic_id(),
+                            user_message_id: message.message_id,
+                        });
+                        continue;
+                    }
+                    None => {}
+                }
                 if !settings.replies {
                     batch.says.push(OutboundJob::Say {
                         session_id: Some(session_id),
@@ -332,6 +387,9 @@ fn poll_loop(
         if held_up.take().is_some() {
             let _ = events.send(MuxEvent::TelegramResumed);
         }
+        // Every return from the long poll, with or without updates, is the cadence
+        // the live views are edited at: at most every ten seconds.
+        service_follows(&root, &bot, &settings, Utc::now());
         if updates.is_empty() {
             continue;
         }
@@ -346,8 +404,30 @@ fn poll_loop(
         // out only after, so none is ever sent twice.
         let recorded = store::update_in(&root, |state| {
             let mut recorded = false;
+            let mut refused: Vec<OutboundJob> = Vec::new();
             for reply in &batch.replies {
                 recorded |= state.record_reply(reply.clone());
+            }
+            for follow in &batch.follows {
+                if !state.start_follow(follow.clone()) {
+                    refused.push(OutboundJob::Say {
+                        session_id: Some(follow.session_id.clone()),
+                        thread_id: follow.thread_id,
+                        reply_to: Some(follow.user_message_id),
+                        text: follow::wording::too_many_follows(follow::MAX_FOLLOWS),
+                    });
+                }
+            }
+            for end in &batch.unfollows {
+                match state.follow_mut(&end.session_id) {
+                    Some(running) => running.stop_requested = true,
+                    None => refused.push(OutboundJob::Say {
+                        session_id: Some(end.session_id.clone()),
+                        thread_id: end.thread_id,
+                        reply_to: Some(end.user_message_id),
+                        text: follow::wording::nothing_to_unfollow(),
+                    }),
+                }
             }
             if let Some(paired) = batch.paired {
                 state.pairing = Some(Pairing::Paired(paired));
@@ -355,16 +435,17 @@ fn poll_loop(
             if let Some(next) = batch.next_offset {
                 state.offset = Some(next);
             }
-            recorded
+            (recorded, refused)
         });
-        match recorded {
-            Ok(recorded) => {
+        let refused = match recorded {
+            Ok((recorded, refused)) => {
                 if recorded {
                     let _ = events.send(MuxEvent::TelegramRepliesChanged);
                 }
                 if batch.paired.is_some() {
                     let _ = events.send(MuxEvent::TelegramPaired);
                 }
+                refused
             }
             Err(error) => {
                 let _ = events.send(MuxEvent::TelegramFailed(format!(
@@ -372,9 +453,13 @@ fn poll_loop(
                 )));
                 continue;
             }
+        };
+        // A follow asked for just now is shown at once, not after the next poll.
+        if !batch.follows.is_empty() || !batch.unfollows.is_empty() {
+            service_follows(&root, &bot, &settings, Utc::now());
         }
         let chat = batch.paired.or(settings.paired);
-        for job in batch.says {
+        for job in batch.says.into_iter().chain(refused) {
             // A hint for an unpaired chat (the code sent from a group without topics)
             // goes back where it came from; everything else goes to the paired chat.
             let Some(paired) = chat else {
@@ -392,6 +477,155 @@ fn poll_loop(
 }
 
 /// Try to become the poller. The file stays open, and locked, for as long as it is held.
+/// Bring every live view up to date, and end the ones that are over.
+///
+/// Runs in the poll loop, so only the CST holding the poller lock edits, and a
+/// takeover carries on with the same message ids from the state file. Each follow is
+/// re-rendered from the end of its session's log; an unchanged rendering is not sent,
+/// and a changed one no more often than [`follow::EDIT_EVERY`]. A view that has
+/// expired, was told to stop, or whose session is gone gets one last edit that says
+/// so, and is forgotten. A failed edit is simply tried again next time: the deadline
+/// bounds how long that can go on.
+fn service_follows(root: &Path, bot: &impl BotApi, settings: &PollSettings, now: DateTime<Utc>) {
+    let follows = store::load_in(root).follows;
+    if follows.is_empty() {
+        return;
+    }
+    let forum = settings
+        .paired
+        .is_some_and(|paired| paired.mode == TelegramChatMode::Forum);
+    for current in follows {
+        let session_dir = settings
+            .copilot_home
+            .join("session-state")
+            .join(&current.session_id);
+        let session_gone = !session_dir.is_dir();
+        let lines = read_tail_lines(&session_dir.join("events.jsonl"), follow::TAIL_BYTES);
+        let tail = LogTail::from_lines(lines.iter().map(String::as_str));
+        let turn_running = turn_in_progress(&session_dir, &tail, now);
+        // In a forum the topic already names the session.
+        let title = (!forum).then(|| session_title(&session_dir, &current.session_id));
+        let ends_in = (current.expires_at - now)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        let view = FollowView {
+            title: title.as_deref(),
+            turn_running,
+            ends_in,
+            tail: &tail,
+        };
+
+        let ending = if current.stop_requested {
+            Some(EndReason::Stopped)
+        } else if session_gone {
+            Some(EndReason::SessionClosed)
+        } else if now >= current.expires_at {
+            Some(EndReason::Expired)
+        } else {
+            None
+        };
+        if let Some(reason) = ending {
+            let html = follow::render_ended(&view, reason);
+            let sent = match current.message_id {
+                Some(id) => bot.edit_message_text(current.chat_id, id, &html),
+                None => bot
+                    .send_message(
+                        current.chat_id,
+                        current.thread_id,
+                        Some(current.user_message_id),
+                        &html,
+                    )
+                    .map(|_| ()),
+            };
+            if sent.is_ok() {
+                let _ = store::update_in(root, |state| state.drop_follow(&current.session_id));
+            }
+            continue;
+        }
+
+        let recently_edited = current
+            .last_edit_at
+            .is_some_and(|at| (now - at).to_std().unwrap_or(Duration::ZERO) < follow::EDIT_EVERY);
+        if current.message_id.is_some() && recently_edited {
+            continue;
+        }
+        let html = follow::render(&view);
+        let hash = follow::content_hash(&html);
+        if current.message_id.is_some() && current.last_hash == Some(hash) {
+            continue;
+        }
+        let sent = match current.message_id {
+            Some(id) => bot
+                .edit_message_text(current.chat_id, id, &html)
+                .map(|_| id),
+            None => bot.send_message(
+                current.chat_id,
+                current.thread_id,
+                Some(current.user_message_id),
+                &html,
+            ),
+        };
+        if let Ok(message_id) = sent {
+            let _ = store::update_in(root, |state| {
+                if let Some(live) = state.follow_mut(&current.session_id) {
+                    live.message_id = Some(message_id);
+                    live.last_hash = Some(hash);
+                    live.last_edit_at = Some(now);
+                }
+            });
+        }
+    }
+}
+
+/// The last `bytes` of a file as whole lines, oldest first. The first line is dropped
+/// when the read began mid-line, so nothing half a record long is parsed.
+fn read_tail_lines(path: &Path, bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(length) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    let start = length.saturating_sub(bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    if file.read_to_string(&mut text).is_err() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
+}
+
+/// Whether a turn is running: what the lifecycle hook last said, or failing a journal,
+/// whether a tool is open or the log grew in the last few seconds.
+fn turn_in_progress(session_dir: &Path, tail: &LogTail, now: DateTime<Utc>) -> bool {
+    let journal = read_tail_lines(&session_dir.join(".cst-lifecycle.jsonl"), 4096);
+    if let Some(last) = journal.last() {
+        return last.contains("\"working\"");
+    }
+    !tail.running.is_empty()
+        || tail
+            .last_event_at
+            .is_some_and(|at| (now - at).num_seconds() < 20)
+}
+
+/// The session's name as CST shows it, from its workspace record; the id's start when
+/// there is none to read.
+fn session_title(session_dir: &Path, session_id: &str) -> String {
+    std::fs::read_to_string(session_dir.join("workspace.yaml"))
+        .ok()
+        .and_then(|yaml| serde_yaml::from_str::<serde_yaml::Value>(&yaml).ok())
+        .and_then(|value| value["summary"].as_str().map(str::trim).map(str::to_string))
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| session_id.chars().take(8).collect())
+}
+
 fn acquire_poller_lock(root: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(root).ok()?;
     let file = std::fs::OpenOptions::new()
@@ -560,6 +794,8 @@ mod tests {
 
     fn settings(paired: Option<Paired>) -> PollSettings {
         PollSettings {
+            content_full: true,
+            copilot_home: PathBuf::new(),
             token: "1:x".to_string(),
             api_base: "http://127.0.0.1:9".to_string(),
             paired,
@@ -785,6 +1021,9 @@ mod tests {
             sent: RefCell<Vec<String>>,
         }
         impl BotApi for Picky {
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }
@@ -849,6 +1088,9 @@ mod tests {
         // Any other refusal is reported as it is, not retried.
         struct Down;
         impl BotApi for Down {
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }
@@ -892,6 +1134,64 @@ mod tests {
                 "Bad Request: chat not found".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn a_follow_is_recorded_as_a_follow_and_never_typed_while_copilots_own_slash_commands_still_are(
+    ) {
+        use crate::notifications::NotificationKind;
+
+        let now = Utc::now();
+        let mut state = TelegramState::default();
+        state.record_sent(SentRecord {
+            message_id: 50,
+            session_id: "s1".to_string(),
+            kind: Some(SentKind::from(NotificationKind::Ready)),
+            tool_call_id: None,
+            sent_at: now,
+        });
+        let private = Paired {
+            chat_id: 7,
+            user_id: 7,
+            mode: TelegramChatMode::Private,
+        };
+        let updates = vec![
+            replying(update(1, 7, 7, "/follow 10"), 50),
+            // Copilot's own command: not CST's to take, so it is a reply like any other.
+            replying(update(2, 7, 7, "/compact"), 50),
+        ];
+
+        let batch = plan_batch(&updates, &settings(Some(private)), &state, now);
+        assert_eq!(batch.follows.len(), 1);
+        assert_eq!(batch.follows[0].session_id, "s1");
+        assert_eq!(batch.follows[0].user_message_id, 10);
+        assert_eq!(
+            batch.follows[0].expires_at,
+            now + chrono::Duration::minutes(10)
+        );
+        assert_eq!(batch.replies.len(), 1, "/compact goes to the session");
+        assert_eq!(batch.replies[0].text, "/compact");
+
+        // Under "Status only" the user chose to keep session text off Telegram, and a
+        // follow would show it: refused with the setting to flip, nothing recorded.
+        let mut status_only = settings(Some(private));
+        status_only.content_full = false;
+        let batch = plan_batch(&updates[..1], &status_only, &state, now);
+        assert!(batch.follows.is_empty());
+        assert!(batch.says.iter().any(|job| matches!(
+            job,
+            OutboundJob::Say { text, .. } if text.contains("Full content")
+        )));
+
+        let batch = plan_batch(
+            &[replying(update(3, 7, 7, "/unfollow"), 50)],
+            &settings(Some(private)),
+            &state,
+            now,
+        );
+        assert_eq!(batch.unfollows.len(), 1);
+        assert_eq!(batch.unfollows[0].session_id, "s1");
+        assert!(batch.replies.is_empty());
     }
 
     #[test]

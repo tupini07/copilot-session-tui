@@ -3752,6 +3752,8 @@ impl App {
             api_base: configured.api_base.clone(),
             paired,
             replies: configured.replies,
+            content_full: configured.content == crate::config::TelegramContent::Full,
+            copilot_home: self.copilot_home.clone(),
         })
     }
 

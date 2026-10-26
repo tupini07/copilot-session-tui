@@ -1,0 +1,50 @@
+# The user wants to see what a session is doing before deciding whether to wait.
+# /follow sends one message with the session's latest words and keeps editing it as
+# the log grows, then /unfollow ends it with a marker that cannot be read as live.
+# The commands are CST's own and are never typed into the session.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+# The stub bot's long poll returns every ten seconds, which is the edit cadence.
+timeout 40000
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# A first turn, so the phone has a message of this session's to reply to.
+type e2e:work 1500 Setup is done.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Setup is done.
+
+# /follow is answered with the live view, quoting the command, and goes nowhere near
+# the session's composer.
+telegram_say /follow 2
+telegram_wait Following
+telegram_wait Setup is done.
+telegram_wait ends in 2 min
+telegram_dump 01-following
+press enter
+expect_not Fake Copilot received: /follow
+dump 01-session-untouched
+
+# The session says more; within one poll the same message is edited to show it.
+type e2e:say Now reading the files, one by one.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait edited
+telegram_wait Now reading the files, one by one.
+telegram_dump 02-edited
+
+# /unfollow ends it; the last edit says so.
+telegram_say /unfollow
+telegram_wait Follow stopped
+telegram_dump 03-stopped
+press enter
+expect_not Fake Copilot received: /unfollow
+dump 03-session-still-untouched
