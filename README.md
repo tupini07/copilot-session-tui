@@ -766,7 +766,10 @@ message stays in Telegram to send again:
   queued for a closed session;
 - the session has **unsent text in its composer**: finish or clear it at the PC first;
 - the session is **working**: you are told once that the reply is queued, and it goes in
-  when the turn ends;
+  when the turn ends. The notice has a **Cancel** button for as long as the reply waits,
+  and `/queue` — sent to a session, or bare for every session — lists what is waiting
+  with a Cancel on each line. When a queued reply goes in, its notice becomes
+  "Delivered" and the button goes with it;
 - the session is waiting for a **tool permission**: that is answered at the keyboard only;
 - the session is waiting on a **question**: your reply answers it. Copilot's question is
   a form, so the reply is played into it as keys: a number picks that choice, any other

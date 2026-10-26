@@ -70,6 +70,10 @@ pub struct Reply {
     /// and it treats the reply as any other sent one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub answering: bool,
+    /// The "Queued …" notice this reply got, Cancel button and all, so that delivery
+    /// can turn it into "Delivered" and take the button away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_message_id: Option<i64>,
 }
 
 impl Reply {
@@ -397,6 +401,7 @@ mod tests {
             planned_at: Utc::now(),
             queued_told: false,
             answering: false,
+            queued_message_id: None,
             status,
         }
     }

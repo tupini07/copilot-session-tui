@@ -706,6 +706,19 @@ mod tests {
             fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
                 Ok(())
             }
+            fn send_message_with_buttons(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+                _: &[super::super::bot::Button],
+            ) -> Result<i64, BotError> {
+                Ok(1)
+            }
+            fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
+                Ok(())
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }

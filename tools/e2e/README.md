@@ -67,7 +67,7 @@ reads anything sent too soon as Alt+key.
 | Command | Effect |
 | --- | --- |
 | `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `f1` to `f12`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
-| `type <text>` | The text exactly as written, trailing spaces included. |
+| `type <text>` | The text exactly as written, trailing spaces included. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
 | `key <bytes>` | Raw bytes, with `\e`, `\r`, `\n`, `\t`, `\s` (space), `\\` and `\xHH`. |
 | `paste <text>` | A bracketed paste. |
 | `click [left\|middle\|right] COLUMN ROW` | A mouse click. |
@@ -83,6 +83,7 @@ reads anything sent too soon as Alt+key.
 | `telegram_say <text>` | A message from the paired user, as a reply to the last message CST sent, or typed into its topic in forum mode. Fails if CST has sent nothing yet. |
 | `telegram_say_bare <text>` | The same with no reply and no topic: General, or a bare message in a private chat. |
 | `telegram_say_from <user id> <text>` | A message from somebody else, placed like `telegram_say`. CST must ignore it. |
+| `telegram_tap <label>` | Tap the inline button with that label under the latest message CST sent that has one, as the paired user. The stub records `tap: <label>`, `button on <id>: <label>` when a message is sent with buttons, and `answered tap: <text>` when CST acknowledges one. |
 | `telegram_pair_code` | Send the pairing code CST has armed (read from its `telegram.json`) as `/start <code>`, which is what pressing Start on the deep link does. |
 | `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `edited <id>: …`, `incoming from <user>: …`. |
 | `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |

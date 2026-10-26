@@ -73,6 +73,29 @@ pub struct Update {
     pub update_id: i64,
     #[serde(default)]
     pub message: Option<Message>,
+    /// A tap on one of this bot's inline buttons.
+    #[serde(default)]
+    pub callback_query: Option<CallbackQuery>,
+}
+
+/// A button tapped. `data` is what the button was made with; `message` is the one it
+/// sat under, which is where any edit in answer goes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CallbackQuery {
+    pub id: String,
+    pub from: User,
+    #[serde(default)]
+    pub message: Option<Message>,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+/// One inline button under a message. `callback_data` comes back verbatim in the
+/// tap and may be at most 64 bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Button {
+    pub text: String,
+    pub callback_data: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -144,6 +167,18 @@ pub trait BotApi {
     /// Replace the text of a message this bot sent. An edit to the same text is not an
     /// error here, whatever Telegram says about it.
     fn edit_message_text(&self, chat_id: i64, message_id: i64, html: &str) -> Result<(), BotError>;
+    /// As `send_message`, with inline buttons under the text, one per row.
+    fn send_message_with_buttons(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        reply_to: Option<i64>,
+        html: &str,
+        buttons: &[Button],
+    ) -> Result<i64, BotError>;
+    /// Acknowledge a tap so the button stops spinning on the phone; `text` shows as a
+    /// small notice there. Every tap is answered, including ones that are ignored.
+    fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError>;
 }
 
 /// The real thing.
@@ -238,6 +273,79 @@ fn sanitize(error: ureq::Error) -> BotError {
 struct Empty {}
 
 impl BotApi for UreqBot {
+    fn send_message_with_buttons(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        reply_to: Option<i64>,
+        html: &str,
+        buttons: &[Button],
+    ) -> Result<i64, BotError> {
+        #[derive(Serialize)]
+        struct ReplyParameters {
+            message_id: i64,
+            allow_sending_without_reply: bool,
+        }
+        #[derive(Serialize)]
+        struct Keyboard<'a> {
+            inline_keyboard: Vec<[&'a Button; 1]>,
+        }
+        #[derive(Serialize)]
+        struct NoPreview {
+            is_disabled: bool,
+        }
+        #[derive(Serialize)]
+        struct Body<'a> {
+            chat_id: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_parameters: Option<ReplyParameters>,
+            text: &'a str,
+            parse_mode: &'static str,
+            link_preview_options: NoPreview,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            reply_markup: Option<Keyboard<'a>>,
+        }
+        #[derive(Deserialize)]
+        struct Sent {
+            message_id: i64,
+        }
+        let body = Body {
+            chat_id,
+            message_thread_id: thread_id,
+            reply_parameters: reply_to.map(|message_id| ReplyParameters {
+                message_id,
+                allow_sending_without_reply: true,
+            }),
+            text: html,
+            parse_mode: "HTML",
+            link_preview_options: NoPreview { is_disabled: true },
+            reply_markup: (!buttons.is_empty()).then(|| Keyboard {
+                inline_keyboard: buttons.iter().map(|button| [button]).collect(),
+            }),
+        };
+        self.call::<Sent>("sendMessage", &body)
+            .map(|sent| sent.message_id)
+    }
+
+    fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            callback_query_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            text: Option<&'a str>,
+        }
+        self.call::<Value>(
+            "answerCallbackQuery",
+            &Body {
+                callback_query_id: callback_id,
+                text,
+            },
+        )
+        .map(|_| ())
+    }
+
     fn edit_message_text(&self, chat_id: i64, message_id: i64, html: &str) -> Result<(), BotError> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -281,14 +389,17 @@ impl BotApi for UreqBot {
             #[serde(skip_serializing_if = "Option::is_none")]
             offset: Option<i64>,
             timeout: u64,
-            allowed_updates: [&'static str; 1],
+            allowed_updates: [&'static str; 2],
         }
         self.call(
             "getUpdates",
             &Body {
                 offset,
                 timeout: timeout.as_secs(),
-                allowed_updates: ["message"],
+                // Telegram remembers this per bot: an older CST taking over the poll
+                // during an upgrade narrows it back to messages, and taps go nowhere
+                // until a newer one polls again. A bounded gap, not a loss.
+                allowed_updates: ["message", "callback_query"],
             },
         )
     }
