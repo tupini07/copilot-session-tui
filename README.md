@@ -759,7 +759,8 @@ configure. Pairing again with a fresh code is how you move the bot from one to t
 #### What a reply does
 
 A reply is typed into the session's composer and submitted, as if you had typed it. CST
-confirms with a 👍 on your message. When it cannot deliver, it says so at once, and the
+confirms with a 👍 on your message, and the session's tab drops its unread mark: you
+read that result on the phone. When it cannot deliver, it says so at once, and the
 message stays in Telegram to send again:
 
 - the session is **not open in CST**: open it on the PC and reply again. Nothing is

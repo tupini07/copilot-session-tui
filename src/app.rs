@@ -4302,6 +4302,19 @@ impl App {
         let text = crate::notifications::sanitize_message(&reply.text);
         match self.inject_prompt(&reply.session_id, &text) {
             Ok(()) => {
+                // Answering from the phone is reading: the result this tab was holding
+                // for the user has been seen, on the phone. The mark would go anyway
+                // once Copilot starts on the reply, but that is seconds away and does
+                // not come at all when the composer is busy, so it goes now. The hand-
+                // made mark stays: that is a reminder, not a result. The turn this
+                // reply starts will mark the tab again when it ends unwatched, which
+                // is right — that result the user has not seen yet.
+                if let Some(pane) = self
+                    .pane_for_session(&reply.session_id)
+                    .and_then(|id| self.mux.as_mut()?.pane_mut(id))
+                {
+                    pane.acknowledge_attention();
+                }
                 self.telegram_react(reply.user_message_id);
                 // The "Queued" notice, if there was one, now says so and loses its
                 // Cancel; a button that can only answer "already delivered" misleads.
