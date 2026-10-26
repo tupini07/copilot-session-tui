@@ -947,7 +947,9 @@ A turn that a wake-up started ends quietly. The tab marks itself unread so you c
 what the session did, but nothing is sent to ntfy or Telegram: a watched issue that
 gets a comment every few minutes would otherwise ring your phone for every one, about
 work nobody at the keyboard began. A turn you started still notifies when it ends, as do
-a question, an error and a plan approval, whoever started the turn.
+a question, an error and a plan approval, whoever started the turn. Telegram does get
+one line as the wake-up is typed in, naming the session and linking the thread, so you
+know why a session is suddenly busy; that line carries the link and never the comment.
 
 ### Closing CST does not lose a message
 

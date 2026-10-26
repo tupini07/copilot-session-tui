@@ -610,6 +610,13 @@ pub mod wording {
     use super::Question;
     use crate::config::TelegramChatMode;
 
+    /// CST has just typed a thread pointer into the session. The link and nothing from
+    /// the comment: that is the rule for what reaches a session, and it holds for what
+    /// reaches the phone about it.
+    pub fn thread_wake(title: &str, url: &str) -> String {
+        format!("Woke {title} for a new comment on {url}. Its turn ends without a notification.")
+    }
+
     pub fn paired(mode: TelegramChatMode) -> String {
         match mode {
             TelegramChatMode::Private => {
