@@ -141,6 +141,9 @@ pub trait BotApi {
         message_id: i64,
         emoji: &str,
     ) -> Result<(), BotError>;
+    /// Replace the text of a message this bot sent. An edit to the same text is not an
+    /// error here, whatever Telegram says about it.
+    fn edit_message_text(&self, chat_id: i64, message_id: i64, html: &str) -> Result<(), BotError>;
 }
 
 /// The real thing.
@@ -235,6 +238,39 @@ fn sanitize(error: ureq::Error) -> BotError {
 struct Empty {}
 
 impl BotApi for UreqBot {
+    fn edit_message_text(&self, chat_id: i64, message_id: i64, html: &str) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            chat_id: i64,
+            message_id: i64,
+            text: &'a str,
+            parse_mode: &'static str,
+            link_preview_options: LinkPreviewOff,
+        }
+        #[derive(Serialize)]
+        struct LinkPreviewOff {
+            is_disabled: bool,
+        }
+        let body = Body {
+            chat_id,
+            message_id,
+            text: html,
+            parse_mode: "HTML",
+            link_preview_options: LinkPreviewOff { is_disabled: true },
+        };
+        match self.call::<Value>("editMessageText", &body) {
+            Ok(_) => Ok(()),
+            // The view is only edited when it changed, but a race can still send the
+            // same text twice; Telegram calling that a bad request is not a failure.
+            Err(BotError::Rejected(description))
+                if description.to_lowercase().contains("not modified") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn get_me(&self) -> Result<BotIdentity, BotError> {
         self.call("getMe", &Empty {})
     }

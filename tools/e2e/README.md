@@ -84,7 +84,7 @@ reads anything sent too soon as Alt+key.
 | `telegram_say_bare <text>` | The same with no reply and no topic: General, or a bare message in a private chat. |
 | `telegram_say_from <user id> <text>` | A message from somebody else, placed like `telegram_say`. CST must ignore it. |
 | `telegram_pair_code` | Send the pairing code CST has armed (read from its `telegram.json`) as `/start <code>`, which is what pressing Start on the deep link does. |
-| `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `incoming from <user>: …`. |
+| `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>` | Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `edited <id>: …`, `incoming from <user>: …`. |
 | `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |
 | `telegram_rights on\|off` | Whether the stub says the bot may manage topics. |
 

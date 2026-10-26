@@ -307,6 +307,13 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
                 r#"{"status":"member"}"#.to_string()
             })
         }
+        "editMessageText" => {
+            let message_id = number(body, "message_id").unwrap_or(0);
+            let text = string(body, "text").unwrap_or_default();
+            let mut state = lock.lock().unwrap();
+            state.outbox.push(format!("edited {message_id}: {text}"));
+            ok(format!(r#"{{"message_id":{message_id}}}"#))
+        }
         "setMessageReaction" => {
             let message_id = number(body, "message_id").unwrap_or(0);
             let mut state = lock.lock().unwrap();

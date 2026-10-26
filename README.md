@@ -776,6 +776,21 @@ message stays in Telegram to send again:
 - the session is waiting on a **plan approval**: that is answered at the PC. The message
   still shows the plan so you know what it is waiting for.
 
+#### Watching a session live
+
+While a turn runs the phone hears nothing, and sometimes you want to know what the agent
+is up to before deciding whether to wait. Send `/follow` the way you would a reply — in
+the session's topic, or as a reply to one of its messages — and CST answers with one
+message holding the session's latest words, whatever tool is running, and whether it is
+waiting on a question. For the next five minutes (`/follow 10` for ten, up to thirty)
+that one message is edited in place as the log grows, at most every ten seconds, so the
+chat does not fill with copies. When the time is up, or you send `/unfollow`, or the
+session closes, the message is edited one last time to say so, in a way that cannot be
+read as current. At most three sessions can be followed at once, which keeps the edits
+under what Telegram allows one chat. A follow shows session text, so under **Status
+only** it is refused rather than honoured. Copilot's own slash commands, like
+`/compact`, are not intercepted; only `/follow` and `/unfollow` are CST's.
+
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for
 24 hours. Telegram needs the multiplexer (`mux`), as threads do: without it there is no

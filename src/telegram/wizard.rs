@@ -703,6 +703,9 @@ mod tests {
     fn rights_failures_tell_the_user_which_switch_to_flip() {
         struct Stub(&'static str, bool);
         impl BotApi for Stub {
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                Ok(())
+            }
             fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
                 unreachable!()
             }
