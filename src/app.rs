@@ -2,6 +2,7 @@ use crate::config::{self, EffectiveWorktreeConfig, ProjectSettings, UserConfig};
 use crate::github::{GithubError, GithubItem};
 use crate::mux::{KeyChord, MuxEvent, MuxState, Pane, PaneLaunch, PaneSpec, PrefixState};
 use crate::notifications::{NotificationKind, NotificationRequest, NotificationWorker};
+use crate::project_labels;
 use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::tmux::{self, TmuxSessionRef, TmuxSupport};
@@ -799,6 +800,9 @@ pub struct App {
     /// Raw directory `cst` was launched from.
     pub cwd: Option<String>,
     pub unique_projects: Vec<String>,
+    /// What each root in `unique_projects` is shown as: its last component, or more of
+    /// its path when another root ends the same way. Rebuilt whenever that list is.
+    project_labels: HashMap<String, String>,
     pub project_selected: usize,
     pub project_scroll_offset: usize,
     pub project_visible_rows: usize,
@@ -1054,6 +1058,7 @@ pub struct App {
 impl App {
     pub fn new(sessions: Vec<Session>, config: UserConfig) -> Self {
         let unique_projects = extract_unique_projects(&sessions, &config.projects);
+        let project_labels = project_labels::label_map(&unique_projects);
         let filtered_indices: Vec<usize> = (0..sessions.len()).collect();
         let mux_on_disk = config.mux;
         let mux = config.mux.then(|| new_mux(&config));
@@ -1072,6 +1077,7 @@ impl App {
             cwd_project: None,
             cwd: None,
             unique_projects,
+            project_labels,
             project_selected: 0,
             project_scroll_offset: 0,
             project_visible_rows: 10,
@@ -5025,6 +5031,20 @@ impl App {
                 self.project_selected
                     .min(self.unique_projects.len().saturating_sub(1))
             });
+        self.refresh_project_labels();
+    }
+
+    fn refresh_project_labels(&mut self) {
+        self.project_labels = project_labels::label_map(&self.unique_projects);
+    }
+
+    /// The name a project root is listed under. A root CST has not listed, such as a
+    /// session's whose folder appeared since, gets its last component.
+    pub fn project_label<'a>(&'a self, root: &'a str) -> &'a str {
+        self.project_labels
+            .get(root)
+            .map(String::as_str)
+            .unwrap_or_else(|| project_labels::short_name(root))
     }
 
     /// Persisted Copilot names are more useful in the pane switcher than OSC window
@@ -5370,12 +5390,9 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, project)| {
-                let short_name = std::path::Path::new(project)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(project);
+                // The label, so whatever a row shows can be typed to find it.
                 matcher
-                    .fuzzy_match(short_name, &self.project_search_query)
+                    .fuzzy_match(self.project_label(project), &self.project_search_query)
                     .is_some()
             })
             .map(|(i, _)| i)
@@ -5437,6 +5454,7 @@ impl App {
             .any(|p| p.eq_ignore_ascii_case(&project));
         if !known {
             self.unique_projects.insert(0, project.clone());
+            self.refresh_project_labels();
         }
         self.cwd_project = Some(project.clone());
 
@@ -5511,6 +5529,7 @@ impl App {
                 .any(|project| project.eq_ignore_ascii_case(here))
             {
                 self.unique_projects.insert(0, here.clone());
+                self.refresh_project_labels();
             }
         }
         self.project_selected = here

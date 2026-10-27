@@ -235,7 +235,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let lines = if has_project_filter {
                 vec![line]
             } else {
-                let project = session.project_name();
+                let project = app.project_label(&session.project_root);
                 // The project line has no time column, so it can use everything the
                 // indent leaves rather than a fixed budget that clips common names.
                 let max_project_width = (inner.width as usize).saturating_sub(5);

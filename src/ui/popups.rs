@@ -859,10 +859,7 @@ pub fn draw_project_filter(f: &mut Frame, app: &App) {
         let is_active = app.project_filter.as_deref() == Some(project.as_str());
 
         let prefix = if is_active { "● " } else { "  " };
-        let name = std::path::Path::new(project)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(project);
+        let name = app.project_label(project);
 
         let display = if app
             .cwd_project
