@@ -28,6 +28,7 @@ pub mod command;
 pub mod follow;
 pub mod markdown;
 pub mod queue;
+pub mod screen;
 pub mod store;
 pub mod wizard;
 pub mod worker;
@@ -558,11 +559,16 @@ pub fn bot_commands() -> &'static [bot::BotCommand] {
     &[
         bot::BotCommand {
             command: "follow",
-            description: "Watch a session live for a few minutes (add a number of minutes)",
+            description:
+                "Watch a session's screen live for a few minutes (add a number of minutes)",
         },
         bot::BotCommand {
             command: "unfollow",
             description: "Stop the live view",
+        },
+        bot::BotCommand {
+            command: "peek",
+            description: "Show a session's screen as it is right now",
         },
         bot::BotCommand {
             command: "queue",

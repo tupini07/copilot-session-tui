@@ -7,12 +7,13 @@
 //! the log grows. Telegram lets a bot edit its own messages, so the chat does not fill
 //! with copies.
 //!
-//! The view is built from the session's event log, not from its screen. The log is
-//! readable by any CST, so the poller services every follow itself and a takeover
-//! carries on with the same message; a screen is only ever visible to the one CST
-//! hosting the pane, and on a phone a hundred columns of box drawing scroll sideways
-//! while the log's prose wraps. The cost is that words arrive per sub-turn rather than
-//! as they are typed, which at a ten-second cadence does not show.
+//! The view is the pane's screen, verbatim, in a monospace block (see `screen`): the
+//! person asking wants to see what the terminal shows, a menu or a prompt included,
+//! not a summary of it. A screen is only readable by the CST hosting the pane, so that
+//! CST renders and edits, stamping the follow as hosted. The view built from the
+//! event log — the session's last words and the tool running — is what the poller
+//! falls back to for a session no CST has open, since the log is readable by any CST
+//! and a takeover carries on with the same message.
 //!
 //! A follow expires on its own, because an edit every ten seconds forever is not a
 //! fair use of Telegram, and the user who asked has usually looked by then. When it
@@ -211,34 +212,90 @@ pub enum EndReason {
     SessionClosed,
 }
 
+/// Everything one rendering of the screen view needs: the host CST's counterpart of
+/// [`FollowView`], built from the pane rather than the log.
+#[derive(Debug, Clone)]
+pub struct ScreenView<'a> {
+    pub title: Option<&'a str>,
+    pub turn_running: bool,
+    pub ends_in: Duration,
+    /// The screen's rows, as [`screen::rows`] cuts them.
+    pub rows: &'a [String],
+}
+
+/// What the live view's footer says. A slash command in a message is tappable in
+/// Telegram, so this is also the button that stops the view.
+const STOP_HINT: &str = "Send /unfollow to stop.";
+
 /// The message as it stands while the follow is live.
 pub fn render(view: &FollowView<'_>) -> String {
-    render_with_footer(view, &live_header(view), None)
+    let header = live_header(view.title, view.turn_running, view.ends_in);
+    render_with_footer(view, &header, Some(STOP_HINT))
 }
 
 /// The message's final form, marked so it cannot be read as current.
 pub fn render_ended(view: &FollowView<'_>, reason: EndReason) -> String {
-    let footer = match reason {
+    render_with_footer(view, &ended_header(view.title), Some(&ended_footer(reason)))
+}
+
+/// The live view from the screen: header, the rows in a monospace block cut from the
+/// top to fit, and the way to stop it.
+pub fn render_screen(view: &ScreenView<'_>) -> String {
+    let header = live_header(view.title, view.turn_running, view.ends_in);
+    let footer = format!("<i>{}</i>", escape_html(STOP_HINT));
+    with_screen_block(&header, view.rows, &footer)
+}
+
+/// The screen view's final form.
+pub fn render_screen_ended(view: &ScreenView<'_>, reason: EndReason) -> String {
+    let footer = format!("<i>{}</i>", escape_html(&ended_footer(reason)));
+    with_screen_block(&ended_header(view.title), view.rows, &footer)
+}
+
+/// One picture of the screen, asked for with `/peek`.
+pub fn render_peek(title: Option<&str>, rows: &[String]) -> String {
+    let header = match title {
+        Some(title) => format!("<b>Peek: {}</b>", escape_html(title)),
+        None => "<b>Peek</b>".to_string(),
+    };
+    with_screen_block(&header, rows, "")
+}
+
+fn with_screen_block(header: &str, rows: &[String], footer: &str) -> String {
+    let fixed = header.chars().count() + footer.chars().count() + 2;
+    let block = super::screen::as_pre(rows, MESSAGE_LIMIT.saturating_sub(fixed));
+    let mut text = format!("{header}\n{block}");
+    if !footer.is_empty() {
+        text.push('\n');
+        text.push_str(footer);
+    }
+    text
+}
+
+fn ended_header(title: Option<&str>) -> String {
+    match title {
+        Some(title) => format!("<b>Followed {}</b>", escape_html(title)),
+        None => "<b>Followed</b>".to_string(),
+    }
+}
+
+fn ended_footer(reason: EndReason) -> String {
+    match reason {
         EndReason::Expired => {
             "⏹ Follow ended: time is up. Send /follow to watch again.".to_string()
         }
         EndReason::Stopped => "⏹ Follow stopped.".to_string(),
         EndReason::SessionClosed => "⏹ Follow ended: the session closed.".to_string(),
-    };
-    let header = match view.title {
-        Some(title) => format!("<b>Followed {}</b>", escape_html(title)),
-        None => "<b>Followed</b>".to_string(),
-    };
-    render_with_footer(view, &header, Some(&footer))
+    }
 }
 
-fn live_header(view: &FollowView<'_>) -> String {
-    let minutes = view.ends_in.as_secs().div_ceil(60).max(1);
-    let name = match view.title {
+fn live_header(title: Option<&str>, turn_running: bool, ends_in: Duration) -> String {
+    let minutes = ends_in.as_secs().div_ceil(60).max(1);
+    let name = match title {
         Some(title) => format!("<b>Following {}</b>", escape_html(title)),
         None => "<b>Following</b>".to_string(),
     };
-    let state = if view.turn_running { "" } else { " · idle" };
+    let state = if turn_running { "" } else { " · idle" };
     format!(
         "{name}{state} · <i>updates every {} s · ends in {minutes} min</i>",
         EDIT_EVERY.as_secs()
@@ -346,6 +403,21 @@ pub mod wording {
         "No follow is running for this session.".to_string()
     }
 
+    /// `/follow image`: a picture re-uploaded every ten seconds is not a fair use of
+    /// anyone's data plan, so a live view is text.
+    pub fn no_image_follow() -> String {
+        "A live view is text, because an image would be uploaded again every ten seconds. \
+         Send /follow for the screen as text, or /peek image for one picture."
+            .to_string()
+    }
+
+    /// `/peek image` before pictures are drawn: said rather than silently sent as text.
+    pub fn no_images_yet() -> String {
+        "Pictures of the screen are not available in this version of CST; here is the \
+         screen as text."
+            .to_string()
+    }
+
     pub fn too_many_follows(limit: usize) -> String {
         format!(
             "{limit} sessions are already being followed, which is as many as Telegram \
@@ -448,7 +520,8 @@ mod tests {
             render(&view),
             "<b>Following Plan &lt;review&gt;</b> · <i>updates every 10 s · ends in 5 min</i>\n\n\
              <b>Done</b>\n\nChanged <code>a.rs</code>.\n\n\
-             ▶ <code>bash: cargo test</code>\n❓ waiting on a question"
+             ▶ <code>bash: cargo test</code>\n❓ waiting on a question\n\n\
+             <i>Send /unfollow to stop.</i>"
         );
         // In a forum the topic names the session; an idle session says so.
         let idle = FollowView {
@@ -494,7 +567,11 @@ mod tests {
         };
         let html = render(&view);
         assert!(html.chars().count() <= MESSAGE_LIMIT);
-        assert!(html.ends_with("The newest, kept whole."));
+        assert!(html.contains(
+            "The newest, kept whole.
+
+<i>Send /unfollow to stop.</i>"
+        ));
         assert!(!html.contains("word word"));
 
         // One message too long on its own: its end is shown, from a whole line.
@@ -510,7 +587,8 @@ mod tests {
         let html = render(&view);
         assert!(html.chars().count() <= MESSAGE_LIMIT);
         assert!(html.contains("…line "), "{html:.120}");
-        assert!(html.ends_with("line 399 of a very long single message"));
+        assert!(html
+            .contains("line 399 of a very long single message\n\n<i>Send /unfollow to stop.</i>"));
     }
 
     #[test]
