@@ -9,6 +9,9 @@ description = "Drives the real CST binary in a pseudo-terminal from a script and
 [workspace]
 
 [dependencies]
+# The stub's event log carries timestamps as the real one does; CST reads them to tell a
+# session in a turn from a quiet one.
+chrono = "0.4"
 dirs = "6"
 portable-pty = "0.9"
 vt100 = "0.16"

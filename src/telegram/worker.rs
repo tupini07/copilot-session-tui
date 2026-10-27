@@ -591,6 +591,7 @@ fn poll_loop(
     let mut lock: Option<std::fs::File> = None;
     let mut held_up: Option<String> = None;
     let mut menu_published = false;
+    let mut presence_started = false;
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -601,6 +602,13 @@ fn poll_loop(
             if lock.is_none() {
                 thread::park_timeout(LOCK_RETRY);
                 continue;
+            }
+            // One presence per bot, like one poller: the "typing…" shown while a
+            // session works is sent by whoever holds this lock.
+            if !presence_started {
+                presence_started = true;
+                let (root, settings, stop) = (root.clone(), settings.clone(), Arc::clone(&stop));
+                thread::spawn(move || presence_loop(&root, &settings, &stop));
             }
         }
         // The menu is a property of the bot, so the one CST that polls publishes it,
@@ -1023,6 +1031,89 @@ fn turn_in_progress(session_dir: &Path, tail: &LogTail, now: DateTime<Utc>) -> b
         || tail
             .last_event_at
             .is_some_and(|at| (now - at).num_seconds() < 20)
+}
+
+/// How often "typing…" is renewed while a session works. Telegram shows the status for
+/// about five seconds, so four keeps it on without a gap.
+const TYPING_EVERY: Duration = Duration::from_secs(4);
+
+/// A session whose log has not grown for this long is not read any further to decide
+/// whether it is working; the metadata alone says it is not.
+const TYPING_LOOKBACK: Duration = Duration::from_secs(60);
+
+/// Keep "typing…" on in the chat, or in a session's topic, while that session works.
+///
+/// The phone then sees the same thing the tab strip shows: which sessions are busy right
+/// now, without a message for it. In a forum each working session's topic types; in a
+/// private chat, which has no topics, the chat types when any session with a recent
+/// message does. Run by the CST that polls, every [`TYPING_EVERY`], from what the
+/// session folders say, so no pane is needed and a session open in another CST counts.
+fn presence_loop(root: &Path, settings: &PollSettings, stop: &AtomicBool) {
+    let bot = UreqBot::new(&settings.api_base, &settings.token, Duration::from_secs(10));
+    while !stop.load(Ordering::Acquire) {
+        if let Some(paired) = settings.paired {
+            let state = store::load_in(root);
+            let now = Utc::now();
+            let working =
+                |session_id: &str| session_working(&settings.copilot_home, session_id, now);
+            for thread_id in typing_targets(&state, paired.mode, now, &working) {
+                let _ = bot.send_chat_action(paired.chat_id, thread_id);
+            }
+        }
+        thread::sleep(TYPING_EVERY);
+    }
+}
+
+/// Where "typing…" goes this tick: one entry per topic whose session works, or a single
+/// `None` for the chat itself in private mode. `working` is asked once per session.
+pub(crate) fn typing_targets(
+    state: &TelegramState,
+    mode: TelegramChatMode,
+    now: DateTime<Utc>,
+    working: &dyn Fn(&str) -> bool,
+) -> Vec<Option<i64>> {
+    match mode {
+        TelegramChatMode::Forum => state
+            .topics
+            .iter()
+            .filter(|(session_id, _)| working(session_id))
+            .map(|(_, topic)| Some(topic.thread_id))
+            .collect(),
+        TelegramChatMode::Private => {
+            // Sessions the chat has heard from lately; without topics there is no
+            // other list of which sessions this chat is about.
+            let mut recent: Vec<&str> = state
+                .sent
+                .iter()
+                .filter(|record| (now - record.sent_at) < chrono::Duration::hours(24))
+                .map(|record| record.session_id.as_str())
+                .collect();
+            recent.sort_unstable();
+            recent.dedup();
+            if recent.into_iter().any(working) {
+                vec![None]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Whether a session is in a turn, from its folder. The log's age is checked first so
+/// a quiet session costs one metadata read, not a tail of its log every few seconds.
+fn session_working(copilot_home: &Path, session_id: &str, now: DateTime<Utc>) -> bool {
+    let session_dir = copilot_home.join("session-state").join(session_id);
+    let events = session_dir.join("events.jsonl");
+    let recently_written = std::fs::metadata(&events)
+        .and_then(|metadata| metadata.modified())
+        .map(|modified| modified.elapsed().map_or(true, |age| age < TYPING_LOOKBACK))
+        .unwrap_or(false);
+    if !recently_written {
+        return false;
+    }
+    let lines = read_tail_lines(&events, follow::TAIL_BYTES);
+    let tail = LogTail::from_lines(lines.iter().map(String::as_str));
+    turn_in_progress(&session_dir, &tail, now)
 }
 
 /// How long a side question may take. A copy of a long conversation is a lot to read.
@@ -2146,6 +2237,51 @@ mod tests {
         assert_eq!(batch.replies[0].user_message_id, 10);
         assert!(batch.says.is_empty(), "a stranger is not even answered");
         assert_eq!(batch.next_offset, Some(4));
+    }
+
+    #[test]
+    fn typing_goes_to_the_topics_of_working_sessions_and_to_a_private_chat_once() {
+        // In a forum each busy session's topic types and the quiet ones do not; a
+        // private chat has one indicator for all of them, shown while any works.
+        let now = Utc::now();
+        let mut state = TelegramState::default();
+        for (session, thread) in [("busy", 300), ("quiet", 301), ("also-busy", 302)] {
+            state.topics.insert(
+                session.to_string(),
+                TopicRecord {
+                    thread_id: thread,
+                    title: session.to_string(),
+                    icon: None,
+                    created_at: None,
+                },
+            );
+        }
+        let working = |session: &str| session.contains("busy");
+
+        let mut forum = typing_targets(&state, TelegramChatMode::Forum, now, &working);
+        forum.sort();
+        assert_eq!(forum, vec![Some(300), Some(302)]);
+
+        // Private: only sessions the chat has heard from count, and once is enough.
+        let mut private = TelegramState::default();
+        assert!(typing_targets(&private, TelegramChatMode::Private, now, &working).is_empty());
+        for session in ["busy", "also-busy", "quiet"] {
+            private.record_sent(SentRecord {
+                message_id: 1,
+                session_id: session.to_string(),
+                kind: None,
+                tool_call_id: None,
+                sent_at: now,
+            });
+        }
+        assert_eq!(
+            typing_targets(&private, TelegramChatMode::Private, now, &working),
+            vec![None]
+        );
+        assert!(
+            typing_targets(&private, TelegramChatMode::Private, now, &|_: &str| false).is_empty(),
+            "nothing working, nothing typing"
+        );
     }
 
     #[test]

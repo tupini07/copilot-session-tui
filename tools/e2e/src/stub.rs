@@ -133,6 +133,16 @@ fn events_path(args: &[String]) -> Option<std::path::PathBuf> {
     )
 }
 
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn append_event(path: &std::path::Path, record: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{record}");
+    }
+}
+
 fn act(direction: &str, events_path: Option<&std::path::Path>) {
     let (verb, rest) = direction.split_once(' ').unwrap_or((direction, ""));
     match verb {
@@ -142,22 +152,28 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             // session said, which is how a table or a list gets into a message.
             let said = rest.replace("\\n", "\n");
             let record = format!(
-                r#"{{"type":"assistant.message","data":{{"content":{}}}}}"#,
+                r#"{{"type":"assistant.message","timestamp":"{}","data":{{"content":{}}}}}"#,
+                now_stamp(),
                 crate::telegram_stub::json_string(&said)
             );
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
-            {
-                let _ = writeln!(file, "{record}");
-            }
+            append_event(path, &record);
         }
         "work" => {
             let (millis, said) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
             let millis: u64 = millis.parse().unwrap_or(1000);
             // Indeterminate progress, then clear: the shape of a turn as Copilot
             // reports it to the terminal. Anything said is written while the turn is
-            // running, which is when the real Copilot writes its messages.
+            // running, which is when the real Copilot writes its messages. The turn's
+            // start goes into the log as the real Copilot's does, with a timestamp, which
+            // is how CST tells from the folder alone that this session is busy.
             print!("\x1b]9;4;3;0\x1b\\");
             let _ = std::io::stdout().flush();
+            if let Some(path) = events_path {
+                append_event(
+                    path,
+                    &format!(r#"{{"type":"assistant.turn_start","timestamp":"{}","data":{{}}}}"#, now_stamp()),
+                );
+            }
             std::thread::sleep(Duration::from_millis(millis));
             if !said.is_empty() {
                 act(&format!("say {said}"), events_path);
