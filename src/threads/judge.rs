@@ -150,10 +150,13 @@ pub fn examine(thread: &ThreadRef, cancelled: Arc<AtomicBool>) -> Option<Stall> 
 /// repository in reach even if something did go wrong.
 fn run_reviewer(scratch: &Path, prompt: &str) -> Option<String> {
     let probe = crate::session::manager::copilot_probe()?;
+    let session = PromptSession::new();
+    // No `--reasoning-effort none`: the CLI rejects it outright for some of its default
+    // models, which made every examination a failed call rather than a cheaper one.
     let output = std::process::Command::new(&probe.program)
         .arg("-p")
         .arg(prompt)
-        .args(["-s", "--reasoning-effort", "none", "--disable-builtin-mcps"])
+        .args(["-s", "--disable-builtin-mcps", "--session-id", &session.id])
         .current_dir(scratch)
         .output()
         .ok()?;
@@ -161,6 +164,33 @@ fn run_reviewer(scratch: &Path, prompt: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// The reviewer's session, removed from the user's session list when it is over.
+///
+/// Prompt mode saves a session like an interactive one, named after the prompt's first
+/// line, even when the call fails, and nothing removes it. Without this, every burst
+/// examined would add a "You are reviewing a conversation" entry to the list CST exists
+/// to manage. Naming the id up front is what makes the folder findable afterwards.
+struct PromptSession {
+    id: String,
+}
+
+impl PromptSession {
+    fn new() -> Self {
+        Self {
+            id: crate::session::manager::new_session_id(),
+        }
+    }
+}
+
+impl Drop for PromptSession {
+    fn drop(&mut self) {
+        let dir = crate::session::loader::copilot_home()
+            .join("session-state")
+            .join(&self.id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[cfg(test)]
