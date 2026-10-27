@@ -76,8 +76,15 @@ pub struct PairingPrompt {
 /// What a background check came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Identity { id: i64, username: String },
-    RightsOk,
+    Identity {
+        id: i64,
+        username: String,
+    },
+    /// Topics may be managed; `may_pin` says whether a new topic's first message can
+    /// be unpinned too, which is cosmetic.
+    RightsOk {
+        may_pin: bool,
+    },
     TestOk,
     Failed(StepKind, String),
 }
@@ -295,9 +302,15 @@ impl Wizard {
                 self.bot_username = Some(username.clone());
                 self.set_state(StepKind::Token, StepState::Done(format!("@{username}")));
             }
-            Outcome::RightsOk => self.set_state(
+            Outcome::RightsOk { may_pin: true } => self.set_state(
                 StepKind::Rights,
                 StepState::Done("admin, may manage topics".to_string()),
+            ),
+            Outcome::RightsOk { may_pin: false } => self.set_state(
+                StepKind::Rights,
+                // The hint under the rows says what the missing right costs; the row
+                // has room for a verdict, not a paragraph.
+                StepState::Done("admin, may manage topics, not pin".to_string()),
             ),
             Outcome::TestOk => {
                 self.set_state(StepKind::Test, StepState::Done("delivered".to_string()))
@@ -371,8 +384,9 @@ impl Wizard {
                 ],
             },
             StepKind::Rights => vec![
-                "The bot must be an admin of the group with the Manage Topics right,".to_string(),
-                "so it can open a topic for each session. Enter: check.".to_string(),
+                "The bot must be an admin of the group with the Manage Topics right, so it".to_string(),
+                "can open a topic per session; Pin Messages lets it unpin each topic's".to_string(),
+                "first message, which Telegram pins by itself. Enter: check.".to_string(),
             ],
             StepKind::Test => vec![
                 "Enter: send one message to the paired chat. In a group this also makes".to_string(),
@@ -498,7 +512,9 @@ pub fn check_rights(
     bot_id: i64,
 ) -> Result<Outcome, (StepKind, String)> {
     match bot.get_chat_member(chat_id, bot_id) {
-        Ok(member) if member.may_manage_topics() => Ok(Outcome::RightsOk),
+        Ok(member) if member.may_manage_topics() => Ok(Outcome::RightsOk {
+            may_pin: member.may_pin_messages(),
+        }),
         Ok(member) if member.status == "administrator" => Err((
             StepKind::Rights,
             "The bot is an admin but may not manage topics. Edit its admin rights in the \
@@ -701,7 +717,7 @@ mod tests {
 
     #[test]
     fn rights_failures_tell_the_user_which_switch_to_flip() {
-        struct Stub(&'static str, bool);
+        struct Stub(&'static str, bool, bool);
         impl BotApi for Stub {
             fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
                 Ok(())
@@ -758,6 +774,7 @@ mod tests {
                 Ok(super::super::bot::ChatMember {
                     status: self.0.to_string(),
                     can_manage_topics: self.1,
+                    can_pin_messages: self.2,
                 })
             }
             fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
@@ -766,15 +783,25 @@ mod tests {
         }
 
         assert_eq!(
-            check_rights(&Stub("administrator", true), 1, 2),
-            Ok(Outcome::RightsOk)
+            check_rights(&Stub("administrator", true, true), 1, 2),
+            Ok(Outcome::RightsOk { may_pin: true })
         );
-        let (_, limited) = check_rights(&Stub("administrator", false), 1, 2).unwrap_err();
+        // Pinning is cosmetic: an admin who may manage topics but not pin passes, and
+        // the row says what that costs.
+        assert_eq!(
+            check_rights(&Stub("administrator", true, false), 1, 2),
+            Ok(Outcome::RightsOk { may_pin: false })
+        );
+        assert_eq!(
+            check_rights(&Stub("creator", false, false), 1, 2),
+            Ok(Outcome::RightsOk { may_pin: true })
+        );
+        let (_, limited) = check_rights(&Stub("administrator", false, false), 1, 2).unwrap_err();
         assert!(limited.contains("Manage Topics"));
-        let (_, member) = check_rights(&Stub("member", false), 1, 2).unwrap_err();
+        let (_, member) = check_rights(&Stub("member", false, false), 1, 2).unwrap_err();
         assert!(member.contains("not an admin"));
         assert_eq!(
-            check_test(&Stub("creator", true), 1, TelegramChatMode::Forum),
+            check_test(&Stub("creator", true, true), 1, TelegramChatMode::Forum),
             Ok(Outcome::TestOk)
         );
     }

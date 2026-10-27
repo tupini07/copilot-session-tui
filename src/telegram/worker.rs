@@ -1498,7 +1498,7 @@ fn perform_with(
             session_id,
             content,
         } => {
-            let thread_id = match outbound.mode {
+            let topic = match outbound.mode {
                 TelegramChatMode::Forum => Some(ensure_topic(
                     bot,
                     root,
@@ -1509,6 +1509,7 @@ fn perform_with(
                 )?),
                 TelegramChatMode::Private => None,
             };
+            let thread_id = topic.as_ref().map(|topic| topic.thread_id);
             let tool_call_id = content
                 .question
                 .as_ref()
@@ -1539,6 +1540,9 @@ fn perform_with(
                     state.record_sent(record);
                 }
             });
+            if let Some(topic) = topic {
+                topic.settle(bot, outbound.chat_id);
+            }
             Ok(())
         }
         OutboundJob::Say {
@@ -1566,7 +1570,7 @@ fn perform_with(
             title,
             text,
         } => {
-            let thread_id = match outbound.mode {
+            let topic = match outbound.mode {
                 TelegramChatMode::Forum => Some(ensure_topic(
                     bot,
                     root,
@@ -1577,6 +1581,7 @@ fn perform_with(
                 )?),
                 TelegramChatMode::Private => None,
             };
+            let thread_id = topic.as_ref().map(|topic| topic.thread_id);
             let message_id =
                 bot.send_message(outbound.chat_id, thread_id, None, &escape_html(text))?;
             let record = SentRecord {
@@ -1587,6 +1592,9 @@ fn perform_with(
                 sent_at: Utc::now(),
             };
             let _ = store::update_in(root, |state| state.record_sent(record));
+            if let Some(topic) = topic {
+                topic.settle(bot, outbound.chat_id);
+            }
             Ok(())
         }
         OutboundJob::Notice {
@@ -1740,6 +1748,24 @@ fn perform_with(
     }
 }
 
+/// A session's topic as handed to the job about to post in it.
+struct Topic {
+    thread_id: i64,
+    /// Made for this very job, so the job's first message is the topic's first.
+    fresh: bool,
+}
+
+impl Topic {
+    /// After a job's messages have gone: Telegram pins a new topic's first message
+    /// by itself, and nobody asked for a pin on every session. Only a fresh topic has
+    /// one to take off; a refusal (the bot may not pin) leaves things as they were.
+    fn settle(&self, bot: &impl BotApi, chat_id: i64) {
+        if self.fresh {
+            let _ = bot.unpin_all_forum_topic_messages(chat_id, self.thread_id);
+        }
+    }
+}
+
 /// The topic that stands for a session, made or renamed as needed.
 fn ensure_topic(
     bot: &impl BotApi,
@@ -1748,11 +1774,14 @@ fn ensure_topic(
     session_id: &str,
     title: &str,
     later: &mut Vec<PendingIcon>,
-) -> Result<i64, BotError> {
+) -> Result<Topic, BotError> {
     let existing = store::load_in(root).topics.get(session_id).cloned();
     let name = super::bot::topic_name(title);
     match existing {
-        Some(topic) if topic.title == name => Ok(topic.thread_id),
+        Some(topic) if topic.title == name => Ok(Topic {
+            thread_id: topic.thread_id,
+            fresh: false,
+        }),
         Some(topic) => {
             // A failed rename is not worth losing the message over.
             let _ = bot.edit_forum_topic(chat_id, topic.thread_id, &name);
@@ -1761,7 +1790,10 @@ fn ensure_topic(
                     record.title = name.clone();
                 }
             });
-            Ok(topic.thread_id)
+            Ok(Topic {
+                thread_id: topic.thread_id,
+                fresh: false,
+            })
         }
         None => {
             // The topic is made plain, now, so the message it is for does not wait on
@@ -1784,7 +1816,10 @@ fn ensure_topic(
                 session_id: session_id.to_string(),
                 title: title.to_string(),
             });
-            Ok(thread_id)
+            Ok(Topic {
+                thread_id,
+                fresh: true,
+            })
         }
     }
 }
@@ -2084,6 +2119,107 @@ mod tests {
             .sent
             .iter()
             .any(|record| record.message_id == 7 && record.session_id == "s1"));
+    }
+
+    #[test]
+    fn a_new_topics_first_message_is_unpinned_after_it_is_sent_and_only_then() {
+        use std::cell::RefCell;
+
+        // Telegram pins the first message of a topic by itself. The job that opens the
+        // topic takes the pin off once its message is there; later jobs into the same
+        // topic have nothing to unpin and must not touch pins the user made.
+        #[derive(Default)]
+        struct Recorder {
+            log: RefCell<Vec<String>>,
+        }
+        impl BotApi for Recorder {
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
+            fn create_forum_topic(&self, _: i64, _: &str) -> Result<i64, BotError> {
+                self.log.borrow_mut().push("create".to_string());
+                Ok(42)
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                thread_id: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+            ) -> Result<i64, BotError> {
+                self.log.borrow_mut().push(format!("send in {thread_id:?}"));
+                Ok(7)
+            }
+            fn unpin_all_forum_topic_messages(
+                &self,
+                _: i64,
+                thread_id: i64,
+            ) -> Result<(), BotError> {
+                self.log.borrow_mut().push(format!("unpin {thread_id}"));
+                // What Telegram says without the Pin Messages right; it must not matter.
+                Err(BotError::Rejected("not enough rights".to_string()))
+            }
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn send_message_with_buttons(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+                _: &[Button],
+            ) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let bot = Recorder::default();
+        let job = |text: &str| Outbound {
+            token: "1:x".to_string(),
+            api_base: "http://127.0.0.1:9".to_string(),
+            chat_id: -100,
+            mode: TelegramChatMode::Forum,
+            job: OutboundJob::Tell {
+                session_id: "s1".to_string(),
+                title: "Watched session".to_string(),
+                text: text.to_string(),
+            },
+        };
+
+        perform_with(&bot, temp.path(), &job("first"), &mut Vec::new()).unwrap();
+        perform_with(&bot, temp.path(), &job("second"), &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            *bot.log.borrow(),
+            vec!["create", "send in Some(42)", "unpin 42", "send in Some(42)"]
+        );
     }
 
     fn settings(paired: Option<Paired>) -> PollSettings {

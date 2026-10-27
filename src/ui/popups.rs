@@ -3505,7 +3505,7 @@ mod help_tests {
             .expect("the deep link is a hyperlink");
         assert_eq!(
             link.target,
-            "https://t.me/cst_bot?startgroup=ABC234&admin=manage_topics"
+            "https://t.me/cst_bot?startgroup=ABC234&admin=manage_topics+pin_messages"
         );
         assert!(!link.cells.is_empty());
 

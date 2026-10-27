@@ -662,14 +662,15 @@ pub fn message_carries_code(text: &str, code: &str) -> bool {
 ///
 /// Pressing Start on a private chat sends `/start <code>` for the user, so following
 /// the link *is* the pairing. For a group the link asks which group to add the bot to
-/// and requests the Manage Topics right on the way in, which is what creating a topic
-/// per session needs.
+/// and requests two rights on the way in: Manage Topics, which creating a topic per
+/// session needs, and Pin Messages, which taking the pin off each new topic's first
+/// message needs and is only a nicety.
 pub fn deep_link(bot_username: &str, code: &str, mode: TelegramChatMode) -> String {
     let username = bot_username.trim_start_matches('@');
     match mode {
         TelegramChatMode::Private => format!("https://t.me/{username}?start={code}"),
         TelegramChatMode::Forum => {
-            format!("https://t.me/{username}?startgroup={code}&admin=manage_topics")
+            format!("https://t.me/{username}?startgroup={code}&admin=manage_topics+pin_messages")
         }
     }
 }
@@ -1300,7 +1301,7 @@ mod tests {
         let link = deep_link("@cst_bot", &code, TelegramChatMode::Forum);
         assert_eq!(
             link,
-            format!("https://t.me/cst_bot?startgroup={code}&admin=manage_topics")
+            format!("https://t.me/cst_bot?startgroup={code}&admin=manage_topics+pin_messages")
         );
         assert_eq!(
             deep_link("cst_bot", &code, TelegramChatMode::Private),

@@ -408,10 +408,25 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
             state.outbox.push(format!("closed topic: {name}"));
             ok("true".to_string())
         }
+        // Telegram pins a new topic's first message by itself; CST takes the pin off
+        // once the message has gone, and a script can see that it did.
+        "unpinAllForumTopicMessages" => {
+            let thread_id = number(body, "message_thread_id").unwrap_or(0);
+            let mut state = lock.lock().unwrap();
+            let name = state
+                .topics
+                .iter()
+                .find(|(id, _)| *id == thread_id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| thread_id.to_string());
+            state.outbox.push(format!("unpinned topic: {name}"));
+            ok("true".to_string())
+        }
         "getChatMember" => {
             let state = lock.lock().unwrap();
             ok(if state.admin {
-                r#"{"status":"administrator","can_manage_topics":true}"#.to_string()
+                r#"{"status":"administrator","can_manage_topics":true,"can_pin_messages":true}"#
+                    .to_string()
             } else {
                 r#"{"status":"member"}"#.to_string()
             })
