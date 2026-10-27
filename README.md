@@ -766,11 +766,14 @@ message stays in Telegram to send again:
 - the session is **not open in CST**: open it on the PC and reply again. Nothing is
   queued for a closed session;
 - the session has **unsent text in its composer**: finish or clear it at the PC first;
-- the session is **working**: you are told once that the reply is queued, and it goes in
-  when the turn ends. The notice has a **Cancel** button for as long as the reply waits,
-  and `/queue` — sent to a session, or bare for every session — lists what is waiting
-  with a Cancel on each line. When a queued reply goes in, its notice becomes
-  "Delivered" and the button goes with it;
+- the session is **working**: the reply goes in at once and steers the turn, exactly as
+  typing at the keyboard would. To hold it for the turn's end instead, send
+  `/queue <text>`: you are told once that it is queued, the notice has a **Cancel**
+  button for as long as it waits, and a bare `/queue` — sent to a session, or in General
+  for every session — lists what is waiting with a Cancel on each line. When a queued
+  reply goes in, its notice becomes "Delivered" and the button goes with it. A reply
+  arriving behind text CST itself put in the composer, such as a thread wake-up Copilot
+  has not picked up yet, waits the same way;
 - the session is waiting for a **tool permission**: that is answered at the keyboard only;
 - the session is waiting on a **question**: your reply answers it. Copilot's question is
   a form, so the reply is played into it as keys: a number picks that choice, any other
@@ -808,6 +811,13 @@ Both are confirmed with a 👍 like a reply.
 CST publishes its commands to the bot's menu, so typing `/` in the chat, or in the
 group, offers `/follow`, `/unfollow`, `/queue`, `/say` and `/esc` with a line on what
 each does.
+
+A turn you start from the phone reports back to the phone when it ends, even if that
+session is the one attached on your screen at the time. A finished turn is normally kept
+quiet when you watched it finish, and that rule stays for turns started at the keyboard;
+but a question asked from Telegram deserves its answer in Telegram, and the session you
+work in most is exactly the one you keep attached. ntfy is left out of that report, since
+a ping on the desk for a screen already in front of you is noise.
 
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for

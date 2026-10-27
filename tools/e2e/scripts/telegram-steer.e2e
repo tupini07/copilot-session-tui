@@ -1,0 +1,68 @@
+# A reply sent while the session is working goes straight in and steers the turn, as
+# typing at the keyboard would; only /queue <text> waits for the turn to end. And a
+# turn the phone started reports back to the phone even when the pane is attached and
+# watched, where a turn started at the keyboard stays silent.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+# The stub bot's long poll returns every ten seconds.
+timeout 40000
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# A first turn, so the phone has a message of this session's to reply to.
+type e2e:work 1500 Setup is done.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Setup is done.
+
+# A long turn. A reply during it is delivered at once: the thumbs-up arrives while
+# the turn still runs, and no "Queued" notice is sent.
+press enter
+type e2e:work 12000 First long task finished.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_say Stop, do the other thing instead
+telegram_wait reaction on
+telegram_expect_not Queued
+telegram_dump 01-steered
+# The stub reads its input only between turns, so the words show once it ends.
+press enter
+wait_for Fake Copilot received: Stop, do the other thing instead
+dump 01-steered
+
+# /queue <text> is the way to wait: told once, with a Cancel, delivered at the end.
+type e2e:work 8000 Second long task finished.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_say /queue Then write the summary
+telegram_wait Queued
+telegram_wait button on
+telegram_expect_not Fake Copilot received: Then write
+wait 8000
+press enter
+wait_for Fake Copilot received: Then write the summary
+telegram_wait Delivered to Existing app session
+expect_not Fake Copilot received: /queue
+dump 02-queued-delivered
+
+# Attached and watching. A turn started from the keyboard ends in silence, as before.
+type e2e:work 1000 Keyboard turn.
+press enter
+wait_for Fake Copilot finished a turn.
+wait 3000
+telegram_expect_not Keyboard turn.
+
+# A turn started from the phone reports back to the phone, attached or not.
+telegram_say e2e:work 1000 Answer for the phone.
+wait_for Fake Copilot received: e2e:work 1000 Answer for the phone.
+telegram_wait Answer for the phone.
+telegram_dump 03-phone-turn-reported
+dump 03-attached

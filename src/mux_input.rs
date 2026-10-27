@@ -2796,6 +2796,32 @@ fn watched_in_split(app: &App, id: crate::mux::PaneId, kind: NotificationKind) -
         && app.pane_on_screen(id)
 }
 
+/// Send a pane's notification where it belongs.
+///
+/// A turn the user watched finish goes nowhere, as ever. A turn the phone started is
+/// the exception: the phone asked, so the phone hears the answer, and only the phone
+/// when somebody at the PC was watching too, since a ping on the desk for a screen
+/// already in front of them is noise.
+fn route_notification(
+    app: &mut App,
+    id: crate::mux::PaneId,
+    kind: NotificationKind,
+    attended: bool,
+    phone_asked: bool,
+    title: &str,
+    session_id: &str,
+) {
+    // Only a finished turn is kept from a watcher; an error or a question is news
+    // wherever you are looking. An attended pane produces a Ready at all only when
+    // the phone asked.
+    let watched = watched_in_split(app, id, kind) || (attended && kind == NotificationKind::Ready);
+    if !watched {
+        app.enqueue_notification(kind, title.to_string(), Some(session_id));
+    } else if phone_asked && kind == NotificationKind::Ready {
+        app.enqueue_phone_report(kind, title.to_string(), Some(session_id));
+    }
+}
+
 /// Apply a PTY event. Returns true when the UI needs a repaint.
 pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
     match event {
@@ -2810,6 +2836,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 cycle_started,
                 title,
                 session_id,
+                phone_asked,
             ) = app
                 .mux
                 .as_mut()
@@ -2817,6 +2844,8 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 .map(|pane| {
                     let before = pane.needs_attention();
                     let title_before = pane.title.clone();
+                    // Read before the signals take it: the turn's end consumes the flag.
+                    let phone_asked = pane.phone_asked();
                     let cycle_started = signals_start_cycle(pane.is_working(), &signals.events);
                     let (outcome, notifications) = pane.apply_signals(signals, attended);
                     (
@@ -2827,6 +2856,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                         cycle_started,
                         pane.title.clone(),
                         pane.session_id.clone(),
+                        phone_asked,
                     )
                 })
                 .unwrap_or_default();
@@ -2841,9 +2871,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::PlanApproval => NotificationKind::PlanApproval,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                if !watched_in_split(app, id, kind) {
-                    app.enqueue_notification(kind, title.clone(), Some(&session_id));
-                }
+                route_notification(app, id, kind, attended, phone_asked, &title, &session_id);
             }
             if outcome.bell {
                 // Numbered like its tab, since several sessions often share a title.
@@ -2996,7 +3024,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             let attended = app.terminal_focused
                 && matches!(app.view, View::Attached(focused) if focused == id);
             let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
-            let (notification, title, session_id) = app
+            let (notification, title, session_id, phone_asked) = app
                 .mux
                 .as_mut()
                 .and_then(|mux| mux.pane_mut(id))
@@ -3004,10 +3032,12 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     if !pane.is_running() {
                         return None;
                     }
+                    let phone_asked = pane.phone_asked();
                     Some((
                         pane.confirm_hook_ready(timestamp, attended),
                         pane.title.clone(),
                         pane.session_id.clone(),
+                        phone_asked,
                     ))
                 })
                 .unwrap_or_default();
@@ -3018,9 +3048,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                     PaneNotification::PlanApproval => NotificationKind::PlanApproval,
                     PaneNotification::Error => NotificationKind::Error,
                 };
-                if !watched_in_split(app, id, kind) {
-                    app.enqueue_notification(kind, title, Some(&session_id));
-                }
+                route_notification(app, id, kind, attended, phone_asked, &title, &session_id);
             }
             if focused {
                 sync_outer_progress(app);
