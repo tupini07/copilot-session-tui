@@ -26,6 +26,7 @@ pub mod bot;
 pub mod cli;
 pub mod command;
 pub mod follow;
+pub mod icon;
 pub mod image;
 pub mod markdown;
 pub mod queue;
@@ -139,6 +140,11 @@ pub struct TopicRecord {
     pub thread_id: i64,
     /// The name the topic was given, so a renamed session renames its topic once.
     pub title: String,
+    /// The emoji chosen for it, so later topics can be told to pick another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// The parts of an incoming message that routing looks at.
@@ -904,6 +910,8 @@ mod tests {
             TopicRecord {
                 thread_id: 300,
                 title: "C".to_string(),
+                icon: None,
+                created_at: None,
             },
         );
 

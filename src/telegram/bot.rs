@@ -98,6 +98,13 @@ pub struct Button {
     pub callback_data: String,
 }
 
+/// One of the emoji a forum topic may wear, as Telegram offers them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicIcon {
+    pub emoji: String,
+    pub custom_emoji_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ChatMember {
     pub status: String,
@@ -188,6 +195,22 @@ pub trait BotApi {
     /// Acknowledge a tap so the button stops spinning on the phone; `text` shows as a
     /// small notice there. Every tap is answered, including ones that are ignored.
     fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError>;
+    /// The emoji Telegram allows as topic icons, each with the id a topic is made
+    /// with. Provided as empty, for stubs: no icon is the state before this existed.
+    fn get_forum_topic_icon_stickers(&self) -> Result<Vec<TopicIcon>, BotError> {
+        Ok(Vec::new())
+    }
+    /// [`BotApi::create_forum_topic`] with an icon from
+    /// [`BotApi::get_forum_topic_icon_stickers`]. Provided as the plain call, so a
+    /// stub that knows nothing of icons still makes the topic.
+    fn create_forum_topic_with_icon(
+        &self,
+        chat_id: i64,
+        name: &str,
+        _icon_custom_emoji_id: Option<&str>,
+    ) -> Result<i64, BotError> {
+        self.create_forum_topic(chat_id, name)
+    }
     /// A PNG with an HTML caption, as a reply when there is something to reply to.
     /// Returns the message id. Provided, so the test stubs that never send one need
     /// not say so.
@@ -570,10 +593,21 @@ impl BotApi for UreqBot {
     }
 
     fn create_forum_topic(&self, chat_id: i64, name: &str) -> Result<i64, BotError> {
+        self.create_forum_topic_with_icon(chat_id, name, None)
+    }
+
+    fn create_forum_topic_with_icon(
+        &self,
+        chat_id: i64,
+        name: &str,
+        icon_custom_emoji_id: Option<&str>,
+    ) -> Result<i64, BotError> {
         #[derive(Serialize)]
         struct Body<'a> {
             chat_id: i64,
             name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            icon_custom_emoji_id: Option<&'a str>,
         }
         #[derive(Deserialize)]
         struct Topic {
@@ -584,9 +618,30 @@ impl BotApi for UreqBot {
             &Body {
                 chat_id,
                 name: &topic_name(name),
+                icon_custom_emoji_id,
             },
         )?;
         Ok(topic.message_thread_id)
+    }
+
+    fn get_forum_topic_icon_stickers(&self) -> Result<Vec<TopicIcon>, BotError> {
+        #[derive(Deserialize)]
+        struct Sticker {
+            #[serde(default)]
+            emoji: Option<String>,
+            #[serde(default)]
+            custom_emoji_id: Option<String>,
+        }
+        let stickers: Vec<Sticker> = self.call("getForumTopicIconStickers", &Empty {})?;
+        Ok(stickers
+            .into_iter()
+            .filter_map(|sticker| {
+                Some(TopicIcon {
+                    emoji: sticker.emoji?,
+                    custom_emoji_id: sticker.custom_emoji_id?,
+                })
+            })
+            .collect())
     }
 
     fn edit_forum_topic(&self, chat_id: i64, thread_id: i64, name: &str) -> Result<(), BotError> {

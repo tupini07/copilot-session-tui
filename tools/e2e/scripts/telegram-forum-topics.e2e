@@ -15,7 +15,8 @@ press enter
 press ctrl+b d
 wait_for Existing app session
 
-telegram_wait topic: Existing app session
+# The topic wears an emoji chosen for its title, from the icons Telegram offers.
+telegram_wait topic: Existing app session icon=🚀
 telegram_wait message in Existing app session: Checkpoint reached
 telegram_wait Checkpoint reached
 telegram_dump 01-topic-made

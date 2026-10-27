@@ -121,6 +121,9 @@ pub struct TelegramState {
     /// `/peek`s waiting for the CST that hosts the pane to answer them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peeks: Vec<Peek>,
+    /// The emoji Telegram allows as topic icons, fetched once a day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_icons: Option<IconSet>,
     /// Anything a newer CST wrote that this one does not understand.
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -153,6 +156,14 @@ pub struct Follow {
     /// the poller carries on from the event log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosted_at: Option<DateTime<Utc>>,
+}
+
+/// Telegram's topic icon set as last fetched: a few hundred emoji, kept so a new topic
+/// does not cost a fetch, and refreshed after a day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IconSet {
+    pub fetched_at: DateTime<Utc>,
+    pub icons: Vec<super::bot::TopicIcon>,
 }
 
 /// A `/peek`: one picture of a session's screen, asked for and not yet sent. Only the
