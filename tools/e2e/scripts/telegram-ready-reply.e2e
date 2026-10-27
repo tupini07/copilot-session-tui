@@ -5,6 +5,7 @@
 
 size 110x30
 arg --mux
+fake_gh
 fake_telegram private
 session existing-app Existing app session
 
@@ -15,14 +16,16 @@ wait_for Fake Copilot is idling
 # What the real Copilot would have persisted as its last message, then a turn that
 # ends while we are back at the list: that is what makes it an attention event.
 # Copilot writes Markdown; the phone gets it as Telegram formatting, not as asterisks.
-type e2e:work 1500 Finished the **refactor** and the tests pass. Run `cargo test` to see. Shall I open the PR?
+# A `#12` in the prose becomes a link into the project's repository, which the fake gh
+# names; the same number inside code is left as it is.
+type e2e:work 1500 Finished the **refactor** for #12 and the tests pass. Run `cargo test #12` to see. Shall I open the PR?
 press enter
 press ctrl+b d
 wait_for Existing app session
 
 telegram_wait message: <b>(Existing app session)</b>
 telegram_expect_not Ready for attention
-telegram_wait Finished the <b>refactor</b> and the tests pass. Run <code>cargo test</code> to see.
+telegram_wait Finished the <b>refactor</b> for <a href="https://github.com/o/r/issues/12">#12</a> and the tests pass. Run <code>cargo test #12</code> to see.
 telegram_expect_not **refactor**
 telegram_dump 01-notified
 dump 01-list-after-turn

@@ -1919,6 +1919,29 @@ impl App {
         else {
             return;
         };
+        self.prefetch_github_repository_for(cwd);
+    }
+
+    /// The repository a session's folder belongs to, once `gh` has said.
+    ///
+    /// `None` also while the answer is on its way: the look-up is started here, so a
+    /// session whose pane was never focused still gets its links from its second
+    /// notification on. Never waits — this runs on the UI thread.
+    fn repository_for_session(&mut self, session_id: &str) -> Option<crate::github::RepositoryRef> {
+        let cwd = self
+            .pane_for_session(session_id)
+            .and_then(|id| self.mux.as_ref()?.pane(id))
+            .map(|pane| pane.cwd.clone())?;
+        match self.github_repositories.get(&cwd) {
+            Some(known) => known.clone(),
+            None => {
+                self.prefetch_github_repository_for(cwd);
+                None
+            }
+        }
+    }
+
+    fn prefetch_github_repository_for(&mut self, cwd: PathBuf) {
         if self.github_repositories.contains_key(&cwd) || self.github_repo_receiver.is_some() {
             return;
         }
@@ -3666,16 +3689,19 @@ impl App {
                 body: None,
                 question: None,
                 plan_summary: None,
+                repository: None,
             },
             TelegramContent::Full => {
                 let (events_path, events_start, events_end) = self.cycle_window(Some(session_id));
-                crate::notifications::telegram_content(
+                let mut content = crate::notifications::telegram_content(
                     kind,
                     &title,
                     events_path.as_deref(),
                     events_start,
                     events_end,
-                )
+                );
+                content.repository = self.repository_for_session(session_id);
+                content
             }
         };
         let outbound = Outbound {

@@ -813,7 +813,9 @@ to one session.
 plus the question and its choices or the plan summary when there is one. Copilot writes
 Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
 themselves, a heading as a bold line, lists as indented bullets, a table as an aligned
-block in monospace, and a raw HTML tag as the text it is. Nothing is cut:
+block in monospace, and a raw HTML tag as the text it is. An issue or pull request
+number in the prose, like #12, is a link into the repository the session's folder
+belongs to, the same way it is a click target in the pane. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a
 paragraph break where there is one, else a line break, a sentence end or a word, and each
 part says which of how many it is. Choose **Status

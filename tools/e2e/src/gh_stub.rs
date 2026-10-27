@@ -60,6 +60,10 @@ pub fn main() {
         println!(r#"{{"data":{{"repository":{{"discussion":{{"comments":{{"nodes":[]}}}}}}}}}}"#);
     } else if has("api") && has("user") {
         println!("{LOGIN}");
+    } else if args.first().map(String::as_str) == Some("repo") && has("view") {
+        // Every fake project belongs to one repository, the same one the thread
+        // scripts watch, so a `#12` a session mentions has somewhere to point.
+        println!(r#"{{"nameWithOwner":"o/r","url":"https://github.com/o/r"}}"#);
     } else {
         eprintln!(
             "fake gh: not something the e2e stub answers: gh {}",

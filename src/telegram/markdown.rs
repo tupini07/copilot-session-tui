@@ -24,6 +24,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
 
 use super::escape_html;
+use crate::github::RepositoryRef;
 
 /// What is parsed: the extensions Copilot's output actually uses. Not the full set the
 /// GitHub inspector enables — superscript, math and smart punctuation would eat `^`,
@@ -38,11 +39,41 @@ const LANGUAGE_LIMIT: usize = 32;
 
 /// Render `markdown` as Telegram HTML.
 pub fn to_telegram_html(markdown: &str) -> String {
-    let mut renderer = Renderer::default();
+    to_telegram_html_in(markdown, None)
+}
+
+/// [`to_telegram_html`], with every `#1234` in the prose linked to that number in
+/// `repository`, the one the session's folder belongs to.
+///
+/// Prose only: a `#12` inside code is whatever the code means by it, and one inside a
+/// link already goes somewhere. The same scanner the pane uses for its click targets
+/// decides what is a reference, so the phone and the screen agree.
+pub fn to_telegram_html_in(markdown: &str, repository: Option<&RepositoryRef>) -> String {
+    let mut renderer = Renderer {
+        repository: repository.cloned(),
+        ..Renderer::default()
+    };
     for event in Parser::new_ext(markdown, OPTIONS) {
         renderer.event(event);
     }
     renderer.finish()
+}
+
+/// `text` escaped, with its references wrapped in links to `repository`.
+fn linkify(text: &str, repository: &RepositoryRef) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for (span, number) in crate::github::reference_spans(text) {
+        out.push_str(&escape_html(&text[from..span.start]));
+        out.push_str(&format!(
+            "<a href=\"{}\">{}</a>",
+            escape_attribute(&repository.issue_url(number)),
+            escape_html(&text[span.clone()])
+        ));
+        from = span.end;
+    }
+    out.push_str(&escape_html(&text[from..]));
+    out
 }
 
 /// Remove the tags from HTML this module produced, keeping the text and its entities.
@@ -79,6 +110,12 @@ struct Renderer {
     table: Option<Table>,
     /// Where the current image's alt text began, to fall back to its address.
     image_start: Option<usize>,
+    /// Where a `#1234` in the prose points, when the session's repository is known.
+    repository: Option<RepositoryRef>,
+    /// Open links and images: text inside one is already a link's text.
+    link_depth: usize,
+    /// Open code blocks: text inside one is code, not prose.
+    code_depth: usize,
 }
 
 #[derive(Default)]
@@ -97,7 +134,12 @@ impl Renderer {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) => self.out.push_str(&escape_html(&text)),
+            Event::Text(text) => match &self.repository {
+                Some(repository) if self.link_depth == 0 && self.code_depth == 0 => {
+                    self.out.push_str(&linkify(&text, repository));
+                }
+                _ => self.out.push_str(&escape_html(&text)),
+            },
             Event::Code(code) => {
                 self.out.push_str("<code>");
                 self.out.push_str(&escape_html(&code));
@@ -144,6 +186,7 @@ impl Renderer {
                 self.quote_depth += 1;
             }
             Tag::CodeBlock(kind) => {
+                self.code_depth += 1;
                 self.begin_block();
                 self.out.push_str("<pre>");
                 let language = match kind {
@@ -187,12 +230,14 @@ impl Renderer {
             Tag::Strong => self.out.push_str("<b>"),
             Tag::Strikethrough => self.out.push_str("<s>"),
             Tag::Link { dest_url, .. } => {
+                self.link_depth += 1;
                 self.out
                     .push_str(&format!("<a href=\"{}\">", escape_attribute(&dest_url)));
             }
             Tag::Image { dest_url, .. } => {
                 // A phone cannot show the image here; its link, labelled by the alt
                 // text, is the next best thing.
+                self.link_depth += 1;
                 self.out
                     .push_str(&format!("<a href=\"{}\">", escape_attribute(&dest_url)));
                 self.image_start = Some(self.out.len());
@@ -229,6 +274,7 @@ impl Renderer {
                 self.end_block();
             }
             TagEnd::CodeBlock => {
+                self.code_depth = self.code_depth.saturating_sub(1);
                 self.trim_trailing_newlines();
                 self.out.push_str("</code></pre>");
                 self.end_block();
@@ -244,8 +290,12 @@ impl Renderer {
             TagEnd::Emphasis => self.out.push_str("</i>"),
             TagEnd::Strong => self.out.push_str("</b>"),
             TagEnd::Strikethrough => self.out.push_str("</s>"),
-            TagEnd::Link => self.out.push_str("</a>"),
+            TagEnd::Link => {
+                self.link_depth = self.link_depth.saturating_sub(1);
+                self.out.push_str("</a>");
+            }
             TagEnd::Image => {
+                self.link_depth = self.link_depth.saturating_sub(1);
                 if let Some(start) = self.image_start.take() {
                     if self.out.len() == start {
                         let href = self.out[..start]
@@ -492,6 +542,28 @@ mod tests {
             to_telegram_html("> outer\n>\n> > inner\n\n---\n\nend"),
             "<blockquote>outer\n\ninner</blockquote>\n\n———\n\nend"
         );
+    }
+
+    #[test]
+    fn references_in_prose_link_to_the_sessions_repository_but_not_in_code_or_inside_a_link() {
+        let repository = RepositoryRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            name: "r".to_string(),
+        };
+        let html = to_telegram_html_in(
+            "Fixed #12 (see [#13](https://e.com/x) and `#14`), colour #fff and sha#15.\n\n\
+             ```\n#16 in code\n```",
+            Some(&repository),
+        );
+        assert_eq!(
+            html,
+            "Fixed <a href=\"https://github.com/o/r/issues/12\">#12</a> (see \
+             <a href=\"https://e.com/x\">#13</a> and <code>#14</code>), colour #fff and \
+             sha#15.\n\n<pre><code>#16 in code</code></pre>"
+        );
+        // Without a repository nothing changes, so sessions outside GitHub read as before.
+        assert_eq!(to_telegram_html("Fixed #12."), "Fixed #12.");
     }
 
     #[test]

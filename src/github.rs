@@ -15,6 +15,55 @@ pub struct RepositoryRef {
     pub name: String,
 }
 
+impl RepositoryRef {
+    /// The page for `#number`. Always the issues path: GitHub redirects a pull
+    /// request's number from there, so one shape serves both and nothing has to be
+    /// looked up first.
+    pub fn issue_url(&self, number: u64) -> String {
+        format!(
+            "https://{}/{}/{}/issues/{number}",
+            self.host, self.owner, self.name
+        )
+    }
+}
+
+/// Every `#1234` in `text`, as its byte range and its number, in order.
+///
+/// Shared by the pane, which makes them click targets, and the Telegram channel, which
+/// makes them links, so the two agree on what counts as a reference. A letter or digit
+/// right before the hash makes it part of a longer token — a colour code, an anchor —
+/// and not a reference.
+pub fn reference_spans(text: &str) -> Vec<(std::ops::Range<usize>, u64)> {
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = text[from..].find('#') {
+        let hash = from + offset;
+        let digits = hash + 1;
+        let mut end = digits;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        from = end.max(digits);
+        if end == digits {
+            continue;
+        }
+        let preceded_by_token = text[..hash]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        if preceded_by_token {
+            continue;
+        }
+        if let Ok(number) = text[digits..end].parse::<u64>() {
+            if number > 0 {
+                found.push((hash..end, number));
+            }
+        }
+    }
+    found
+}
+
 fn discussion_reference_alias(number: u64) -> String {
     format!("d{number}")
 }
@@ -2797,6 +2846,21 @@ fn strings(values: &[&str]) -> Vec<String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn a_reference_is_a_hash_and_digits_not_glued_to_a_token_and_links_to_the_issues_page() {
+        let spans = reference_spans("Fixed #12 and #7; see color#123 and a#1, not #0 or #abc");
+        let numbers: Vec<u64> = spans.iter().map(|(_, number)| *number).collect();
+        assert_eq!(numbers, [12, 7]);
+        assert_eq!(&"Fixed #12 and #7"[spans[0].0.clone()], "#12");
+
+        let repository = RepositoryRef {
+            host: "github.com".to_string(),
+            owner: "o".to_string(),
+            name: "r".to_string(),
+        };
+        assert_eq!(repository.issue_url(12), "https://github.com/o/r/issues/12");
+    }
 
     /// A runner that replays canned `gh` output and records what was asked for.
     struct FakeRunner {
