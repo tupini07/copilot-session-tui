@@ -307,13 +307,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Title bar
     let filter_text = match &app.project_filter {
-        Some(p) => {
-            let name = std::path::Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(p);
-            format!(" Filter: {} ", name)
-        }
+        Some(p) => format!(" Filter: {} ", app.project_label(p)),
         None => " All Projects ".to_string(),
     };
 

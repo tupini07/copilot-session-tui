@@ -48,13 +48,6 @@ impl Session {
             .unwrap_or("(unnamed)")
     }
 
-    pub fn project_name(&self) -> &str {
-        std::path::Path::new(&self.project_root)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&self.project_root)
-    }
-
     pub fn relative_time(&self) -> String {
         let dt = self.updated_at.or(self.created_at);
         match dt {

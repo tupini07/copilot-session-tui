@@ -1621,10 +1621,7 @@ fn finish_new_project(app: &mut App) {
         }
     };
     app.mode = Mode::Normal;
-    let name = Path::new(&project)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| project.clone());
+    let name = app.project_label(&project).to_string();
     app.status_message = Some(format!("Showing project {name} — n starts a session in it"));
 }
 
