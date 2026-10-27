@@ -15,13 +15,10 @@ pub fn main() {
         println!("1.0.40");
         return;
     }
-    // `copilot -p <prompt>`: CST asking a one-line question in a throwaway session it
-    // removes afterwards, as it does to choose a topic's emoji. The stub answers the
-    // first emoji it is offered
-    // that the prompt does not list as already taken, so a script can predict it.
-    if let Some(at) = args.iter().position(|arg| arg == "-p") {
-        let prompt = args.get(at + 1).cloned().unwrap_or_default();
-        println!("{}", choose_emoji(&prompt));
+    // `copilot --server --stdio`: the Copilot SDK starting the CLI for CST's side
+    // questions, such as a topic's emoji. Spoken over the pipes, never a terminal.
+    if args.iter().any(|arg| arg == "--server") {
+        super::sdk_server::main();
         return;
     }
     // `copilot plugin ...` is CST installing its hook plugin; succeeding quietly
@@ -104,7 +101,7 @@ pub fn main() {
 
 /// The first offered emoji not listed as taken, from CST's prompt: the offered ones
 /// follow the line ending in "the title:", the taken ones the line ending in "fits:".
-fn choose_emoji(prompt: &str) -> String {
+pub(crate) fn choose_emoji(prompt: &str) -> String {
     let list_after = |marker: &str| -> Vec<String> {
         prompt
             .split_inclusive('\n')

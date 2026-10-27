@@ -753,11 +753,10 @@ it; protect the file as you would any credential.
   Topics** right; the wizard's link requests that on the way in, and checks it. This is
   the mode for running many sessions at once. Each new topic wears an emoji chosen for
   the session's title — the rocket for the deploy, the bug for the bug hunt — so a row
-  of topics can be read at a glance. Copilot picks it, non-interactively, from the icons
-  Telegram offers, told which ones other topics got in the last week so neighbours do
-  not match;
-  the choice takes a few seconds on the session's first notification, and a topic goes
-  without when Copilot is not to hand.
+  of topics can be read at a glance. Copilot picks it, in a side session of its own,
+  from the icons Telegram offers, told which ones other topics got in the last week so
+  neighbours do not match. The message never waits for it: the topic is made at once and
+  the emoji appears on it a few seconds later, or not at all when Copilot is not to hand.
 
 The wizard reads which kind you paired from the chat itself, so there is nothing to
 configure. Pairing again with a fresh code is how you move the bot from one to the other.

@@ -3,6 +3,7 @@
 
 mod gh_stub;
 mod screen;
+mod sdk_server;
 mod stub;
 mod telegram_stub;
 

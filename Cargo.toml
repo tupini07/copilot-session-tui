@@ -2,7 +2,7 @@
 name = "copilot-session-tui"
 version = "0.38.0"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.94"
 description = "A TUI for managing GitHub Copilot CLI sessions"
 
 # Off by default: the generator exists only to regenerate the README images from the
@@ -57,6 +57,12 @@ pulldown-cmark = { version = "0.13", default-features = false }
 ab_glyph = "0.2"
 epaint_default_fonts = "0.34"
 png = "0.18"
+# Questions for a model that are not a session's business — a topic's emoji, a side
+# question from the phone about a session — go through Copilot's own SDK: one CLI kept
+# in server mode, a session made and deleted per question. The bundled CLI is left off;
+# CST asks the one the user already has.
+github-copilot-sdk = { version = "1.0.27", default-features = false, features = ["runtime"] }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
 
 [target.'cfg(windows)'.dependencies]
 # Checking whether a PID is alive by shelling out to tasklist costs ~250 ms per call,

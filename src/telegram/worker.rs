@@ -1024,7 +1024,81 @@ fn describe(error: &BotError) -> String {
 /// Do one outbound job. Runs on the drain thread.
 fn perform(root: &Path, outbound: &Outbound) -> Result<(), BotError> {
     let bot = UreqBot::new(&outbound.api_base, &outbound.token, Duration::from_secs(15));
-    perform_with(&bot, root, outbound)
+    let mut later = Vec::new();
+    perform_with(&bot, root, outbound, &mut later)?;
+    // A new topic's emoji is chosen after its first message has gone, and off this
+    // thread: the model takes seconds, and every other message would wait behind it.
+    for pending in later {
+        let (api_base, token, root) = (
+            outbound.api_base.clone(),
+            outbound.token.clone(),
+            root.to_path_buf(),
+        );
+        thread::spawn(move || {
+            let bot = UreqBot::new(&api_base, &token, Duration::from_secs(15));
+            finish_icon(&bot, &root, pending, &icon::ask_copilot);
+        });
+    }
+    Ok(())
+}
+
+/// A topic made without its emoji, waiting for the model's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingIcon {
+    chat_id: i64,
+    thread_id: i64,
+    session_id: String,
+    title: String,
+}
+
+/// Choose a topic's emoji and put it on, after the fact. `ask` is the model; a test
+/// passes an answer of its own. Advisory throughout: no choice, no change, and a topic
+/// renamed or replaced meanwhile is left as it is.
+pub(crate) fn finish_icon(
+    bot: &impl BotApi,
+    root: &Path,
+    pending: PendingIcon,
+    ask: &dyn Fn(&str) -> Option<String>,
+) {
+    let Some(choice) = choose_icon(bot, root, &pending.title, ask) else {
+        return;
+    };
+    let current = store::load_in(root)
+        .topics
+        .get(&pending.session_id)
+        .cloned();
+    if current.is_none_or(|record| record.thread_id != pending.thread_id) {
+        return;
+    }
+    let (emoji, renamed) = match choice {
+        IconChoice::Icon { emoji, id } => {
+            if bot
+                .edit_forum_topic_icon(pending.chat_id, pending.thread_id, &id)
+                .is_err()
+            {
+                return;
+            }
+            (emoji, None)
+        }
+        IconChoice::Prefix(emoji) => {
+            let name = super::bot::topic_name(&format!("{emoji} {}", pending.title));
+            if bot
+                .edit_forum_topic(pending.chat_id, pending.thread_id, &name)
+                .is_err()
+            {
+                return;
+            }
+            (emoji, Some(name))
+        }
+    };
+    let _ = store::update_in(root, |state| {
+        if let Some(record) = state.topics.get_mut(&pending.session_id) {
+            record.icon = Some(emoji.clone());
+            if let Some(name) = renamed.clone() {
+                record.title = name;
+            }
+        }
+    });
 }
 
 /// Send one part of a notification, and send it plain if Telegram refuses its markup.
@@ -1070,7 +1144,14 @@ fn send_part_replying(
     }
 }
 
-fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(), BotError> {
+/// Send one job. A topic made along the way without its emoji yet is added to `later`
+/// for the caller to see to, once the message is out.
+fn perform_with(
+    bot: &impl BotApi,
+    root: &Path,
+    outbound: &Outbound,
+    later: &mut Vec<PendingIcon>,
+) -> Result<(), BotError> {
     match &outbound.job {
         OutboundJob::Notify {
             session_id,
@@ -1083,6 +1164,7 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
                     outbound.chat_id,
                     session_id,
                     &content.title,
+                    later,
                 )?),
                 TelegramChatMode::Private => None,
             };
@@ -1173,6 +1255,7 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
                     outbound.chat_id,
                     session_id,
                     title,
+                    later,
                 )?),
                 TelegramChatMode::Private => None,
             };
@@ -1346,6 +1429,7 @@ fn ensure_topic(
     chat_id: i64,
     session_id: &str,
     title: &str,
+    later: &mut Vec<PendingIcon>,
 ) -> Result<i64, BotError> {
     let existing = store::load_in(root).topics.get(session_id).cloned();
     let name = super::bot::topic_name(title);
@@ -1362,28 +1446,25 @@ fn ensure_topic(
             Ok(topic.thread_id)
         }
         None => {
-            // A new topic gets an emoji chosen for its title, as an icon when Telegram
-            // offers one, in front of its name when it does not. Advisory: no choice,
-            // no change.
-            let (icon_id, icon, name) = match choose_icon(bot, root, title) {
-                Some(IconChoice::Icon { emoji, id }) => (Some(id), Some(emoji), name),
-                Some(IconChoice::Prefix(emoji)) => {
-                    let prefixed = super::bot::topic_name(&format!("{emoji} {title}"));
-                    (None, Some(emoji), prefixed)
-                }
-                None => (None, None, name),
-            };
-            let thread_id = bot.create_forum_topic_with_icon(chat_id, &name, icon_id.as_deref())?;
+            // The topic is made plain, now, so the message it is for does not wait on
+            // a model; its emoji is chosen afterwards by whoever drains `later`.
+            let thread_id = bot.create_forum_topic(chat_id, &name)?;
             let _ = store::update_in(root, |state| {
                 state.topics.insert(
                     session_id.to_string(),
                     TopicRecord {
                         thread_id,
                         title: name.clone(),
-                        icon,
+                        icon: None,
                         created_at: Some(Utc::now()),
                     },
                 );
+            });
+            later.push(PendingIcon {
+                chat_id,
+                thread_id,
+                session_id: session_id.to_string(),
+                title: title.to_string(),
             });
             Ok(thread_id)
         }
@@ -1400,7 +1481,12 @@ enum IconChoice {
 
 /// Ask the model for a topic's emoji: from Telegram's icon set when it can be fetched,
 /// else from CST's own short list; avoiding what other recent topics got.
-fn choose_icon(bot: &impl BotApi, root: &Path, title: &str) -> Option<IconChoice> {
+fn choose_icon(
+    bot: &impl BotApi,
+    root: &Path,
+    title: &str,
+    ask: &dyn Fn(&str) -> Option<String>,
+) -> Option<IconChoice> {
     let state = store::load_in(root);
     let now = Utc::now();
     let fresh = state
@@ -1437,7 +1523,7 @@ fn choose_icon(bot: &impl BotApi, root: &Path, title: &str) -> Option<IconChoice
         })
         .filter_map(|topic| topic.icon.clone())
         .collect();
-    let answer = icon::ask_copilot(&icon::prompt(title, &available, &taken))?;
+    let answer = ask(&icon::prompt(title, &available, &taken))?;
     let emoji = icon::parse_choice(&answer, &available)?;
     match icons.iter().find(|i| i.emoji == emoji) {
         Some(found) => Some(IconChoice::Icon {
@@ -1452,6 +1538,136 @@ fn choose_icon(bot: &impl BotApi, root: &Path, title: &str) -> Option<IconChoice
 mod tests {
     use super::*;
     use crate::telegram::bot::{CallbackQuery, Chat, Message, RepliedTo, User};
+
+    #[test]
+    fn a_new_topic_is_made_at_once_and_its_emoji_is_put_on_afterwards() {
+        // The message must not wait for a model: the topic is created plain, the
+        // message goes, and the emoji chosen later lands on the same topic and in
+        // the record a later notification reads.
+        use std::cell::RefCell;
+
+        use super::super::bot::TopicIcon;
+
+        struct Recorder {
+            topics: RefCell<Vec<String>>,
+            icons: RefCell<Vec<(i64, String)>>,
+        }
+        impl BotApi for Recorder {
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
+            fn create_forum_topic(&self, _: i64, name: &str) -> Result<i64, BotError> {
+                self.topics.borrow_mut().push(name.to_string());
+                Ok(42)
+            }
+            fn get_forum_topic_icon_stickers(&self) -> Result<Vec<TopicIcon>, BotError> {
+                Ok(vec![
+                    TopicIcon {
+                        emoji: "🚀".to_string(),
+                        custom_emoji_id: "5300".to_string(),
+                    },
+                    TopicIcon {
+                        emoji: "🐛".to_string(),
+                        custom_emoji_id: "5301".to_string(),
+                    },
+                ])
+            }
+            fn edit_forum_topic_icon(
+                &self,
+                _: i64,
+                thread_id: i64,
+                id: &str,
+            ) -> Result<(), BotError> {
+                self.icons.borrow_mut().push((thread_id, id.to_string()));
+                Ok(())
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+            ) -> Result<i64, BotError> {
+                Ok(7)
+            }
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!("an icon from the set never renames the topic")
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn send_message_with_buttons(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+                _: &[Button],
+            ) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let bot = Recorder {
+            topics: RefCell::new(Vec::new()),
+            icons: RefCell::new(Vec::new()),
+        };
+        let outbound = Outbound {
+            token: "1:x".to_string(),
+            api_base: "http://127.0.0.1:9".to_string(),
+            chat_id: -100,
+            mode: TelegramChatMode::Forum,
+            job: OutboundJob::Tell {
+                session_id: "s1".to_string(),
+                title: "Bug hunt".to_string(),
+                text: "hello".to_string(),
+            },
+        };
+        let mut later = Vec::new();
+
+        perform_with(&bot, temp.path(), &outbound, &mut later).unwrap();
+
+        assert_eq!(bot.topics.borrow().as_slice(), ["Bug hunt"]);
+        assert!(
+            bot.icons.borrow().is_empty(),
+            "nothing asked before the message is out"
+        );
+        assert_eq!(later.len(), 1);
+        let asked = RefCell::new(Vec::new());
+        finish_icon(&bot, temp.path(), later.pop().unwrap(), &|prompt: &str| {
+            asked.borrow_mut().push(prompt.to_string());
+            Some("I'd say 🐛".to_string())
+        });
+
+        assert!(asked.borrow()[0].contains("Bug hunt"));
+        assert_eq!(bot.icons.borrow().as_slice(), [(42, "5301".to_string())]);
+        let record = store::load_in(temp.path()).topics["s1"].clone();
+        assert_eq!(record.icon.as_deref(), Some("🐛"));
+        assert_eq!(record.title, "Bug hunt", "the name is left alone");
+    }
 
     #[test]
     fn a_line_from_cst_about_a_session_opens_its_topic_if_need_be_and_routes_replies_back() {
@@ -1538,7 +1754,7 @@ mod tests {
             },
         };
 
-        perform_with(&bot, temp.path(), &outbound).unwrap();
+        perform_with(&bot, temp.path(), &outbound, &mut Vec::new()).unwrap();
 
         assert!(bot.topics.borrow()[0].contains("Watched session"));
         let sent = bot.sent.borrow();
@@ -2199,7 +2415,8 @@ mod tests {
                 },
             },
         };
-        perform_with(&bot, temp.path(), &outbound).expect("the refusal is absorbed");
+        perform_with(&bot, temp.path(), &outbound, &mut Vec::new())
+            .expect("the refusal is absorbed");
         assert_eq!(*bot.photos.borrow(), 1, "the picture was tried first");
         let sent = bot.sent.borrow();
         assert_eq!(sent.len(), 2, "the text, then the table as a block");
