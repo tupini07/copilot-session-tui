@@ -40,6 +40,20 @@ pub enum Command {
     Say(String),
     /// Press Escape in the session.
     Esc,
+    /// One picture of the session's screen, as text or as an image.
+    Peek {
+        image: bool,
+    },
+    /// `/follow image`: asked for, and refused with why.
+    FollowImage,
+}
+
+/// Words that ask for a picture rather than text.
+fn means_image(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "image" | "img" | "photo" | "picture" | "pic" | "png"
+    )
 }
 
 /// Read a message. Case does not matter, and `/follow@cst_bot` is `/follow`: Telegram
@@ -59,11 +73,19 @@ pub fn parse(text: &str) -> Parsed {
         .unwrap_or(first)
         .to_ascii_lowercase();
     match follow::parse_command(text) {
-        Some(FollowCommand::Follow { minutes }) => return Parsed::Cst(Command::Follow { minutes }),
+        Some(FollowCommand::Follow { minutes }) => {
+            if rest.split_whitespace().any(means_image) {
+                return Parsed::Cst(Command::FollowImage);
+            }
+            return Parsed::Cst(Command::Follow { minutes });
+        }
         Some(FollowCommand::Unfollow) => return Parsed::Cst(Command::Unfollow),
         None => {}
     }
     match name.as_str() {
+        "/peek" | "/screen" => Parsed::Cst(Command::Peek {
+            image: rest.split_whitespace().any(means_image),
+        }),
         "/queue" => Parsed::Cst(Command::Queue((!rest.is_empty()).then(|| rest.to_string()))),
         "/say" => {
             if rest.is_empty() {
@@ -84,7 +106,7 @@ pub mod wording {
         format!(
             "Not delivered: {command} looks like a Copilot slash command. Those open menus in \
              the session that cannot be closed from here, so none is forwarded. CST's own are \
-             /follow, /unfollow, /queue, /say and /esc. To send the line anyway, write \
+             /follow, /unfollow, /peek, /queue, /say and /esc. To send the line anyway, write \
              /say {command} …"
         )
     }
@@ -110,6 +132,28 @@ mod tests {
         );
         assert_eq!(parse("/Unfollow@cst_bot"), Parsed::Cst(Command::Unfollow));
         assert_eq!(parse("/esc"), Parsed::Cst(Command::Esc));
+    }
+
+    #[test]
+    fn peek_takes_text_or_an_image_and_a_live_image_is_a_thing_to_refuse_not_ignore() {
+        assert_eq!(parse("/peek"), Parsed::Cst(Command::Peek { image: false }));
+        assert_eq!(
+            parse("/peek text"),
+            Parsed::Cst(Command::Peek { image: false })
+        );
+        assert_eq!(
+            parse("/peek@cst_bot image"),
+            Parsed::Cst(Command::Peek { image: true })
+        );
+        assert_eq!(
+            parse("/peek photo"),
+            Parsed::Cst(Command::Peek { image: true })
+        );
+        assert_eq!(parse("/follow 5 image"), Parsed::Cst(Command::FollowImage));
+        assert_eq!(
+            parse("/follow text"),
+            Parsed::Cst(Command::Follow { minutes: 5 })
+        );
     }
 
     #[test]

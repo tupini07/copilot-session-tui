@@ -879,6 +879,12 @@ pub struct App {
     telegram_state_seen: Option<std::time::SystemTime>,
     /// Replies on disk as of that reading, so the idle tick can skip the file.
     telegram_live_replies: usize,
+    /// Follows and peeks on disk as of that reading; the panes they want are here or
+    /// elsewhere, and only reading the file says which.
+    telegram_live_views: usize,
+    /// Follows whose closing edit this process has already handed to the sender, so
+    /// the pass after does not close them a second time before the record goes.
+    telegram_closing: std::collections::HashSet<String>,
     /// Keys still to play into a question form, one per pump pass so the form has
     /// time to redraw between them and the UI never waits on a sleep.
     telegram_keys: std::collections::VecDeque<(crate::mux::PaneId, crate::telegram::answer::Key)>,
@@ -1103,6 +1109,8 @@ impl App {
             telegram_state_root: crate::telegram::store::state_root(),
             telegram_state_seen: None,
             telegram_live_replies: 0,
+            telegram_live_views: 0,
+            telegram_closing: std::collections::HashSet::new(),
             telegram_keys: std::collections::VecDeque::new(),
             telegram_key_due: None,
             telegram_worker: None,
@@ -3815,15 +3823,208 @@ impl App {
         let discovered = modified != self.telegram_state_seen;
         if discovered {
             self.telegram_state_seen = modified;
-            self.telegram_live_replies = crate::telegram::store::load_in(&self.telegram_state_root)
-                .replies
-                .len();
+            let state = crate::telegram::store::load_in(&self.telegram_state_root);
+            self.telegram_live_replies = state.replies.len();
+            self.telegram_live_views = state.follows.len() + state.peeks.len();
+            self.telegram_closing
+                .retain(|session_id| state.follow_mut_ref(session_id).is_some());
         }
         let mut changed = discovered && self.telegram_pairing_arrived();
         if self.telegram_live_replies > 0 {
             changed |= self.deliver_telegram_replies();
         }
+        if self.telegram_live_views > 0 {
+            changed |= self.serve_telegram_views();
+        }
         changed
+    }
+
+    /// How long a `/peek` waits for the CST that has the session in a tab before the
+    /// phone is told nobody has it open.
+    const VIEW_PATIENCE_SECS: i64 = 60;
+
+    /// Answer the phone's `/peek`s and keep its `/follow`s current, for the panes this
+    /// CST hosts.
+    ///
+    /// A screen is readable only by the process that owns the pane, so this runs here
+    /// rather than in the poller. Each pass stamps the follows it shows as hosted, which
+    /// keeps the poller's log view off them; a stamp that goes stale, because this CST
+    /// closed, hands them back.
+    fn serve_telegram_views(&mut self) -> bool {
+        use crate::config::TelegramChatMode;
+        use crate::telegram::follow::{self, EndReason, ScreenView};
+        use crate::telegram::wording;
+        use crate::telegram::worker::OutboundJob;
+
+        let state = crate::telegram::store::load_in(&self.telegram_state_root);
+        if state.peeks.is_empty() && state.follows.is_empty() {
+            self.telegram_live_views = 0;
+            return false;
+        }
+        let forum = self.config.telegram.chat_mode == TelegramChatMode::Forum;
+        let now = chrono::Utc::now();
+        let mut changed = false;
+        let mut hosted = None;
+
+        for peek in &state.peeks {
+            let title = self.telegram_session_title(&peek.session_id);
+            match self.pane_screen_rows(&peek.session_id) {
+                Some(rows) => {
+                    let html = follow::render_peek((!forum).then_some(title.as_str()), &rows);
+                    self.send_telegram_job(OutboundJob::Html {
+                        session_id: peek.session_id.clone(),
+                        thread_id: peek.thread_id,
+                        reply_to: Some(peek.user_message_id),
+                        html,
+                    });
+                }
+                None => {
+                    // Another CST with the session in a tab answers it; one in no tab
+                    // anywhere gets the same answer a reply would.
+                    let elsewhere = hosted
+                        .get_or_insert_with(|| self.sessions_hosted_elsewhere())
+                        .contains(&peek.session_id);
+                    let age = (now - peek.requested_at).num_seconds();
+                    if elsewhere && age < Self::VIEW_PATIENCE_SECS {
+                        continue;
+                    }
+                    self.telegram_say(
+                        &peek.session_id,
+                        Some(peek.user_message_id),
+                        wording::not_open(&title),
+                    );
+                }
+            }
+            self.update_telegram(|state| state.drop_peek(peek.user_message_id));
+            changed = true;
+        }
+
+        for current in &state.follows {
+            let Some(pane_id) = self.pane_for_session(&current.session_id) else {
+                continue;
+            };
+            if self.telegram_closing.contains(&current.session_id) {
+                continue;
+            }
+            let Some((rows, working, running)) = self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane(pane_id))
+                .map(|pane| {
+                    (
+                        pane.with_screen(crate::telegram::screen::rows)
+                            .unwrap_or_default(),
+                        pane.is_working(),
+                        pane.is_running(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let title = (!forum).then(|| self.telegram_session_title(&current.session_id));
+            let ends_in = (current.expires_at - now)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            let view = ScreenView {
+                title: title.as_deref(),
+                turn_running: working,
+                ends_in,
+                rows: &rows,
+            };
+            let ending = if current.stop_requested {
+                Some(EndReason::Stopped)
+            } else if !running {
+                Some(EndReason::SessionClosed)
+            } else if now >= current.expires_at {
+                Some(EndReason::Expired)
+            } else {
+                None
+            };
+            if let Some(reason) = ending {
+                let html = follow::render_screen_ended(&view, reason);
+                self.send_telegram_job(OutboundJob::FollowClose {
+                    session_id: current.session_id.clone(),
+                    thread_id: current.thread_id,
+                    reply_to: current.user_message_id,
+                    html,
+                });
+                self.telegram_closing.insert(current.session_id.clone());
+                changed = true;
+                continue;
+            }
+
+            let stale_stamp = current
+                .hosted_at
+                .is_none_or(|at| (now - at) >= chrono::Duration::seconds(10));
+            let recently_shown = current
+                .last_edit_at
+                .is_some_and(|at| (now - at).to_std().unwrap_or_default() < follow::EDIT_EVERY);
+            if recently_shown {
+                if stale_stamp {
+                    self.update_telegram(|state| {
+                        if let Some(live) = state.follow_mut(&current.session_id) {
+                            live.hosted_at = Some(now);
+                        }
+                    });
+                }
+                continue;
+            }
+            let html = follow::render_screen(&view);
+            let hash = follow::content_hash(&html);
+            if current.message_id.is_some() && current.last_hash == Some(hash) {
+                if stale_stamp {
+                    self.update_telegram(|state| {
+                        if let Some(live) = state.follow_mut(&current.session_id) {
+                            live.hosted_at = Some(now);
+                        }
+                    });
+                }
+                continue;
+            }
+            // Claimed before sending, so the next pass sees a fresh edit and waits for
+            // the sender to record the message id rather than sending a second copy.
+            self.update_telegram(|state| {
+                if let Some(live) = state.follow_mut(&current.session_id) {
+                    live.last_edit_at = Some(now);
+                    live.last_hash = Some(hash);
+                    live.hosted_at = Some(now);
+                }
+            });
+            self.send_telegram_job(OutboundJob::FollowShow {
+                session_id: current.session_id.clone(),
+                thread_id: current.thread_id,
+                reply_to: current.user_message_id,
+                html,
+            });
+            changed = true;
+        }
+        changed
+    }
+
+    /// The rows of a session's screen, when this CST has its pane.
+    fn pane_screen_rows(&self, session_id: &str) -> Option<Vec<String>> {
+        let pane_id = self.pane_for_session(session_id)?;
+        let pane = self.mux.as_ref()?.pane(pane_id)?;
+        if !pane.is_running() {
+            return None;
+        }
+        pane.with_screen(crate::telegram::screen::rows)
+    }
+
+    /// Hand a job to the sender with the credentials in force now.
+    fn send_telegram_job(&mut self, job: crate::telegram::worker::OutboundJob) {
+        let telegram = &self.config.telegram;
+        let Some(chat_id) = telegram.chat_id else {
+            return;
+        };
+        let outbound = crate::telegram::worker::Outbound {
+            token: self.config.telegram_bot_token.trim().to_string(),
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job,
+        };
+        self.send_telegram(outbound);
     }
 
     /// What is said to the phone about a session: its name as the list shows it.

@@ -788,14 +788,22 @@ message stays in Telegram to send again:
 While a turn runs the phone hears nothing, and sometimes you want to know what the agent
 is up to before deciding whether to wait. Send `/follow` the way you would a reply — in
 the session's topic, or as a reply to one of its messages — and CST answers with one
-message holding the session's latest words, whatever tool is running, and whether it is
-waiting on a question. For the next five minutes (`/follow 10` for ten, up to thirty)
-that one message is edited in place as the log grows, at most every ten seconds, so the
-chat does not fill with copies. When the time is up, or you send `/unfollow`, or the
+message holding the session's screen, verbatim, in a monospace block: the prompt, the
+menu that opened, the exact line Copilot is on. For the next five minutes (`/follow 10`
+for ten, up to thirty) that one message is edited in place as the screen changes, at
+most every ten seconds, so the chat does not fill with copies. Its footer carries
+`/unfollow`, which Telegram makes tappable; when the time is up, or you send it, or the
 session closes, the message is edited one last time to say so, in a way that cannot be
-read as current. At most three sessions can be followed at once, which keeps the edits
-under what Telegram allows one chat. A follow shows session text, so under **Status
-only** it is refused rather than honoured.
+read as current. Tapping `/unfollow` in a private chat sends it bare, so a bare one stops
+every follow. `/peek` answers once with the screen as it is right now and starts nothing.
+
+A screen is only readable by the CST hosting the pane, so that CST does the editing. A
+session no CST has open is followed from its event log instead: its latest words and
+the tool running, as the view used to be. A terminal is wider than a phone, so the block
+wraps there; turn the phone sideways, or read it on the PC. What does not fit in one
+message is cut from the top, where the oldest rows are. At most three sessions can be
+followed at once, which keeps the edits under what Telegram allows one chat. A follow
+shows session text, so under **Status only** it is refused rather than honoured.
 
 #### Slash commands
 
@@ -809,8 +817,8 @@ do mean it, and `/esc` presses Escape in the session, which closes a menu Copilo
 Both are confirmed with a 👍 like a reply.
 
 CST publishes its commands to the bot's menu, so typing `/` in the chat, or in the
-group, offers `/follow`, `/unfollow`, `/queue`, `/say` and `/esc` with a line on what
-each does.
+group, offers `/follow`, `/unfollow`, `/peek`, `/queue`, `/say` and `/esc` with a line on
+what each does.
 
 A turn you start from the phone reports back to the phone when it ends, even if that
 session is the one attached on your screen at the time. A finished turn is normally kept

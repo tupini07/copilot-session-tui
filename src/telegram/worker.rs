@@ -31,7 +31,7 @@ use super::command::{self, Command, Parsed};
 use super::follow::{self, EndReason, FollowView, LogTail};
 use super::markdown;
 use super::queue::{self, CancelSource, QueuedEntry};
-use super::store::{self, Follow, Pairing, Reply, ReplyStatus, TelegramState};
+use super::store::{self, Follow, Pairing, Peek, Reply, ReplyStatus, TelegramState};
 use super::{
     chat_mode_of, classify, compose, escape_html, message_carries_code, route, wording, Content,
     Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict, POLL_TIMEOUT,
@@ -45,6 +45,13 @@ const LOCK_RETRY: Duration = Duration::from_secs(5);
 /// How long to wait after Telegram refused or did not answer. Long enough not to hammer
 /// a dead network, short enough that a VPN coming up is noticed within the minute.
 const FAILURE_DELAY: Duration = Duration::from_secs(30);
+/// How long a host's stamp on a follow keeps the poller off it. Longer than the host's
+/// own refresh, so a host that is merely quiet is not taken for one that is gone.
+const HOST_FRESH: Duration = Duration::from_secs(30);
+/// How long a fresh follow waits for a host before the poller shows the log instead.
+/// A host looks on its idle tick, five seconds at most; a session nobody hosts costs
+/// the phone this much extra wait, once.
+const HOST_GRACE: Duration = Duration::from_secs(12);
 
 /// What the poll loop needs. Resolved once; a change is a restart of the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +116,29 @@ pub enum OutboundJob {
     },
     /// Replace a message's text; its buttons go with the old text.
     Edit { message_id: i64, html: String },
+    /// HTML already composed, as a reply: a `/peek`'s screen. Recorded against the
+    /// session like a `Say`.
+    Html {
+        session_id: String,
+        thread_id: Option<i64>,
+        reply_to: Option<i64>,
+        html: String,
+    },
+    /// The host CST's rendering of a followed screen: edits the view's message, or
+    /// sends it the first time and records the id in the follow.
+    FollowShow {
+        session_id: String,
+        thread_id: Option<i64>,
+        reply_to: i64,
+        html: String,
+    },
+    /// The view's last edit, after which the follow is forgotten.
+    FollowClose {
+        session_id: String,
+        thread_id: Option<i64>,
+        reply_to: i64,
+        html: String,
+    },
     /// A thumbs-up on the user's own message: delivery confirmed without a bubble.
     React { message_id: i64 },
     /// The session is gone; its topic is closed, not deleted, so the history stays.
@@ -202,6 +232,8 @@ pub struct Batch {
     pub ignored_taps: Vec<String>,
     /// `/queue`s: which session, or every session when `None`, and where to answer.
     pub queue_requests: Vec<QueueRequest>,
+    /// `/peek`s, recorded for the CST hosting the pane to answer.
+    pub peeks: Vec<Peek>,
 }
 
 /// A tap on a Cancel button, as planned.
@@ -380,6 +412,7 @@ pub fn plan_batch(
                             last_hash: None,
                             last_edit_at: None,
                             stop_requested: false,
+                            hosted_at: None,
                         });
                         continue;
                     }
@@ -388,6 +421,43 @@ pub fn plan_batch(
                             session_id,
                             thread_id: message.topic_id(),
                             user_message_id: message.message_id,
+                        });
+                        continue;
+                    }
+                    Parsed::Cst(Command::FollowImage) => {
+                        batch.says.push(OutboundJob::Say {
+                            session_id: Some(session_id),
+                            thread_id: message.topic_id(),
+                            reply_to: Some(message.message_id),
+                            text: follow::wording::no_image_follow(),
+                        });
+                        continue;
+                    }
+                    Parsed::Cst(Command::Peek { image }) => {
+                        if !settings.content_full {
+                            batch.says.push(OutboundJob::Say {
+                                session_id: Some(session_id),
+                                thread_id: message.topic_id(),
+                                reply_to: Some(message.message_id),
+                                text: follow::wording::needs_full_content(),
+                            });
+                            continue;
+                        }
+                        if image {
+                            batch.says.push(OutboundJob::Say {
+                                session_id: Some(session_id.clone()),
+                                thread_id: message.topic_id(),
+                                reply_to: Some(message.message_id),
+                                text: follow::wording::no_images_yet(),
+                            });
+                        }
+                        batch.peeks.push(Peek {
+                            session_id,
+                            chat_id: paired.chat_id,
+                            thread_id: message.topic_id(),
+                            user_message_id: message.message_id,
+                            image: false,
+                            requested_at: now,
                         });
                         continue;
                     }
@@ -437,6 +507,25 @@ pub fn plan_batch(
                     holds_for_idle,
                     status: ReplyStatus::Planned,
                 });
+            }
+            // Tapping the /unfollow in a view's footer sends it bare, so a bare one
+            // stops every follow rather than asking which: there are at most three.
+            Route::Unrouted if parsed == Parsed::Cst(Command::Unfollow) => {
+                if state.follows.is_empty() {
+                    batch.says.push(OutboundJob::Say {
+                        session_id: None,
+                        thread_id: message.topic_id(),
+                        reply_to: Some(message.message_id),
+                        text: follow::wording::nothing_to_unfollow(),
+                    });
+                }
+                for live in &state.follows {
+                    batch.unfollows.push(FollowEnd {
+                        session_id: live.session_id.clone(),
+                        thread_id: live.thread_id,
+                        user_message_id: message.message_id,
+                    });
+                }
             }
             Route::Unrouted => batch.says.push(OutboundJob::Say {
                 session_id: None,
@@ -524,6 +613,10 @@ fn poll_loop(
             let mut refused: Vec<OutboundJob> = Vec::new();
             for reply in &batch.replies {
                 recorded |= state.record_reply(reply.clone());
+            }
+            for peek in &batch.peeks {
+                state.peeks.push(peek.clone());
+                recorded = true;
             }
             for follow in &batch.follows {
                 if !state.start_follow(follow.clone()) {
@@ -635,6 +728,22 @@ fn service_follows(root: &Path, bot: &impl BotApi, settings: &PollSettings, now:
         .paired
         .is_some_and(|paired| paired.mode == TelegramChatMode::Forum);
     for current in follows {
+        // The CST hosting the pane shows the screen itself, which beats anything the
+        // log can say; this view is only for a session no CST has open, or whose host
+        // stopped showing it.
+        let since_host = current
+            .hosted_at
+            .map(|at| (now - at).to_std().unwrap_or(Duration::ZERO));
+        // A new follow waits for a host to claim it before the log view goes out, or
+        // the first thing the phone saw would be prose that the screen then replaces.
+        let unclaimed_young = since_host.is_none()
+            && (now - current.started_at)
+                .to_std()
+                .unwrap_or(Duration::ZERO)
+                < HOST_GRACE;
+        if since_host.is_some_and(|since| since < HOST_FRESH) || unclaimed_young {
+            continue;
+        }
         let session_dir = settings
             .copilot_home
             .join("session-state")
@@ -936,6 +1045,25 @@ pub(crate) fn send_part(
     }
 }
 
+/// [`send_part`] as a reply to the user's message, with the same plain fallback.
+fn send_part_replying(
+    bot: &impl BotApi,
+    chat_id: i64,
+    thread_id: Option<i64>,
+    reply_to: Option<i64>,
+    html: &str,
+) -> Result<(i64, bool), BotError> {
+    match bot.send_message(chat_id, thread_id, reply_to, html) {
+        Err(BotError::Rejected(description))
+            if description.to_lowercase().contains("parse entities") =>
+        {
+            bot.send_message(chat_id, thread_id, reply_to, &markdown::strip_tags(html))
+                .map(|id| (id, true))
+        }
+        other => other.map(|id| (id, false)),
+    }
+}
+
 fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(), BotError> {
     match &outbound.job {
         OutboundJob::Notify {
@@ -1057,6 +1185,71 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
         }
         OutboundJob::Edit { message_id, html } => {
             bot.edit_message_text(outbound.chat_id, *message_id, html)
+        }
+        OutboundJob::Html {
+            session_id,
+            thread_id,
+            reply_to,
+            html,
+        } => {
+            let (message_id, _) =
+                send_part_replying(bot, outbound.chat_id, *thread_id, *reply_to, html)?;
+            let _ = store::update_in(root, |state| {
+                state.record_sent(SentRecord {
+                    message_id,
+                    session_id: session_id.clone(),
+                    kind: None,
+                    tool_call_id: None,
+                    sent_at: Utc::now(),
+                })
+            });
+            Ok(())
+        }
+        OutboundJob::FollowShow {
+            session_id,
+            thread_id,
+            reply_to,
+            html,
+        } => {
+            let existing = store::load_in(root)
+                .follow_mut_ref(session_id)
+                .and_then(|follow| follow.message_id);
+            match existing {
+                Some(message_id) => bot.edit_message_text(outbound.chat_id, message_id, html),
+                None => {
+                    let (message_id, _) = send_part_replying(
+                        bot,
+                        outbound.chat_id,
+                        *thread_id,
+                        Some(*reply_to),
+                        html,
+                    )?;
+                    let _ = store::update_in(root, |state| {
+                        if let Some(live) = state.follow_mut(session_id) {
+                            live.message_id = Some(message_id);
+                        }
+                    });
+                    Ok(())
+                }
+            }
+        }
+        OutboundJob::FollowClose {
+            session_id,
+            thread_id,
+            reply_to,
+            html,
+        } => {
+            let existing = store::load_in(root)
+                .follow_mut_ref(session_id)
+                .and_then(|follow| follow.message_id);
+            match existing {
+                Some(message_id) => bot.edit_message_text(outbound.chat_id, message_id, html)?,
+                None => {
+                    send_part_replying(bot, outbound.chat_id, *thread_id, Some(*reply_to), html)?;
+                }
+            }
+            let _ = store::update_in(root, |state| state.drop_follow(session_id));
+            Ok(())
         }
         OutboundJob::React { message_id } => {
             bot.set_message_reaction(outbound.chat_id, *message_id, "👍")

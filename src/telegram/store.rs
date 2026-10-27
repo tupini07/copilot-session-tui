@@ -118,6 +118,9 @@ pub struct TelegramState {
     /// polling, so a takeover carries each on with the same message.
     #[serde(default)]
     pub follows: Vec<Follow>,
+    /// `/peek`s waiting for the CST that hosts the pane to answer them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peeks: Vec<Peek>,
     /// Anything a newer CST wrote that this one does not understand.
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -145,6 +148,28 @@ pub struct Follow {
     /// Set by `/unfollow`; the next service pass ends the view and drops it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stop_requested: bool,
+    /// When the CST hosting the pane last showed the screen. While this is fresh the
+    /// poller leaves the view alone; when it goes stale (the host closed, or the pane)
+    /// the poller carries on from the event log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_at: Option<DateTime<Utc>>,
+}
+
+/// A `/peek`: one picture of a session's screen, asked for and not yet sent. Only the
+/// CST hosting the pane can take it, so the poller records the request here and the
+/// host's apply pass answers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Peek {
+    pub session_id: String,
+    pub chat_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i64>,
+    /// The user's `/peek`, which the answer quotes; also what identifies the request.
+    pub user_message_id: i64,
+    /// Whether a picture was asked for rather than text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image: bool,
+    pub requested_at: DateTime<Utc>,
 }
 
 impl TelegramState {
@@ -224,8 +249,17 @@ impl TelegramState {
         self.follows.iter_mut().find(|f| f.session_id == session_id)
     }
 
+    pub fn follow_mut_ref(&self, session_id: &str) -> Option<&Follow> {
+        self.follows.iter().find(|f| f.session_id == session_id)
+    }
+
     pub fn drop_follow(&mut self, session_id: &str) {
         self.follows.retain(|f| f.session_id != session_id);
+    }
+
+    pub fn drop_peek(&mut self, user_message_id: i64) {
+        self.peeks
+            .retain(|peek| peek.user_message_id != user_message_id);
     }
 
     pub fn forget_topic(&mut self, session_id: &str) -> Option<TopicRecord> {
@@ -370,6 +404,7 @@ mod tests {
             last_hash: None,
             last_edit_at: None,
             stop_requested: false,
+            hosted_at: None,
         }
     }
 
