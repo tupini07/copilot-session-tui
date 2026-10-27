@@ -824,9 +824,21 @@ that remain: `/say /compact` sends the rest of the line exactly as written, for 
 do mean it, and `/esc` presses Escape in the session, which closes a menu Copilot opened.
 Both are confirmed with a 👍 like a reply.
 
+`/ask <question>` is the exception that is kept, because it is the one worth having
+from a phone: a quick question about what a session is doing, without interrupting it.
+Copilot's own `/ask` opens a dialog in the terminal that only Esc can close; CST's `/ask`
+answers in Telegram instead. A Copilot of CST's own reads a copy of the session's
+conversation — the session itself never sees the question and goes on with its turn —
+and the answer replaces the "Asking…" message a few seconds later, as text, so a table in
+it arrives as a picture like any other. That side Copilot has no tools and takes no
+actions; it can only answer in words from what the conversation already contains. The
+copy is deleted when the answer is in, and the session list hides it meanwhile. `/btw`
+is the same command, as it is in Copilot. A session that has not said anything yet has
+no conversation to copy, and says so.
+
 CST publishes its commands to the bot's menu, so typing `/` in the chat, or in the
-group, offers `/follow`, `/unfollow`, `/peek`, `/queue`, `/say` and `/esc` with a line on
-what each does.
+group, offers `/ask`, `/follow`, `/unfollow`, `/peek`, `/queue`, `/say` and `/esc` with a
+line on what each does.
 
 A turn you start from the phone reports back to the phone when it ends, even if that
 session is the one attached on your screen at the time. A finished turn is normally kept

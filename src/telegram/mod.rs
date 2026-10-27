@@ -379,7 +379,7 @@ fn kind_line(kind: NotificationKind) -> &'static str {
 /// balance, and rejects the whole of it. When there is more than one part, each says
 /// which it is. [`MAX_MESSAGES`] is a safety valve against a runaway, not a length
 /// anyone should meet.
-fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
+pub(crate) fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
     let header = |index: usize, total: usize| -> String {
         let label = if title_html.is_empty() {
             String::new()
@@ -590,6 +590,11 @@ fn sentence_end(text: &str) -> Option<usize> {
 pub fn bot_commands() -> &'static [bot::BotCommand] {
     &[
         bot::BotCommand {
+            command: "ask",
+            description:
+                "Ask a side question about a session's conversation, without interrupting it",
+        },
+        bot::BotCommand {
             command: "follow",
             description:
                 "Watch a session's screen live for a few minutes (add a number of minutes)",
@@ -785,6 +790,22 @@ pub mod wording {
 
     pub fn replies_off() -> String {
         "Replies are turned off in CST's Telegram settings.".to_string()
+    }
+
+    /// Sent at once when `/ask` arrives, and edited into the answer when it comes.
+    pub fn asking(title: &str) -> String {
+        format!("Asking a side Copilot about {title}…")
+    }
+
+    pub fn ask_usage() -> String {
+        "Write the question after /ask, as in /ask what is left to do? A Copilot of CST's \
+         own reads a copy of this session's conversation and answers here; the session \
+         itself is not interrupted and never sees the question."
+            .to_string()
+    }
+
+    pub fn ask_failed(title: &str, why: &str) -> String {
+        format!("Could not ask about {title}: {why}.")
     }
 
     pub fn unrouted_hint(mode: TelegramChatMode) -> String {
