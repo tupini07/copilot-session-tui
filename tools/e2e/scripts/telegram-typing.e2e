@@ -9,7 +9,10 @@ session existing-app Existing app session
 wait_for Existing app session
 press enter
 wait_for Fake Copilot is idling
-# A first turn opens the topic; a long second one is what the phone watches.
+# A first turn opens the topic, since a topic cannot type before it exists; the long
+# second one keeps the status on. (The stub has no lifecycle journal, so it reads as
+# working for twenty seconds after any event: the typing seen here may begin with the
+# first turn's tail. What is tested is that a working session's topic types at all.)
 type e2e:work 1000 Warming up.
 press enter
 press ctrl+b d

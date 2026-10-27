@@ -794,7 +794,8 @@ While a session works, its topic shows "typing…", the way a person's chat does
 glance at the group tells you which sessions are busy without a message from any of
 them. In a private chat, which has no topics, the chat types while any session you have
 heard from lately is working. It is sent by the CST that polls Telegram from what the
-session folders say, so a session open in another CST counts too.
+session folders say, so a session open in another CST counts too. A session's very
+first turn cannot type: its topic does not exist until its first message lands.
 
 Beyond that, while a turn runs the phone hears nothing, and sometimes you want to know
 what the agent is up to before deciding whether to wait. Send `/follow` the way you would a reply — in
