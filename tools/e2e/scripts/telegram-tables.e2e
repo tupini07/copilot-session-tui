@@ -1,0 +1,26 @@
+# Copilot likes tables, and Telegram has no table markup: a monospace block wraps on a
+# phone into something unreadable. So a notification's tables are taken out of the text,
+# which says where each was, and sent after it as pictures with the table drawn in them.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# What the session said: prose, a table, more prose. The stub reads \n as a line break.
+type e2e:work 1500 Here are the **results**:\n\n| Name | Size | Status |\n|---|---|---|\n| alpha | 12 KB | ok |\n| beta | 3 MB | failed |\n\nShall I retry beta?
+press enter
+press ctrl+b d
+wait_for Existing app session
+
+telegram_wait Here are the <b>results</b>:
+telegram_wait [Table 1 is sent as a picture below]
+telegram_wait Shall I retry beta?
+telegram_expect_not <pre>
+telegram_wait photo 
+telegram_wait : <i>Table 1</i>
+telegram_dump 01-table-sent

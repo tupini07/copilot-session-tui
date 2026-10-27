@@ -988,7 +988,7 @@ impl Driver {
         // by text, since the crate has no JSON library: the script's object loses its
         // closing brace and gains the Telegram keys.
         if let Some((mode, paired)) = self.setup.telegram {
-            let stub = telegram_stub::TelegramStub::start(mode)?;
+            let stub = telegram_stub::TelegramStub::start(mode, self.run_dir.clone())?;
             let pairing = if paired {
                 format!(
                     r#""chat_id": {}, "user_id": {}, "chat_mode": "{}", "#,

@@ -19,9 +19,13 @@ press ctrl+b d
 wait_for Existing app session
 telegram_wait Setup is done.
 
-# One message, the screen, nothing typed into the session.
+# /peek is a picture of the screen, drawn by CST, with the session named under it;
+# /peek text is the same screen as a monospace block. Neither types into the session.
 telegram_say /peek
-telegram_wait <b>Peek
+telegram_wait photo
+telegram_wait : <b>Peek: Existing app session</b>
+telegram_say /peek text
+telegram_wait message: <b>Peek: Existing app session</b>
 telegram_wait Fake Copilot is idling.
 telegram_wait Fake Copilot received: e2e:work 1500 Setup is done.
 telegram_dump 01-peeked

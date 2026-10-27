@@ -3870,13 +3870,40 @@ impl App {
             let title = self.telegram_session_title(&peek.session_id);
             match self.pane_screen_rows(&peek.session_id) {
                 Some(rows) => {
-                    let html = follow::render_peek((!forum).then_some(title.as_str()), &rows);
-                    self.send_telegram_job(OutboundJob::Html {
-                        session_id: peek.session_id.clone(),
-                        thread_id: peek.thread_id,
-                        reply_to: Some(peek.user_message_id),
-                        html,
-                    });
+                    let shown_title = (!forum).then_some(title.as_str());
+                    let picture = peek
+                        .image
+                        .then(|| self.pane_screen_picture(&peek.session_id))
+                        .flatten();
+                    match picture {
+                        Some(Ok(png)) => {
+                            self.send_telegram_job(OutboundJob::Photo {
+                                session_id: peek.session_id.clone(),
+                                thread_id: peek.thread_id,
+                                reply_to: Some(peek.user_message_id),
+                                png,
+                                caption_html: follow::peek_caption(shown_title),
+                                fallback_html: follow::render_peek(shown_title, &rows),
+                            });
+                        }
+                        picture => {
+                            let mut html = follow::render_peek(shown_title, &rows);
+                            if let Some(Err(reason)) = picture {
+                                html = format!(
+                                    "<i>{}</i>\n{html}",
+                                    crate::telegram::escape_html(&follow::wording::image_failed(
+                                        &reason
+                                    ))
+                                );
+                            }
+                            self.send_telegram_job(OutboundJob::Html {
+                                session_id: peek.session_id.clone(),
+                                thread_id: peek.thread_id,
+                                reply_to: Some(peek.user_message_id),
+                                html,
+                            });
+                        }
+                    }
                 }
                 None => {
                     // Another CST with the session in a tab answers it; one in no tab
@@ -4009,6 +4036,20 @@ impl App {
             return None;
         }
         pane.with_screen(crate::telegram::screen::rows)
+    }
+
+    /// A session's screen drawn as a PNG, when this CST has its pane. Drawing a
+    /// hundred by thirty cells takes a few milliseconds; the parser lock is held only
+    /// for the copy of the cells.
+    fn pane_screen_picture(&self, session_id: &str) -> Option<Result<Vec<u8>, String>> {
+        use crate::telegram::image;
+        let pane_id = self.pane_for_session(session_id)?;
+        let pane = self.mux.as_ref()?.pane(pane_id)?;
+        if !pane.is_running() {
+            return None;
+        }
+        let cells = pane.with_screen(image::cells)?;
+        Some(image::render(&cells, image::DARK_BG))
     }
 
     /// Hand a job to the sender with the credentials in force now.

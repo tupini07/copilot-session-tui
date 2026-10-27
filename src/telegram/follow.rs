@@ -252,13 +252,17 @@ pub fn render_screen_ended(view: &ScreenView<'_>, reason: EndReason) -> String {
     with_screen_block(&ended_header(view.title), view.rows, &footer)
 }
 
-/// One picture of the screen, asked for with `/peek`.
+/// The screen as text, asked for with `/peek text`.
 pub fn render_peek(title: Option<&str>, rows: &[String]) -> String {
-    let header = match title {
+    with_screen_block(&peek_caption(title), rows, "")
+}
+
+/// What goes above a `/peek`, as text or under the picture.
+pub fn peek_caption(title: Option<&str>) -> String {
+    match title {
         Some(title) => format!("<b>Peek: {}</b>", escape_html(title)),
         None => "<b>Peek</b>".to_string(),
-    };
-    with_screen_block(&header, rows, "")
+    }
 }
 
 fn with_screen_block(header: &str, rows: &[String], footer: &str) -> String {
@@ -411,11 +415,9 @@ pub mod wording {
             .to_string()
     }
 
-    /// `/peek image` before pictures are drawn: said rather than silently sent as text.
-    pub fn no_images_yet() -> String {
-        "Pictures of the screen are not available in this version of CST; here is the \
-         screen as text."
-            .to_string()
+    /// The picture could not be drawn; the text goes instead, with this on top.
+    pub fn image_failed(reason: &str) -> String {
+        format!("The picture could not be drawn ({reason}); here is the screen as text.")
     }
 
     pub fn too_many_follows(limit: usize) -> String {

@@ -48,6 +48,11 @@ pub enum Command {
     FollowImage,
 }
 
+/// Words that ask for text rather than a picture.
+fn means_text(word: &str) -> bool {
+    matches!(word.to_ascii_lowercase().as_str(), "text" | "txt" | "plain")
+}
+
 /// Words that ask for a picture rather than text.
 fn means_image(word: &str) -> bool {
     matches!(
@@ -83,8 +88,10 @@ pub fn parse(text: &str) -> Parsed {
         None => {}
     }
     match name.as_str() {
+        // A picture unless text is asked for: a photo keeps a hundred columns where
+        // they are, where a monospace block on a phone wraps them.
         "/peek" | "/screen" => Parsed::Cst(Command::Peek {
-            image: rest.split_whitespace().any(means_image),
+            image: !rest.split_whitespace().any(means_text),
         }),
         "/queue" => Parsed::Cst(Command::Queue((!rest.is_empty()).then(|| rest.to_string()))),
         "/say" => {
@@ -136,7 +143,7 @@ mod tests {
 
     #[test]
     fn peek_takes_text_or_an_image_and_a_live_image_is_a_thing_to_refuse_not_ignore() {
-        assert_eq!(parse("/peek"), Parsed::Cst(Command::Peek { image: false }));
+        assert_eq!(parse("/peek"), Parsed::Cst(Command::Peek { image: true }));
         assert_eq!(
             parse("/peek text"),
             Parsed::Cst(Command::Peek { image: false })

@@ -113,9 +113,12 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
     match verb {
         "say" => {
             let Some(path) = events_path else { return };
+            // A script types one line; a literal `\n` in it is a line break in what the
+            // session said, which is how a table or a list gets into a message.
+            let said = rest.replace("\\n", "\n");
             let record = format!(
                 r#"{{"type":"assistant.message","data":{{"content":{}}}}}"#,
-                crate::telegram_stub::json_string(rest)
+                crate::telegram_stub::json_string(&said)
             );
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
             {
