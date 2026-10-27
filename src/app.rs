@@ -6069,7 +6069,41 @@ impl App {
         {
             pane.note_automated_turn();
         }
+        // The turn this starts ends quietly, so this line is the phone's one word about
+        // it: the session is busy because of a comment, here is the thread. The link
+        // only; the comment's text never goes anywhere.
+        let title = self.telegram_session_title(session_id);
+        self.telegram_tell(
+            session_id,
+            &title,
+            crate::telegram::wording::thread_wake(&title, &thread.url()),
+        );
         Ok(())
+    }
+
+    /// A line from CST about a session, to the phone. In a forum it goes in the
+    /// session's topic, which is made if the session has not spoken yet.
+    fn telegram_tell(&mut self, session_id: &str, title: &str, text: String) {
+        let telegram = &self.config.telegram;
+        let (true, Some(chat_id)) = (telegram.enabled, telegram.chat_id) else {
+            return;
+        };
+        let token = self.config.telegram_bot_token.trim().to_string();
+        if token.is_empty() {
+            return;
+        }
+        let outbound = crate::telegram::worker::Outbound {
+            token,
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Tell {
+                session_id: session_id.to_string(),
+                title: title.to_string(),
+                text,
+            },
+        };
+        self.send_telegram(outbound);
     }
 
     /// Type text into a session's composer and submit it.

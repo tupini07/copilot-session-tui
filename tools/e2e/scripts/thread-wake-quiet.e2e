@@ -1,7 +1,8 @@
-# A thread wake-up starts a turn the user did not ask for. When it ends, the phone
-# hears nothing: a watched issue with a comment every few minutes would otherwise ring
-# for every one. A turn the user starts still notifies, so the channel is not silenced,
-# only the turns CST itself began.
+# A thread wake-up starts a turn the user did not ask for. The phone gets one line as
+# the pointer goes in, naming the session and linking the thread, and then nothing
+# when the turn ends: a watched issue with a comment every few minutes would otherwise
+# ring for every one. A turn the user starts still notifies, so the channel is not
+# silenced, only the turns CST itself began.
 
 size 110x30
 arg --mux
@@ -15,6 +16,9 @@ wait_for Watched session
 press enter
 # Opening the session delivers the held wake-up; the stub acts it out as a 3 s turn.
 wait_for Fake Copilot received: A new comment arrived on
+# The phone is told why the session is suddenly busy: the link, never the comment.
+telegram_wait Woke Watched session for a new comment on https://github.com/o/r/discussions/7
+telegram_expect_not read it and decide
 press ctrl+b d
 wait_for Watched session
 # The wake-up turn ends while we are away. Its text exists, but no notification
