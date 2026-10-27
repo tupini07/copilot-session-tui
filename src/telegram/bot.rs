@@ -188,6 +188,21 @@ pub trait BotApi {
     /// Acknowledge a tap so the button stops spinning on the phone; `text` shows as a
     /// small notice there. Every tap is answered, including ones that are ignored.
     fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError>;
+    /// A PNG with an HTML caption, as a reply when there is something to reply to.
+    /// Returns the message id. Provided, so the test stubs that never send one need
+    /// not say so.
+    fn send_photo(
+        &self,
+        _chat_id: i64,
+        _thread_id: Option<i64>,
+        _reply_to: Option<i64>,
+        _png: &[u8],
+        _caption_html: &str,
+    ) -> Result<i64, BotError> {
+        Err(BotError::Rejected(
+            "this bot does not send photos".to_string(),
+        ))
+    }
     /// Publish the command menu. Per bot, not per chat: one call with the default scope
     /// reaches the private chat and every group the bot is in.
     fn set_my_commands(&self, commands: &[BotCommand]) -> Result<(), BotError>;
@@ -232,6 +247,54 @@ impl UreqBot {
             )
             .send_json(body)
             .map_err(sanitize)?;
+        Self::unwrap_envelope(response)
+    }
+
+    /// A call whose body is a file: `multipart/form-data`, built by hand because the
+    /// one method that needs it does not justify a crate.
+    fn call_multipart<T: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        fields: &[(&str, &str)],
+        file: (&str, &str, &[u8]),
+    ) -> Result<T, BotError> {
+        let boundary = format!("cst{}", uuid::Uuid::new_v4().simple());
+        let mut body: Vec<u8> = Vec::new();
+        for (name, value) in fields {
+            body.extend_from_slice(
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                    .as_bytes(),
+            );
+        }
+        let (name, filename, bytes) = file;
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let url = format!("{}/bot{}/{method}", self.api_base, self.token);
+        let response = self
+            .agent
+            .post(&url)
+            .header(
+                "User-Agent",
+                concat!("copilot-session-tui/", env!("CARGO_PKG_VERSION")),
+            )
+            .header(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send(&body[..])
+            .map_err(sanitize)?;
+        Self::unwrap_envelope(response)
+    }
+
+    fn unwrap_envelope<T: for<'de> Deserialize<'de>>(
+        response: ureq::http::Response<ureq::Body>,
+    ) -> Result<T, BotError> {
         let status = response.status().as_u16();
         let bytes = response
             .into_body()
@@ -356,6 +419,36 @@ impl BotApi for UreqBot {
             },
         )
         .map(|_| ())
+    }
+
+    fn send_photo(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        reply_to: Option<i64>,
+        png: &[u8],
+        caption_html: &str,
+    ) -> Result<i64, BotError> {
+        #[derive(Deserialize)]
+        struct Sent {
+            message_id: i64,
+        }
+        let chat = chat_id.to_string();
+        let thread = thread_id.map(|id| id.to_string());
+        let reply = reply_to
+            .map(|id| format!(r#"{{"message_id":{id},"allow_sending_without_reply":true}}"#));
+        let mut fields: Vec<(&str, &str)> = vec![("chat_id", &chat), ("parse_mode", "HTML")];
+        if !caption_html.is_empty() {
+            fields.push(("caption", caption_html));
+        }
+        if let Some(thread) = &thread {
+            fields.push(("message_thread_id", thread));
+        }
+        if let Some(reply) = &reply {
+            fields.push(("reply_parameters", reply));
+        }
+        self.call_multipart::<Sent>("sendPhoto", &fields, ("photo", "screen.png", png))
+            .map(|sent| sent.message_id)
     }
 
     fn set_my_commands(&self, commands: &[BotCommand]) -> Result<(), BotError> {

@@ -801,7 +801,10 @@ A screen is only readable by the CST hosting the pane, so that CST does the edit
 session no CST has open is followed from its event log instead: its latest words and
 the tool running, as the view used to be. A terminal is wider than a phone, so the block
 wraps there; turn the phone sideways, or read it on the PC. What does not fit in one
-message is cut from the top, where the oldest rows are. At most three sessions can be
+message is cut from the top, where the oldest rows are. `/peek` sends a picture instead:
+the screen drawn by CST, colours and all, which keeps a hundred columns where they are
+(`/peek text` for the block). A follow stays text, because a picture re-uploaded every
+ten seconds is not a fair use of anyone's data plan. At most three sessions can be
 followed at once, which keeps the edits under what Telegram allows one chat. A follow
 shows session text, so under **Status only** it is refused rather than honoured.
 
@@ -841,8 +844,9 @@ to one session.
 **Full** content is the default: the session's last message of the current work cycle,
 plus the question and its choices or the plan summary when there is one. Copilot writes
 Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
-themselves, a heading as a bold line, lists as indented bullets, a table as an aligned
-block in monospace, and a raw HTML tag as the text it is. An issue or pull request
+themselves, a heading as a bold line, lists as indented bullets, and a raw HTML tag as the text it
+is. A table is sent after the message as a picture, drawn by CST, because Telegram has no
+table markup and a monospace block wraps on a phone; the text says where each table was. An issue or pull request
 number in the prose, like #12, is a link into the repository the session's folder
 belongs to, the same way it is a click target in the pane. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a

@@ -26,6 +26,7 @@ pub mod bot;
 pub mod cli;
 pub mod command;
 pub mod follow;
+pub mod image;
 pub mod markdown;
 pub mod queue;
 pub mod screen;
@@ -241,6 +242,23 @@ pub struct Content {
 /// three characters, and what the agent wrote is Markdown, which [`markdown`] turns into
 /// the tags Telegram knows and shows everything else as text.
 pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
+    compose_in(content, mode, false).0
+}
+
+/// [`compose`] with the body's tables taken out as pictures: the messages, then the
+/// tables' monospace layouts for the caller to draw and send after them.
+pub fn compose_with_pictures(
+    content: &Content,
+    mode: TelegramChatMode,
+) -> (Vec<String>, Vec<String>) {
+    compose_in(content, mode, true)
+}
+
+fn compose_in(
+    content: &Content,
+    mode: TelegramChatMode,
+    pictures: bool,
+) -> (Vec<String>, Vec<String>) {
     // In a forum the topic already carries the name, so repeating it would read as
     // part of what the session said. In a private chat it is the only thing telling
     // interleaved sessions apart, kept in brackets so it reads as a label.
@@ -260,14 +278,22 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
     if content.kind != NotificationKind::Ready || body.is_none() {
         text.push_str(&format!("<i>{}</i>", escape_html(kind_line(content.kind))));
     }
+    let mut tables = Vec::new();
     if let Some(body) = body {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str(&markdown::to_telegram_html_in(
-            body,
-            content.repository.as_ref(),
-        ));
+        if pictures {
+            let (html, found) =
+                markdown::to_telegram_html_with_tables(body, content.repository.as_ref());
+            text.push_str(&html);
+            tables = found;
+        } else {
+            text.push_str(&markdown::to_telegram_html_in(
+                body,
+                content.repository.as_ref(),
+            ));
+        }
     }
     if let Some(question) = &content.question {
         text.push_str("\n\n");
@@ -323,7 +349,7 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         });
         text.push_str(&html);
     }
-    chunk(&title, &text)
+    (chunk(&title, &text), tables)
 }
 
 fn kind_line(kind: NotificationKind) -> &'static str {

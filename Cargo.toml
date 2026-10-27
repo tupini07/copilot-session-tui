@@ -51,6 +51,12 @@ tui-term = "0.3"
 tui-markdown = { version = "0.3", default-features = false }
 # Already pulled in by tui-markdown; named directly to find HTML comments to drop.
 pulldown-cmark = { version = "0.13", default-features = false }
+# A screen or a table as a picture for Telegram: glyph outlines, the font bytes (Hack and
+# Noto Emoji, which this crate exists to ship), and a PNG encoder. Drawn in-process
+# because CST may be running over SSH with no browser or desktop to ask.
+ab_glyph = "0.2"
+epaint_default_fonts = "0.34"
+png = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 # Checking whether a PID is alive by shelling out to tasklist costs ~250 ms per call,

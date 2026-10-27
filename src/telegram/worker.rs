@@ -29,12 +29,14 @@ use super::bot::{BotApi, BotError, Button, Update, UreqBot};
 use super::bot_commands;
 use super::command::{self, Command, Parsed};
 use super::follow::{self, EndReason, FollowView, LogTail};
+use super::image;
 use super::markdown;
 use super::queue::{self, CancelSource, QueuedEntry};
 use super::store::{self, Follow, Pairing, Peek, Reply, ReplyStatus, TelegramState};
 use super::{
-    chat_mode_of, classify, compose, escape_html, message_carries_code, route, wording, Content,
-    Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict, POLL_TIMEOUT,
+    chat_mode_of, classify, compose_with_pictures, escape_html, message_carries_code, route,
+    wording, Content, Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict,
+    POLL_TIMEOUT,
 };
 use crate::config::TelegramChatMode;
 use crate::mux::MuxEvent;
@@ -131,6 +133,15 @@ pub enum OutboundJob {
         thread_id: Option<i64>,
         reply_to: i64,
         html: String,
+    },
+    /// A picture with a caption: a `/peek image`. Recorded against the session so a
+    /// reply to it routes there.
+    Photo {
+        session_id: String,
+        thread_id: Option<i64>,
+        reply_to: Option<i64>,
+        png: Vec<u8>,
+        caption_html: String,
     },
     /// The view's last edit, after which the follow is forgotten.
     FollowClose {
@@ -443,20 +454,12 @@ pub fn plan_batch(
                             });
                             continue;
                         }
-                        if image {
-                            batch.says.push(OutboundJob::Say {
-                                session_id: Some(session_id.clone()),
-                                thread_id: message.topic_id(),
-                                reply_to: Some(message.message_id),
-                                text: follow::wording::no_images_yet(),
-                            });
-                        }
                         batch.peeks.push(Peek {
                             session_id,
                             chat_id: paired.chat_id,
                             thread_id: message.topic_id(),
                             user_message_id: message.message_id,
-                            image: false,
+                            image,
                             requested_at: now,
                         });
                         continue;
@@ -1085,8 +1088,34 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
                 .as_ref()
                 .map(|question| question.tool_call_id.clone());
             let mut records = Vec::new();
-            for chunk in compose(content, outbound.mode) {
+            let (chunks, tables) = compose_with_pictures(content, outbound.mode);
+            for chunk in chunks {
                 let (message_id, _) = send_part(bot, outbound.chat_id, thread_id, &chunk)?;
+                records.push(SentRecord {
+                    message_id,
+                    session_id: session_id.clone(),
+                    kind: Some(SentKind::from(content.kind)),
+                    tool_call_id: tool_call_id.clone(),
+                    sent_at: Utc::now(),
+                });
+            }
+            // The body's tables, drawn: Telegram has no table markup and a monospace
+            // block wraps on a phone. A table that will not draw goes as the block.
+            for (index, table) in tables.iter().enumerate() {
+                let caption = format!("<i>Table {}</i>", index + 1);
+                let lines: Vec<String> = table.lines().map(str::to_string).collect();
+                let drawn = image::render_at(
+                    &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
+                    image::LIGHT_BG,
+                    image::TABLE_FONT_PX,
+                );
+                let message_id = match drawn {
+                    Ok(png) => bot.send_photo(outbound.chat_id, thread_id, None, &png, &caption)?,
+                    Err(_) => {
+                        let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
+                        send_part(bot, outbound.chat_id, thread_id, &html)?.0
+                    }
+                };
                 records.push(SentRecord {
                     message_id,
                     session_id: session_id.clone(),
@@ -1194,6 +1223,26 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
         } => {
             let (message_id, _) =
                 send_part_replying(bot, outbound.chat_id, *thread_id, *reply_to, html)?;
+            let _ = store::update_in(root, |state| {
+                state.record_sent(SentRecord {
+                    message_id,
+                    session_id: session_id.clone(),
+                    kind: None,
+                    tool_call_id: None,
+                    sent_at: Utc::now(),
+                })
+            });
+            Ok(())
+        }
+        OutboundJob::Photo {
+            session_id,
+            thread_id,
+            reply_to,
+            png,
+            caption_html,
+        } => {
+            let message_id =
+                bot.send_photo(outbound.chat_id, *thread_id, *reply_to, png, caption_html)?;
             let _ = store::update_in(root, |state| {
                 state.record_sent(SentRecord {
                     message_id,

@@ -71,6 +71,8 @@ struct State {
     admin: bool,
     /// Every request path seen, for debugging a failing script.
     requests: Vec<String>,
+    /// Where pictures are written.
+    photos: std::path::PathBuf,
 }
 
 pub struct TelegramStub {
@@ -80,7 +82,9 @@ pub struct TelegramStub {
 }
 
 impl TelegramStub {
-    pub fn start(mode: Mode) -> Result<Self, String> {
+    /// `photos` is where every picture CST sends is written, as `photo-<id>.png`, so a
+    /// script's author can look at it.
+    pub fn start(mode: Mode, photos: std::path::PathBuf) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
         let port = listener.local_addr().map_err(|error| error.to_string())?.port();
         let state = Arc::new((
@@ -89,6 +93,7 @@ impl TelegramStub {
                 next_message_id: 1,
                 next_thread_id: 500,
                 admin: true,
+                photos,
                 ..State::default()
             }),
             Condvar::new(),
@@ -209,10 +214,17 @@ impl TelegramStub {
 
 fn serve(mut stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>, mode: Mode) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let Some((path, body)) = read_request(&mut stream) else {
+    let Some((path, content_type, bytes)) = read_request(&mut stream) else {
         return;
     };
     let method = path.rsplit('/').next().unwrap_or("").to_string();
+    let multipart = content_type.contains("multipart/form-data");
+    // A picture's bytes are not text; the request log keeps the fields and the size.
+    let body = if multipart {
+        format!("<multipart, {} bytes>", bytes.len())
+    } else {
+        String::from_utf8_lossy(&bytes).to_string()
+    };
     {
         let (lock, _) = &**shared;
         lock.lock().unwrap().requests.push(format!("{method} {body}"));
@@ -220,6 +232,8 @@ fn serve(mut stream: TcpStream, shared: &Arc<(Mutex<State>, Condvar)>, mode: Mod
     let token_ok = path.starts_with(&format!("/bot{TOKEN}/"));
     let (status, reply) = if !token_ok {
         (401, r#"{"ok":false,"error_code":401,"description":"Unauthorized"}"#.to_string())
+    } else if multipart {
+        handle_multipart(&method, &content_type, &bytes, shared, mode)
     } else {
         handle(&method, &body, shared, mode)
     };
@@ -386,7 +400,116 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+/// `sendPhoto`: the one method that arrives as a form with a file in it. The parts are
+/// split on the boundary the header names; each has its own headers, then its bytes.
+fn handle_multipart(
+    method: &str,
+    content_type: &str,
+    bytes: &[u8],
+    shared: &Arc<(Mutex<State>, Condvar)>,
+    mode: Mode,
+) -> (u16, String) {
+    let (lock, _) = &**shared;
+    let Some(boundary) = content_type
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("boundary="))
+    else {
+        return (400, r#"{"ok":false,"error_code":400,"description":"Bad Request: no boundary"}"#.to_string());
+    };
+    let marker = format!("--{boundary}").into_bytes();
+    let mut fields: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut at = 0;
+    while let Some(start) = find(&bytes[at..], &marker).map(|i| at + i + marker.len()) {
+        if bytes[start..].starts_with(b"--") {
+            break;
+        }
+        let Some(header_end) = find(&bytes[start..], b"\r\n\r\n").map(|i| start + i) else {
+            break;
+        };
+        let headers = String::from_utf8_lossy(&bytes[start..header_end]).to_string();
+        let name = headers
+            .split(';')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix("name=\""))
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("")
+            .to_string();
+        let content_start = header_end + 4;
+        let Some(next) = find(&bytes[content_start..], &marker).map(|i| content_start + i) else {
+            break;
+        };
+        // The CRLF before the next boundary belongs to the boundary, not the content.
+        let content_end = next.saturating_sub(2).max(content_start);
+        fields.push((name, bytes[content_start..content_end].to_vec()));
+        at = next;
+    }
+    let text_of = |wanted: &str| -> Option<String> {
+        fields
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| String::from_utf8_lossy(value).to_string())
+    };
+    if method != "sendPhoto" {
+        return (404, format!(r#"{{"ok":false,"error_code":404,"description":"Not Found: {method}"}}"#));
+    }
+    let chat_id: i64 = text_of("chat_id").and_then(|c| c.parse().ok()).unwrap_or(0);
+    if chat_id != mode.chat_id() {
+        return (400, r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#.to_string());
+    }
+    let caption = text_of("caption").unwrap_or_default();
+    let thread_id: Option<i64> = text_of("message_thread_id").and_then(|t| t.parse().ok());
+    let is_reply = text_of("reply_parameters").is_some();
+    let photo = fields
+        .iter()
+        .find(|(name, _)| name == "photo")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let size = png_size(&photo);
+    let mut state = lock.lock().unwrap();
+    let message_id = state.next_message_id;
+    state.next_message_id += 1;
+    let path = state.photos.join(format!("photo-{message_id}.png"));
+    let _ = std::fs::write(&path, &photo);
+    let topic = thread_id
+        .and_then(|id| state.topics.iter().find(|(t, _)| *t == id).map(|(_, name)| name.clone()));
+    let dims = match size {
+        Some((w, h)) => format!("{w}x{h}"),
+        None => "not a PNG".to_string(),
+    };
+    state.outbox.push(match topic {
+        Some(name) => format!("photo {dims} in {name}: {caption}"),
+        None => format!("photo {dims}: {caption}"),
+    });
+    let sent = Sent {
+        message_id,
+        thread_id,
+        buttons: Vec::new(),
+    };
+    if !is_reply {
+        state.last_notification = Some(sent.clone());
+    }
+    state.sent.push(sent);
+    (200, format!(r#"{{"ok":true,"result":{{"message_id":{message_id}}}}}"#))
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// The width and height a PNG declares.
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || &bytes[1..4] != b"PNG" {
+        return None;
+    }
+    let read = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    Some((read(16), read(20)))
+}
+
+/// The request's path, its content type, and its body bytes.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String, Vec<u8>)> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     let header_end;
@@ -424,8 +547,15 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
         }
         bytes.extend_from_slice(&buffer[..read]);
     }
-    let body = String::from_utf8_lossy(&bytes[header_end..]).to_string();
-    Some((path, body))
+    let content_type = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-type")
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default();
+    Some((path, content_type, bytes[header_end..].to_vec()))
 }
 
 /// The number after `"key":` in a JSON object, if it is there.

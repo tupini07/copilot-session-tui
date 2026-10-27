@@ -59,6 +59,28 @@ pub fn to_telegram_html_in(markdown: &str, repository: Option<&RepositoryRef>) -
     renderer.finish()
 }
 
+/// [`to_telegram_html_in`] with every table taken out of the text and returned as its
+/// monospace layout, one string per table, in order; the text says where each was.
+///
+/// Telegram has no table markup, and a `<pre>` block wraps on a phone into something
+/// unreadable at four columns. A picture keeps the columns. The layouts are what the
+/// caller draws.
+pub fn to_telegram_html_with_tables(
+    markdown: &str,
+    repository: Option<&RepositoryRef>,
+) -> (String, Vec<String>) {
+    let mut renderer = Renderer {
+        repository: repository.cloned(),
+        tables_out: Some(Vec::new()),
+        ..Renderer::default()
+    };
+    for event in Parser::new_ext(markdown, OPTIONS) {
+        renderer.event(event);
+    }
+    let tables = renderer.tables_out.take().unwrap_or_default();
+    (renderer.finish(), tables)
+}
+
 /// `text` escaped, with its references wrapped in links to `repository`.
 fn linkify(text: &str, repository: &RepositoryRef) -> String {
     let mut out = String::with_capacity(text.len());
@@ -116,6 +138,10 @@ struct Renderer {
     link_depth: usize,
     /// Open code blocks: text inside one is code, not prose.
     code_depth: usize,
+    /// When set, each table's monospace layout is collected here and the text gets
+    /// a placeholder naming it; the caller sends the layouts as pictures. When not,
+    /// the table stays inline as a `<pre>` block.
+    tables_out: Option<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -345,9 +371,21 @@ impl Renderer {
             }
             Event::End(TagEnd::Table) => {
                 let table = self.table.take().unwrap_or_default();
-                self.out.push_str("<pre>");
-                self.out.push_str(&escape_html(&layout(&table.rows)));
-                self.out.push_str("</pre>");
+                let laid_out = layout(&table.rows);
+                match self.tables_out.as_mut() {
+                    Some(tables) => {
+                        tables.push(laid_out);
+                        self.out.push_str(&format!(
+                            "<i>[Table {} is sent as a picture below]</i>",
+                            tables.len()
+                        ));
+                    }
+                    None => {
+                        self.out.push_str("<pre>");
+                        self.out.push_str(&escape_html(&laid_out));
+                        self.out.push_str("</pre>");
+                    }
+                }
                 self.end_block();
             }
             Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
