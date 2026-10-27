@@ -27,7 +27,8 @@ use fs4::{FileExt, TryLockError};
 
 use super::bot::{BotApi, BotError, Button, Update, UreqBot};
 use super::bot_commands;
-use super::follow::{self, EndReason, FollowCommand, FollowView, LogTail};
+use super::command::{self, Command, Parsed};
+use super::follow::{self, EndReason, FollowView, LogTail};
 use super::markdown;
 use super::queue::{self, CancelSource, QueuedEntry};
 use super::store::{self, Follow, Pairing, Reply, ReplyStatus, TelegramState};
@@ -336,10 +337,11 @@ pub fn plan_batch(
             message_thread_id: message.topic_id(),
             reply_to_message_id: message.reply_to_message.as_ref().map(|r| r.message_id),
         };
-        // `/queue` is taken before routing: sent to a session it lists that session's
-        // queue, sent anywhere else it lists everything, where a reply would get the
-        // "which session?" hint.
-        if queue::is_queue_command(text) {
+        let parsed = command::parse(text);
+        // A bare `/queue` is taken before routing: sent to a session it lists that
+        // session's queue, sent anywhere else it lists everything, where a reply would
+        // get the "which session?" hint.
+        if parsed == Parsed::Cst(Command::Queue(None)) {
             let session_id = match route(&incoming, paired.mode, &state.sent, &state.topics) {
                 Route::Session(session_id) => Some(session_id),
                 Route::Unrouted => None,
@@ -354,9 +356,10 @@ pub fn plan_batch(
         match route(&incoming, paired.mode, &state.sent, &state.topics) {
             Route::Session(session_id) => {
                 // CST's own commands are acted on here and never typed into the
-                // session. Copilot has slash commands too, so only these are taken.
-                match follow::parse_command(text) {
-                    Some(FollowCommand::Follow { minutes }) => {
+                // session; Copilot's are refused, because a menu opened in a session
+                // nobody is sitting at cannot be closed from the phone.
+                let (text, presses_escape, holds_for_idle) = match parsed {
+                    Parsed::Cst(Command::Follow { minutes }) => {
                         if !settings.content_full {
                             batch.says.push(OutboundJob::Say {
                                 session_id: Some(session_id),
@@ -380,7 +383,7 @@ pub fn plan_batch(
                         });
                         continue;
                     }
-                    Some(FollowCommand::Unfollow) => {
+                    Parsed::Cst(Command::Unfollow) => {
                         batch.unfollows.push(FollowEnd {
                             session_id,
                             thread_id: message.topic_id(),
@@ -388,8 +391,21 @@ pub fn plan_batch(
                         });
                         continue;
                     }
-                    None => {}
-                }
+                    Parsed::Foreign(name) => {
+                        batch.says.push(OutboundJob::Say {
+                            session_id: Some(session_id),
+                            thread_id: message.topic_id(),
+                            reply_to: Some(message.message_id),
+                            text: command::wording::not_forwarded(&name),
+                        });
+                        continue;
+                    }
+                    Parsed::Cst(Command::Queue(None)) => unreachable!("taken above"),
+                    Parsed::Cst(Command::Queue(Some(held))) => (held, false, true),
+                    Parsed::Cst(Command::Say(said)) => (said, false, false),
+                    Parsed::Cst(Command::Esc) => ("Escape".to_string(), true, false),
+                    Parsed::Text => (text.to_string(), false, false),
+                };
                 if !settings.replies {
                     batch.says.push(OutboundJob::Say {
                         session_id: Some(session_id),
@@ -410,13 +426,15 @@ pub fn plan_batch(
                     update_id: update.update_id,
                     user_message_id: message.message_id,
                     session_id,
-                    text: text.to_string(),
+                    text,
                     tool_call_id,
                     received_at: now,
                     planned_at: now,
                     queued_told: false,
                     answering: false,
                     queued_message_id: None,
+                    presses_escape,
+                    holds_for_idle,
                     status: ReplyStatus::Planned,
                 });
             }
@@ -1107,6 +1125,9 @@ mod tests {
             sent: RefCell<Vec<(Option<i64>, String)>>,
         }
         impl BotApi for Recorder {
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
             fn create_forum_topic(&self, _: i64, name: &str) -> Result<i64, BotError> {
                 self.topics.borrow_mut().push(name.to_string());
                 Ok(42)
@@ -1573,8 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn a_follow_is_recorded_as_a_follow_and_never_typed_while_copilots_own_slash_commands_still_are(
-    ) {
+    fn a_follow_is_recorded_as_a_follow_and_copilots_own_slash_commands_are_refused_unless_said() {
         use crate::notifications::NotificationKind;
 
         let now = Utc::now();
@@ -1593,8 +1613,13 @@ mod tests {
         };
         let updates = vec![
             replying(update(1, 7, 7, "/follow 10"), 50),
-            // Copilot's own command: not CST's to take, so it is a reply like any other.
+            // Copilot's own command: refused, because the menu it opens cannot be
+            // closed from the phone. /say is the way to send it on purpose, /esc the
+            // way out, and /queue with words holds them for the turn's end.
             replying(update(2, 7, 7, "/compact"), 50),
+            replying(update(3, 7, 7, "/say /compact"), 50),
+            replying(update(4, 7, 7, "/esc"), 50),
+            replying(update(5, 7, 7, "/queue later, please"), 50),
         ];
 
         let batch = plan_batch(&updates, &settings(Some(private)), &state, now);
@@ -1605,8 +1630,21 @@ mod tests {
             batch.follows[0].expires_at,
             now + chrono::Duration::minutes(10)
         );
-        assert_eq!(batch.replies.len(), 1, "/compact goes to the session");
+        assert!(batch.says.iter().any(|job| matches!(
+            job,
+            OutboundJob::Say { text, session_id: Some(s), .. }
+                if text.starts_with("Not delivered: /compact") && s == "s1"
+        )));
+        assert_eq!(
+            batch.replies.len(),
+            3,
+            "/compact itself never reaches the session"
+        );
         assert_eq!(batch.replies[0].text, "/compact");
+        assert!(!batch.replies[0].presses_escape && !batch.replies[0].holds_for_idle);
+        assert!(batch.replies[1].presses_escape);
+        assert_eq!(batch.replies[2].text, "later, please");
+        assert!(batch.replies[2].holds_for_idle);
 
         // Under "Status only" the user chose to keep session text off Telegram, and a
         // follow would show it: refused with the setting to flip, nothing recorded.

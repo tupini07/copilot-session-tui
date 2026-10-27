@@ -1,0 +1,52 @@
+# Copilot has slash commands of its own, and a phone has no key to leave the menus they
+# open. /ask typed on the phone is refused with the way round it instead of being
+# typed into the session; /say sends a line that starts with a slash on purpose; /esc
+# presses Escape in the session, for one that is already stuck in a menu.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# A first turn, so the phone has a message of this session's to reply to.
+type e2e:work 1500 Setup is done.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait Setup is done.
+
+# A Copilot command is refused, named, and never reaches the session.
+telegram_say /ask hello
+telegram_wait Not delivered: /ask looks like a Copilot slash command
+telegram_wait /say /ask
+telegram_dump 01-refused
+press enter
+wait 1000
+expect_not Fake Copilot received: /ask
+dump 01-session-untouched
+
+# /say forwards the rest of the line, slash and all, and the phone gets its thumbs-up.
+press ctrl+b d
+wait_for Existing app session
+telegram_say /say /compact
+press enter
+wait_for Fake Copilot received: /compact
+telegram_wait reaction on
+dump 02-said
+
+# /esc presses Escape in the session and is confirmed the same way.
+press ctrl+b d
+wait_for Existing app session
+telegram_say /esc
+press enter
+# The console holds the lone byte until an Enter follows it.
+press enter
+wait_for Fake Copilot received: <esc>
+telegram_wait reaction on
+expect_not Fake Copilot received: /esc
+dump 03-escaped
+telegram_dump 03-escaped

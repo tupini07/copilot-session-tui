@@ -25,14 +25,6 @@ pub const CANCEL_LABEL: &str = "Cancel";
 /// How much of a queued reply the listing quotes.
 const QUOTE_WIDTH: usize = 80;
 
-/// `/queue` or `/queue@bot`, in any case; anything else is not CST's.
-pub fn is_queue_command(text: &str) -> bool {
-    text.split_whitespace()
-        .next()
-        .and_then(|word| word.split('@').next())
-        .is_some_and(|command| command.eq_ignore_ascii_case("/queue"))
-}
-
 /// Where a Cancel button sat, which decides what its message becomes when tapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelSource {
@@ -157,17 +149,10 @@ mod tests {
             queued_told: true,
             answering: false,
             queued_message_id: None,
+            presses_escape: false,
+            holds_for_idle: false,
             status: ReplyStatus::Planned,
         }
-    }
-
-    #[test]
-    fn only_queue_is_the_queue_command() {
-        assert!(is_queue_command("/queue"));
-        assert!(is_queue_command("  /Queue@cst_bot "));
-        assert!(!is_queue_command("/queued up"));
-        assert!(!is_queue_command("queue"));
-        assert!(!is_queue_command("/compact"));
     }
 
     #[test]

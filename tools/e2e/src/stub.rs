@@ -53,6 +53,15 @@ pub fn main() {
         for line in std::io::stdin().lines() {
             let Ok(line) = line else { break };
             let line = line.trim_end().to_string();
+            // Escape on its own, as CST presses it for the phone's /esc. The console is
+            // in line mode, so the byte waits for the next Enter and arrives as a line
+            // of its own; a script sends that Enter and looks for this.
+            if line == "\x1b" {
+                println!("Fake Copilot received: <esc>");
+                print!("> ");
+                let _ = std::io::stdout().flush();
+                continue;
+            }
             // While a question is open the stub is the form: arrows move a highlight
             // over the choices and the Other row, text typed on Other is the answer,
             // Enter accepts. The e2e driver and CST both send arrows as escape

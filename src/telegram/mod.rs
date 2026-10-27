@@ -24,6 +24,7 @@
 pub mod answer;
 pub mod bot;
 pub mod cli;
+pub mod command;
 pub mod follow;
 pub mod markdown;
 pub mod queue;
@@ -550,9 +551,9 @@ fn sentence_end(text: &str) -> Option<usize> {
 
 /// The commands CST answers itself, for Telegram's `/` menu.
 ///
-/// Only CST's own: Copilot's slash commands pass through untouched and are not CST's to
-/// advertise. The aliases (`/tail`, `/untail`) still work but stay out of the menu,
-/// which is meant to be read, not completed.
+/// Only CST's own: Copilot's slash commands are refused rather than forwarded (see
+/// [`command`]) and are not CST's to advertise. The aliases (`/tail`, `/untail`) still
+/// work but stay out of the menu, which is meant to be read, not completed.
 pub fn bot_commands() -> &'static [bot::BotCommand] {
     &[
         bot::BotCommand {
@@ -565,7 +566,15 @@ pub fn bot_commands() -> &'static [bot::BotCommand] {
         },
         bot::BotCommand {
             command: "queue",
-            description: "List replies waiting for a turn to end, each with a Cancel",
+            description: "List replies waiting for a turn to end; with text, queue that text",
+        },
+        bot::BotCommand {
+            command: "say",
+            description: "Send the rest of the line as it is, even one starting with a slash",
+        },
+        bot::BotCommand {
+            command: "esc",
+            description: "Press Escape in the session, to leave a menu Copilot opened",
         },
     ]
 }
@@ -761,8 +770,10 @@ mod tests {
         let commands = bot_commands();
         for command in commands {
             assert!(
-                follow::parse_command(&format!("/{}", command.command)).is_some()
-                    || queue::is_queue_command(&format!("/{}", command.command)),
+                matches!(
+                    command::parse(&format!("/{} x", command.command)),
+                    command::Parsed::Cst(_)
+                ),
                 "/{} is in the menu but nothing answers it",
                 command.command
             );

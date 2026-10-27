@@ -792,11 +792,22 @@ chat does not fill with copies. When the time is up, or you send `/unfollow`, or
 session closes, the message is edited one last time to say so, in a way that cannot be
 read as current. At most three sessions can be followed at once, which keeps the edits
 under what Telegram allows one chat. A follow shows session text, so under **Status
-only** it is refused rather than honoured. Copilot's own slash commands, like
-`/compact`, are not intercepted; only `/follow` and `/unfollow` are CST's.
+only** it is refused rather than honoured.
+
+#### Slash commands
+
+Copilot has slash commands of its own — `/ask`, `/compact`, `/model` — and most open a
+menu in the session's terminal. A phone has no key to close one, so `/ask hello` typed
+in Telegram used to leave the session stuck until somebody pressed Escape at the PC. Now
+anything that starts with a slash and is not one of CST's commands is refused with a
+sentence naming it, and nothing reaches the session. Two commands exist for the cases
+that remain: `/say /compact` sends the rest of the line exactly as written, for when you
+do mean it, and `/esc` presses Escape in the session, which closes a menu Copilot opened.
+Both are confirmed with a 👍 like a reply.
 
 CST publishes its commands to the bot's menu, so typing `/` in the chat, or in the
-group, offers `/follow`, `/unfollow` and `/queue` with a line on what each does.
+group, offers `/follow`, `/unfollow`, `/queue`, `/say` and `/esc` with a line on what
+each does.
 
 A reply sent while no CST was running is seen on the next start and gets the "not open"
 answer, since the session is not open yet either. Telegram keeps undelivered messages for
