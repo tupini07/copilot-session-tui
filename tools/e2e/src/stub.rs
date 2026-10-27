@@ -15,6 +15,14 @@ pub fn main() {
         println!("1.0.40");
         return;
     }
+    // `copilot -p <prompt>`: CST asking a one-line question with no session, as it
+    // does to choose a topic's emoji. The stub answers the first emoji it is offered
+    // that the prompt does not list as already taken, so a script can predict it.
+    if let Some(at) = args.iter().position(|arg| arg == "-p") {
+        let prompt = args.get(at + 1).cloned().unwrap_or_default();
+        println!("{}", choose_emoji(&prompt));
+        return;
+    }
     // `copilot plugin ...` is CST installing its hook plugin; succeeding quietly
     // is all it needs.
     if args.first().is_some_and(|arg| arg == "plugin") {
@@ -91,6 +99,25 @@ pub fn main() {
     while started.elapsed() < LIFETIME {
         std::thread::sleep(Duration::from_secs(5));
     }
+}
+
+/// The first offered emoji not listed as taken, from CST's prompt: the offered ones
+/// follow the line ending in "the title:", the taken ones the line ending in "fits:".
+fn choose_emoji(prompt: &str) -> String {
+    let list_after = |marker: &str| -> Vec<String> {
+        prompt
+            .split_inclusive('\n')
+            .skip_while(|line| !line.trim_end().ends_with(marker))
+            .nth(1)
+            .map(|line| line.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let offered = list_after("the title:");
+    let taken = list_after("fits:");
+    offered
+        .into_iter()
+        .find(|emoji| !taken.contains(emoji))
+        .unwrap_or_else(|| "🚀".to_string())
 }
 
 /// Where the real Copilot would write this session's events: under `COPILOT_HOME`,

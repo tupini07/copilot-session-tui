@@ -751,7 +751,12 @@ it; protect the file as you would any credential.
   session; no Reply needed. You are notified for every topic unless you mute one, and the
   notification names the topic. The bot must be an admin of the group with the **Manage
   Topics** right; the wizard's link requests that on the way in, and checks it. This is
-  the mode for running many sessions at once.
+  the mode for running many sessions at once. Each new topic wears an emoji chosen for
+  the session's title — the rocket for the deploy, the bug for the bug hunt — so a row
+  of topics can be read at a glance. A small model picks it from the icons Telegram
+  offers, told which ones other topics got in the last week so neighbours do not match;
+  the choice takes a few seconds on the session's first notification, and a topic goes
+  without when Copilot is not to hand.
 
 The wizard reads which kind you paired from the chat itself, so there is nothing to
 configure. Pairing again with a fresh code is how you move the bot from one to the other.

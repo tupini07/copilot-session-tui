@@ -29,6 +29,7 @@ use super::bot::{BotApi, BotError, Button, Update, UreqBot};
 use super::bot_commands;
 use super::command::{self, Command, Parsed};
 use super::follow::{self, EndReason, FollowView, LogTail};
+use super::icon;
 use super::image;
 use super::markdown;
 use super::queue::{self, CancelSource, QueuedEntry};
@@ -1338,18 +1339,89 @@ fn ensure_topic(
             Ok(topic.thread_id)
         }
         None => {
-            let thread_id = bot.create_forum_topic(chat_id, &name)?;
+            // A new topic gets an emoji chosen for its title, as an icon when Telegram
+            // offers one, in front of its name when it does not. Advisory: no choice,
+            // no change.
+            let (icon_id, icon, name) = match choose_icon(bot, root, title) {
+                Some(IconChoice::Icon { emoji, id }) => (Some(id), Some(emoji), name),
+                Some(IconChoice::Prefix(emoji)) => {
+                    let prefixed = super::bot::topic_name(&format!("{emoji} {title}"));
+                    (None, Some(emoji), prefixed)
+                }
+                None => (None, None, name),
+            };
+            let thread_id = bot.create_forum_topic_with_icon(chat_id, &name, icon_id.as_deref())?;
             let _ = store::update_in(root, |state| {
                 state.topics.insert(
                     session_id.to_string(),
                     TopicRecord {
                         thread_id,
                         title: name.clone(),
+                        icon,
+                        created_at: Some(Utc::now()),
                     },
                 );
             });
             Ok(thread_id)
         }
+    }
+}
+
+/// What the model chose for a topic, if anything usable.
+enum IconChoice {
+    /// One of Telegram's own icons.
+    Icon { emoji: String, id: String },
+    /// An emoji of CST's list, for the name, because the set was not to hand.
+    Prefix(String),
+}
+
+/// Ask the model for a topic's emoji: from Telegram's icon set when it can be fetched,
+/// else from CST's own short list; avoiding what other recent topics got.
+fn choose_icon(bot: &impl BotApi, root: &Path, title: &str) -> Option<IconChoice> {
+    let state = store::load_in(root);
+    let now = Utc::now();
+    let fresh = state
+        .topic_icons
+        .as_ref()
+        .filter(|set| now - set.fetched_at < chrono::Duration::hours(icon::ICON_SET_TTL_HOURS));
+    let icons = match fresh {
+        Some(set) => set.icons.clone(),
+        None => match bot.get_forum_topic_icon_stickers() {
+            Ok(icons) if !icons.is_empty() => {
+                let _ = store::update_in(root, |state| {
+                    state.topic_icons = Some(store::IconSet {
+                        fetched_at: now,
+                        icons: icons.clone(),
+                    });
+                });
+                icons
+            }
+            _ => Vec::new(),
+        },
+    };
+    let available: Vec<String> = if icons.is_empty() {
+        icon::FALLBACK.iter().map(|e| e.to_string()).collect()
+    } else {
+        icons.iter().map(|i| i.emoji.clone()).collect()
+    };
+    let taken: Vec<String> = state
+        .topics
+        .values()
+        .filter(|topic| {
+            topic
+                .created_at
+                .is_some_and(|at| now - at < chrono::Duration::days(icon::RECENT_DAYS))
+        })
+        .filter_map(|topic| topic.icon.clone())
+        .collect();
+    let answer = icon::ask_copilot(&icon::prompt(title, &available, &taken))?;
+    let emoji = icon::parse_choice(&answer, &available)?;
+    match icons.iter().find(|i| i.emoji == emoji) {
+        Some(found) => Some(IconChoice::Icon {
+            emoji,
+            id: found.custom_emoji_id.clone(),
+        }),
+        None => Some(IconChoice::Prefix(emoji)),
     }
 }
 
@@ -1590,6 +1662,8 @@ mod tests {
             TopicRecord {
                 thread_id: 300,
                 title: "A".to_string(),
+                icon: None,
+                created_at: None,
             },
         );
         let updates = vec![

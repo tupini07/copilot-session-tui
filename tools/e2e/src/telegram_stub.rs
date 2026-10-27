@@ -21,6 +21,10 @@ pub const BOT_USERNAME: &str = "cst_e2e_bot";
 pub const USER_ID: i64 = 77;
 pub const PRIVATE_CHAT_ID: i64 = 1000;
 pub const FORUM_CHAT_ID: i64 = -1000;
+/// The topic icons the stub offers, as (emoji, sticker id). The stub Copilot, asked to
+/// choose one, takes the first it is offered that is not already in use, so a script
+/// knows which to expect.
+pub const TOPIC_ICONS: &[(&str, &str)] = &[("🚀", "5300"), ("🐛", "5301"), ("📦", "5302")];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -252,6 +256,17 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
         "getMe" => ok(format!(
             r#"{{"id":{BOT_ID},"is_bot":true,"username":"{BOT_USERNAME}"}}"#
         )),
+        "getForumTopicIconStickers" => ok(format!(
+            "[{}]",
+            TOPIC_ICONS
+                .iter()
+                .map(|(emoji, id)| format!(
+                    r#"{{"emoji":{},"custom_emoji_id":"{id}"}}"#,
+                    json_string(emoji)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
         "getUpdates" => {
             let offset = number(body, "offset");
             let timeout = number(body, "timeout").unwrap_or(0).max(0) as u64;
@@ -332,7 +347,18 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
             let thread_id = state.next_thread_id;
             state.next_thread_id += 1;
             state.topics.push((thread_id, name.clone()));
-            state.outbox.push(format!("topic: {name}"));
+            // The icon is named by the sticker id CST was offered; the outbox shows
+            // the emoji it stands for, which is what a script can read.
+            let icon = string(body, "icon_custom_emoji_id").and_then(|id| {
+                TOPIC_ICONS
+                    .iter()
+                    .find(|(_, offered)| *offered == id)
+                    .map(|(emoji, _)| *emoji)
+            });
+            state.outbox.push(match icon {
+                Some(emoji) => format!("topic: {name} icon={emoji}"),
+                None => format!("topic: {name}"),
+            });
             ok(format!(
                 r#"{{"message_thread_id":{thread_id},"name":{}}}"#,
                 json_string(&name)
