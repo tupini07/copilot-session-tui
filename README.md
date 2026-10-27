@@ -750,8 +750,11 @@ it; protect the file as you would any credential.
   everything about that session lands in its topic. Type in the topic to answer the
   session; no Reply needed. You are notified for every topic unless you mute one, and the
   notification names the topic. The bot must be an admin of the group with the **Manage
-  Topics** right; the wizard's link requests that on the way in, and checks it. This is
-  the mode for running many sessions at once. Each new topic wears an emoji chosen for
+  Topics** right; the wizard's link requests that on the way in, and checks it. It asks
+  for **Pin Messages** too: Telegram pins a topic's first message by itself, and with that
+  right CST takes the pin off again, so a session's topic does not open on a pinned
+  notification. Without it everything still works and the pin stays. This is the mode
+  for running many sessions at once. Each new topic wears an emoji chosen for
   the session's title — the rocket for the deploy, the bug for the bug hunt — so a row
   of topics can be read at a glance. Copilot picks it, in a side session of its own,
   from the icons Telegram offers, told which ones other topics got in the last week so
