@@ -89,6 +89,14 @@ reads anything sent too soon as Alt+key.
 | `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |
 | `telegram_rights on\|off` | Whether the stub says the bot may manage topics. |
 
+The stub `copilot` also plays the CLI's server mode, which the Copilot SDK starts for
+CST's side questions (a topic's emoji, a `/ask` from the phone). Its answers are canned:
+an emoji prompt gets the first offered emoji not already taken; anything else gets
+`Fake Copilot aside about <session id>: <last line of the prompt>` when the question was
+about a session, `Fake Copilot aside: …` otherwise. A prompt containing `e2e:fail` is
+refused, one containing `e2e:slow` is answered after three seconds. Its throwaway
+sessions appear under the run's `home/session-state/` and are deleted as the real ones are.
+
 The stub `copilot` also takes stage directions, typed into its pane like any prompt, so a
 script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a turn over
 OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as

@@ -46,6 +46,9 @@ pub enum Command {
     },
     /// `/follow image`: asked for, and refused with why.
     FollowImage,
+    /// A side question about the session's conversation, answered by a Copilot of
+    /// CST's own and never typed into the session. Bare, it explains itself.
+    Ask(Option<String>),
 }
 
 /// Words that ask for text rather than a picture.
@@ -94,6 +97,9 @@ pub fn parse(text: &str) -> Parsed {
             image: !rest.split_whitespace().any(means_text),
         }),
         "/queue" => Parsed::Cst(Command::Queue((!rest.is_empty()).then(|| rest.to_string()))),
+        // Copilot's own `/ask` and `/btw` ask a side question in a dialog; here they
+        // ask CST's side Copilot the same kind of question, about this session.
+        "/ask" | "/btw" => Parsed::Cst(Command::Ask((!rest.is_empty()).then(|| rest.to_string()))),
         "/say" => {
             if rest.is_empty() {
                 // `/say` with nothing after it is a question about itself.
@@ -113,8 +119,8 @@ pub mod wording {
         format!(
             "Not delivered: {command} looks like a Copilot slash command. Those open menus in \
              the session that cannot be closed from here, so none is forwarded. CST's own are \
-             /follow, /unfollow, /peek, /queue, /say and /esc. To send the line anyway, write \
-             /say {command} …"
+             /ask, /follow, /unfollow, /peek, /queue, /say and /esc. To send the line anyway, \
+             write /say {command} …"
         )
     }
 }
@@ -127,7 +133,11 @@ mod tests {
     fn copilots_commands_are_told_apart_from_csts_and_from_text() {
         assert_eq!(parse("hello there"), Parsed::Text);
         assert_eq!(parse("  a path like /tmp/x"), Parsed::Text);
-        assert_eq!(parse("/ask hello"), Parsed::Foreign("/ask".to_string()));
+        assert_eq!(
+            parse("/ask hello"),
+            Parsed::Cst(Command::Ask(Some("hello".to_string())))
+        );
+        assert_eq!(parse("/btw@cst_bot"), Parsed::Cst(Command::Ask(None)));
         assert_eq!(parse("/COMPACT"), Parsed::Foreign("/compact".to_string()));
         assert_eq!(
             parse("/model@cst_bot"),

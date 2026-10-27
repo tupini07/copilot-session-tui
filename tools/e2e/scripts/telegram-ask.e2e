@@ -1,0 +1,42 @@
+# /ask from the phone asks a side Copilot about the session's conversation and never
+# touches the session: an "asking" line appears at once and is edited into the answer,
+# the stub's answer names the session it was copied from, a bare /ask explains itself,
+# and a refused question says so in the same place.
+
+size 110x30
+arg --mux
+fake_telegram forum
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 1500 Checkpoint reached.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait topic: Existing app session
+telegram_wait Checkpoint reached
+
+# The question is acknowledged at once and answered in the same message.
+telegram_say /ask what are we doing?
+telegram_wait Asking a side Copilot about Existing app session
+telegram_wait Fake Copilot aside about 00000001-0000-4000-8000-000000000001: what are we doing?
+telegram_dump 01-answered
+# The session never saw the question.
+press enter
+wait 1000
+expect_not Fake Copilot received: what are we doing
+dump 01-session-untouched
+press ctrl+b d
+wait_for Existing app session
+
+# A bare /ask explains itself.
+telegram_say /ask
+telegram_wait Write the question after /ask
+telegram_dump 02-usage
+
+# A question the model refuses is reported where the answer would have been.
+telegram_say /ask e2e:fail please
+telegram_wait Could not ask about Existing app session: Copilot did not answer
+telegram_dump 03-refused
