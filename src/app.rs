@@ -4116,6 +4116,32 @@ impl App {
                 continue;
             }
 
+            if reply.presses_escape {
+                // Wanted exactly when the session is stuck in a menu, so none of the
+                // checks below apply: Escape closes what a turn, a question or a draft
+                // would otherwise block.
+                let pressed = self
+                    .pane_for_session(&session_id)
+                    .and_then(|id| self.mux.as_mut()?.pane_mut(id))
+                    .map(|pane| {
+                        pane.send_key(&crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::Esc,
+                            crossterm::event::KeyModifiers::NONE,
+                        ))
+                    });
+                match pressed {
+                    Some(Ok(())) => self.telegram_react(reply.user_message_id),
+                    _ => self.telegram_say(
+                        &session_id,
+                        Some(reply.user_message_id),
+                        wording::not_open(&title),
+                    ),
+                }
+                self.update_telegram(|state| state.drop_reply(reply.update_id));
+                changed = true;
+                continue;
+            }
+
             let pane_state = self.mux.as_ref().and_then(|mux| {
                 mux.pane_for_session(&session_id)
                     .and_then(|id| mux.pane(id))
@@ -7745,6 +7771,8 @@ mod tests {
                 queued_told: false,
                 answering: false,
                 queued_message_id: None,
+                presses_escape: false,
+                holds_for_idle: false,
                 status: ReplyStatus::Planned,
             });
             state.record_reply(Reply {
@@ -7758,6 +7786,8 @@ mod tests {
                 queued_told: false,
                 answering: false,
                 queued_message_id: None,
+                presses_escape: false,
+                holds_for_idle: false,
                 status: ReplyStatus::Planned,
             });
         })

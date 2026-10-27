@@ -74,6 +74,13 @@ pub struct Reply {
     /// can turn it into "Delivered" and take the button away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_message_id: Option<i64>,
+    /// `/esc`: press Escape in the session instead of typing anything. The text is a
+    /// label for listings. A flag rather than a kind, for the same reason as `answering`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub presses_escape: bool,
+    /// `/queue <text>`: wait for the turn to end rather than steer it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_for_idle: bool,
 }
 
 impl Reply {
@@ -402,6 +409,8 @@ mod tests {
             queued_told: false,
             answering: false,
             queued_message_id: None,
+            presses_escape: false,
+            holds_for_idle: false,
             status,
         }
     }
