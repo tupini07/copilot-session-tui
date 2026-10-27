@@ -19,6 +19,7 @@
 //! never asks never runs it. It is a child speaking over pipes, and the CLI exits when
 //! its pipe closes, so a CST that dies takes it along.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -217,11 +218,32 @@ async fn start_client() -> Result<Client, Failure> {
         .map_err(|error| Failure::Start(error.to_string()))
 }
 
-/// One question in one session, which is deleted whatever happened.
+/// One question in one session, which is deleted whatever happened — including the
+/// whole thing taking too long. The question's timeout bounds the model's turn; the
+/// copy of a conversation, the session's start and its shutdown are bounded here, with
+/// a server start's worth of room, so a CLI that hangs on any of them cannot leave the
+/// asker waiting for good.
 async fn answer(client: &Client, question: Question) -> Answer {
+    let budget = question.timeout + START_TIMEOUT;
+    let made: RefCell<Option<SessionId>> = RefCell::new(None);
+    let result = match tokio::time::timeout(budget, run(client, question, &made)).await {
+        Ok(answer) => answer,
+        Err(_) => Err(Failure::Timeout),
+    };
+    // Whatever happened, the session made for this question does not stay.
+    let made = made.borrow().clone();
+    if let Some(id) = made {
+        let _ = client.delete_session(&id).await;
+    }
+    result
+}
+
+/// The question itself. `made` learns the session's id as soon as there is one, so the
+/// caller can delete it even if this never returns.
+async fn run(client: &Client, question: Question, made: &RefCell<Option<SessionId>>) -> Answer {
     // Kept until the end: the folder must outlive the session that runs in it.
     let mut scratch: Option<tempfile::TempDir> = None;
-    let (id, session) = match &question.about {
+    let session = match &question.about {
         Some(source) => {
             let forked = client
                 .rpc()
@@ -234,15 +256,17 @@ async fn answer(client: &Client, question: Question) -> Answer {
                 .await
                 .map_err(|error| fork_failure(&error.to_string()))?;
             let id = forked.session_id;
-            let mut config = ResumeSessionConfig::new(id.clone()).deny_all_permissions();
+            *made.borrow_mut() = Some(id.clone());
+            let mut config = ResumeSessionConfig::new(id).deny_all_permissions();
             config.available_tools = Some(Vec::new());
             config.enable_config_discovery = Some(false);
-            (id, client.resume_session(config).await)
+            client.resume_session(config).await
         }
         None => {
             let id = SessionId::new(crate::session::manager::new_session_id());
+            *made.borrow_mut() = Some(id.clone());
             let mut config = SessionConfig::default()
-                .with_session_id(id.clone())
+                .with_session_id(id)
                 .with_name(SESSION_NAME)
                 .deny_all_permissions()
                 .with_available_tools(Vec::<String>::new())
@@ -256,10 +280,10 @@ async fn answer(client: &Client, question: Question) -> Answer {
                 .working_dir
                 .clone()
                 .or_else(|| scratch.as_ref().map(|dir| dir.path().to_path_buf()));
-            (id, client.create_session(config).await)
+            client.create_session(config).await
         }
     };
-    let result = match session {
+    match session {
         Ok(session) => {
             let outcome = session
                 .send_and_wait(
@@ -286,10 +310,7 @@ async fn answer(client: &Client, question: Question) -> Answer {
             answer
         }
         Err(error) => Err(Failure::Session(tidy(&error.to_string()))),
-    };
-    // Whatever happened, the session made for this question does not stay.
-    let _ = client.delete_session(&id).await;
-    result
+    }
 }
 
 /// The CLI's one expected refusal, told apart from the rest so the phone hears "no

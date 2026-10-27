@@ -22,6 +22,10 @@ pub const TAIL_BYTES: u64 = 512 * 1024;
 /// the gist of each, not every line.
 pub const MESSAGE_CHARS: usize = 3_000;
 
+/// Longest the whole quote may be. Half a megabyte of a chatty, tool-free log is more
+/// conversation than a prompt should carry; the most recent messages are kept.
+pub const TOTAL_CHARS: usize = 40_000;
+
 /// The recent exchange from `events.jsonl`, or `None` when the log is unreadable or
 /// holds no messages in its tail.
 pub fn recent_exchange(events_path: &Path) -> Option<String> {
@@ -43,9 +47,10 @@ pub fn recent_exchange(events_path: &Path) -> Option<String> {
 }
 
 /// The user and assistant messages in these log lines, oldest first, as
-/// `User:` / `Copilot:` paragraphs. Pure, for the test.
+/// `User:` / `Copilot:` paragraphs, the most recent [`TOTAL_CHARS`] of them. Pure, for
+/// the test.
 pub fn exchange_from_lines(lines: &str) -> String {
-    let mut out = String::new();
+    let mut paragraphs: Vec<String> = Vec::new();
     for line in lines.lines() {
         if !line.contains("user.message") && !line.contains("assistant.message") {
             continue;
@@ -65,14 +70,18 @@ pub fn exchange_from_lines(lines: &str) -> String {
         if content.is_empty() {
             continue;
         }
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(speaker);
-        out.push_str(": ");
-        out.push_str(&cut(&content, MESSAGE_CHARS));
+        paragraphs.push(format!("{speaker}: {}", cut(&content, MESSAGE_CHARS)));
     }
-    out
+    // Kept from the end: when there is too much, it is the oldest that goes.
+    let mut total = 0;
+    let keep_from = paragraphs
+        .iter()
+        .rposition(|paragraph| {
+            total += paragraph.chars().count() + 2;
+            total > TOTAL_CHARS
+        })
+        .map_or(0, |cut_at| cut_at + 1);
+    paragraphs[keep_from..].join("\n\n")
 }
 
 fn cut(text: &str, max_chars: usize) -> String {
@@ -123,6 +132,30 @@ mod tests {
             exchange.chars().count(),
             "User: ".len() + MESSAGE_CHARS + " […]".chars().count()
         );
+    }
+
+    #[test]
+    fn too_much_conversation_keeps_the_most_recent_of_it() {
+        // The quote exists so a question is answered in seconds; a prompt the model
+        // refuses for its size would defeat it, and recent is what the phone asks about.
+        let message = "m".repeat(MESSAGE_CHARS);
+        let mut lines = String::new();
+        for i in 0..30 {
+            lines.push_str(&format!(
+                r#"{{"type":"user.message","data":{{"content":"{i:02}{message}"}}}}"#
+            ));
+            lines.push('\n');
+        }
+
+        let exchange = exchange_from_lines(&lines);
+
+        assert!(
+            exchange.chars().count() <= TOTAL_CHARS,
+            "{}",
+            exchange.chars().count()
+        );
+        assert!(exchange.contains("User: 29m"), "the newest is kept");
+        assert!(!exchange.contains("User: 00m"), "the oldest goes first");
     }
 
     #[test]

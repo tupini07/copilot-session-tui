@@ -1127,8 +1127,46 @@ pub(crate) fn ask_prompt(question: &str, exchange: Option<&str>) -> String {
     prompt
 }
 
+/// A message's tables, drawn: Telegram has no table markup and a monospace block wraps
+/// on a phone. A table that will not draw, or whose upload Telegram refuses (it caps a
+/// photo's aspect ratio, and a long one-row table can exceed it), arrives as the block
+/// it would have been. Returns the message ids, one per table.
+fn send_tables(
+    bot: &impl BotApi,
+    chat_id: i64,
+    thread_id: Option<i64>,
+    tables: &[String],
+) -> Result<Vec<i64>, BotError> {
+    let mut sent_ids = Vec::with_capacity(tables.len());
+    for (index, table) in tables.iter().enumerate() {
+        let caption = format!("<i>Table {}</i>", index + 1);
+        let lines: Vec<String> = table.lines().map(str::to_string).collect();
+        let drawn = image::render_at(
+            &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
+            image::LIGHT_BG,
+            image::TABLE_FONT_PX,
+        );
+        let sent = drawn.ok().and_then(|png| {
+            bot.send_photo(chat_id, thread_id, None, &png, &caption)
+                .ok()
+        });
+        let message_id = match sent {
+            Some(message_id) => message_id,
+            None => {
+                let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
+                send_part(bot, chat_id, thread_id, &html)?.0
+            }
+        };
+        sent_ids.push(message_id);
+    }
+    Ok(sent_ids)
+}
+
 /// Put the answer where the "asking" message was; a long one continues in messages
-/// after it. A failure is said in a sentence in the same place.
+/// after it, and its tables follow as pictures, as a notification's do. A failure is
+/// said in a sentence in the same place. When the edit itself fails — the message too
+/// old, Telegram unreachable for a moment — the answer is sent as a fresh reply rather
+/// than lost, since an "Asking…" that never changes is the one outcome not allowed.
 pub(crate) fn deliver_answer(
     bot: &impl BotApi,
     root: &Path,
@@ -1137,29 +1175,53 @@ pub(crate) fn deliver_answer(
     placeholder: i64,
     answer: &crate::aside::Answer,
 ) {
-    let parts = match answer {
-        Ok(text) => super::chunk(
-            &format!("<b>{}</b>", escape_html(title)),
-            &markdown::to_telegram_html(text),
+    let (parts, tables) = match answer {
+        Ok(text) => {
+            let (html, tables) = markdown::to_telegram_html_with_tables(text, None);
+            (
+                super::chunk(&format!("<b>{}</b>", escape_html(title)), &html),
+                tables,
+            )
+        }
+        Err(failure) => (
+            vec![escape_html(&wording::ask_failed(
+                title,
+                &failure.to_string(),
+            ))],
+            Vec::new(),
         ),
-        Err(failure) => vec![escape_html(&wording::ask_failed(
-            title,
-            &failure.to_string(),
-        ))],
     };
     let mut parts = parts.into_iter();
     if let Some(first) = parts.next() {
-        if let Err(BotError::Rejected(description)) =
-            bot.edit_message_text(ask.chat_id, placeholder, &first)
-        {
-            if description.to_lowercase().contains("parse entities") {
-                let _ =
-                    bot.edit_message_text(ask.chat_id, placeholder, &markdown::strip_tags(&first));
+        let edited = match bot.edit_message_text(ask.chat_id, placeholder, &first) {
+            Ok(()) => true,
+            Err(BotError::Rejected(description))
+                if description.to_lowercase().contains("parse entities") =>
+            {
+                bot.edit_message_text(ask.chat_id, placeholder, &markdown::strip_tags(&first))
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        if !edited {
+            if let Ok((message_id, _)) = send_part_replying(
+                bot,
+                ask.chat_id,
+                ask.thread_id,
+                Some(ask.user_message_id),
+                &first,
+            ) {
+                record_sent(root, &ask.session_id, message_id);
             }
         }
     }
     for part in parts {
         if let Ok((message_id, _)) = send_part(bot, ask.chat_id, ask.thread_id, &part) {
+            record_sent(root, &ask.session_id, message_id);
+        }
+    }
+    if let Ok(message_ids) = send_tables(bot, ask.chat_id, ask.thread_id, &tables) {
+        for message_id in message_ids {
             record_sent(root, &ask.session_id, message_id);
         }
     }
@@ -1372,30 +1434,7 @@ fn perform_with(
                     sent_at: Utc::now(),
                 });
             }
-            // The body's tables, drawn: Telegram has no table markup and a monospace
-            // block wraps on a phone. A table that will not draw goes as the block.
-            for (index, table) in tables.iter().enumerate() {
-                let caption = format!("<i>Table {}</i>", index + 1);
-                let lines: Vec<String> = table.lines().map(str::to_string).collect();
-                let drawn = image::render_at(
-                    &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
-                    image::LIGHT_BG,
-                    image::TABLE_FONT_PX,
-                );
-                // A refused upload (Telegram caps a photo's aspect ratio, and a long
-                // one-row table can exceed it) falls back the same way as a failed
-                // drawing: the table arrives, as the block it would have been.
-                let sent = drawn.ok().and_then(|png| {
-                    bot.send_photo(outbound.chat_id, thread_id, None, &png, &caption)
-                        .ok()
-                });
-                let message_id = match sent {
-                    Some(message_id) => message_id,
-                    None => {
-                        let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
-                        send_part(bot, outbound.chat_id, thread_id, &html)?.0
-                    }
-                };
+            for message_id in send_tables(bot, outbound.chat_id, thread_id, &tables)? {
                 records.push(SentRecord {
                     message_id,
                     session_id: session_id.clone(),
@@ -2153,7 +2192,8 @@ mod tests {
 
         struct Recorder {
             edits: RefCell<Vec<(i64, String)>>,
-            sent: RefCell<Vec<String>>,
+            sent: RefCell<Vec<(Option<i64>, String)>>,
+            refuse_edits: std::cell::Cell<bool>,
         }
         impl BotApi for Recorder {
             fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
@@ -2165,6 +2205,11 @@ mod tests {
                 message_id: i64,
                 html: &str,
             ) -> Result<(), BotError> {
+                if self.refuse_edits.get() {
+                    return Err(BotError::Rejected(
+                        "Bad Request: message can't be edited".to_string(),
+                    ));
+                }
                 self.edits.borrow_mut().push((message_id, html.to_string()));
                 Ok(())
             }
@@ -2172,10 +2217,10 @@ mod tests {
                 &self,
                 _: i64,
                 _: Option<i64>,
-                _: Option<i64>,
+                reply_to: Option<i64>,
                 html: &str,
             ) -> Result<i64, BotError> {
-                self.sent.borrow_mut().push(html.to_string());
+                self.sent.borrow_mut().push((reply_to, html.to_string()));
                 Ok(90 + self.sent.borrow().len() as i64)
             }
             fn create_forum_topic(&self, _: i64, _: &str) -> Result<i64, BotError> {
@@ -2222,6 +2267,7 @@ mod tests {
         let bot = Recorder {
             edits: RefCell::new(Vec::new()),
             sent: RefCell::new(Vec::new()),
+            refuse_edits: std::cell::Cell::new(false),
         };
         let ask = Ask {
             session_id: "s1".to_string(),
@@ -2268,6 +2314,33 @@ mod tests {
             bot.sent.borrow().is_empty(),
             "a short answer fits the one message"
         );
+        drop(edits);
+
+        // An edit Telegram refuses must not leave "Asking…" standing: the answer goes as
+        // a reply to the question instead, and its table follows as a notification's
+        // would — here as the block, since this bot takes no photos.
+        bot.refuse_edits.set(true);
+        deliver_answer(
+            &bot,
+            temp.path(),
+            &ask,
+            "Bug <hunt>",
+            79,
+            &Ok("Counts:\n\n| a | b |\n|---|---|\n| 1 | 2 |".to_string()),
+        );
+        let sent = bot.sent.borrow();
+        assert_eq!(
+            sent[0].0,
+            Some(10),
+            "a reply to the question: {:?}",
+            sent[0]
+        );
+        assert!(
+            sent[0].1.contains("Table 1 is sent as a picture below"),
+            "{}",
+            sent[0].1
+        );
+        assert!(sent[1].1.contains("<pre>"), "{}", sent[1].1);
         assert!(ask_prompt("what is left?", None).ends_with("quoted as data:\nwhat is left?"));
         let quoted = ask_prompt("what is left?", Some("User: hi\n\nCopilot: hello"));
         assert!(
