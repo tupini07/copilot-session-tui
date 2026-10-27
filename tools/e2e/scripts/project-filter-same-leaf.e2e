@@ -1,6 +1,9 @@
 # Several sessions whose folders are all called `inputs`, none in a Git repository, so
 # each is its own project. The filter popup and the list must tell them apart instead
 # of printing `inputs` once per session, and typing part of the parent must find one.
+#
+# Labels are joined with the platform separator, so the expectations below are written
+# for Windows; on Linux they would read c01-r00/inputs.
 
 size 110x30
 arg --mux
