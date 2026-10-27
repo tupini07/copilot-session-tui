@@ -21,7 +21,7 @@ press ctrl+b d
 wait_for Existing app session
 telegram_wait Setup is done.
 # The poller published CST's own commands to the bot's menu when it started.
-telegram_wait commands: follow unfollow peek queue
+telegram_wait commands: ask follow unfollow peek queue
 
 # /follow is answered with the live view — the pane's screen in a monospace block,
 # with the way to stop it — quoting the command, and goes nowhere near the session's
