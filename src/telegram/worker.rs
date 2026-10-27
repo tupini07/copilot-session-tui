@@ -143,6 +143,8 @@ pub enum OutboundJob {
         reply_to: Option<i64>,
         png: Vec<u8>,
         caption_html: String,
+        /// What goes instead when Telegram refuses the picture.
+        fallback_html: String,
     },
     /// The view's last edit, after which the follow is forgotten.
     FollowClose {
@@ -1110,9 +1112,16 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
                     image::LIGHT_BG,
                     image::TABLE_FONT_PX,
                 );
-                let message_id = match drawn {
-                    Ok(png) => bot.send_photo(outbound.chat_id, thread_id, None, &png, &caption)?,
-                    Err(_) => {
+                // A refused upload (Telegram caps a photo's aspect ratio, and a long
+                // one-row table can exceed it) falls back the same way as a failed
+                // drawing: the table arrives, as the block it would have been.
+                let sent = drawn.ok().and_then(|png| {
+                    bot.send_photo(outbound.chat_id, thread_id, None, &png, &caption)
+                        .ok()
+                });
+                let message_id = match sent {
+                    Some(message_id) => message_id,
+                    None => {
                         let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
                         send_part(bot, outbound.chat_id, thread_id, &html)?.0
                     }
@@ -1241,9 +1250,23 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
             reply_to,
             png,
             caption_html,
+            fallback_html,
         } => {
+            // The picture is the answer; if Telegram will not take it, the text is.
             let message_id =
-                bot.send_photo(outbound.chat_id, *thread_id, *reply_to, png, caption_html)?;
+                match bot.send_photo(outbound.chat_id, *thread_id, *reply_to, png, caption_html) {
+                    Ok(message_id) => message_id,
+                    Err(_) => {
+                        send_part_replying(
+                            bot,
+                            outbound.chat_id,
+                            *thread_id,
+                            *reply_to,
+                            fallback_html,
+                        )?
+                        .0
+                    }
+                };
             let _ = store::update_in(root, |state| {
                 state.record_sent(SentRecord {
                     message_id,
@@ -2071,6 +2094,123 @@ mod tests {
         // hint: listing everything is what it asked for.
         assert!(batch.replies.is_empty());
         assert!(batch.says.is_empty());
+    }
+
+    /// Telegram refuses some pictures (a one-row table drawn wide passes its aspect
+    /// cap); the table has to arrive anyway, so a refusal sends the block instead.
+    #[test]
+    fn a_table_whose_picture_telegram_refuses_arrives_as_a_monospace_block() {
+        use crate::notifications::NotificationKind;
+        use std::cell::RefCell;
+
+        struct Refuser {
+            sent: RefCell<Vec<String>>,
+            photos: RefCell<usize>,
+        }
+        impl BotApi for Refuser {
+            fn send_photo(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &[u8],
+                _: &str,
+            ) -> Result<i64, BotError> {
+                *self.photos.borrow_mut() += 1;
+                Err(BotError::Rejected(
+                    "Bad Request: PHOTO_INVALID_DIMENSIONS".to_string(),
+                ))
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                html: &str,
+            ) -> Result<i64, BotError> {
+                self.sent.borrow_mut().push(html.to_string());
+                Ok(self.sent.borrow().len() as i64)
+            }
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn send_message_with_buttons(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+                _: &[super::super::bot::Button],
+            ) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn create_forum_topic(&self, _: i64, _: &str) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let bot = Refuser {
+            sent: RefCell::new(Vec::new()),
+            photos: RefCell::new(0),
+        };
+        let outbound = Outbound {
+            token: "t".to_string(),
+            api_base: "http://127.0.0.1:9".to_string(),
+            chat_id: 7,
+            mode: TelegramChatMode::Private,
+            job: OutboundJob::Notify {
+                session_id: "s1".to_string(),
+                content: Content {
+                    kind: NotificationKind::Ready,
+                    title: "Build".to_string(),
+                    body: Some("Done:\n\n| Name | Size |\n|---|---|\n| a | 1 |".to_string()),
+                    question: None,
+                    plan_summary: None,
+                    repository: None,
+                },
+            },
+        };
+        perform_with(&bot, temp.path(), &outbound).expect("the refusal is absorbed");
+        assert_eq!(*bot.photos.borrow(), 1, "the picture was tried first");
+        let sent = bot.sent.borrow();
+        assert_eq!(sent.len(), 2, "the text, then the table as a block");
+        assert!(sent[0].contains("[Table 1 is sent as a picture below]"));
+        assert!(
+            sent[1].starts_with("<i>Table 1</i>\n<pre>Name  Size"),
+            "{}",
+            sent[1]
+        );
+        // Both are recorded, so a reply to either routes to the session.
+        assert_eq!(store::load_in(temp.path()).sent.len(), 2);
     }
 
     #[test]

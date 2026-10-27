@@ -3883,6 +3883,7 @@ impl App {
                                 reply_to: Some(peek.user_message_id),
                                 png,
                                 caption_html: follow::peek_caption(shown_title),
+                                fallback_html: follow::render_peek(shown_title, &rows),
                             });
                         }
                         picture => {
