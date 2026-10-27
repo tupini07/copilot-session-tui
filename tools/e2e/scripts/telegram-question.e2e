@@ -8,6 +8,9 @@ size 110x30
 arg --mux
 fake_telegram private
 session existing-app Existing app session
+# Answers are played into the form as keys with settling pauses; under load that
+# takes longer than the default wait.
+timeout 20000
 
 wait_for Existing app session
 press enter
