@@ -1,0 +1,48 @@
+# A reply from the phone is typed into the session by CST, Enter and all. That must not
+# leave a draft mark on the tab: the user's composer is empty, and the pencil said it
+# was not. Seen live with the session attached and the cursor in its input box. Two
+# tabs, because the strip with the markers is drawn only when there is more than one.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+session other-app Other session
+
+# Two tabs: whichever row is first opens first, then the other.
+wait_for Other session
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b d
+wait_for Other session
+press down
+press enter
+wait_for --resume=00000002-0000-4000-8000-000000000002
+
+# A turn in the first tab, watched from the second so its end reaches the phone, which
+# then has a message of that session's to reply to. Back to the first tab afterwards:
+# cursor in the input box, nothing typed.
+press ctrl+b p
+wait_for --resume=00000001-0000-4000-8000-000000000001
+type e2e:work 1500 Setup is done.
+press enter
+press ctrl+b n
+telegram_wait Setup is done.
+press ctrl+b p
+wait_for --resume=00000001-0000-4000-8000-000000000001
+wait_for Fake Copilot is idling
+
+# The phone speaks to the session on screen. CST types it in and presses Enter; the
+# stub never starts a turn on plain text, so nothing else could clear the slot.
+telegram_say hello from the phone
+wait_for Fake Copilot received: hello from the phone
+telegram_wait reaction on
+wait 1000
+dump 01-no-phantom-draft
+expect_not ✎
+
+# Typing something now is a draft, as it always was.
+type half a thought
+wait 500
+dump 02-real-draft
+expect ✎
