@@ -273,6 +273,7 @@ enum Step {
     TelegramWait(String),
     TelegramExpect(String),
     TelegramExpectNot(String),
+    TelegramOrder(Vec<String>),
     TelegramDump(String),
     /// Whether the stub says the bot may manage topics.
     TelegramRights(bool),
@@ -460,6 +461,17 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
         "telegram_wait" => Step::TelegramWait(need("text")?),
         "telegram_expect" => Step::TelegramExpect(need("text")?),
         "telegram_expect_not" => Step::TelegramExpectNot(need("text")?),
+        "telegram_order" => {
+            let texts: Vec<String> = need("texts separated by ||")?
+                .split("||")
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect();
+            if texts.len() < 2 {
+                return Err("telegram_order needs at least two texts, separated by ||".to_string());
+            }
+            Step::TelegramOrder(texts)
+        }
         "telegram_dump" => Step::TelegramDump(need("a name")?),
         "telegram_rights" => match need("on or off")?.as_str() {
             "on" => Step::TelegramRights(true),
@@ -842,6 +854,31 @@ impl Driver {
                         "did not expect Telegram to receive {text:?}, found {line:?}"
                     )),
                 }
+            }
+            Step::TelegramOrder(texts) => {
+                // Presence is what telegram_wait checks; this is for when the order
+                // of what was received is the point, as with a table sent between the
+                // paragraphs around it.
+                let outbox = self.telegram_stub()?.outbox();
+                let mut last = None;
+                for text in texts {
+                    let found = outbox
+                        .iter()
+                        .enumerate()
+                        .skip(last.map_or(0, |at| at + 1))
+                        .find(|(_, line)| line.contains(text.as_str()))
+                        .map(|(at, _)| at);
+                    match found {
+                        Some(at) => last = Some(at),
+                        None => {
+                            return Err(format!(
+                                "expected Telegram to receive {text:?} after what came before it; it has:\n{}",
+                                outbox.join("\n")
+                            ))
+                        }
+                    }
+                }
+                Ok(())
             }
             Step::TelegramDump(name) => {
                 let stub = self.telegram_stub()?;

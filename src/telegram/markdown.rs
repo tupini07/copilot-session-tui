@@ -59,26 +59,49 @@ pub fn to_telegram_html_in(markdown: &str, repository: Option<&RepositoryRef>) -
     renderer.finish()
 }
 
-/// [`to_telegram_html_in`] with every table taken out of the text and returned as its
-/// monospace layout, one string per table, in order; the text says where each was.
+/// One stretch of a message as Telegram will carry it: the HTML of the prose between
+/// tables, or a table's monospace layout for the caller to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Piece {
+    Text(String),
+    Table(String),
+}
+
+/// Stands in for a table in the rendered text until the text is cut into pieces.
+/// Never produced by the renderer otherwise, and stripped from the input first.
+const TABLE_MARK: char = '\0';
+
+/// [`to_telegram_html_in`] cut at every table: the prose before it, the table, the
+/// prose after, in the order written, so a picture can go exactly where the table was.
 ///
 /// Telegram has no table markup, and a `<pre>` block wraps on a phone into something
-/// unreadable at four columns. A picture keeps the columns. The layouts are what the
-/// caller draws.
-pub fn to_telegram_html_with_tables(
-    markdown: &str,
-    repository: Option<&RepositoryRef>,
-) -> (String, Vec<String>) {
+/// unreadable at four columns. A picture keeps the columns, and sending it between
+/// the paragraphs that surround it keeps the reading order. Prose that is empty
+/// between two tables, or before the first, is left out rather than sent blank.
+pub fn to_telegram_pieces(markdown: &str, repository: Option<&RepositoryRef>) -> Vec<Piece> {
+    let markdown = markdown.replace(TABLE_MARK, "");
     let mut renderer = Renderer {
         repository: repository.cloned(),
         tables_out: Some(Vec::new()),
         ..Renderer::default()
     };
-    for event in Parser::new_ext(markdown, OPTIONS) {
+    for event in Parser::new_ext(&markdown, OPTIONS) {
         renderer.event(event);
     }
     let tables = renderer.tables_out.take().unwrap_or_default();
-    (renderer.finish(), tables)
+    let html = renderer.finish();
+    let mut pieces = Vec::new();
+    let mut tables = tables.into_iter();
+    for segment in html.split(TABLE_MARK) {
+        let text = segment.trim();
+        if !text.is_empty() {
+            pieces.push(Piece::Text(text.to_string()));
+        }
+        if let Some(table) = tables.next() {
+            pieces.push(Piece::Table(table));
+        }
+    }
+    pieces
 }
 
 /// `text` escaped, with its references wrapped in links to `repository`.
@@ -139,8 +162,9 @@ struct Renderer {
     /// Open code blocks: text inside one is code, not prose.
     code_depth: usize,
     /// When set, each table's monospace layout is collected here and the text gets
-    /// a placeholder naming it; the caller sends the layouts as pictures. When not,
-    /// the table stays inline as a `<pre>` block.
+    /// a [`TABLE_MARK`] where it was, for [`to_telegram_pieces`] to cut at; the caller
+    /// sends the layouts as pictures. When not, the table stays inline as a `<pre>`
+    /// block.
     tables_out: Option<Vec<String>>,
 }
 
@@ -375,10 +399,7 @@ impl Renderer {
                 match self.tables_out.as_mut() {
                     Some(tables) => {
                         tables.push(laid_out);
-                        self.out.push_str(&format!(
-                            "<i>[Table {} is sent as a picture below]</i>",
-                            tables.len()
-                        ));
+                        self.out.push(TABLE_MARK);
                     }
                     None => {
                         self.out.push_str("<pre>");
@@ -558,6 +579,40 @@ mod tests {
         assert_eq!(
             to_telegram_html(markdown),
             "<pre>File     Change\n───────  ──────\nmain.rs  edited\nlib.rs   new</pre>"
+        );
+    }
+
+    #[test]
+    fn pieces_keep_the_prose_and_the_tables_in_the_order_they_were_written() {
+        let table = |a: &str| format!("| k | v |\n|---|---|\n| {a} | 1 |");
+        // Prose, table, prose: the picture goes between the paragraphs it sat between.
+        let pieces = to_telegram_pieces(
+            &format!(
+                "Here are the **results**:\n\n{}\n\nShall I retry?",
+                table("x")
+            ),
+            None,
+        );
+        assert_eq!(
+            pieces,
+            vec![
+                Piece::Text("Here are the <b>results</b>:".to_string()),
+                Piece::Table("k  v\n─  ─\nx  1".to_string()),
+                Piece::Text("Shall I retry?".to_string()),
+            ]
+        );
+        // A message that opens with a table, and two tables with nothing between them:
+        // no blank prose is sent for the gaps.
+        let pieces =
+            to_telegram_pieces(&format!("{}\n\n{}\n\nDone.", table("a"), table("b")), None);
+        assert!(matches!(&pieces[0], Piece::Table(t) if t.contains("a  1")));
+        assert!(matches!(&pieces[1], Piece::Table(t) if t.contains("b  1")));
+        assert_eq!(pieces[2], Piece::Text("Done.".to_string()));
+        assert_eq!(pieces.len(), 3);
+        // A stray NUL in what the agent wrote cannot be mistaken for a table.
+        assert_eq!(
+            to_telegram_pieces("a\0b", None),
+            vec![Piece::Text("ab".to_string())]
         );
     }
 

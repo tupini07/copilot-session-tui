@@ -249,23 +249,30 @@ pub struct Content {
 /// three characters, and what the agent wrote is Markdown, which [`markdown`] turns into
 /// the tags Telegram knows and shows everything else as text.
 pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
-    compose_in(content, mode, false).0
+    compose_in(content, mode, false)
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Message(html) => Some(html),
+            Part::Table(_) => None,
+        })
+        .collect()
 }
 
-/// [`compose`] with the body's tables taken out as pictures: the messages, then the
-/// tables' monospace layouts for the caller to draw and send after them.
-pub fn compose_with_pictures(
-    content: &Content,
-    mode: TelegramChatMode,
-) -> (Vec<String>, Vec<String>) {
+/// What a notification is sent as, in order: a message's HTML, or a table's monospace
+/// layout for the caller to draw and send as a picture where the table was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Part {
+    Message(String),
+    Table(String),
+}
+
+/// [`compose`] with the body's tables taken out as pictures, each in its place
+/// between the prose around it, so the reading order is the one the session wrote.
+pub fn compose_with_pictures(content: &Content, mode: TelegramChatMode) -> Vec<Part> {
     compose_in(content, mode, true)
 }
 
-fn compose_in(
-    content: &Content,
-    mode: TelegramChatMode,
-    pictures: bool,
-) -> (Vec<String>, Vec<String>) {
+fn compose_in(content: &Content, mode: TelegramChatMode, pictures: bool) -> Vec<Part> {
     // In a forum the topic already carries the name, so repeating it would read as
     // part of what the session said. In a private chat it is the only thing telling
     // interleaved sessions apart, kept in brackets so it reads as a label.
@@ -285,16 +292,32 @@ fn compose_in(
     if content.kind != NotificationKind::Ready || body.is_none() {
         text.push_str(&format!("<i>{}</i>", escape_html(kind_line(content.kind))));
     }
-    let mut tables = Vec::new();
+    // The prose runs and the tables between them. `text` is the run being written;
+    // a table closes it and starts the next, so the question or plan that follows the
+    // body lands after the last table, where the session put it.
+    let mut runs: Vec<Part> = Vec::new();
     if let Some(body) = body {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         if pictures {
-            let (html, found) =
-                markdown::to_telegram_html_with_tables(body, content.repository.as_ref());
-            text.push_str(&html);
-            tables = found;
+            for piece in markdown::to_telegram_pieces(body, content.repository.as_ref()) {
+                match piece {
+                    markdown::Piece::Text(html) => {
+                        if !text.is_empty() && !text.ends_with("\n\n") {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(&html);
+                    }
+                    markdown::Piece::Table(layout) => {
+                        if !text.trim().is_empty() {
+                            runs.push(Part::Message(std::mem::take(&mut text)));
+                        }
+                        text.clear();
+                        runs.push(Part::Table(layout));
+                    }
+                }
+            }
         } else {
             text.push_str(&markdown::to_telegram_html_in(
                 body,
@@ -356,7 +379,20 @@ fn compose_in(
         });
         text.push_str(&html);
     }
-    (chunk(&title, &text), tables)
+    if !text.trim().is_empty() {
+        runs.push(Part::Message(text));
+    }
+    // Each prose run is cut to Telegram's limit on its own; every message of it carries
+    // the label, as before, so a reply to any of them reads right.
+    runs.into_iter()
+        .flat_map(|run| match run {
+            Part::Message(html) => chunk(&title, html.trim())
+                .into_iter()
+                .map(Part::Message)
+                .collect(),
+            table => vec![table],
+        })
+        .collect()
 }
 
 fn kind_line(kind: NotificationKind) -> &'static str {
@@ -1000,6 +1036,49 @@ mod tests {
         assert!(!messages[0].contains("Ready for attention"));
         assert!(messages[0].contains("Use &lt;b&gt;bold&lt;/b&gt; &amp; co."));
         assert!(!messages[0].contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn tables_go_as_pictures_where_they_were_written_and_the_question_comes_after_the_last() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+        // Prose, table, prose: three parts in that order, the prose with the label.
+        let parts = compose_with_pictures(
+            &content(Some(&format!("Before.\n\n{table}\n\nAfter."))),
+            TelegramChatMode::Private,
+        );
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(
+            matches!(&parts[0], Part::Message(m) if m.ends_with("Before.") && m.contains("<b>("))
+        );
+        assert!(matches!(&parts[1], Part::Table(t) if t.starts_with("a  b")));
+        assert!(
+            matches!(&parts[2], Part::Message(m) if m.ends_with("After.") && m.contains("<b>("))
+        );
+
+        // A body that opens with a table: the kind line still comes first as its own
+        // message, and the question goes after the table, where the session put it.
+        let mut asking = content(Some(&format!("{table}\n\nWhich?")));
+        asking.kind = NotificationKind::Question;
+        asking.question = Some(Question {
+            tool_call_id: "c1".to_string(),
+            text: "Pick one".to_string(),
+            fields: Vec::new(),
+        });
+        let parts = compose_with_pictures(&asking, TelegramChatMode::Forum);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(matches!(&parts[0], Part::Message(m) if m.contains("Question waiting")));
+        assert!(matches!(&parts[1], Part::Table(_)));
+        assert!(
+            matches!(&parts[2], Part::Message(m) if m.starts_with("Which?") && m.contains("Question: Pick one"))
+        );
+
+        // Without pictures the table stays in the one message as a block.
+        let messages = compose(
+            &content(Some(&format!("Before.\n\n{table}"))),
+            TelegramChatMode::Forum,
+        );
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("<pre>"));
     }
 
     #[test]
