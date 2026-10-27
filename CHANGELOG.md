@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.39.0 - 2026-10-27
+
+- Note: a reply sent while a session works now steers that turn. Use /queue to hold it for the end.
+- Note: Copilot slash commands from the phone are refused. Use /say to send one anyway, /esc to press Escape.
+- Ask a session what it is doing from your phone with /ask, without interrupting it.
+- /follow and /peek show the session's screen itself, /peek as a picture, and tables arrive as pictures.
+- Each session's Telegram topic wears an emoji chosen for its title and shows typing while it works.
+- A turn you start from the phone reports its result to the phone, even for the session on your screen.
+- A reply from the phone no longer leaves a draft mark on the tab, and issue numbers in messages open on GitHub.
+
 ## v0.38.0 - 2026-10-26
 
 - Headings, lists, bold and code a session writes arrive on your phone as Telegram formatting.
