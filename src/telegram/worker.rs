@@ -1107,6 +1107,9 @@ mod tests {
             sent: RefCell<Vec<(Option<i64>, String)>>,
         }
         impl BotApi for Recorder {
+            fn set_my_commands(&self, _: &[super::super::bot::BotCommand]) -> Result<(), BotError> {
+                Ok(())
+            }
             fn create_forum_topic(&self, _: i64, name: &str) -> Result<i64, BotError> {
                 self.topics.borrow_mut().push(name.to_string());
                 Ok(42)
