@@ -40,3 +40,12 @@ telegram_dump 02-usage
 telegram_say /ask e2e:fail please
 telegram_wait Could not ask about Existing app session: Copilot did not answer
 telegram_dump 03-refused
+
+# An answer with a table: the "asking" line becomes the prose before the table, the
+# table follows as a picture in the topic, and the prose after it comes last.
+telegram_say /ask e2e:table what is the state?
+telegram_wait Here is the <b>state</b>:
+telegram_wait That is all for now.
+telegram_order Here is the <b>state</b>: || photo || That is all for now.
+telegram_expect_not Table 1
+telegram_dump 04-table-answer

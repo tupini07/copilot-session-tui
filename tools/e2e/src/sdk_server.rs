@@ -14,7 +14,7 @@
 //! gets the first offered one not already taken, as the `-p` stub did; anything else
 //! gets a line naming the session the question was about, when it was about one.
 //! Stage directions in a prompt steer the rest: `e2e:slow` delays the answer,
-//! `e2e:fail` refuses it.
+//! `e2e:fail` refuses it, `e2e:table` answers with prose, a table and more prose.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -108,6 +108,8 @@ fn handle(method: &str, message: &str, sessions: &mut Sessions) -> Outcome {
             let about = sessions.forked_from.get(&id).cloned().flatten();
             let answer = if prompt.contains("Choose the one emoji") {
                 super::stub::choose_emoji(&prompt)
+            } else if prompt.contains("e2e:table") {
+                "Here is the **state**:\n\n| Step | Status |\n|---|---|\n| build | done |\n| tests | running |\n\nThat is all for now.".to_string()
             } else {
                 let first_line = prompt.lines().last().unwrap_or("").trim();
                 match about {

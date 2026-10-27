@@ -1,6 +1,6 @@
 # Copilot likes tables, and Telegram has no table markup: a monospace block wraps on a
-# phone into something unreadable. So a notification's tables are taken out of the text,
-# which says where each was, and sent after it as pictures with the table drawn in them.
+# phone into something unreadable. So a notification's tables are sent as pictures with
+# the table drawn in them, each between the paragraphs it was written between.
 
 size 110x30
 arg --mux
@@ -18,9 +18,10 @@ press ctrl+b d
 wait_for Existing app session
 
 telegram_wait Here are the <b>results</b>:
-telegram_wait [Table 1 is sent as a picture below]
+telegram_wait photo
 telegram_wait Shall I retry beta?
 telegram_expect_not <pre>
-telegram_wait photo 
-telegram_wait : <i>Table 1</i>
+telegram_expect_not Table 1
+# The prose before, the picture, the prose after: the order the session wrote.
+telegram_order Here are the <b>results</b>: || photo || Shall I retry beta?
 telegram_dump 01-table-sent

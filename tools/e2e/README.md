@@ -86,6 +86,7 @@ reads anything sent too soon as Alt+key.
 | `telegram_tap <label>` | Tap the inline button with that label under the latest message CST sent that has one, as the paired user. The stub records `tap: <label>`, `button on <id>: <label>` when a message is sent with buttons, and `answered tap: <text>` when CST acknowledges one. |
 | `telegram_pair_code` | Send the pairing code CST has armed (read from its `telegram.json`) as `/start <code>`, which is what pressing Start on the deep link does. |
 | `telegram_wait <text>`, `telegram_expect <text>`, `telegram_expect_not <text>`  `photo <W>x<H>: <caption>` (the PNG itself is written to the run directory as `photo-<id>.png`),| Against what the stub has received, one line per event: `message: …`, `message in <topic>: …`, `topic: <name>`, `renamed topic: …`, `closed topic: …`, `reaction on <id>`, `edited <id>: …`, `incoming from <user>: …`. |
+| `telegram_order <text> \|\| <text> [\|\| <text> ...]` | Fail unless each text is found on a line after the line the previous one matched. For when the order of what Telegram received is the point. |
 | `telegram_dump <name>` | Write those lines, and every request CST made, to `<name>.telegram.txt`. |
 | `telegram_rights on\|off` | Whether the stub says the bot may manage topics. |
 

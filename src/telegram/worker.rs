@@ -37,7 +37,7 @@ use super::store::{self, Follow, Pairing, Peek, Reply, ReplyStatus, TelegramStat
 use super::transcript;
 use super::{
     chat_mode_of, classify, compose_with_pictures, escape_html, message_carries_code, route,
-    wording, Content, Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict,
+    wording, Content, Incoming, Paired, Part, Route, SentKind, SentRecord, TopicRecord, Verdict,
     POLL_TIMEOUT,
 };
 use crate::config::TelegramChatMode;
@@ -1218,46 +1218,41 @@ pub(crate) fn ask_prompt(question: &str, exchange: Option<&str>) -> String {
     prompt
 }
 
-/// A message's tables, drawn: Telegram has no table markup and a monospace block wraps
-/// on a phone. A table that will not draw, or whose upload Telegram refuses (it caps a
+/// A table, drawn: Telegram has no table markup and a monospace block wraps on a
+/// phone. No caption: the picture sits where the table was, between the paragraphs
+/// around it. A table that will not draw, or whose upload Telegram refuses (it caps a
 /// photo's aspect ratio, and a long one-row table can exceed it), arrives as the block
-/// it would have been. Returns the message ids, one per table.
-fn send_tables(
+/// it would have been. Returns the message id.
+fn send_table(
     bot: &impl BotApi,
     chat_id: i64,
     thread_id: Option<i64>,
-    tables: &[String],
-) -> Result<Vec<i64>, BotError> {
-    let mut sent_ids = Vec::with_capacity(tables.len());
-    for (index, table) in tables.iter().enumerate() {
-        let caption = format!("<i>Table {}</i>", index + 1);
-        let lines: Vec<String> = table.lines().map(str::to_string).collect();
-        let drawn = image::render_at(
-            &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
-            image::LIGHT_BG,
-            image::TABLE_FONT_PX,
-        );
-        let sent = drawn.ok().and_then(|png| {
-            bot.send_photo(chat_id, thread_id, None, &png, &caption)
-                .ok()
-        });
-        let message_id = match sent {
-            Some(message_id) => message_id,
-            None => {
-                let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
-                send_part(bot, chat_id, thread_id, &html)?.0
-            }
-        };
-        sent_ids.push(message_id);
+    table: &str,
+) -> Result<i64, BotError> {
+    let lines: Vec<String> = table.lines().map(str::to_string).collect();
+    let drawn = image::render_at(
+        &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
+        image::LIGHT_BG,
+        image::TABLE_FONT_PX,
+    );
+    let sent = drawn
+        .ok()
+        .and_then(|png| bot.send_photo(chat_id, thread_id, None, &png, "").ok());
+    match sent {
+        Some(message_id) => Ok(message_id),
+        None => {
+            let html = format!("<pre>{}</pre>", escape_html(table));
+            Ok(send_part(bot, chat_id, thread_id, &html)?.0)
+        }
     }
-    Ok(sent_ids)
 }
 
 /// Put the answer where the "asking" message was; a long one continues in messages
-/// after it, and its tables follow as pictures, as a notification's do. A failure is
-/// said in a sentence in the same place. When the edit itself fails — the message too
-/// old, Telegram unreachable for a moment — the answer is sent as a fresh reply rather
-/// than lost, since an "Asking…" that never changes is the one outcome not allowed.
+/// after it, with its tables as pictures between the paragraphs they sat between, as
+/// a notification's are. A failure is said in a sentence in the same place. When the
+/// edit itself fails — the message too old, Telegram unreachable for a moment — the
+/// answer is sent as a fresh reply rather than lost, since an "Asking…" that never
+/// changes is the one outcome not allowed.
 pub(crate) fn deliver_answer(
     bot: &impl BotApi,
     root: &Path,
@@ -1266,24 +1261,30 @@ pub(crate) fn deliver_answer(
     placeholder: i64,
     answer: &crate::aside::Answer,
 ) {
-    let (parts, tables) = match answer {
-        Ok(text) => {
-            let (html, tables) = markdown::to_telegram_html_with_tables(text, None);
-            (
-                super::chunk(&format!("<b>{}</b>", escape_html(title)), &html),
-                tables,
-            )
-        }
-        Err(failure) => (
-            vec![escape_html(&wording::ask_failed(
-                title,
-                &failure.to_string(),
-            ))],
-            Vec::new(),
-        ),
+    let title_html = format!("<b>{}</b>", escape_html(title));
+    let mut parts: Vec<Part> = match answer {
+        Ok(text) => markdown::to_telegram_pieces(text, None)
+            .into_iter()
+            .flat_map(|piece| match piece {
+                markdown::Piece::Text(html) => super::chunk(&title_html, &html)
+                    .into_iter()
+                    .map(Part::Message)
+                    .collect(),
+                markdown::Piece::Table(layout) => vec![Part::Table(layout)],
+            })
+            .collect(),
+        Err(failure) => vec![Part::Message(escape_html(&wording::ask_failed(
+            title,
+            &failure.to_string(),
+        )))],
     };
+    // The placeholder is edited into the first message. An answer that opens with a
+    // table, or says nothing, still has to replace "Asking…" with something.
+    if !matches!(parts.first(), Some(Part::Message(_))) {
+        parts.insert(0, Part::Message(title_html));
+    }
     let mut parts = parts.into_iter();
-    if let Some(first) = parts.next() {
+    if let Some(Part::Message(first)) = parts.next() {
         let edited = match bot.edit_message_text(ask.chat_id, placeholder, &first) {
             Ok(()) => true,
             Err(BotError::Rejected(description))
@@ -1307,12 +1308,11 @@ pub(crate) fn deliver_answer(
         }
     }
     for part in parts {
-        if let Ok((message_id, _)) = send_part(bot, ask.chat_id, ask.thread_id, &part) {
-            record_sent(root, &ask.session_id, message_id);
-        }
-    }
-    if let Ok(message_ids) = send_tables(bot, ask.chat_id, ask.thread_id, &tables) {
-        for message_id in message_ids {
+        let sent = match &part {
+            Part::Message(html) => send_part(bot, ask.chat_id, ask.thread_id, html).map(|s| s.0),
+            Part::Table(layout) => send_table(bot, ask.chat_id, ask.thread_id, layout),
+        };
+        if let Ok(message_id) = sent {
             record_sent(root, &ask.session_id, message_id);
         }
     }
@@ -1514,18 +1514,11 @@ fn perform_with(
                 .as_ref()
                 .map(|question| question.tool_call_id.clone());
             let mut records = Vec::new();
-            let (chunks, tables) = compose_with_pictures(content, outbound.mode);
-            for chunk in chunks {
-                let (message_id, _) = send_part(bot, outbound.chat_id, thread_id, &chunk)?;
-                records.push(SentRecord {
-                    message_id,
-                    session_id: session_id.clone(),
-                    kind: Some(SentKind::from(content.kind)),
-                    tool_call_id: tool_call_id.clone(),
-                    sent_at: Utc::now(),
-                });
-            }
-            for message_id in send_tables(bot, outbound.chat_id, thread_id, &tables)? {
+            for part in compose_with_pictures(content, outbound.mode) {
+                let message_id = match &part {
+                    Part::Message(html) => send_part(bot, outbound.chat_id, thread_id, html)?.0,
+                    Part::Table(layout) => send_table(bot, outbound.chat_id, thread_id, layout)?,
+                };
                 records.push(SentRecord {
                     message_id,
                     session_id: session_id.clone(),
@@ -2453,8 +2446,8 @@ mod tests {
         drop(edits);
 
         // An edit Telegram refuses must not leave "Asking…" standing: the answer goes as
-        // a reply to the question instead, and its table follows as a notification's
-        // would — here as the block, since this bot takes no photos.
+        // a reply to the question instead, its table where it was written — here as the
+        // block, since this bot takes no photos — and the prose after it last.
         bot.refuse_edits.set(true);
         deliver_answer(
             &bot,
@@ -2462,7 +2455,7 @@ mod tests {
             &ask,
             "Bug <hunt>",
             79,
-            &Ok("Counts:\n\n| a | b |\n|---|---|\n| 1 | 2 |".to_string()),
+            &Ok("Counts:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nThat is all.".to_string()),
         );
         let sent = bot.sent.borrow();
         assert_eq!(
@@ -2471,12 +2464,32 @@ mod tests {
             "a reply to the question: {:?}",
             sent[0]
         );
-        assert!(
-            sent[0].1.contains("Table 1 is sent as a picture below"),
-            "{}",
-            sent[0].1
+        assert!(sent[0].1.ends_with("Counts:"), "{}", sent[0].1);
+        assert!(sent[1].1.starts_with("<pre>"), "{}", sent[1].1);
+        assert!(sent[2].1.ends_with("That is all."), "{}", sent[2].1);
+        assert_eq!(sent.len(), 3);
+        drop(sent);
+
+        // An answer that opens with a table still replaces "Asking…": with the title,
+        // and the table follows.
+        bot.refuse_edits.set(false);
+        deliver_answer(
+            &bot,
+            temp.path(),
+            &ask,
+            "Bug <hunt>",
+            80,
+            &Ok("| a |\n|---|\n| 1 |".to_string()),
         );
-        assert!(sent[1].1.contains("<pre>"), "{}", sent[1].1);
+        let edits = bot.edits.borrow();
+        assert_eq!(edits.last().unwrap().1, "<b>Bug &lt;hunt&gt;</b>");
+        let sent = bot.sent.borrow();
+        assert!(
+            sent.last().unwrap().1.starts_with("<pre>"),
+            "{}",
+            sent.last().unwrap().1
+        );
+        drop(edits);
         assert!(ask_prompt("what is left?", None).ends_with("quoted as data:\nwhat is left?"));
         let quoted = ask_prompt("what is left?", Some("User: hi\n\nCopilot: hello"));
         assert!(
@@ -3022,12 +3035,8 @@ mod tests {
         assert_eq!(*bot.photos.borrow(), 1, "the picture was tried first");
         let sent = bot.sent.borrow();
         assert_eq!(sent.len(), 2, "the text, then the table as a block");
-        assert!(sent[0].contains("[Table 1 is sent as a picture below]"));
-        assert!(
-            sent[1].starts_with("<i>Table 1</i>\n<pre>Name  Size"),
-            "{}",
-            sent[1]
-        );
+        assert!(sent[0].ends_with("Done:"), "{}", sent[0]);
+        assert!(sent[1].starts_with("<pre>Name  Size"), "{}", sent[1]);
         // Both are recorded, so a reply to either routes to the session.
         assert_eq!(store::load_in(temp.path()).sent.len(), 2);
     }
