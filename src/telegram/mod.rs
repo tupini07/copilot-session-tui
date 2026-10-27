@@ -32,6 +32,7 @@ pub mod markdown;
 pub mod queue;
 pub mod screen;
 pub mod store;
+pub mod transcript;
 pub mod wizard;
 pub mod worker;
 

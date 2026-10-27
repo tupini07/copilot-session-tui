@@ -219,6 +219,8 @@ async fn start_client() -> Result<Client, Failure> {
 
 /// One question in one session, which is deleted whatever happened.
 async fn answer(client: &Client, question: Question) -> Answer {
+    // Kept until the end: the folder must outlive the session that runs in it.
+    let mut scratch: Option<tempfile::TempDir> = None;
     let (id, session) = match &question.about {
         Some(source) => {
             let forked = client
@@ -245,7 +247,15 @@ async fn answer(client: &Client, question: Question) -> Answer {
                 .deny_all_permissions()
                 .with_available_tools(Vec::<String>::new())
                 .with_enable_config_discovery(false);
-            config.working_directory = question.working_dir.clone();
+            // A question with no folder of its own gets an empty one, not CST's
+            // working directory: there is nothing there for a model to see.
+            if question.working_dir.is_none() {
+                scratch = tempfile::tempdir().ok();
+            }
+            config.working_directory = question
+                .working_dir
+                .clone()
+                .or_else(|| scratch.as_ref().map(|dir| dir.path().to_path_buf()));
             (id, client.create_session(config).await)
         }
     };
@@ -270,12 +280,12 @@ async fn answer(client: &Client, question: Question) -> Answer {
                     let _ = session.abort().await;
                     Err(Failure::Timeout)
                 }
-                Err(error) => Err(Failure::Session(error.to_string())),
+                Err(error) => Err(Failure::Session(tidy(&error.to_string()))),
             };
             let _ = session.disconnect().await;
             answer
         }
-        Err(error) => Err(Failure::Session(error.to_string())),
+        Err(error) => Err(Failure::Session(tidy(&error.to_string()))),
     };
     // Whatever happened, the session made for this question does not stay.
     let _ = client.delete_session(&id).await;
@@ -288,7 +298,17 @@ fn fork_failure(message: &str) -> Failure {
     if message.contains("no persisted or in-memory events") {
         Failure::NoConversation
     } else {
-        Failure::Fork(message.to_string())
+        Failure::Fork(tidy(message))
+    }
+}
+
+/// The CLI's message without the RPC wrapping — "RPC error -32603: Request x failed
+/// with message: " — which says nothing to the person reading it on a phone.
+fn tidy(message: &str) -> String {
+    const WRAPPING: &str = "failed with message: ";
+    match message.find(WRAPPING) {
+        Some(at) => message[at + WRAPPING.len()..].trim().to_string(),
+        None => message.trim().to_string(),
     }
 }
 
@@ -303,13 +323,12 @@ mod tests {
     #[ignore = "starts the real Copilot CLI"]
     fn live_copilot_answers_a_side_question_and_leaves_no_session_behind() {
         let scratch = tempfile::tempdir().unwrap();
-        let before: std::collections::HashSet<_> = std::fs::read_dir(
-            crate::session::loader::copilot_home().join("session-state"),
-        )
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.file_name())
-        .collect();
+        let before: std::collections::HashSet<_> =
+            std::fs::read_dir(crate::session::loader::copilot_home().join("session-state"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
         let answer = ask(Question {
             prompt: "Reply with the single word pong.".to_string(),
             about: None,
@@ -317,15 +336,21 @@ mod tests {
             timeout: Duration::from_secs(60),
         });
         shutdown();
-        let after: std::collections::HashSet<_> = std::fs::read_dir(
-            crate::session::loader::copilot_home().join("session-state"),
-        )
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.file_name())
-        .collect();
-        assert_eq!(answer.as_deref().map(|a| a.to_lowercase()), Ok("pong".to_string()));
-        assert_eq!(after.difference(&before).count(), 0, "a session was left behind");
+        let after: std::collections::HashSet<_> =
+            std::fs::read_dir(crate::session::loader::copilot_home().join("session-state"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+        assert_eq!(
+            answer.as_deref().map(|a| a.to_lowercase()),
+            Ok("pong".to_string())
+        );
+        assert_eq!(
+            after.difference(&before).count(),
+            0,
+            "a session was left behind"
+        );
     }
 
     #[test]
@@ -335,6 +360,10 @@ mod tests {
         let refusal = "RPC error -32603: Request sessions.fork failed with message: Cannot fork \
                        session abc: no persisted or in-memory events found";
         assert_eq!(fork_failure(refusal), Failure::NoConversation);
+        assert_eq!(
+            tidy("RPC error -32603: Request session.sendAndWait failed with message: model unavailable"),
+            "model unavailable"
+        );
         assert!(matches!(
             fork_failure("RPC error -32603: boom"),
             Failure::Fork(_)
