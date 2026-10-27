@@ -195,6 +195,11 @@ pub trait BotApi {
     /// Acknowledge a tap so the button stops spinning on the phone; `text` shows as a
     /// small notice there. Every tap is answered, including ones that are ignored.
     fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), BotError>;
+    /// Show "typing…" in the chat, or in one topic of it, for about five seconds.
+    /// Provided as a no-op, so a stub that does not care is not asked to.
+    fn send_chat_action(&self, _chat_id: i64, _thread_id: Option<i64>) -> Result<(), BotError> {
+        Ok(())
+    }
     /// The emoji Telegram allows as topic icons, each with the id a topic is made
     /// with. Provided as empty, for stubs: no icon is the state before this existed.
     fn get_forum_topic_icon_stickers(&self) -> Result<Vec<TopicIcon>, BotError> {
@@ -748,6 +753,25 @@ impl BotApi for UreqBot {
                     kind: "emoji",
                     emoji,
                 }],
+            },
+        )?;
+        Ok(())
+    }
+
+    fn send_chat_action(&self, chat_id: i64, thread_id: Option<i64>) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body {
+            chat_id: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            message_thread_id: Option<i64>,
+            action: &'static str,
+        }
+        let _: Value = self.call(
+            "sendChatAction",
+            &Body {
+                chat_id,
+                message_thread_id: thread_id,
+                action: "typing",
             },
         )?;
         Ok(())

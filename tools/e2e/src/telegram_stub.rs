@@ -441,6 +441,28 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
             state.outbox.push(format!("commands: {}", names.join(" ")));
             ok("true".to_string())
         }
+        "sendChatAction" => {
+            // Sent every few seconds while a session works; one line per stretch of
+            // typing is what a script wants to read, not one per tick.
+            let thread_id = number(body, "message_thread_id");
+            let mut state = lock.lock().unwrap();
+            let line = match thread_id {
+                Some(thread_id) => {
+                    let name = state
+                        .topics
+                        .iter()
+                        .find(|(id, _)| *id == thread_id)
+                        .map(|(_, name)| name.clone())
+                        .unwrap_or_else(|| thread_id.to_string());
+                    format!("typing in {name}")
+                }
+                None => "typing".to_string(),
+            };
+            if state.outbox.last() != Some(&line) {
+                state.outbox.push(line);
+            }
+            ok("true".to_string())
+        }
         other => (
             404,
             format!(r#"{{"ok":false,"error_code":404,"description":"Not Found: {other}"}}"#),

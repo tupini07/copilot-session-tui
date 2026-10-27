@@ -1,0 +1,31 @@
+# While a session works, its topic shows "typing…", so the phone can tell a busy
+# session from a quiet one without a message. The stub records one line per stretch.
+
+size 110x30
+arg --mux
+fake_telegram forum
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+# A first turn opens the topic, since a topic cannot type before it exists; the long
+# second one keeps the status on. (The stub has no lifecycle journal, so it reads as
+# working for twenty seconds after any event: the typing seen here may begin with the
+# first turn's tail. What is tested is that a working session's topic types at all.)
+type e2e:work 1000 Warming up.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait topic: Existing app session
+press enter
+wait_for Fake Copilot is idling
+type e2e:work 15000 Long task finished.
+press enter
+press ctrl+b d
+wait_for Existing app session
+telegram_wait typing in Existing app session
+telegram_dump 01-typing
+# The rest of the fifteen seconds, then the result lands in the topic that was typing.
+timeout 20000
+telegram_wait Long task finished.
