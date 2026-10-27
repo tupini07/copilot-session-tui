@@ -104,6 +104,15 @@ pub struct Pane {
     /// turn's own ending.
     automated_turn: bool,
 
+    /// The turn now running was started from the phone, so its ending is reported to
+    /// the phone whoever is watching the pane. The attended rule exists because a turn
+    /// you watched finish needs no announcing; a question asked from Telegram while
+    /// this pane happens to be the attached one is not that case, and was found live:
+    /// the session the user works in most is the one they keep attached, and every
+    /// answer it gave to the phone went unreported. Set by a delivered reply; taken by
+    /// the turn's ending.
+    phone_asked: bool,
+
     working: bool,
     progress_state: crate::host_terminal::ProgressState,
     raw_progress_generation: u64,
@@ -284,6 +293,7 @@ impl Pane {
             },
             composer_occupied: false,
             automated_turn: false,
+            phone_asked: false,
             working: false,
             progress_state: crate::host_terminal::ProgressState::Clear,
             raw_progress_generation: 0,
@@ -492,6 +502,16 @@ impl Pane {
         self.automated_turn = false;
     }
 
+    /// The text just delivered came from the phone; the turn it starts, or steers,
+    /// reports back there when it ends, attended or not. See `phone_asked`.
+    pub fn note_phone_turn(&mut self) {
+        self.phone_asked = true;
+    }
+
+    pub fn phone_asked(&self) -> bool {
+        self.phone_asked
+    }
+
     /// Note a key on its way to the child, to track whether a draft is being composed.
     ///
     /// Only a plain Enter clears it. Everything else that could be editing — backspace,
@@ -511,8 +531,11 @@ impl Pane {
         // only the bare one means the composer is now empty.
         if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
             self.composer_occupied = false;
-            // The user submitted something, so whatever runs next is theirs.
+            // The user submitted something, so whatever runs next is theirs: neither
+            // CST's nor the phone's. Without the second reset a phone message that
+            // started no turn would have the next keyboard turn reported to the phone.
             self.automated_turn = false;
+            self.phone_asked = false;
             return;
         }
         let composes = match key.code {
@@ -779,7 +802,8 @@ impl Pane {
                         // A turn CST started ends without a word to the user; either
                         // way its ending puts the mark down.
                         let automated = std::mem::take(&mut self.automated_turn);
-                        if !attended && !automated {
+                        let phone = std::mem::take(&mut self.phone_asked);
+                        if (!attended && !automated) || phone {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -808,7 +832,8 @@ impl Pane {
                         // A turn CST started ends without a word to the user; either
                         // way its ending puts the mark down.
                         let automated = std::mem::take(&mut self.automated_turn);
-                        if !attended && !automated {
+                        let phone = std::mem::take(&mut self.phone_asked);
+                        if (!attended && !automated) || phone {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -844,7 +869,8 @@ impl Pane {
                         // A turn CST started ends without a word to the user; either
                         // way its ending puts the mark down.
                         let automated = std::mem::take(&mut self.automated_turn);
-                        if !attended && !automated {
+                        let phone = std::mem::take(&mut self.phone_asked);
+                        if (!attended && !automated) || phone {
                             notifications.push(PaneNotification::Ready);
                         }
                     }
@@ -1100,7 +1126,8 @@ impl Pane {
             // same question — "does this pane want you?" — so a turn that leaves no `●`
             // sends nothing either.
             let automated = std::mem::take(&mut self.automated_turn);
-            (!attended && !automated).then_some(PaneNotification::Ready)
+            let phone = std::mem::take(&mut self.phone_asked);
+            ((!attended && !automated) || phone).then_some(PaneNotification::Ready)
         } else {
             self.needs_attention = false;
             None
@@ -2281,6 +2308,42 @@ mod tests {
         assert!(
             notifications.is_empty(),
             "a turn finished under your nose is not news, got: {notifications:?}"
+        );
+        pane.shutdown().unwrap();
+    }
+
+    /// The exception to the rule above: the phone asked, so the phone is told, whoever
+    /// is watching. A keyboard Enter afterwards makes the next turn the user's again.
+    #[test]
+    fn a_turn_the_phone_started_notifies_even_when_watched_and_a_keyboard_enter_resets_that() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(33, program, args), 24, 80, tx).unwrap();
+
+        pane.note_phone_turn();
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        let (_, notifications) = pane.refresh_from_callbacks(true);
+        assert_eq!(notifications, vec![PaneNotification::Ready]);
+        assert!(!pane.phone_asked(), "the turn's end takes the flag");
+
+        pane.note_phone_turn();
+        pane.note_user_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        let (_, notifications) = pane.refresh_from_callbacks(true);
+        assert!(
+            notifications.is_empty(),
+            "a turn the user started at the keyboard is theirs, got: {notifications:?}"
         );
         pane.shutdown().unwrap();
     }

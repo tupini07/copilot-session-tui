@@ -3547,6 +3547,26 @@ impl App {
         session_title: String,
         session_id: Option<&str>,
     ) {
+        self.enqueue_notification_to(kind, session_title, session_id, true);
+    }
+
+    /// The answer to something asked from the phone: Telegram only, ntfy kept quiet.
+    pub fn enqueue_phone_report(
+        &mut self,
+        kind: NotificationKind,
+        session_title: String,
+        session_id: Option<&str>,
+    ) {
+        self.enqueue_notification_to(kind, session_title, session_id, false);
+    }
+
+    fn enqueue_notification_to(
+        &mut self,
+        kind: NotificationKind,
+        session_title: String,
+        session_id: Option<&str>,
+        ntfy_too: bool,
+    ) {
         if self.notification_drain_started.is_some() {
             return;
         }
@@ -3570,7 +3590,9 @@ impl App {
         };
         // Two channels, each gated on its own settings: ntfy being off or misconfigured
         // must not silence Telegram, or the other way round.
-        self.enqueue_ntfy(&effective, kind, &session_title, session_id);
+        if ntfy_too {
+            self.enqueue_ntfy(&effective, kind, &session_title, session_id);
+        }
         self.enqueue_telegram(&effective, kind, &session_title, session_id);
     }
 
@@ -4163,8 +4185,13 @@ impl App {
             // first: "queued until this turn ends" would be a promise about a turn
             // that cannot end until somebody answers. Seen live, with a reply left
             // waiting behind an open question.
+            //
+            // A reply during a plain turn is not held: it goes in now and steers the
+            // turn, as typing at the keyboard would. Only `/queue <text>` waits, and so
+            // does anything arriving behind text CST itself put in the composer.
             let blocked_on_user = permission_wait || user_action;
-            if working && !blocked_on_user {
+            let behind_cst = draft && self.injection_outstanding(&session_id);
+            if working && !blocked_on_user && (reply.holds_for_idle || behind_cst) {
                 if !reply.queued_told {
                     self.telegram_queued_notice(&session_id, &reply, &title);
                     self.update_telegram(|state| {
@@ -4243,6 +4270,10 @@ impl App {
                         let (keys, _) = crate::telegram::answer::plan(&question, &reply.text);
                         self.telegram_keys
                             .extend(keys.into_iter().map(|key| (pane_id, key)));
+                        if let Some(pane) = self.mux.as_mut().and_then(|mux| mux.pane_mut(pane_id))
+                        {
+                            pane.note_phone_turn();
+                        }
                         self.update_telegram(|state| {
                             if let Some(held) = state.reply_mut(reply.update_id) {
                                 held.status = ReplyStatus::Sent;
@@ -4292,10 +4323,13 @@ impl App {
                 continue;
             }
 
-            if self.session_ready_for_wake(&session_id)
-                && self.paste_ready(&session_id, &reply.text)
-            {
-                self.deliver_telegram_text(&reply, &title);
+            let ready = if working {
+                self.session_ready_for_steer(&session_id)
+            } else {
+                self.session_ready_for_wake(&session_id)
+            };
+            if ready && self.paste_ready(&session_id, &reply.text) {
+                self.deliver_telegram_text(&reply, &title, working);
                 changed = true;
             } else if reply.age_seconds() >= Self::WAKE_PATIENCE_SECS {
                 // Blank for five minutes, or never came to accept a paste: say so
@@ -4330,7 +4364,16 @@ impl App {
     }
 
     /// Type a reply into its session and tell the phone it landed.
-    fn deliver_telegram_text(&mut self, reply: &crate::telegram::store::Reply, title: &str) {
+    ///
+    /// `steering` says the session is mid-turn: Copilot takes the text as it arrives,
+    /// so the composer is not counted as occupied afterwards, and a second steer in the
+    /// same turn is not made to wait behind the first.
+    fn deliver_telegram_text(
+        &mut self,
+        reply: &crate::telegram::store::Reply,
+        title: &str,
+        steering: bool,
+    ) {
         use crate::telegram::store::ReplyStatus;
 
         // Claim before typing. A Cancel tapped on the phone takes a reply out under
@@ -4352,8 +4395,14 @@ impl App {
             return;
         }
         let text = crate::notifications::sanitize_message(&reply.text);
-        match self.inject_prompt(&reply.session_id, &text) {
+        match self.inject_prompt_as(&reply.session_id, &text, !steering) {
             Ok(()) => {
+                if let Some(pane) = self
+                    .pane_for_session(&reply.session_id)
+                    .and_then(|id| self.mux.as_mut()?.pane_mut(id))
+                {
+                    pane.note_phone_turn();
+                }
                 // Answering from the phone is reading: the result this tab was holding
                 // for the user has been seen, on the phone. The mark would go anyway
                 // once Copilot starts on the reply, but that is seconds away and does
@@ -6080,6 +6129,20 @@ impl App {
             .is_none_or(|pane| !pane.has_draft())
     }
 
+    /// Whether a working session can take a message that steers its turn: the same as
+    /// [`Self::session_ready_for_wake`] without the turn having to be over.
+    fn session_ready_for_steer(&self, session_id: &str) -> bool {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
+            .is_some_and(|pane| {
+                pane.is_running()
+                    && !pane.is_blank()
+                    && !pane.requires_user_action()
+                    && !pane.has_draft()
+            })
+    }
+
     /// Whether a session can be written to without corrupting what it is doing.
     fn session_ready_for_wake(&self, session_id: &str) -> bool {
         self.mux
@@ -6163,6 +6226,17 @@ impl App {
     /// Shared by thread wake-ups and Telegram replies. The caller has decided the pane
     /// can take it; this only does the typing.
     fn inject_prompt(&mut self, session_id: &str, text: &str) -> Result<()> {
+        self.inject_prompt_as(session_id, text, true)
+    }
+
+    /// `occupies_composer` is false when the session is mid-turn and takes the text at
+    /// once, so nothing is left sitting there for a later notice to queue behind.
+    fn inject_prompt_as(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        occupies_composer: bool,
+    ) -> Result<()> {
         let Some(pane_id) = self.pane_for_session(session_id) else {
             anyhow::bail!("the session is no longer open");
         };
@@ -6181,7 +6255,9 @@ impl App {
         // the composer while it is busy in a way the hooks do not report — an autopilot
         // run working through background agents, say. The composer counts as occupied
         // until a turn actually starts, so the next notice waits rather than stacking.
-        pane.note_injection();
+        if occupies_composer {
+            pane.note_injection();
+        }
         // An injection is the user's unless the caller says otherwise afterwards (a
         // thread wake-up does); a Telegram reply is the user speaking and must end loud.
         pane.clear_automated_turn();
