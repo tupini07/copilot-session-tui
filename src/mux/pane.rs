@@ -1482,34 +1482,12 @@ fn github_references(screen: &vt100::Screen) -> Vec<u64> {
     let (rows, cols) = screen.size();
     let mut found = std::collections::BTreeSet::new();
     for row in 0..rows {
-        let characters = row_characters(screen, row, cols);
-        for (index, character) in characters.iter().enumerate() {
-            if *character != '#' {
-                continue;
-            }
-            let start = index + 1;
-            let mut end = start;
-            while characters.get(end).is_some_and(char::is_ascii_digit) {
-                end += 1;
-            }
-            if end == start {
-                continue;
-            }
-            // A digit immediately before the hash means this is part of a
-            // longer token such as a colour code, not a reference.
-            if index > 0 && characters[index - 1].is_ascii_alphanumeric() {
-                continue;
-            }
-            if let Ok(number) = characters[start..end]
-                .iter()
-                .collect::<String>()
-                .parse::<u64>()
-            {
-                if number > 0 {
-                    found.insert(number);
-                }
-            }
-        }
+        let line: String = row_characters(screen, row, cols).into_iter().collect();
+        found.extend(
+            crate::github::reference_spans(&line)
+                .into_iter()
+                .map(|(_, number)| number),
+        );
     }
     found.into_iter().collect()
 }

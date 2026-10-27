@@ -1919,6 +1919,29 @@ impl App {
         else {
             return;
         };
+        self.prefetch_github_repository_for(cwd);
+    }
+
+    /// The repository a session's folder belongs to, once `gh` has said.
+    ///
+    /// `None` also while the answer is on its way: the look-up is started here, so a
+    /// session whose pane was never focused still gets its links from its second
+    /// notification on. Never waits — this runs on the UI thread.
+    fn repository_for_session(&mut self, session_id: &str) -> Option<crate::github::RepositoryRef> {
+        let cwd = self
+            .pane_for_session(session_id)
+            .and_then(|id| self.mux.as_ref()?.pane(id))
+            .map(|pane| pane.cwd.clone())?;
+        match self.github_repositories.get(&cwd) {
+            Some(known) => known.clone(),
+            None => {
+                self.prefetch_github_repository_for(cwd);
+                None
+            }
+        }
+    }
+
+    fn prefetch_github_repository_for(&mut self, cwd: PathBuf) {
         if self.github_repositories.contains_key(&cwd) || self.github_repo_receiver.is_some() {
             return;
         }
@@ -3666,16 +3689,19 @@ impl App {
                 body: None,
                 question: None,
                 plan_summary: None,
+                repository: None,
             },
             TelegramContent::Full => {
                 let (events_path, events_start, events_end) = self.cycle_window(Some(session_id));
-                crate::notifications::telegram_content(
+                let mut content = crate::notifications::telegram_content(
                     kind,
                     &title,
                     events_path.as_deref(),
                     events_start,
                     events_end,
-                )
+                );
+                content.repository = self.repository_for_session(session_id);
+                content
             }
         };
         let outbound = Outbound {
@@ -4302,6 +4328,19 @@ impl App {
         let text = crate::notifications::sanitize_message(&reply.text);
         match self.inject_prompt(&reply.session_id, &text) {
             Ok(()) => {
+                // Answering from the phone is reading: the result this tab was holding
+                // for the user has been seen, on the phone. The mark would go anyway
+                // once Copilot starts on the reply, but that is seconds away and does
+                // not come at all when the composer is busy, so it goes now. The hand-
+                // made mark stays: that is a reminder, not a result. The turn this
+                // reply starts will mark the tab again when it ends unwatched, which
+                // is right — that result the user has not seen yet.
+                if let Some(pane) = self
+                    .pane_for_session(&reply.session_id)
+                    .and_then(|id| self.mux.as_mut()?.pane_mut(id))
+                {
+                    pane.acknowledge_attention();
+                }
                 self.telegram_react(reply.user_message_id);
                 // The "Queued" notice, if there was one, now says so and loses its
                 // Cancel; a button that can only answer "already delivered" misleads.
@@ -6056,7 +6095,41 @@ impl App {
         {
             pane.note_automated_turn();
         }
+        // The turn this starts ends quietly, so this line is the phone's one word about
+        // it: the session is busy because of a comment, here is the thread. The link
+        // only; the comment's text never goes anywhere.
+        let title = self.telegram_session_title(session_id);
+        self.telegram_tell(
+            session_id,
+            &title,
+            crate::telegram::wording::thread_wake(&title, &thread.url()),
+        );
         Ok(())
+    }
+
+    /// A line from CST about a session, to the phone. In a forum it goes in the
+    /// session's topic, which is made if the session has not spoken yet.
+    fn telegram_tell(&mut self, session_id: &str, title: &str, text: String) {
+        let telegram = &self.config.telegram;
+        let (true, Some(chat_id)) = (telegram.enabled, telegram.chat_id) else {
+            return;
+        };
+        let token = self.config.telegram_bot_token.trim().to_string();
+        if token.is_empty() {
+            return;
+        }
+        let outbound = crate::telegram::worker::Outbound {
+            token,
+            api_base: telegram.api_base.clone(),
+            chat_id,
+            mode: telegram.chat_mode,
+            job: crate::telegram::worker::OutboundJob::Tell {
+                session_id: session_id.to_string(),
+                title: title.to_string(),
+                text,
+            },
+        };
+        self.send_telegram(outbound);
     }
 
     /// Type text into a session's composer and submit it.

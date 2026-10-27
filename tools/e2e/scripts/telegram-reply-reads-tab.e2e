@@ -1,0 +1,36 @@
+# A session finishes while the user is in another tab, so its tab carries the unread
+# mark and the phone gets the result. The user answers from the phone. That answer is
+# proof the result was read, so the mark goes at once, before Copilot has even picked
+# the reply up; the stub never starts a turn on plain text, so nothing else could clear it.
+
+size 110x30
+arg --mux
+fake_telegram private
+session existing-app Existing app session
+session other-app Other session
+
+# Two tabs: whichever row is first opens first, then the other.
+wait_for Other session
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b d
+wait_for Other session
+press down
+press enter
+wait_for --resume=00000002-0000-4000-8000-000000000002
+
+# A turn in the previous tab, watched from this one, so its end is unread there.
+press ctrl+b p
+wait_for --resume=00000001-0000-4000-8000-000000000001
+type e2e:work 3000 Done thinking about it.
+press enter
+press ctrl+b n
+telegram_wait Done thinking about it.
+wait_for ●
+dump 01-unread-tab
+
+# Answering from the phone reads it: the mark is gone while the other tab stays focused.
+telegram_say Thanks, carry on
+telegram_wait reaction on
+wait_gone ●
+dump 02-read-from-phone

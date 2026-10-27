@@ -97,6 +97,15 @@ pub enum OutboundJob {
         buttons: Vec<Button>,
         queued_for: Option<i64>,
     },
+    /// A line about a session, from CST rather than from the session: in a forum it
+    /// goes in the session's topic, made first if this is the session's first word.
+    /// `Say` cannot do that, since it takes the topic as given.
+    Tell {
+        session_id: String,
+        /// Names the topic if one has to be made.
+        title: String,
+        text: String,
+    },
     /// Replace a message's text; its buttons go with the old text.
     Edit { message_id: i64, html: String },
     /// A thumbs-up on the user's own message: delivery confirmed without a bubble.
@@ -967,6 +976,33 @@ fn perform_with(bot: &impl BotApi, root: &Path, outbound: &Outbound) -> Result<(
             }
             Ok(())
         }
+        OutboundJob::Tell {
+            session_id,
+            title,
+            text,
+        } => {
+            let thread_id = match outbound.mode {
+                TelegramChatMode::Forum => Some(ensure_topic(
+                    bot,
+                    root,
+                    outbound.chat_id,
+                    session_id,
+                    title,
+                )?),
+                TelegramChatMode::Private => None,
+            };
+            let message_id =
+                bot.send_message(outbound.chat_id, thread_id, None, &escape_html(text))?;
+            let record = SentRecord {
+                message_id,
+                session_id: session_id.clone(),
+                kind: None,
+                tool_call_id: None,
+                sent_at: Utc::now(),
+            };
+            let _ = store::update_in(root, |state| state.record_sent(record));
+            Ok(())
+        }
         OutboundJob::Notice {
             session_id,
             thread_id,
@@ -1061,6 +1097,102 @@ fn ensure_topic(
 mod tests {
     use super::*;
     use crate::telegram::bot::{CallbackQuery, Chat, Message, RepliedTo, User};
+
+    #[test]
+    fn a_line_from_cst_about_a_session_opens_its_topic_if_need_be_and_routes_replies_back() {
+        use std::cell::RefCell;
+
+        struct Recorder {
+            topics: RefCell<Vec<String>>,
+            sent: RefCell<Vec<(Option<i64>, String)>>,
+        }
+        impl BotApi for Recorder {
+            fn create_forum_topic(&self, _: i64, name: &str) -> Result<i64, BotError> {
+                self.topics.borrow_mut().push(name.to_string());
+                Ok(42)
+            }
+            fn send_message(
+                &self,
+                _: i64,
+                thread_id: Option<i64>,
+                _: Option<i64>,
+                html: &str,
+            ) -> Result<i64, BotError> {
+                self.sent.borrow_mut().push((thread_id, html.to_string()));
+                Ok(7)
+            }
+            fn get_me(&self) -> Result<super::super::bot::BotIdentity, BotError> {
+                unreachable!()
+            }
+            fn get_updates(&self, _: Option<i64>, _: Duration) -> Result<Vec<Update>, BotError> {
+                unreachable!()
+            }
+            fn edit_forum_topic(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn close_forum_topic(&self, _: i64, _: i64) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn get_chat_member(
+                &self,
+                _: i64,
+                _: i64,
+            ) -> Result<super::super::bot::ChatMember, BotError> {
+                unreachable!()
+            }
+            fn set_message_reaction(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn edit_message_text(&self, _: i64, _: i64, _: &str) -> Result<(), BotError> {
+                unreachable!()
+            }
+            fn send_message_with_buttons(
+                &self,
+                _: i64,
+                _: Option<i64>,
+                _: Option<i64>,
+                _: &str,
+                _: &[Button],
+            ) -> Result<i64, BotError> {
+                unreachable!()
+            }
+            fn answer_callback_query(&self, _: &str, _: Option<&str>) -> Result<(), BotError> {
+                unreachable!()
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let bot = Recorder {
+            topics: RefCell::new(Vec::new()),
+            sent: RefCell::new(Vec::new()),
+        };
+        // A session that has never notified has no topic yet; the line about it is
+        // its first word in the group and must not land in General.
+        let outbound = Outbound {
+            token: "1:x".to_string(),
+            api_base: "http://127.0.0.1:9".to_string(),
+            chat_id: -100,
+            mode: TelegramChatMode::Forum,
+            job: OutboundJob::Tell {
+                session_id: "s1".to_string(),
+                title: "Watched session".to_string(),
+                text: wording::thread_wake("Watched session", "https://github.com/o/r/issues/7"),
+            },
+        };
+
+        perform_with(&bot, temp.path(), &outbound).unwrap();
+
+        assert!(bot.topics.borrow()[0].contains("Watched session"));
+        let sent = bot.sent.borrow();
+        assert_eq!(sent[0].0, Some(42), "sent into the topic just made");
+        assert!(sent[0].1.contains("https://github.com/o/r/issues/7"));
+        // Recorded against the session, so a reply to this line reaches it.
+        let state = store::load_in(temp.path());
+        assert!(state
+            .sent
+            .iter()
+            .any(|record| record.message_id == 7 && record.session_id == "s1"));
+    }
 
     fn settings(paired: Option<Paired>) -> PollSettings {
         PollSettings {

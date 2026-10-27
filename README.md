@@ -759,7 +759,8 @@ configure. Pairing again with a fresh code is how you move the bot from one to t
 #### What a reply does
 
 A reply is typed into the session's composer and submitted, as if you had typed it. CST
-confirms with a 👍 on your message. When it cannot deliver, it says so at once, and the
+confirms with a 👍 on your message, and the session's tab drops its unread mark: you
+read that result on the phone. When it cannot deliver, it says so at once, and the
 message stays in Telegram to send again:
 
 - the session is **not open in CST**: open it on the PC and reply again. Nothing is
@@ -812,7 +813,9 @@ to one session.
 plus the question and its choices or the plan summary when there is one. Copilot writes
 Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
 themselves, a heading as a bold line, lists as indented bullets, a table as an aligned
-block in monospace, and a raw HTML tag as the text it is. Nothing is cut:
+block in monospace, and a raw HTML tag as the text it is. An issue or pull request
+number in the prose, like #12, is a link into the repository the session's folder
+belongs to, the same way it is a click target in the pane. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a
 paragraph break where there is one, else a line break, a sentence end or a word, and each
 part says which of how many it is. Choose **Status
@@ -950,7 +953,9 @@ A turn that a wake-up started ends quietly. The tab marks itself unread so you c
 what the session did, but nothing is sent to ntfy or Telegram: a watched issue that
 gets a comment every few minutes would otherwise ring your phone for every one, about
 work nobody at the keyboard began. A turn you started still notifies when it ends, as do
-a question, an error and a plan approval, whoever started the turn.
+a question, an error and a plan approval, whoever started the turn. Telegram does get
+one line as the wake-up is typed in, naming the session and linking the thread, so you
+know why a session is suddenly busy; that line carries the link and never the comment.
 
 ### Closing CST does not lose a message
 
