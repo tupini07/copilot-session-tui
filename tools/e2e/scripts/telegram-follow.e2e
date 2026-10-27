@@ -1,7 +1,7 @@
 # The user wants to see what a session is doing before deciding whether to wait.
-# /follow sends one message with the pane's screen, verbatim in a monospace block, and
-# keeps editing it as the screen changes, then /unfollow ends it with a marker that
-# cannot be read as live. The commands are CST's own and are never typed into the session.
+# /follow sends one message with the session's latest words and keeps editing it as
+# the log grows, then /unfollow ends it with a marker that cannot be read as live.
+# The commands are CST's own and are never typed into the session.
 
 size 110x30
 arg --mux
@@ -23,22 +23,18 @@ telegram_wait Setup is done.
 # The poller published CST's own commands to the bot's menu when it started.
 telegram_wait commands: follow unfollow queue
 
-# /follow is answered with the live view — the pane's screen in a monospace block,
-# with the way to stop it — quoting the command, and goes nowhere near the session's
-# composer.
+# /follow is answered with the live view, quoting the command, and goes nowhere near
+# the session's composer.
 telegram_say /follow 2
 telegram_wait Following
-telegram_wait <pre>
-telegram_wait Fake Copilot is idling.
 telegram_wait Setup is done.
-telegram_wait Send /unfollow to stop
 telegram_wait ends in 2 min
 telegram_dump 01-following
 press enter
 expect_not Fake Copilot received: /follow
 dump 01-session-untouched
 
-# The session shows more; within ten seconds the same message is edited to show it.
+# The session says more; within one poll the same message is edited to show it.
 type e2e:say Now reading the files, one by one.
 press enter
 press ctrl+b d
