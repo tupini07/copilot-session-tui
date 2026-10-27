@@ -15,8 +15,9 @@ pub fn main() {
         println!("1.0.40");
         return;
     }
-    // `copilot -p <prompt>`: CST asking a one-line question with no session, as it
-    // does to choose a topic's emoji. The stub answers the first emoji it is offered
+    // `copilot -p <prompt>`: CST asking a one-line question in a throwaway session it
+    // removes afterwards, as it does to choose a topic's emoji. The stub answers the
+    // first emoji it is offered
     // that the prompt does not list as already taken, so a script can predict it.
     if let Some(at) = args.iter().position(|arg| arg == "-p") {
         let prompt = args.get(at + 1).cloned().unwrap_or_default();

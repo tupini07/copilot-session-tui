@@ -3,8 +3,8 @@
 //! A forum topic can carry an icon, and a row of topics all wearing the default
 //! bubble is a row of names to read. One well-chosen emoji per session makes the group
 //! scannable: the rocket is the deploy, the bug is the bug hunt. Choosing it is a
-//! judgement about a title, so a small model does it, non-interactively and with no
-//! tools, the way `threads::judge` asks its one question.
+//! judgement about a title, so Copilot does it, non-interactively and with no tools,
+//! the way `threads::judge` asks its one question.
 //!
 //! Telegram allows a topic icon only from its own set, so the model picks from the
 //! emoji that set offers, and is told which were handed out to other sessions lately
@@ -20,8 +20,37 @@ use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// How long the model gets. The topic is made on the sending thread, so this is the
-/// most a session's first notification can be delayed.
-pub const TIMEOUT: Duration = Duration::from_secs(15);
+/// most a session's first notification can be delayed. A one-emoji answer through
+/// prompt mode measured twelve seconds with the CLI's default model, most of it the
+/// CLI starting up, so this leaves room for a slow day rather than for a long think.
+pub const TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A prompt-mode call's session, removed from the user's session list when it is over.
+///
+/// Prompt mode saves a session like an interactive one, named after the prompt's first
+/// line, and nothing removes it. Left alone, every topic made would add a "You are
+/// choosing an icon for a chat topic" entry to the list CST exists to manage. Choosing
+/// the id up front is what makes the folder findable afterwards, however the call ended.
+struct PromptSession {
+    id: String,
+}
+
+impl PromptSession {
+    fn new() -> Self {
+        Self {
+            id: crate::session::manager::new_session_id(),
+        }
+    }
+}
+
+impl Drop for PromptSession {
+    fn drop(&mut self) {
+        let dir = crate::session::loader::copilot_home()
+            .join("session-state")
+            .join(&self.id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
 
 /// How recently another topic must have been given an emoji for it to count as taken.
 pub const RECENT_DAYS: i64 = 7;
@@ -82,10 +111,13 @@ pub fn parse_choice(answer: &str, available: &[String]) -> Option<String> {
 pub fn ask_copilot(prompt_text: &str) -> Option<String> {
     let probe = crate::session::manager::copilot_probe()?;
     let scratch = tempfile::tempdir().ok()?;
+    let session = PromptSession::new();
+    // No `--reasoning-effort none`: the CLI rejects it outright for some of its default
+    // models, which turned every choice into a failed call rather than a cheaper one.
     let mut child = std::process::Command::new(&probe.program)
         .arg("-p")
         .arg(prompt_text)
-        .args(["-s", "--reasoning-effort", "none", "--disable-builtin-mcps"])
+        .args(["-s", "--disable-builtin-mcps", "--session-id", &session.id])
         .current_dir(scratch.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

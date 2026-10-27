@@ -753,8 +753,9 @@ it; protect the file as you would any credential.
   Topics** right; the wizard's link requests that on the way in, and checks it. This is
   the mode for running many sessions at once. Each new topic wears an emoji chosen for
   the session's title — the rocket for the deploy, the bug for the bug hunt — so a row
-  of topics can be read at a glance. A small model picks it from the icons Telegram
-  offers, told which ones other topics got in the last week so neighbours do not match;
+  of topics can be read at a glance. Copilot picks it, non-interactively, from the icons
+  Telegram offers, told which ones other topics got in the last week so neighbours do
+  not match;
   the choice takes a few seconds on the session's first notification, and a topic goes
   without when Copilot is not to hand.
 
