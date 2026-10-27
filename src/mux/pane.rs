@@ -93,6 +93,13 @@ pub struct Pane {
     /// evidence it is gone — a submit, or a turn starting.
     composer_occupied: bool,
 
+    /// CST itself has written into the composer and pressed Enter, and no turn has
+    /// started since. Kept apart from `composer_occupied` because the two mean
+    /// different things to the user: this blocks the next injection from stacking onto
+    /// it, but it is not a draft of theirs, and showing it as one — a pencil on a tab
+    /// whose composer they know to be empty — is what a phone reply used to do.
+    injection_pending: bool,
+
     /// The turn now running was started by CST itself — a thread wake-up — and not by
     /// the user. Its ending is not news the user asked for: a watched issue that gets
     /// seventeen comments in a morning wakes the session seventeen times, and each
@@ -292,6 +299,7 @@ impl Pane {
                 cols: size.cols,
             },
             composer_occupied: false,
+            injection_pending: false,
             automated_turn: false,
             phone_asked: false,
             working: false,
@@ -476,8 +484,15 @@ impl Pane {
         }
     }
 
-    /// Whether this pane's composer holds text nobody has sent yet.
+    /// Whether this pane's composer holds text no turn has taken yet: the user's, or
+    /// CST's own. This is the question before writing into it.
     pub fn has_draft(&self) -> bool {
+        self.composer_occupied || self.injection_pending
+    }
+
+    /// Whether the user typed something here and never sent it. This is the question
+    /// before showing them a pencil, or refusing a phone reply on their behalf.
+    pub fn has_user_draft(&self) -> bool {
         self.composer_occupied
     }
 
@@ -488,7 +503,7 @@ impl Pane {
     /// second wake-up arriving then would stack onto the first, and the user would get
     /// one message containing the same notice several times over.
     pub fn note_injection(&mut self) {
-        self.composer_occupied = true;
+        self.injection_pending = true;
     }
 
     /// The prompt just injected was CST's own doing, so the turn it starts should end
@@ -531,6 +546,7 @@ impl Pane {
         // only the bare one means the composer is now empty.
         if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
             self.composer_occupied = false;
+            self.injection_pending = false;
             // The user submitted something, so whatever runs next is theirs: neither
             // CST's nor the phone's. Without the second reset a phone message that
             // started no turn would have the next keyboard turn reported to the phone.
@@ -615,6 +631,7 @@ impl Pane {
             self.hook_ready_pending = None;
             self.hook_state = Some(HookActivity::Working);
             self.working = true;
+            self.injection_pending = false;
             self.needs_attention = false;
             self.ready_sent_in_cycle = false;
             self.error_sent_in_cycle = false;
@@ -669,6 +686,7 @@ impl Pane {
         self._lifecycle_monitor.take();
         self._hook_monitor.take();
         self.working = false;
+        self.injection_pending = false;
         self.progress_state = crate::host_terminal::ProgressState::Clear;
         self.hook_state = Some(HookActivity::Idle);
         self.hook_waiting = None;
@@ -777,6 +795,7 @@ impl Pane {
                         self.error_sent_in_cycle = false;
                     }
                     self.working = true;
+                    self.injection_pending = false;
                     if !self.requires_user_action() {
                         self.needs_attention = false;
                     }
@@ -983,6 +1002,7 @@ impl Pane {
                 // the authoritative clear: it catches a message submitted by a route CST
                 // never saw, such as a mouse click or a paste that ends in a newline.
                 self.composer_occupied = false;
+                self.injection_pending = false;
                 self.hook_state = Some(HookActivity::Working);
                 self.hook_waiting = None;
                 self.hook_ready_pending = None;
@@ -1000,6 +1020,7 @@ impl Pane {
                     self.error_sent_in_cycle = false;
                 }
                 self.working = true;
+                self.injection_pending = false;
                 self.needs_attention = false;
                 PaneHookOutcome {
                     notification: None,
@@ -1110,6 +1131,7 @@ impl Pane {
             self.hook_ready_pending = None;
             self.hook_state = Some(HookActivity::Working);
             self.working = true;
+            self.injection_pending = false;
             self.needs_attention = false;
             self.ready_sent_in_cycle = false;
             return None;
@@ -1966,6 +1988,32 @@ mod tests {
 
         pane.note_user_key(&key(KeyCode::Enter));
         assert!(!pane.has_draft(), "sending empties the composer");
+        pane.shutdown().unwrap();
+    }
+
+    #[test]
+    fn what_cst_typed_itself_blocks_the_next_injection_but_is_not_the_users_draft() {
+        // A reply from the phone goes into the composer with an Enter CST presses. Until
+        // a turn starts it must hold the slot, or a wake-up arriving now would stack
+        // onto it; but it is not something the user left unsent, and the pencil on the
+        // tab said it was. Seen live: a phone reply to the attached session, and a draft
+        // mark on a composer the user could see was empty.
+        let (tx, _rx) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+
+        pane.note_injection();
+        assert!(pane.has_draft(), "the slot is held");
+        assert!(!pane.has_user_draft(), "but it is not theirs");
+
+        // The turn starting is what frees the slot, as for a draft of the user's.
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        assert!(!pane.has_draft(), "the turn took it");
         pane.shutdown().unwrap();
     }
 

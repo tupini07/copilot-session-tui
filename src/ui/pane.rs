@@ -719,7 +719,7 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
     // Something typed here and never sent. Ranked below anything the session wants from
     // the user, because a draft is not waiting on them — it is waiting on them to come
     // back, which is a quieter thing.
-    if pane.has_draft() {
+    if pane.has_user_draft() {
         return "✎ ".to_string();
     }
     match pane.effective_progress_state() {

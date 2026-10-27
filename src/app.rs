@@ -4415,10 +4415,12 @@ impl App {
                             pane.awaiting_tool_permission(),
                             pane.requires_user_action(),
                             pane.has_draft(),
+                            pane.has_user_draft(),
                         )
                     })
             });
-            let Some((working, permission_wait, user_action, draft)) = pane_state else {
+            let Some((working, permission_wait, user_action, draft, user_draft)) = pane_state
+            else {
                 continue;
             };
 
@@ -4432,7 +4434,10 @@ impl App {
             // turn, as typing at the keyboard would. Only `/queue <text>` waits, and so
             // does anything arriving behind text CST itself put in the composer.
             let blocked_on_user = permission_wait || user_action;
-            let behind_cst = draft && self.injection_outstanding(&session_id);
+            // Text of CST's own: a phone reply or a wake-up pressed in and not yet taken
+            // by a turn. The pane knows about both; the thread store only about the
+            // second, and is kept for the record it carries across restarts.
+            let behind_cst = draft && (!user_draft || self.injection_outstanding(&session_id));
             if working && !blocked_on_user && (reply.holds_for_idle || behind_cst) {
                 if !reply.queued_told {
                     self.telegram_queued_notice(&session_id, &reply, &title);
@@ -4541,7 +4546,7 @@ impl App {
             }
 
             if draft {
-                if self.injection_outstanding(&session_id) {
+                if !user_draft || self.injection_outstanding(&session_id) {
                     // CST's own text, not the user's. Queue behind it, as thread
                     // notices queue behind each other.
                     if !reply.queued_told {
