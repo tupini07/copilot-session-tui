@@ -433,6 +433,8 @@ pub(crate) fn telegram_content(
         body,
         question,
         plan_summary,
+        // The caller knows the session's folder and what `gh` said about it.
+        repository: None,
     }
 }
 

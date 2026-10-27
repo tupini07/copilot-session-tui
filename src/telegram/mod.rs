@@ -226,6 +226,9 @@ pub struct Content {
     pub body: Option<String>,
     pub question: Option<Question>,
     pub plan_summary: Option<String>,
+    /// The repository the session's folder belongs to, once known, so a `#1234` in the
+    /// body opens that issue or pull request from the phone.
+    pub repository: Option<crate::github::RepositoryRef>,
 }
 
 /// Turn a notification into the HTML messages Telegram is sent, in order.
@@ -259,7 +262,10 @@ pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
         if !text.is_empty() {
             text.push_str("\n\n");
         }
-        text.push_str(&markdown::to_telegram_html(body));
+        text.push_str(&markdown::to_telegram_html_in(
+            body,
+            content.repository.as_ref(),
+        ));
     }
     if let Some(question) = &content.question {
         text.push_str("\n\n");
@@ -842,6 +848,7 @@ mod tests {
             body: body.map(str::to_string),
             question: None,
             plan_summary: None,
+            repository: None,
         }
     }
 

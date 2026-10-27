@@ -197,6 +197,7 @@ pub fn test(config: &UserConfig, markdown: Option<&Path>) -> Result<String> {
             body: Some(body),
             question: None,
             plan_summary: None,
+            repository: None,
         };
         let parts = compose(&content, telegram.chat_mode);
         let total = parts.len();
