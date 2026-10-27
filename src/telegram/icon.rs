@@ -14,43 +14,14 @@
 //! Advisory throughout: any failure — no Copilot, a slow answer, an emoji not in the
 //! set — leaves the topic exactly as it was before this existed.
 
-use std::io::Read;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// How long the model gets. The topic is made on the sending thread, so this is the
-/// most a session's first notification can be delayed. A one-emoji answer through
-/// prompt mode measured twelve seconds with the CLI's default model, most of it the
-/// CLI starting up, so this leaves room for a slow day rather than for a long think.
-pub const TIMEOUT: Duration = Duration::from_secs(20);
-
-/// A prompt-mode call's session, removed from the user's session list when it is over.
-///
-/// Prompt mode saves a session like an interactive one, named after the prompt's first
-/// line, and nothing removes it. Left alone, every topic made would add a "You are
-/// choosing an icon for a chat topic" entry to the list CST exists to manage. Choosing
-/// the id up front is what makes the folder findable afterwards, however the call ended.
-struct PromptSession {
-    id: String,
-}
-
-impl PromptSession {
-    fn new() -> Self {
-        Self {
-            id: crate::session::manager::new_session_id(),
-        }
-    }
-}
-
-impl Drop for PromptSession {
-    fn drop(&mut self) {
-        let dir = crate::session::loader::copilot_home()
-            .join("session-state")
-            .join(&self.id);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
+/// How long the model gets. The topic is already made when it is asked, so a slow
+/// answer costs a late icon, not a late message; a one-emoji answer measures a few
+/// seconds, plus the Copilot server's start when it is the first question in a while.
+pub const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How recently another topic must have been given an emoji for it to count as taken.
 pub const RECENT_DAYS: i64 = 7;
@@ -103,51 +74,20 @@ pub fn parse_choice(answer: &str, available: &[String]) -> Option<String> {
         })
 }
 
-/// Run Copilot non-interactively for one line, bounded by [`TIMEOUT`].
+/// Ask Copilot for one line, bounded by [`TIMEOUT`].
 ///
 /// No tools, no repository: the prompt holds a title written by whoever named the
-/// session, and nothing it says should be able to do anything. A child still running
-/// at the deadline is killed, and the answer is `None`.
+/// session, and nothing it says should be able to do anything. The question runs in a
+/// session of its own, in an empty folder, deleted when the answer is in.
 pub fn ask_copilot(prompt_text: &str) -> Option<String> {
-    let probe = crate::session::manager::copilot_probe()?;
     let scratch = tempfile::tempdir().ok()?;
-    let session = PromptSession::new();
-    // No `--reasoning-effort none`: the CLI rejects it outright for some of its default
-    // models, which turned every choice into a failed call rather than a cheaper one.
-    let mut child = std::process::Command::new(&probe.program)
-        .arg("-p")
-        .arg(prompt_text)
-        .args(["-s", "--disable-builtin-mcps", "--session-id", &session.id])
-        .current_dir(scratch.path())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    // Read on a thread: a child that fills the pipe and waits would otherwise hang the
-    // deadline loop, and the pipe is what the deadline is protecting against.
-    let reader = std::thread::spawn(move || {
-        let mut out = String::new();
-        let _ = stdout.read_to_string(&mut out);
-        out
-    });
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let out = reader.join().ok()?;
-                return status.success().then_some(out);
-            }
-            Ok(None) if started.elapsed() >= TIMEOUT => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return None,
-        }
-    }
+    crate::aside::ask(crate::aside::Question {
+        prompt: prompt_text.to_string(),
+        about: None,
+        working_dir: Some(scratch.path().to_path_buf()),
+        timeout: TIMEOUT,
+    })
+    .ok()
 }
 
 #[cfg(test)]

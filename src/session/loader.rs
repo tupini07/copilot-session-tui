@@ -135,6 +135,12 @@ pub fn load_session(copilot_home: &Path, session_id: &str) -> Result<Option<Sess
 }
 
 fn session_is_visible(session: &Session) -> bool {
+    // A session CST made to ask Copilot something on the side lives for seconds and is
+    // deleted after; one copied from a real conversation would otherwise show up as a
+    // twin of it meanwhile.
+    if session.summary.as_deref() == Some(crate::aside::SESSION_NAME) {
+        return false;
+    }
     if session.summary.is_some() {
         return true;
     }
@@ -186,13 +192,21 @@ fn load_single_session_with(dir: &Path, roots: &mut HashMap<String, String>) -> 
         .or_insert_with(|| resolve_project_root(&cwd))
         .clone();
 
+    // `name` is the current Copilot CLI field. Prefer `summary` when present so titles
+    // written by older TUI versions remain effective. The one exception is a session
+    // CST made to ask Copilot something on the side: a copy of a conversation carries
+    // the conversation's summary, and only its name says what it is.
+    let summary = if ws.name.as_deref() == Some(crate::aside::SESSION_NAME) {
+        ws.name
+    } else {
+        ws.summary.or(ws.name)
+    };
+
     Ok(Session {
         id: ws.id,
         cwd,
         project_root,
-        // `name` is the current Copilot CLI field. Prefer `summary` when
-        // present so titles written by older TUI versions remain effective.
-        summary: ws.summary.or(ws.name),
+        summary,
         created_at,
         updated_at,
         is_active,

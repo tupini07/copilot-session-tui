@@ -14,6 +14,9 @@ below.
 
 ## Before you open a PR
 
+CST builds with Rust 1.94 or newer; `rust-toolchain.toml` picks it for you if you use
+rustup. The Copilot SDK it talks to for side questions is what sets the floor.
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets

@@ -211,6 +211,17 @@ pub trait BotApi {
     ) -> Result<i64, BotError> {
         self.create_forum_topic(chat_id, name)
     }
+    /// Give an existing topic an icon from [`BotApi::get_forum_topic_icon_stickers`],
+    /// leaving its name alone. Provided as a no-op, so a stub that knows nothing of
+    /// icons is not asked to.
+    fn edit_forum_topic_icon(
+        &self,
+        _chat_id: i64,
+        _thread_id: i64,
+        _icon_custom_emoji_id: &str,
+    ) -> Result<(), BotError> {
+        Ok(())
+    }
     /// A PNG with an HTML caption, as a reply when there is something to reply to.
     /// Returns the message id. Provided, so the test stubs that never send one need
     /// not say so.
@@ -657,6 +668,29 @@ impl BotApi for UreqBot {
                 chat_id,
                 message_thread_id: thread_id,
                 name: &topic_name(name),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn edit_forum_topic_icon(
+        &self,
+        chat_id: i64,
+        thread_id: i64,
+        icon_custom_emoji_id: &str,
+    ) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            chat_id: i64,
+            message_thread_id: i64,
+            icon_custom_emoji_id: &'a str,
+        }
+        let _: Value = self.call(
+            "editForumTopic",
+            &Body {
+                chat_id,
+                message_thread_id: thread_id,
+                icon_custom_emoji_id,
             },
         )?;
         Ok(())

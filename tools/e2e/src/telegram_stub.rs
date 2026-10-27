@@ -366,12 +366,34 @@ fn handle(method: &str, body: &str, shared: &Arc<(Mutex<State>, Condvar)>, mode:
         }
         "editForumTopic" => {
             let thread_id = number(body, "message_thread_id").unwrap_or(0);
-            let name = string(body, "name").unwrap_or_default();
             let mut state = lock.lock().unwrap();
-            if let Some(topic) = state.topics.iter_mut().find(|(id, _)| *id == thread_id) {
-                topic.1 = name.clone();
+            let current = state
+                .topics
+                .iter()
+                .find(|(id, _)| *id == thread_id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| thread_id.to_string());
+            // CST sets the icon after the topic exists, once the model has chosen; a
+            // rename carries a name, an icon carries a sticker id, and the outbox
+            // shows each as what a script can read.
+            let icon = string(body, "icon_custom_emoji_id").and_then(|id| {
+                TOPIC_ICONS
+                    .iter()
+                    .find(|(_, offered)| *offered == id)
+                    .map(|(emoji, _)| *emoji)
+            });
+            match (string(body, "name"), icon) {
+                (Some(name), _) => {
+                    if let Some(topic) = state.topics.iter_mut().find(|(id, _)| *id == thread_id) {
+                        topic.1 = name.clone();
+                    }
+                    state.outbox.push(format!("renamed topic: {name}"));
+                }
+                (None, Some(emoji)) => {
+                    state.outbox.push(format!("topic icon: {current} icon={emoji}"));
+                }
+                (None, None) => state.outbox.push(format!("edited topic: {current}")),
             }
-            state.outbox.push(format!("renamed topic: {name}"));
             ok("true".to_string())
         }
         "closeForumTopic" => {

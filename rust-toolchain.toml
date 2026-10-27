@@ -1,0 +1,5 @@
+# The Copilot SDK needs 1.94. Pinning it here means a plain `cargo build` picks it
+# up, instead of failing with "requires rustc 1.94" on whatever a machine defaults to.
+# CI sets its own toolchain through the environment, which takes precedence.
+[toolchain]
+channel = "1.94.0"

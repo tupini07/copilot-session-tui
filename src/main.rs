@@ -1,5 +1,6 @@
 mod app;
 mod app_state;
+mod aside;
 mod changelog;
 mod command_palette;
 mod config;
@@ -788,6 +789,9 @@ fn run_tui_cycle(app: &mut App, cli: &Cli) -> Result<Option<PreparedRestart>> {
 
     let result = run_app(&mut terminal, app, cli);
     app.wait_for_update_install();
+    // The Copilot kept for side questions is a child of this process; let it go
+    // deliberately rather than through a closing pipe.
+    aside::shutdown();
 
     disable_raw_mode()?;
     terminal
