@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::events::hooks::{HookAttention, HookLifecycleEvent, HookMonitor};
-use crate::events::lifecycle::{InputKind, LifecycleEvent, LifecycleMonitor};
+use crate::events::lifecycle::{
+    BackgroundShell, InputKind, LifecycleEvent, LifecycleMonitor, ShellKind,
+};
 
 use super::callbacks::{PaneCallbacks, PaneSignalEvent, PaneSignals};
 use super::keys;
@@ -143,6 +145,15 @@ pub struct Pane {
     /// every quiet period instead of settling. Once the log has proved the session idle,
     /// progress alone stops being grounds to start a turn until a hook vouches for one.
     raw_progress_discredited: bool,
+    /// The working state rests on the session log alone: a background shell's
+    /// completion notice, which Copilot writes as it wakes the agent for a follow-up
+    /// turn no hook announces. Held as loosely as `working_from_raw_progress`, and given
+    /// up the same way, because the notice can also be one Copilot merely queued.
+    working_from_log: bool,
+    /// Background shells the agent is still waiting to hear from, as the session log
+    /// reports them. The agent's own hooks call the session idle while these run, so
+    /// without them a session mid-way through an hour of training looks finished.
+    background_shells: Vec<BackgroundShell>,
     raw_completion_pending: bool,
     hook_completion_window: bool,
     attention_resolved_at: u64,
@@ -174,6 +185,15 @@ pub struct PaneHookOutcome {
     pub notification: Option<PaneNotification>,
     pub cycle_started: bool,
     pub ready_confirmation: Option<u64>,
+}
+
+/// What applying a session-log event changed, beyond the pane's own state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneLifecycleOutcome {
+    pub notification: Option<PaneNotification>,
+    /// A turn began on the log's evidence alone, so a new notification cycle starts:
+    /// the follow-up's ending must not carry the previous turn's content.
+    pub cycle_started: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +332,8 @@ impl Pane {
             hook_ready_raw_generation: 0,
             working_from_raw_progress: false,
             raw_progress_discredited: false,
+            working_from_log: false,
+            background_shells: Vec::new(),
             raw_completion_pending: false,
             hook_completion_window: false,
             attention_resolved_at: 0,
@@ -694,6 +716,29 @@ impl Pane {
         self.raw_completion_pending = false;
         self.hook_completion_window = false;
         self.pending_inputs.clear();
+        self.background_shells.clear();
+    }
+
+    /// The background shells the agent is still waiting to hear from, oldest first.
+    pub fn background_shells(&self) -> &[BackgroundShell] {
+        &self.background_shells
+    }
+
+    /// The agent has stopped, by its hooks, and is waiting on a shell it started.
+    ///
+    /// Kept apart from `is_working()` on purpose. Copilot's composer is open while it
+    /// waits and takes a message at once, so a reply from the phone or a thread wake-up
+    /// should still go in; only the picture of the session as idle is wrong.
+    pub fn waiting_on_shells(&self) -> bool {
+        !self.working && !self.requires_user_action() && !self.background_shells.is_empty()
+    }
+
+    /// Whether any waited-on shell is one Copilot backgrounded for overrunning, which
+    /// is a job by construction; an async launch might be a server left for the user.
+    pub fn waiting_on_a_job(&self) -> bool {
+        self.background_shells
+            .iter()
+            .any(|shell| shell.kind == ShellKind::Backgrounded)
     }
 
     /// Run `f` against the current screen. The parser lock is held for the call, so
@@ -899,8 +944,50 @@ impl Pane {
         (outcome, notifications)
     }
 
+    #[cfg(test)]
     pub fn apply_lifecycle(&mut self, event: LifecycleEvent) -> Option<PaneNotification> {
+        self.apply_lifecycle_outcome(event).notification
+    }
+
+    pub fn apply_lifecycle_outcome(&mut self, event: LifecycleEvent) -> PaneLifecycleOutcome {
+        let notification = match event {
+            LifecycleEvent::BackgroundShells { shells, completed } => {
+                self.background_shells = shells;
+                // The notice is written as the follow-up turn starts, and the hooks
+                // have nothing to say about that turn. Promoted the way a progress
+                // sequence is: only over a hook's idle, never over no hook at all (the
+                // regime without hooks has its own progress to go on), and held weakly,
+                // because Copilot also writes the notice for a shell that finished
+                // while the agent was stopped, queued for whatever the user asks next.
+                if completed && !self.working && self.hook_state == Some(HookActivity::Idle) {
+                    self.hook_ready_pending = None;
+                    self.hook_state = Some(HookActivity::Working);
+                    self.working = true;
+                    self.working_from_log = true;
+                    self.injection_pending = false;
+                    self.needs_attention = false;
+                    self.ready_sent_in_cycle = false;
+                    self.error_sent_in_cycle = false;
+                    self.raw_completion_pending = false;
+                    self.hook_completion_window = false;
+                    return PaneLifecycleOutcome {
+                        notification: None,
+                        cycle_started: true,
+                    };
+                }
+                return PaneLifecycleOutcome::default();
+            }
+            other => self.apply_lifecycle_inner(other),
+        };
+        PaneLifecycleOutcome {
+            notification,
+            cycle_started: false,
+        }
+    }
+
+    fn apply_lifecycle_inner(&mut self, event: LifecycleEvent) -> Option<PaneNotification> {
         match event {
+            LifecycleEvent::BackgroundShells { .. } => None,
             LifecycleEvent::InputRequested { tool_call_id, kind } => {
                 if self
                     .pending_inputs
@@ -935,6 +1022,7 @@ impl Pane {
                 None
             }
             LifecycleEvent::Reset => {
+                self.background_shells.clear();
                 if !self.pending_inputs.is_empty() {
                     self.pending_inputs.clear();
                     self.needs_attention = false;
@@ -951,8 +1039,9 @@ impl Pane {
                 // Whatever the child is animating, it is not a turn. Progress alone stops
                 // being grounds to start one until a hook vouches for activity again.
                 self.raw_progress_discredited = true;
-                if self.working_from_raw_progress {
+                if self.working_from_raw_progress || self.working_from_log {
                     self.working_from_raw_progress = false;
+                    self.working_from_log = false;
                     self.hook_state = Some(HookActivity::Idle);
                     self.working = false;
                     self.progress_state = crate::host_terminal::ProgressState::Clear;
@@ -976,6 +1065,7 @@ impl Pane {
         // This is what keeps a genuinely working session spinning through a long silent
         // tool call: `Quiet` only ever gives up a belief nothing but the animation backed.
         self.working_from_raw_progress = false;
+        self.working_from_log = false;
         self.raw_progress_discredited = false;
         match event {
             HookLifecycleEvent::SessionStarted { .. } => {
@@ -2698,6 +2788,96 @@ mod tests {
         assert_eq!(final_ready.ready_confirmation, Some(3));
         assert_eq!(pane.confirm_hook_ready(2, false), None);
         assert_eq!(pane.confirm_hook_ready(3, false), None);
+        pane.shutdown().unwrap();
+    }
+
+    fn shells(ids: &[(&str, ShellKind)], completed: bool) -> LifecycleEvent {
+        LifecycleEvent::BackgroundShells {
+            shells: ids
+                .iter()
+                .map(|(id, kind)| BackgroundShell {
+                    id: id.to_string(),
+                    kind: *kind,
+                    since: Instant::now(),
+                })
+                .collect(),
+            completed,
+        }
+    }
+
+    /// The hooks call the agent idle while a shell it backgrounded still runs. The pane
+    /// says so without claiming a turn: `is_working()` stays false so a reply from the
+    /// phone still goes in, and the shell's completion notice, which Copilot writes as it
+    /// wakes the agent, is what makes the pane working again — loosely, so a quiet log
+    /// can take it back, and only once the hooks have had their say at all.
+    #[test]
+    fn a_stopped_agent_waiting_on_its_shell_is_shown_waiting_and_its_notice_restarts_work() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(49, program, args), 24, 80, tx).unwrap();
+        pane.apply_hook(HookLifecycleEvent::Working { timestamp: 1 }, false);
+        pane.apply_lifecycle(shells(&[("fits", ShellKind::Backgrounded)], false));
+        assert!(
+            !pane.waiting_on_shells(),
+            "while the turn runs, the shell is just part of it"
+        );
+        pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 2 }, false);
+        assert_eq!(pane.confirm_hook_ready(2, false), None);
+        assert!(!pane.is_working());
+        assert!(pane.waiting_on_shells());
+        assert!(pane.waiting_on_a_job());
+
+        // The notice: the follow-up turn has begun, and a new notification cycle with it.
+        let outcome = pane.apply_lifecycle_outcome(shells(&[], true));
+        assert!(outcome.cycle_started);
+        assert!(pane.is_working());
+        assert!(!pane.waiting_on_shells());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Indeterminate,
+            "the tab spins for the follow-up turn"
+        );
+
+        // A quiet log takes back a working state that rested on the notice alone.
+        pane.apply_lifecycle(LifecycleEvent::Quiet);
+        assert!(!pane.is_working());
+
+        // The follow-up's own ending is a turn's ending like any other: the ready hook
+        // is confirmed, and the pane is idle with nothing left to wait on.
+        pane.apply_lifecycle(shells(&[], true));
+        assert!(pane.is_working());
+        let ready = pane.apply_hook(HookLifecycleEvent::Ready { timestamp: 3 }, false);
+        assert_eq!(ready.ready_confirmation, Some(3));
+        pane.confirm_hook_ready(3, false);
+        assert!(!pane.is_working());
+        assert!(!pane.waiting_on_shells());
+        pane.shutdown().unwrap();
+    }
+
+    /// Without hooks the stub's progress sequences decide, and a notice must not
+    /// override them: promoting here would make the pane ignore the next clear.
+    #[test]
+    fn a_shell_notice_starts_no_turn_where_no_hook_has_ever_spoken() {
+        let (tx, _) = mpsc::channel();
+        let (program, args) = shell_command(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
+        });
+        let mut pane = Pane::spawn(test_spec(50, program, args), 24, 80, tx).unwrap();
+        pane.apply_lifecycle(shells(&[("server", ShellKind::Async)], false));
+        assert!(pane.waiting_on_shells());
+        assert!(
+            !pane.waiting_on_a_job(),
+            "an async launch might be a server"
+        );
+        let outcome = pane.apply_lifecycle_outcome(shells(&[], true));
+        assert!(!outcome.cycle_started);
+        assert!(!pane.is_working());
         pane.shutdown().unwrap();
     }
 

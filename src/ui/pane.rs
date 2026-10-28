@@ -675,6 +675,24 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]
         }
+        // The agent has stopped, by its own account, and is waiting on a shell it
+        // started. Copilot's own status row says only "Waiting for background shells";
+        // naming the shell and how long it has run is what lets the user tell a
+        // training job from a server somebody forgot.
+        PaneStatus::Running
+            if mux.prefix_state == PrefixState::Idle && pane.waiting_on_shells() =>
+        {
+            vec![
+                Span::styled(" Waiting ", badge_style(theme, theme.accent_alt)),
+                Span::raw(format!(
+                    " {} ",
+                    text::truncate_to_width(
+                        &waiting_on_shells_text(pane.background_shells()),
+                        area.width.saturating_sub(12) as usize,
+                    )
+                )),
+            ]
+        }
         PaneStatus::Running => vec![
             Span::raw(" "),
             Span::styled(prefix.clone(), Style::default().fg(theme.accent_alt)),
@@ -694,6 +712,41 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     fill_area(f.buffer_mut(), area, theme.chrome_bg);
     let status = Paragraph::new(Line::from(hint)).style(status_style(theme));
     f.render_widget(status, area);
+}
+
+/// "on background shell fits-inference (17 min)", or the count and every name when the
+/// agent waits on several, with the longest wait as the age.
+fn waiting_on_shells_text(shells: &[crate::events::lifecycle::BackgroundShell]) -> String {
+    let age = shells
+        .iter()
+        .map(|shell| shell.since.elapsed())
+        .max()
+        .map(shell_age)
+        .unwrap_or_default();
+    match shells {
+        [] => String::new(),
+        [shell] => format!("on background shell {} ({age})", shell.id),
+        many => {
+            let names: Vec<&str> = many.iter().map(|shell| shell.id.as_str()).collect();
+            format!(
+                "on {} background shells: {} ({age})",
+                many.len(),
+                names.join(", ")
+            )
+        }
+    }
+}
+
+/// Coarse on purpose: the bar is glanced at, and a count of seconds would tick.
+fn shell_age(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        "under a minute".to_string()
+    } else if seconds < 3600 {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{} h {} min", seconds / 3600, (seconds % 3600) / 60)
+    }
 }
 
 /// Two-column activity cell shown at the head of every tab.
@@ -721,6 +774,17 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
     // back, which is a quieter thing.
     if pane.has_user_draft() {
         return "✎ ".to_string();
+    }
+    // The agent has stopped but is waiting on a shell it started. A shell Copilot
+    // backgrounded for overrunning is a job, so the tab spins as for any turn; one the
+    // agent started async might be a server left up for the user, and gets a quieter
+    // mark so a session that is merely hosting something does not look busy.
+    if pane.waiting_on_shells() {
+        return if pane.waiting_on_a_job() {
+            format!("{} ", crate::ui::spinner_frame())
+        } else {
+            WAITING_ON_SHELL_MARKER.to_string()
+        };
     }
     match pane.effective_progress_state() {
         ProgressState::Normal | ProgressState::Indeterminate => {
@@ -767,6 +831,10 @@ pub fn tab_sources(mux: &crate::mux::MuxState) -> Vec<tabs::TabSource> {
 
 /// The marker for a tab: whichever of its sessions most wants the user. A question in
 /// one session of three must not hide behind a spinner in another.
+/// A tab whose agent has stopped to wait on an async shell of its own. One column
+/// wide like every marker, so the strip never shifts.
+pub(crate) const WAITING_ON_SHELL_MARKER: &str = "◷ ";
+
 fn window_marker(members: &[&crate::mux::Pane]) -> String {
     let markers: Vec<String> = members.iter().map(|pane| tab_marker(pane)).collect();
     let rank = |marker: &str| match marker {
@@ -774,9 +842,10 @@ fn window_marker(members: &[&crate::mux::Pane]) -> String {
         "● " => 1,
         "! " => 2,
         "▲ " => 3,
-        "✎ " => 5,
-        "× " => 6,
-        "  " => 7,
+        WAITING_ON_SHELL_MARKER => 5,
+        "✎ " => 6,
+        "× " => 7,
+        "  " => 8,
         // Anything else is a spinner frame: a turn in progress.
         _ => 4,
     };
@@ -1380,6 +1449,49 @@ mod tests {
             })
             .map(|(index, _)| (index as u16 % width, index as u16 / width))
             .collect()
+    }
+
+    /// Every marker is two columns, because the strip's click hit-testing assumes it;
+    /// a job's wait spins like a turn, an async shell's gets the quieter mark, and a
+    /// split takes the busier of its members' marks.
+    #[test]
+    fn a_tab_waiting_on_a_shell_shows_a_two_column_mark_ranked_between_a_turn_and_a_draft() {
+        use crate::events::lifecycle::{BackgroundShell, LifecycleEvent, ShellKind};
+        assert_eq!(crate::text::display_width(WAITING_ON_SHELL_MARKER), 2);
+        let (tx, _) = mpsc::channel();
+        let mut pane = silent_pane(tx.clone());
+        let shell = |kind: ShellKind| LifecycleEvent::BackgroundShells {
+            shells: vec![BackgroundShell {
+                id: "job".to_string(),
+                kind,
+                since: std::time::Instant::now(),
+            }],
+            completed: false,
+        };
+        pane.apply_lifecycle(shell(ShellKind::Async));
+        assert_eq!(tab_marker(&pane), WAITING_ON_SHELL_MARKER);
+        pane.apply_lifecycle(shell(ShellKind::Backgrounded));
+        assert_eq!(
+            tab_marker(&pane),
+            format!("{} ", crate::ui::spinner_frame()),
+            "a backgrounded job spins like a turn"
+        );
+        let mut drafting = silent_pane(tx);
+        drafting.note_user_key(&crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(tab_marker(&drafting), "✎ ");
+        pane.apply_lifecycle(shell(ShellKind::Async));
+        assert_eq!(
+            window_marker(&[&drafting, &pane]),
+            WAITING_ON_SHELL_MARKER,
+            "the wait outranks a draft in a split"
+        );
+        assert_eq!(
+            waiting_on_shells_text(pane.background_shells()),
+            "on background shell job (under a minute)"
+        );
     }
 
     #[test]

@@ -53,6 +53,17 @@ pub fn main() {
     //                    event log records it; the turn stays open until e2e:answered
     //   e2e:answered <text>  record the answer to the open question and end the turn
     //   e2e:bell         ring the bell, which is how a turn's end is also reported
+    //   e2e:shell <id> [async|detached]
+    //                    record a shell command left running in the background under
+    //                    that id, in the words the real Copilot's log uses: one it
+    //                    backgrounded for overrunning (the default), one the agent
+    //                    started async, or one started detached
+    //   e2e:shell_done <id>  record the completion notice Copilot writes as it wakes
+    //                    the agent with that shell's result
+    //   e2e:stop <id>    record the agent stopping that shell
+    //   e2e:hook <working|ready>
+    //                    write what CST's hook plugin would have, beside the event log,
+    //                    so a script can drive the regime where hooks decide the state
     let events_path = events_path(&args);
     enable_virtual_terminal_input();
     std::thread::spawn(move || {
@@ -122,9 +133,10 @@ pub(crate) fn choose_emoji(prompt: &str) -> String {
 /// in the folder named by the `--resume=<id>` CST passes.
 fn events_path(args: &[String]) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("COPILOT_HOME")?;
-    let id = args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--resume=").or_else(|| arg.strip_prefix("--session-id=")))?;
+    let id = args.iter().find_map(|arg| {
+        arg.strip_prefix("--resume=")
+            .or_else(|| arg.strip_prefix("--session-id="))
+    })?;
     Some(
         std::path::PathBuf::from(home)
             .join("session-state")
@@ -138,7 +150,11 @@ fn now_stamp() -> String {
 }
 
 fn append_event(path: &std::path::Path, record: &str) {
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{record}");
     }
 }
@@ -171,7 +187,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             if let Some(path) = events_path {
                 append_event(
                     path,
-                    &format!(r#"{{"type":"assistant.turn_start","timestamp":"{}","data":{{}}}}"#, now_stamp()),
+                    &format!(
+                        r#"{{"type":"assistant.turn_start","timestamp":"{}","data":{{}}}}"#,
+                        now_stamp()
+                    ),
                 );
             }
             std::thread::sleep(Duration::from_millis(millis));
@@ -215,7 +234,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
                         .collect(),
                 ));
             }
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
             {
                 let _ = writeln!(file, "{record}");
             }
@@ -232,8 +254,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
                     r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"{id}","result":{{"content":{}}}}}}}"#,
                     crate::telegram_stub::json_string(&format!("User responded: {}", rest.trim()))
                 );
-                if let Ok(mut file) =
-                    std::fs::OpenOptions::new().create(true).append(true).open(path)
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
                 {
                     let _ = writeln!(file, "{record}");
                 }
@@ -246,6 +270,102 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             print!("\x07");
             let _ = std::io::stdout().flush();
         }
+        // The sentences and the telemetry are copied from a real session's log; they
+        // are what CST reads, so the stub has to write them to the letter.
+        "shell" => {
+            let Some(path) = events_path else { return };
+            let (id, mode) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            let (content, execution_mode, detached) = match mode.trim() {
+                "async" => (
+                    format!("<command started in background with shellId: {id}>"),
+                    "async",
+                    "false",
+                ),
+                "detached" => (
+                    format!("<command started in detached background with shellId: {id}>"),
+                    "async",
+                    "true",
+                ),
+                _ => (
+                    format!("<command with shellId: {id} is still running after 30 seconds. The command is still running but hasn't produced output yet. You will be automatically notified when it completes; if you need the output sooner, read the shell by its id>"),
+                    "sync",
+                    "false",
+                ),
+            };
+            let call = format!("call_e2e_shell_{id}");
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_start","timestamp":"{}","data":{{"toolCallId":"{call}","toolName":"powershell","arguments":{{"command":"private command","shellId":"{id}"}}}}}}"#,
+                    now_stamp()
+                ),
+            );
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_complete","timestamp":"{}","data":{{"toolCallId":"{call}","success":true,"result":{{"content":{}}},"toolTelemetry":{{"properties":{{"executionMode":"{execution_mode}","detached":"{detached}"}}}}}}}}"#,
+                    now_stamp(),
+                    crate::telegram_stub::json_string(&content)
+                ),
+            );
+            println!("Fake Copilot left shell {id} running");
+            let _ = std::io::stdout().flush();
+        }
+        "shell_done" => {
+            let Some(path) = events_path else { return };
+            let id = rest.trim();
+            let content = format!(
+                "<system_notification>\nShell command \"private description\" (shellId: {id}) has completed successfully.\n</system_notification>"
+            );
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"system.notification","timestamp":"{}","data":{{"content":{},"kind":{{"type":"shell_completed","shellId":"{id}","exitCode":0}}}}}}"#,
+                    now_stamp(),
+                    crate::telegram_stub::json_string(&content)
+                ),
+            );
+            println!("Fake Copilot heard shell {id} finish");
+            let _ = std::io::stdout().flush();
+        }
+        "stop" => {
+            let Some(path) = events_path else { return };
+            let id = rest.trim();
+            let call = format!("call_e2e_stop_{id}");
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_start","timestamp":"{}","data":{{"toolCallId":"{call}","toolName":"stop_powershell","arguments":{{"shellId":"{id}"}}}}}}"#,
+                    now_stamp()
+                ),
+            );
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_complete","timestamp":"{}","data":{{"toolCallId":"{call}","success":true,"result":{{"content":"<shellId: {id} stopped>"}}}}}}"#,
+                    now_stamp()
+                ),
+            );
+        }
+        "hook" => {
+            // What `copilot-session-tui hook-event working|ready` appends when the real
+            // Copilot runs the plugin's hooks. Milliseconds, like the hook's own clock,
+            // and never earlier than the last: CST ignores a hook that goes backwards.
+            let Some(path) = events_path else { return };
+            let state = match rest.trim() {
+                "working" => "working",
+                "ready" => "ready",
+                _ => return,
+            };
+            let lifecycle = path.with_file_name(".cst-lifecycle.jsonl");
+            let millis = chrono::Utc::now().timestamp_millis();
+            append_event(
+                &lifecycle,
+                &format!(r#"{{"state":"{state}","timestamp":{millis}}}"#),
+            );
+            println!("Fake Copilot ran the {state} hook");
+            let _ = std::io::stdout().flush();
+        }
         _ => {}
     }
 }
@@ -253,8 +373,7 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
 /// The question that is open, if one is: its tool call id and its choices. Set by
 /// `e2e:ask`, cleared by the answer. Every question gets a new id, because CST's
 /// lifecycle monitor ignores a start record whose id it has already seen.
-static OPEN_QUESTION: std::sync::Mutex<Option<(String, Vec<String>)>> =
-    std::sync::Mutex::new(None);
+static OPEN_QUESTION: std::sync::Mutex<Option<(String, Vec<String>)>> = std::sync::Mutex::new(None);
 static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The id of the question that is open, or of the last one asked.
@@ -308,11 +427,15 @@ fn answer_form(line: &str) -> Option<String> {
     let mut typed = String::new();
     let mut rest = line;
     while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("\x1b[A").or_else(|| rest.strip_prefix("\x1bOA")) {
+        if let Some(after) = rest
+            .strip_prefix("\x1b[A")
+            .or_else(|| rest.strip_prefix("\x1bOA"))
+        {
             highlight = highlight.saturating_sub(1);
             rest = after;
-        } else if let Some(after) =
-            rest.strip_prefix("\x1b[B").or_else(|| rest.strip_prefix("\x1bOB"))
+        } else if let Some(after) = rest
+            .strip_prefix("\x1b[B")
+            .or_else(|| rest.strip_prefix("\x1bOB"))
         {
             highlight = (highlight + 1).min(choices.len());
             rest = after;

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -54,7 +54,49 @@ pub enum LifecycleEvent {
     /// Repeated while the quiet lasts rather than sent once, because whoever needs it
     /// may not have needed it yet when the quiet began.
     Quiet,
+    /// The set of background shells the agent is still waiting on has changed.
+    ///
+    /// A shell command that outlives its time limit, or one the agent starts in async
+    /// mode, keeps running after the tool call returns; the agent is told it will be
+    /// notified when it finishes, says what it has to say, and stops. Its `agentStop`
+    /// hook fires, so to the hooks the session is idle, while Copilot's own status row
+    /// reads "Waiting for background shells" and the work the user cares about is still
+    /// running. The whole current set is sent each time, so a listener never has to
+    /// reconcile.
+    ///
+    /// `completed` is true when a shell left the set because Copilot wrote its
+    /// completion notice into the log. That notice is written at the start of the
+    /// turn it wakes, milliseconds after `assistant.turn_start`, so it is also the
+    /// evidence that a follow-up turn has begun — one no `userPromptSubmitted` hook
+    /// announces.
+    BackgroundShells {
+        shells: Vec<BackgroundShell>,
+        completed: bool,
+    },
     Reset,
+}
+
+/// How a shell came to run in the background, which is how much it says about work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    /// Copilot backgrounded it when it overran its time limit. Nobody starts a server
+    /// that way, so this is a job the agent is waiting on.
+    Backgrounded,
+    /// The agent asked for async mode. Usually a long job, sometimes a server left up
+    /// for the user, which the log cannot tell apart.
+    Async,
+}
+
+/// One background shell the agent has not yet heard back from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundShell {
+    /// The agent's own name for it, such as `fits-inference`. Shown to the user, who
+    /// can tell a job from a server by its name far better than any rule here.
+    pub id: String,
+    pub kind: ShellKind,
+    /// When this monitor saw it start, not when Copilot did: the monitor begins at
+    /// the session's launch, so the two agree for anything it will ever report.
+    pub since: Instant,
 }
 
 #[cfg(test)]
@@ -123,7 +165,11 @@ impl LifecycleMonitor {
     ///
     /// Events are delivered in file order. Returning `false` from `callback`
     /// stops the worker. Payload fields such as arguments, result, and content
-    /// are neither retained nor included in [`LifecycleEvent`].
+    /// are neither retained nor included in [`LifecycleEvent`], with one exception:
+    /// the ids of background shells still running, which Copilot writes into tool
+    /// results and which the user needs to see to know what their session is
+    /// waiting on. An id is a name the agent gave a command, never the command or
+    /// its output.
     pub fn start_from_baseline<F>(
         path: impl Into<PathBuf>,
         baseline: LifecycleBaseline,
@@ -249,6 +295,10 @@ struct LifecycleTail {
     /// Signed, because a log CST started reading partway through can complete a tool it
     /// never saw start. Going negative is harmless — it means the same thing as zero.
     outstanding_tools: i64,
+    /// Background shells the agent has been told it will hear back from. Keyed by the
+    /// agent's id for the shell, because Copilot reuses ids: a second launch under the
+    /// same name owns the next completion.
+    shells: HashMap<String, BackgroundShell>,
 }
 
 impl LifecycleTail {
@@ -276,6 +326,7 @@ impl LifecycleTail {
             seen_completions: HashSet::new(),
             advanced: false,
             outstanding_tools: 0,
+            shells: HashMap::new(),
         }
     }
 
@@ -298,6 +349,7 @@ impl LifecycleTail {
                     self.seen_starts.clear();
                     self.seen_completions.clear();
                     self.outstanding_tools = 0;
+                    self.shells.clear();
                     return Ok(callback(LifecycleEvent::Reset));
                 }
                 return Ok(true);
@@ -314,6 +366,7 @@ impl LifecycleTail {
             self.seen_starts.clear();
             self.seen_completions.clear();
             self.outstanding_tools = 0;
+            self.shells.clear();
             self.reset_to_end(&mut file, len, identity)?;
             return Ok(callback(LifecycleEvent::Reset));
         }
@@ -357,6 +410,7 @@ impl LifecycleTail {
                     &mut self.seen_starts,
                     &mut self.seen_completions,
                     &mut self.outstanding_tools,
+                    &mut self.shells,
                     callback,
                 ) {
                     return false;
@@ -379,6 +433,7 @@ impl LifecycleTail {
                         &mut self.seen_starts,
                         &mut self.seen_completions,
                         &mut self.outstanding_tools,
+                        &mut self.shells,
                         callback,
                     ) {
                         return false;
@@ -391,6 +446,7 @@ impl LifecycleTail {
                         &mut self.seen_starts,
                         &mut self.seen_completions,
                         &mut self.outstanding_tools,
+                        &mut self.shells,
                         callback,
                     ) {
                         return false;
@@ -463,12 +519,16 @@ fn record_line<F>(
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
     outstanding_tools: &mut i64,
+    shells: &mut HashMap<String, BackgroundShell>,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
     count_tool(line, outstanding_tools);
+    if !track_shells(line, shells, callback) {
+        return false;
+    }
     if candidate_kind(line, pending).is_none() {
         return true;
     }
@@ -492,12 +552,18 @@ fn record_oversized_prefix<F>(
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
     outstanding_tools: &mut i64,
+    shells: &mut HashMap<String, BackgroundShell>,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
     count_tool(prefix, outstanding_tools);
+    // A shell's result opens with the sentence that matters, long before any output,
+    // so even a prefix of an oversized record carries it.
+    if !track_shells(prefix, shells, callback) {
+        return false;
+    }
     if candidate_kind(prefix, pending).is_none() {
         return true;
     }
@@ -596,6 +662,147 @@ fn count_tool(line: &[u8], outstanding_tools: &mut i64) {
         Some(TOOL_COMPLETE) => *outstanding_tools -= 1,
         _ => {}
     }
+}
+
+const SYSTEM_NOTIFICATION: &[u8] = b"system.notification";
+/// How Copilot's shell tool reports a command it started in async mode. The detached
+/// variant reads "started in detached background", which this never matches: a
+/// detached shell is meant to outlive the turn and holds nothing up.
+const ASYNC_STARTED: &[u8] = b"started in background with shellId: ";
+/// How the shell tool reports a command Copilot backgrounded for overrunning its limit.
+const STILL_RUNNING: &[u8] = b" is still running after";
+const SHELL_ID_IN_RESULT: &[u8] = b"shellId: ";
+/// How reading a finished shell's output reports it, when no notice was ever written.
+const READ_COMPLETED: &[u8] = b" completed with exit code";
+const SHELL_COMPLETED: &[u8] = br#""shell_completed""#;
+const DETACHED_TELEMETRY: &[u8] = br#""detached":"true""#;
+
+enum ShellChange {
+    Started(String, ShellKind),
+    /// `bool`: by the completion notice Copilot writes as it wakes the agent.
+    Gone(String, bool),
+    Clear,
+}
+
+/// Follow the agent's background shells through the sentences Copilot writes about
+/// them, reading no more of a record than the words that name them.
+///
+/// Nothing here parses JSON: a shell's result record can be enormous, and the sentences
+/// that matter sit at its front. An id is taken from the text after its marker and runs
+/// to the first character an id cannot contain.
+fn track_shells<F>(
+    line: &[u8],
+    shells: &mut HashMap<String, BackgroundShell>,
+    callback: &mut F,
+) -> bool
+where
+    F: FnMut(LifecycleEvent) -> bool,
+{
+    let Some(event_type) = leading_event_type(line) else {
+        return true;
+    };
+    let change = match event_type {
+        TOOL_COMPLETE if contains_bytes(line, SHELL_ID_IN_RESULT) => shell_change_in_result(line),
+        TOOL_START
+            if json_string_field(line, br#""toolName""#)
+                .is_some_and(|name| name.starts_with("stop_")) =>
+        {
+            json_string_field(line, br#""shellId""#)
+                .map(|id| ShellChange::Gone(id.to_string(), false))
+        }
+        SYSTEM_NOTIFICATION if contains_bytes(line, SHELL_COMPLETED) => {
+            json_string_field(line, br#""shellId""#)
+                .map(|id| ShellChange::Gone(id.to_string(), true))
+        }
+        // An interrupt ends the wait whatever the shells do next; a resume starts the
+        // session over, and the monitor begins at launch anyway.
+        b"abort" | b"session.resume" => Some(ShellChange::Clear),
+        _ => None,
+    };
+    let Some(change) = change else {
+        return true;
+    };
+    let completed = match change {
+        ShellChange::Started(id, kind) => {
+            shells.insert(
+                id.clone(),
+                BackgroundShell {
+                    id,
+                    kind,
+                    since: Instant::now(),
+                },
+            );
+            false
+        }
+        ShellChange::Gone(id, by_notice) => {
+            if shells.remove(&id).is_none() {
+                return true;
+            }
+            by_notice
+        }
+        ShellChange::Clear => {
+            if shells.is_empty() {
+                return true;
+            }
+            shells.clear();
+            false
+        }
+    };
+    let mut current: Vec<BackgroundShell> = shells.values().cloned().collect();
+    current.sort_by_key(|shell| shell.since);
+    callback(LifecycleEvent::BackgroundShells {
+        shells: current,
+        completed,
+    })
+}
+
+fn shell_change_in_result(line: &[u8]) -> Option<ShellChange> {
+    if let Some(id) =
+        shell_id_after(line, ASYNC_STARTED).filter(|_| !contains_bytes(line, DETACHED_TELEMETRY))
+    {
+        return Some(ShellChange::Started(id.to_string(), ShellKind::Async));
+    }
+    // Every "shellId: " in the record is tried, because a listing of active shells
+    // names several and only the sentence after the name says which this is.
+    let mut from = 0;
+    while let Some(id) = shell_id_after(&line[from..], SHELL_ID_IN_RESULT) {
+        let start = position(&line[from..], SHELL_ID_IN_RESULT)? + from + SHELL_ID_IN_RESULT.len();
+        let after = &line[start + id.len()..];
+        if after.starts_with(STILL_RUNNING) {
+            return Some(ShellChange::Started(
+                id.to_string(),
+                ShellKind::Backgrounded,
+            ));
+        }
+        if after.starts_with(READ_COMPLETED) {
+            return Some(ShellChange::Gone(id.to_string(), false));
+        }
+        from = start + id.len();
+    }
+    None
+}
+
+/// The shell id written right after `marker`: letters, digits, `_`, `-` and `.`, which
+/// is what Copilot accepts as one.
+fn shell_id_after<'a>(line: &'a [u8], marker: &[u8]) -> Option<&'a str> {
+    let start = position(line, marker)? + marker.len();
+    let len = line[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        .count();
+    if len == 0 {
+        return None;
+    }
+    std::str::from_utf8(&line[start..start + len]).ok()
+}
+
+fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn candidate_kind(line: &[u8], pending: &HashMap<String, InputKind>) -> Option<CandidateKind> {
@@ -754,6 +961,184 @@ mod tests {
 
         poll(&mut tail);
         assert!(!tail.advanced, "nothing new was written");
+    }
+
+    /// The sentences below are copied from a real session's log, because they are the
+    /// whole interface: Copilot writes them, nothing else says a shell is still running.
+    fn backgrounded(id: &str) -> String {
+        format!(
+            r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"call_{id}","success":true,"result":{{"content":"<command with shellId: {id} is still running after 30 seconds. The command is still running but hasn't produced output yet. You will be automatically notified when it completes>"}},"toolTelemetry":{{"properties":{{"executionMode":"sync","detached":"false"}}}}}}}}"#
+        )
+    }
+
+    fn async_started(id: &str, detached: bool) -> String {
+        let (phrase, flag) = if detached {
+            ("started in detached background", "true")
+        } else {
+            ("started in background", "false")
+        };
+        format!(
+            r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"call_{id}","success":true,"result":{{"content":"<command {phrase} with shellId: {id}>"}},"toolTelemetry":{{"properties":{{"executionMode":"async","detached":"{flag}"}}}}}}}}"#
+        )
+    }
+
+    fn completion_notice(id: &str) -> String {
+        format!(
+            r#"{{"type":"system.notification","data":{{"content":"<system_notification>\nShell command \"Run it\" (shellId: {id}) has completed successfully.\n</system_notification>","kind":{{"type":"shell_completed","shellId":"{id}","exitCode":0}}}}}}"#
+        )
+    }
+
+    fn shell_ids(events: &[LifecycleEvent]) -> Vec<Vec<(String, ShellKind, bool)>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LifecycleEvent::BackgroundShells { shells, completed } => Some(
+                    shells
+                        .iter()
+                        .map(|shell| (shell.id.clone(), shell.kind, *completed))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A shell Copilot backgrounded for overrunning is a job the agent waits on, and
+    /// the wait ends with the completion notice; a detached shell is a server left for
+    /// the user and is never a wait at all.
+    #[test]
+    fn a_backgrounded_shell_is_waited_on_until_its_notice_and_a_detached_one_never_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+
+        append(&path, &(async_started("report-server", true) + "\n"));
+        assert!(
+            shell_ids(&poll(&mut tail)).is_empty(),
+            "a detached server holds nothing up"
+        );
+
+        append(&path, &(backgrounded("fits-inference") + "\n"));
+        assert_eq!(
+            shell_ids(&poll(&mut tail)),
+            vec![vec![(
+                "fits-inference".to_string(),
+                ShellKind::Backgrounded,
+                false
+            )]]
+        );
+
+        append(&path, &(completion_notice("fits-inference") + "\n"));
+        assert_eq!(
+            shell_ids(&poll(&mut tail)),
+            vec![vec![]],
+            "the notice empties the set, and says so was by notice"
+        );
+        let events = {
+            append(&path, &(completion_notice("fits-inference") + "\n"));
+            poll(&mut tail)
+        };
+        assert!(
+            shell_ids(&events).is_empty(),
+            "a notice for a shell not waited on changes nothing"
+        );
+    }
+
+    /// Only one in twelve stopped shells ever gets a completion notice, and a shell
+    /// whose output the agent read after it finished gets none either: both have to end
+    /// the wait, or the tab spins for a shell that ended an hour ago.
+    #[test]
+    fn a_stop_or_a_read_of_the_finished_output_ends_the_wait_as_the_notice_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+
+        append(&path, &(async_started("worker", false) + "\n"));
+        append(&path, &(backgrounded("fits") + "\n"));
+        let _ = poll(&mut tail);
+        append(
+            &path,
+            r#"{"type":"tool.execution_start","data":{"toolCallId":"call_s","toolName":"stop_powershell","arguments":{"shellId":"worker"}}}
+"#,
+        );
+        let after_stop = shell_ids(&poll(&mut tail));
+        assert_eq!(
+            after_stop,
+            vec![vec![("fits".to_string(), ShellKind::Backgrounded, false)]],
+            "the stop removed the worker and left the fits"
+        );
+
+        append(
+            &path,
+            r#"{"type":"tool.execution_complete","data":{"toolCallId":"call_r","result":{"content":"<shellId: fits completed with exit code 0>"}}}
+"#,
+        );
+        assert_eq!(shell_ids(&poll(&mut tail)), vec![vec![]]);
+    }
+
+    /// Copilot reuses shell ids, so a second launch under a name owns the next
+    /// completion; and a listing of active shells, which names several, starts nothing.
+    #[test]
+    fn a_reused_id_is_one_shell_and_a_listing_of_shells_starts_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+
+        append(&path, &(async_started("worker", false) + "\n"));
+        append(&path, &(completion_notice("worker") + "\n"));
+        append(&path, &(async_started("worker", false) + "\n"));
+        let events = shell_ids(&poll(&mut tail));
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events[2],
+            vec![("worker".to_string(), ShellKind::Async, false)],
+            "the second launch is waited on again"
+        );
+
+        append(
+            &path,
+            r#"{"type":"tool.execution_complete","data":{"toolCallId":"call_l","result":{"content":"Active shell sessions:\n  shellId: report-server, pid: 4704, mode: async, status: running, elapsed: 64748s\n  shellId: worker, pid: 11, mode: async, status: running"}}}
+"#,
+        );
+        assert!(
+            shell_ids(&poll(&mut tail)).is_empty(),
+            "a listing is neither a start nor an end"
+        );
+        assert_eq!(tail.shells.len(), 1);
+    }
+
+    /// An interrupt ends the wait whatever the shells go on doing.
+    #[test]
+    fn an_abort_clears_every_waited_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+        append(&path, &(backgrounded("fits") + "\n"));
+        let _ = poll(&mut tail);
+        append(&path, "{\"type\":\"abort\",\"data\":{}}\n");
+        assert_eq!(shell_ids(&poll(&mut tail)), vec![vec![]]);
+    }
+
+    /// A shell's result can run past the prefix the monitor keeps of a huge record; the
+    /// sentence that matters is at its front, so the wait is still seen.
+    #[test]
+    fn a_backgrounded_shell_in_an_oversized_record_is_still_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut tail = LifecycleTail::new(path.clone(), 0);
+        let padding = "x".repeat(MAX_RECORD_PREFIX + 10);
+        let record = format!(
+            r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"call_big","result":{{"content":"<command with shellId: big-job is still running after 30 seconds. {padding}>"}}}}}}"#
+        );
+        append(&path, &(record + "\n"));
+        assert_eq!(
+            shell_ids(&poll(&mut tail)),
+            vec![vec![(
+                "big-job".to_string(),
+                ShellKind::Backgrounded,
+                false
+            )]]
+        );
     }
 
     /// The rule that decides a session is idle, without waiting real seconds for it.

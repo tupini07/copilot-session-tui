@@ -1,0 +1,91 @@
+# A shell command that outlives its time limit keeps running after the agent stops:
+# Copilot's hooks call the session idle, its own status row says "Waiting for background
+# shells", and CST used to show nothing. Now the tab spins for a shell Copilot
+# backgrounded for overrunning (a job), shows ◷ for one the agent started async (which
+# might be a server), and the status bar names the shell. A detached shell is a server
+# left for the user and counts for nothing. When the shell's completion notice arrives,
+# the agent is working again, and the ready hook ends that like any turn.
+#
+# Driven in the hooks regime, because that is what runs on a real machine: once a hook
+# has spoken, CST takes its word over the stub's progress sequences. Two tabs, because
+# a lone session has no tab strip to carry a marker.
+
+size 110x30
+arg --mux
+session alpha Training session
+session beta Other session
+
+wait_for Training session
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b d
+wait_for Other session
+press down
+press enter
+wait_for Fake Copilot is idling
+wait_for --resume=00000002
+press ctrl+b 1
+wait_for projects\alpha
+
+# A turn, then the agent stops with a backgrounded job still running.
+type e2e:hook working
+press enter
+wait_for ran the working hook
+type e2e:shell fits-inference
+press enter
+wait_for left shell fits-inference running
+type e2e:hook ready
+press enter
+wait_for ran the ready hook
+wait 1200
+wait_for Waiting
+wait_for on background shell fits-inference
+dump 01-waiting-on-job
+
+# The job finishes: Copilot writes the notice as it wakes the agent, so the session is
+# working again, and the ready hook ends the follow-up turn.
+type e2e:shell_done fits-inference
+press enter
+wait_for heard shell fits-inference finish
+wait 800
+wait_gone on background shell
+dump 02-follow-up-running
+type e2e:hook ready
+press enter
+wait_for ran the ready hook
+wait 1200
+dump 03-idle-again
+
+# An async shell might be a server: a quieter mark, and the status bar still names it.
+type e2e:shell report-server async
+press enter
+wait_for left shell report-server running
+wait 800
+wait_for ◷
+wait_for on background shell report-server
+dump 04-waiting-on-async
+
+# Seen from the other tab too, which is where it matters: this one is not being watched.
+press ctrl+b 2
+wait_for projects\beta
+wait_for ◷
+dump 05-seen-from-other-tab
+press ctrl+b 1
+wait_for projects\alpha
+
+# Stopping it ends the wait with no notice written, as most stops do.
+type e2e:stop report-server
+press enter
+wait 800
+wait_gone on background shell
+wait_gone ◷
+dump 06-stopped
+
+# A detached shell is a server left for the user: nothing to wait on.
+type e2e:shell viewer detached
+press enter
+wait_for left shell viewer running
+wait 1000
+expect_not on background shell
+expect_not ◷
+dump 07-detached-ignored

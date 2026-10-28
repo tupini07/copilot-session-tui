@@ -1768,11 +1768,13 @@ fn tab_spinner_animating(app: &App) -> bool {
         mux.panes.iter().any(|pane| {
             pane.is_running()
                 && !pane.needs_attention()
-                && matches!(
+                && (matches!(
                     pane.effective_progress_state(),
                     host_terminal::ProgressState::Normal
                         | host_terminal::ProgressState::Indeterminate
                 )
+                    // A stopped agent waiting on a job of its own spins like a turn.
+                    || (pane.waiting_on_shells() && pane.waiting_on_a_job()))
         })
     })
 }
