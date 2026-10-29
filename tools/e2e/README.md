@@ -107,7 +107,16 @@ starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as th
 Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
 <text>`, or by playing the form as CST does for a phone reply (arrows move the highlight
 from the first choice, text typed on the Other row is the answer, Enter accepts),
-which ends the turn; `e2e:bell` rings the bell. An Escape pressed in the pane on its own, as CST does for the phone's `/esc`, shows as `Fake Copilot received: <esc>` once the next Enter flushes the console's line buffer. A thread wake-up pointer (`A new comment
+which ends the turn; `e2e:bell` rings the bell. `e2e:shell <id> [async|detached]` records a
+shell command left running in the background under that id, in the words the real
+Copilot's log uses: one Copilot backgrounded for overrunning its limit (the default), one
+the agent started async, or one started detached; `e2e:shell_done <id>` records the
+completion notice Copilot writes as it wakes the agent with the result, and `e2e:stop
+<id>` records the agent stopping it. `e2e:hook working|ready [<ms>]` writes what CST's
+hook plugin would have, beside the event log, so a script can drive the regime where hooks
+decide a pane's state, which is what runs on a real machine; with `<ms>` it waits that
+long first, so the script can leave the pane before the turn's end is confirmed, which
+is what makes it an attention event. An Escape pressed in the pane on its own, as CST does for the phone's `/esc`, shows as `Fake Copilot received: <esc>` once the next Enter flushes the console's line buffer. A thread wake-up pointer (`A new comment
 arrived on …`) is acted out as a 3 s turn on its own, as the real Copilot would, so a
 script can see how CST treats that turn's end. A turn
 that ends while the script is back at the list is an attention event, which is what

@@ -2921,31 +2921,40 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
         }
         MuxEvent::SessionLifecycle(id, event) => {
             let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
-            let (notification, attention_changed, action_or_progress_changed, title, session_id) =
-                app.mux
-                    .as_mut()
-                    .and_then(|mux| mux.pane_mut(id))
-                    .and_then(|pane| {
-                        if !pane.is_running() {
-                            return None;
-                        }
-                        let attention_before = pane.needs_attention();
-                        let action_before = pane.requires_user_action();
-                        // A quiet report can retire a spinner without touching either of
-                        // those, and a stale spinner on an unfocused tab is exactly what this
-                        // is here to clear — so the marker is compared too.
-                        let progress_before = pane.effective_progress_state();
-                        let notification = pane.apply_lifecycle(event);
-                        Some((
-                            notification,
-                            attention_before != pane.needs_attention(),
-                            action_before != pane.requires_user_action()
-                                || progress_before != pane.effective_progress_state(),
-                            pane.title.clone(),
-                            pane.session_id.clone(),
-                        ))
-                    })
-                    .unwrap_or_default();
+            let (outcome, attention_changed, action_or_progress_changed, title, session_id) = app
+                .mux
+                .as_mut()
+                .and_then(|mux| mux.pane_mut(id))
+                .and_then(|pane| {
+                    if !pane.is_running() {
+                        return None;
+                    }
+                    let attention_before = pane.needs_attention();
+                    let action_before = pane.requires_user_action();
+                    // A quiet report can retire a spinner without touching either of
+                    // those, and a stale spinner on an unfocused tab is exactly what this
+                    // is here to clear — so the marker is compared too.
+                    let progress_before = pane.effective_progress_state();
+                    // The tab's marker and the status bar both read the waited-on
+                    // shells, so a change there is a change on screen as well.
+                    let shells_before = (pane.waiting_on_shells(), pane.background_shells().len());
+                    let outcome = pane.apply_lifecycle_outcome(event);
+                    Some((
+                        outcome,
+                        attention_before != pane.needs_attention(),
+                        action_before != pane.requires_user_action()
+                            || progress_before != pane.effective_progress_state()
+                            || shells_before
+                                != (pane.waiting_on_shells(), pane.background_shells().len()),
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                    ))
+                })
+                .unwrap_or_default();
+            if outcome.cycle_started {
+                app.begin_notification_cycle(&session_id);
+            }
+            let notification = outcome.notification;
             if let Some(notification) = notification {
                 let kind = match notification {
                     PaneNotification::Question => NotificationKind::Question,
@@ -2964,6 +2973,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
                 || attention_changed
                 || action_or_progress_changed
                 || notification.is_some()
+                || outcome.cycle_started
         }
         MuxEvent::HookLifecycle(id, event) => {
             let attended = app.terminal_focused

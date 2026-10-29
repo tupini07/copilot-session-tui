@@ -1,0 +1,68 @@
+# A session's agent stops with a shell still running in the background, while the user
+# is away. Telegram gets the Ready message as before: Copilot takes a message in that
+# state, so the session is reachable from the phone. A reply from the phone goes
+# straight in, with no "queued" detour, because waiting on a shell is not working. When
+# the shell finishes, the agent's follow-up turn is a new cycle: its end sends a second
+# Ready carrying what that turn said, not the message from before the shell.
+#
+# Driven in the hooks regime, which is what runs on a real machine.
+
+size 110x30
+arg --mux
+fake_telegram private
+session alpha Training session
+
+wait_for Training session
+press enter
+wait_for Fake Copilot is idling
+
+# A turn that leaves a backgrounded job running, then the agent stops. The ready hook
+# lands after we are back at the list, which is what makes its end an attention event.
+type e2e:hook working
+press enter
+wait_for ran the working hook
+type e2e:shell fits-inference
+press enter
+wait_for left shell fits-inference running
+type e2e:work 1000 Started the training run; it is still going in the background.
+press enter
+wait_for finished a turn
+type e2e:hook ready 1500
+press enter
+press ctrl+b d
+wait_for Training session
+
+telegram_wait message: <b>(Training session)</b>
+telegram_wait Started the training run; it is still going in the background.
+telegram_dump 01-ready-with-shell-outstanding
+dump 01-list
+
+# A reply while the agent waits on its shell: delivered at once, thumbs-up on the phone.
+telegram_say How far along is it?
+wait 3000
+telegram_expect_not Queued
+press enter
+wait_for Fake Copilot received: How far along is it?
+telegram_wait reaction on
+wait_for on background shell fits-inference
+dump 02-reply-in-while-waiting
+telegram_dump 02-reply-delivered
+
+# The job finishes: the notice wakes the agent, whose follow-up turn ends while we are
+# away again. The phone hears about this turn, with this turn's words.
+type e2e:shell_done fits-inference
+press enter
+wait_for heard shell fits-inference finish
+wait 800
+wait_gone on background shell
+type e2e:work 1000 Training finished: accuracy 0.93 on the held-out set.
+press enter
+wait_for finished a turn
+type e2e:hook ready 1500
+press enter
+press ctrl+b d
+wait_for Training session
+
+telegram_wait Training finished: accuracy 0.93 on the held-out set.
+telegram_dump 03-ready-after-follow-up
+dump 03-list-after-follow-up

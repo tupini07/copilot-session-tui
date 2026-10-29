@@ -445,6 +445,15 @@ window has focus, because you watched it finish; its border turns to the attenti
 instead, and its tab keeps its marker until you focus it. Questions, plan approvals and
 errors still notify, just as they do for the focused session.
 
+An agent that has stopped but left a shell running in the background — a training run
+that overran its time limit, say — is still working as far as you are concerned, even
+though Copilot's hooks call it idle and its own status row says only "Waiting for
+background shells". Its tab keeps spinning, and the status bar names the shell and how
+long it has run. A shell the agent started in async mode might be a server left up for
+you rather than a job, so that tab shows `◷` instead of the spinner, and a detached
+shell counts for nothing. Copilot takes a message at once while it waits, so replies
+from your phone and thread wake-ups still go in.
+
 Drag the line between two splits to resize them; the sessions on either side reflow as
 you go and the rest stay put. The scratchpad's left edge and the terminal's top edge
 drag the same way, with or without a split, and the sizes last until CST quits.
