@@ -61,9 +61,10 @@ pub fn main() {
     //   e2e:shell_done <id>  record the completion notice Copilot writes as it wakes
     //                    the agent with that shell's result
     //   e2e:stop <id>    record the agent stopping that shell
-    //   e2e:hook <working|ready>
+    //   e2e:hook <working|ready> [<ms>]
     //                    write what CST's hook plugin would have, beside the event log,
-    //                    so a script can drive the regime where hooks decide the state
+    //                    so a script can drive the regime where hooks decide the state;
+    //                    after <ms>, if given, so the script can leave the pane first
     let events_path = events_path(&args);
     enable_virtual_terminal_input();
     std::thread::spawn(move || {
@@ -352,11 +353,18 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             // Copilot runs the plugin's hooks. Milliseconds, like the hook's own clock,
             // and never earlier than the last: CST ignores a hook that goes backwards.
             let Some(path) = events_path else { return };
-            let state = match rest.trim() {
+            let (state, delay) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            let state = match state {
                 "working" => "working",
                 "ready" => "ready",
                 _ => return,
             };
+            // An optional pause first, so a script can leave the pane before the hook
+            // lands: whether a turn's end is worth telling the phone about is decided
+            // by where the user is when CST confirms it, not when the key was pressed.
+            if let Ok(millis) = delay.trim().parse::<u64>() {
+                std::thread::sleep(Duration::from_millis(millis));
+            }
             let lifecycle = path.with_file_name(".cst-lifecycle.jsonl");
             let millis = chrono::Utc::now().timestamp_millis();
             append_event(
