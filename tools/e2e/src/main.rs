@@ -249,6 +249,14 @@ enum Step {
     Env(String, String),
     Arg(String),
     Config(String),
+    /// Bytes the driver writes back whenever the child's output contains `query`, as
+    /// a terminal answering a capability question. `{id}` in the reply is replaced by
+    /// the `i=` value that follows the match, which is how a Kitty graphics query is
+    /// echoed.
+    Answer {
+        query: Vec<u8>,
+        reply: Vec<u8>,
+    },
     FakeGh,
     WatchThread(String),
     HeldReply(String),
@@ -314,6 +322,7 @@ impl Step {
                 | Step::Env(..)
                 | Step::Arg(_)
                 | Step::Config(_)
+                | Step::Answer { .. }
                 | Step::FakeGh
                 | Step::WatchThread(_)
                 | Step::HeldReply(_)
@@ -398,6 +407,16 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
         }
         "arg" => Step::Arg(need("an argument")?),
         "config" => Step::Config(need("the settings as JSON")?),
+        "answer" => {
+            let text = need("QUERY REPLY, as `key` bytes")?;
+            let (query, reply) = text
+                .split_once(' ')
+                .ok_or("answer wants the query bytes, then the reply bytes")?;
+            Step::Answer {
+                query: unescape(query)?,
+                reply: unescape(reply.trim())?,
+            }
+        }
         "fake_gh" => Step::FakeGh,
         "watch_thread" => {
             let url = need("a thread URL")?;
@@ -571,6 +590,36 @@ fn unescape(text: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// The scripted reply to a query found in `chunk`, if it is there: `reply` with `{id}`
+/// replaced by the digits after the first `i=` following the match, or by nothing.
+fn answer_for(chunk: &[u8], query: &[u8], reply: &[u8]) -> Option<Vec<u8>> {
+    let at = chunk.windows(query.len()).position(|window| window == query)?;
+    let rest = &chunk[at + query.len()..];
+    let id: Vec<u8> = rest
+        .windows(2)
+        .position(|window| window == b"i=")
+        .map(|start| {
+            rest[start + 2..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(reply.len() + id.len());
+    let mut index = 0;
+    while index < reply.len() {
+        if reply[index..].starts_with(b"{id}") {
+            out.extend_from_slice(&id);
+            index += 4;
+        } else {
+            out.push(reply[index]);
+            index += 1;
+        }
+    }
+    Some(out)
+}
+
 /// What a terminal sends for a named key, as xterm and ConPTY spell it.
 fn key_bytes(name: &str) -> Result<Vec<u8>, String> {
     let lower = name.to_ascii_lowercase();
@@ -634,6 +683,7 @@ struct Setup {
     env: Vec<(String, String)>,
     args: Vec<String>,
     config: Option<String>,
+    answers: Vec<(Vec<u8>, Vec<u8>)>,
     fake_gh: bool,
     watched: Vec<String>,
     held: Vec<String>,
@@ -674,6 +724,9 @@ impl Driver {
             Step::Env(key, value) => self.setup.env.push((key.clone(), value.clone())),
             Step::Arg(arg) => self.setup.args.push(arg.clone()),
             Step::Config(json) => self.setup.config = Some(json.clone()),
+            Step::Answer { query, reply } => {
+                self.setup.answers.push((query.clone(), reply.clone()))
+            }
             Step::FakeGh => self.setup.fake_gh = true,
             Step::WatchThread(url) => self.setup.watched.push(url.clone()),
             Step::HeldReply(url) => self.setup.held.push(url.clone()),
@@ -1081,6 +1134,7 @@ impl Driver {
             let parser = parser.clone();
             let raw = raw.clone();
             let answer = writer.clone();
+            let answers = self.setup.answers.clone();
             std::thread::spawn(move || {
                 let mut buffer = [0u8; 8192];
                 while let Ok(read) = reader.read(&mut buffer) {
@@ -1096,6 +1150,13 @@ impl Driver {
                         let mut answer = answer.lock().unwrap();
                         let _ = answer.write_all(b"\x1b[1;1R");
                         let _ = answer.flush();
+                    }
+                    for (query, reply) in &answers {
+                        if let Some(reply) = answer_for(chunk, query, reply) {
+                            let mut answer = answer.lock().unwrap();
+                            let _ = answer.write_all(&reply);
+                            let _ = answer.flush();
+                        }
                     }
                 }
             });
@@ -1385,6 +1446,30 @@ fn canonical(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scripted_answer_echoes_the_query_id_so_a_kitty_graphics_query_gets_a_valid_reply() {
+        let step = parse_step("answer", r"\e_G \e_Gi={id};OK\e\\").unwrap();
+        let Step::Answer { query, reply } = step else {
+            panic!("not an answer step");
+        };
+        let chunk = b"text\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\more";
+
+        assert_eq!(
+            answer_for(chunk, &query, &reply).as_deref(),
+            Some(&b"\x1b_Gi=31;OK\x1b\\"[..])
+        );
+        assert_eq!(answer_for(b"nothing asked", &query, &reply), None);
+        // A query with no id, such as DA1, is answered as written.
+        let da1 = parse_step("answer", r"\e[c \e[?61;4c").unwrap();
+        let Step::Answer { query, reply } = da1 else {
+            panic!("not an answer step");
+        };
+        assert_eq!(
+            answer_for(b"\x1b[c", &query, &reply).as_deref(),
+            Some(&b"\x1b[?61;4c"[..])
+        );
+    }
 
     #[test]
     fn a_setup_line_after_driving_has_started_is_refused_before_anything_runs() {
