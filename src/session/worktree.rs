@@ -121,6 +121,21 @@ impl CreationProgress {
     }
 }
 
+#[cfg(test)]
+impl ManagedWorktree {
+    /// An entry for drawing tests, which never touch git.
+    pub(crate) fn fixture(path: PathBuf, branch: &str) -> Self {
+        Self {
+            path,
+            source_repository: PathBuf::from("repo"),
+            common_git_dir: PathBuf::from("repo/.git"),
+            branch: branch.to_string(),
+            identity: "fixture".to_string(),
+            include_patterns: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RemovalOutcome {
     pub branch_removed: bool,
@@ -231,6 +246,74 @@ pub fn is_dirty(entry: &ManagedWorktree) -> Result<bool> {
     }
 
     included_files_are_dirty(entry)
+}
+
+/// What a user is about to delete, gathered before the confirmation popups so they
+/// can say it: whether there are uncommitted changes, which branch the worktree is on
+/// now, and which commits exist nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeState {
+    pub dirty: bool,
+    /// The branch checked out now; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// Commits reachable from HEAD that no local branch and no remote has. Only a
+    /// detached HEAD can hold any; removing the worktree loses them.
+    pub unanchored_commits: usize,
+    /// Commits reachable from HEAD that no remote has, when the repository has one.
+    pub unpushed_commits: usize,
+}
+
+impl WorktreeState {
+    /// Deleting would lose something, which only the second confirmation may allow.
+    pub fn needs_force(&self) -> bool {
+        self.dirty || self.unanchored_commits > 0
+    }
+}
+
+pub fn inspect(entry: &ManagedWorktree) -> Result<WorktreeState> {
+    let dirty = is_dirty(entry)?;
+    let branch = git_stdout(&entry.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    let has_remote = !git_stdout(&entry.path, ["remote"])?.is_empty();
+    let unpushed_commits = if has_remote {
+        count_commits(
+            &entry.path,
+            ["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        )?
+    } else {
+        0
+    };
+    let unanchored_commits = if branch.is_some() {
+        0
+    } else {
+        count_commits(
+            &entry.path,
+            [
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--remotes",
+            ],
+        )?
+    };
+    Ok(WorktreeState {
+        dirty,
+        branch,
+        unanchored_commits,
+        unpushed_commits,
+    })
+}
+
+fn count_commits<I, S>(repository: &Path, args: I) -> Result<usize>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let count = git_stdout(repository, args)?;
+    count
+        .parse()
+        .with_context(|| format!("git rev-list --count answered '{count}'"))
 }
 
 pub fn remove_managed_worktree(entry: &ManagedWorktree, force: bool) -> Result<RemovalOutcome> {
@@ -757,20 +840,19 @@ fn remove_managed_worktree_in(
         bail!("Managed worktree metadata changed; reload before deleting");
     }
 
-    let dirty = is_dirty(entry)?;
-    if dirty && !force {
-        bail!("Worktree has uncommitted changes and requires explicit force confirmation");
+    // An agent that checked out or created another branch inside the worktree had a
+    // reason to; that is not a reason to keep the folder. What would vanish with it,
+    // uncommitted changes or commits on no branch, is the user's call, and the
+    // confirmation popups have said which it is before `force` arrives here.
+    let state = inspect(entry)?;
+    if state.needs_force() && !force {
+        if state.dirty {
+            bail!("Worktree has uncommitted changes and requires explicit force confirmation");
+        }
+        bail!("Worktree has commits on no branch and requires explicit force confirmation");
     }
 
     let head = validate_worktree_identity(entry)?;
-    // An agent that checked out or created another branch inside the worktree had a
-    // reason to; that is not a reason to keep the folder. What must not vanish with
-    // it are commits reachable from nowhere else, which only a detached HEAD can hold.
-    if head.branch.is_none() && !commit_is_in_repository(&entry.source_repository, &head.commit)? {
-        bail!(
-            "Worktree is on a detached HEAD with commits on no branch; put them on a branch first"
-        );
-    }
     let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
         args.push(OsStr::new("--force"));
@@ -838,28 +920,6 @@ fn require_registered_branch(head: &WorktreeHead, branch: &str) -> Result<()> {
         ),
         None => bail!("Refusing automatic removal because the worktree is on a detached HEAD"),
     }
-}
-
-/// Whether `commit` is already reachable from some branch of the repository, so that
-/// removing a checkout that sits on it loses nothing.
-fn commit_is_in_repository(repository: &Path, commit: &str) -> Result<bool> {
-    let output = git_output(
-        repository,
-        [
-            "branch",
-            "--all",
-            "--contains",
-            commit,
-            "--format=%(refname)",
-        ],
-    )?;
-    if !output.status.success() {
-        bail!(
-            "Failed to check which branches contain {commit}: {}",
-            command_error(&output)
-        );
-    }
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 fn rollback_registered_worktree_in(entry: &ManagedWorktree, registry_path: &Path) -> Result<()> {
@@ -2016,7 +2076,7 @@ mod tests {
     }
 
     #[test]
-    fn a_detached_worktree_is_refused_only_while_its_commits_are_on_no_branch() {
+    fn a_detached_worktree_with_commits_on_no_branch_needs_force_like_a_dirty_one() {
         let repo = repository();
         let temp = tempfile::tempdir().unwrap();
         let registry = temp.path().join("registry.json");
@@ -2036,15 +2096,70 @@ mod tests {
             &["commit", "-m", "commit on no branch"],
         );
 
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.branch, None);
+        assert_eq!(state.unanchored_commits, 1);
+        assert!(state.needs_force());
         let refused = remove_managed_worktree_in(&created.entry, false, &registry).unwrap_err();
-        assert!(refused.to_string().contains("detached HEAD"));
+        assert!(refused.to_string().contains("force confirmation"));
         assert!(created.entry.path.exists());
 
-        // Once the commit is on a branch nothing is lost, and the worktree goes.
+        // Forcing is the user's second confirmation; it takes the commit with it.
+        let outcome = remove_managed_worktree_in(&created.entry, true, &registry).unwrap();
+        assert!(!created.entry.path.exists());
+        assert!(outcome.branch_removed);
+    }
+
+    #[test]
+    fn a_detached_worktree_at_a_commit_some_branch_has_needs_no_force() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/anchored",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "--detach"]);
+        fs::write(created.entry.path.join("new.txt"), "kept").unwrap();
+        git(&created.entry.path, &["add", "."]);
+        git(
+            &created.entry.path,
+            &["commit", "-m", "commit kept on a branch"],
+        );
         git(&created.entry.path, &["branch", "agent/kept"]);
+
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.unanchored_commits, 0);
+        assert!(!state.needs_force());
         let outcome = remove_managed_worktree_in(&created.entry, false, &registry).unwrap();
         assert!(!created.entry.path.exists());
         assert!(outcome.branch_removed);
+    }
+
+    #[test]
+    fn inspecting_a_moved_worktree_names_its_branch_and_counts_no_unpushed_work_without_a_remote() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/inspected",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "-b", "agent/moved"]);
+
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.branch.as_deref(), Some("agent/moved"));
+        assert_eq!(state.unanchored_commits, 0);
+        assert_eq!(state.unpushed_commits, 0);
+        assert!(!state.needs_force());
     }
 
     #[test]

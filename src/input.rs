@@ -1053,9 +1053,12 @@ fn begin_delete(app: &mut App) {
     let cwd = session.cwd.clone();
 
     match worktree::managed_worktree_for_cwd(Path::new(&cwd)) {
-        Ok(Some(entry)) => match worktree::is_dirty(&entry) {
-            Ok(dirty) => {
-                app.pending_delete = Some(DeleteTarget::Managed { entry, dirty });
+        Ok(Some(entry)) => match worktree::inspect(&entry) {
+            Ok(state) => {
+                app.pending_delete = Some(DeleteTarget::Managed {
+                    entry: Box::new(entry),
+                    state,
+                });
                 app.mode = Mode::ConfirmDelete;
             }
             Err(error) => {
@@ -1397,8 +1400,8 @@ fn handle_rename(app: &mut App, key: KeyCode) {
 fn handle_confirm_delete(app: &mut App, key: KeyCode) {
     if matches!(key, KeyCode::Char('y') | KeyCode::Char('Y')) {
         if matches!(
-            app.pending_delete,
-            Some(DeleteTarget::Managed { dirty: true, .. })
+            &app.pending_delete,
+            Some(DeleteTarget::Managed { state, .. }) if state.needs_force()
         ) {
             app.mode = Mode::ConfirmForceDelete;
         } else {

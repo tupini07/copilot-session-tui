@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 
 use crate::app::{App, DeleteTarget, SettingsEditField, SettingsSection};
+use crate::session::worktree::{ManagedWorktree, WorktreeState};
 use crate::theme::{fill_area, Theme, ThemeName};
 
 pub(crate) fn surface_style(theme: Theme) -> Style {
@@ -545,22 +546,115 @@ pub fn draw_pane_list(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(hint).style(surface_style(theme)), chunks[1]);
 }
 
+/// What the delete confirmation says about a managed worktree beyond that it goes:
+/// one note per fact, flagged when the fact is something that will be lost. The
+/// branch comes first because an agent usually left the worktree on one of its own.
+fn worktree_delete_notes(entry: &ManagedWorktree, state: &WorktreeState) -> Vec<(bool, String)> {
+    let mut notes = Vec::new();
+    match state.branch.as_deref() {
+        Some(branch) if branch == entry.branch => notes.push((
+            false,
+            format!("On branch '{branch}', deleted if merged and kept otherwise."),
+        )),
+        Some(branch) => {
+            notes.push((false, format!("Moved to branch '{branch}', which is kept.")));
+            notes.push((
+                false,
+                format!("CST's branch '{}' is deleted if merged.", entry.branch),
+            ));
+        }
+        None if state.unanchored_commits > 0 => notes.push((
+            true,
+            format!(
+                "Detached HEAD: {} on no branch will be lost.",
+                commits(state.unanchored_commits)
+            ),
+        )),
+        None => notes.push((
+            false,
+            "Detached HEAD at a commit a branch already has.".to_string(),
+        )),
+    }
+    if state.unpushed_commits > 0 {
+        notes.push((
+            false,
+            format!(
+                "{} not pushed to any remote.",
+                commits(state.unpushed_commits)
+            ),
+        ));
+    }
+    if state.dirty {
+        notes.push((true, "Uncommitted changes will be lost.".to_string()));
+    }
+    if state.needs_force() {
+        notes.push((true, "Another force confirmation follows.".to_string()));
+    }
+    notes
+}
+
+/// What the force confirmation says will be gone for good.
+fn force_delete_notes(state: &WorktreeState) -> Vec<String> {
+    let mut notes = Vec::new();
+    if state.dirty {
+        notes.push("Modified, staged, and untracked files will be permanently lost.".to_string());
+    }
+    if state.unanchored_commits > 0 {
+        notes.push(format!(
+            "{} on no branch will be permanently lost.",
+            commits(state.unanchored_commits)
+        ));
+    }
+    if state.unpushed_commits > 0 {
+        notes.push(format!(
+            "{} exist on no remote.",
+            commits(state.unpushed_commits)
+        ));
+    }
+    notes
+}
+
+fn commits(count: usize) -> String {
+    if count == 1 {
+        "1 commit".to_string()
+    } else {
+        format!("{count} commits")
+    }
+}
+
+/// A popup `percent_x` wide and as tall as `lines` need inside its border, counting
+/// the rows a long line wraps onto, so a confirmation with more to say never clips
+/// its key hints.
+fn popup_for(lines: &[Line], percent_x: u16, area: Rect) -> Rect {
+    let width = (u32::from(area.width) * u32::from(percent_x) / 100) as u16;
+    let width = width.clamp(1, area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(inner))
+        .sum();
+    let height = (rows as u16).saturating_add(2).min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
 pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
     let theme = app.theme();
-    let area = centered_rect(55, 36, f.area());
-    prepare_popup(f, area, theme);
 
     let name = app
         .selected_session()
         .map(|s| s.display_name().to_string())
         .unwrap_or_default();
 
-    let managed = matches!(app.pending_delete, Some(DeleteTarget::Managed { .. }));
-    let dirty = matches!(
-        app.pending_delete,
-        Some(DeleteTarget::Managed { dirty: true, .. })
-    );
-    let action = if managed {
+    let managed = match &app.pending_delete {
+        Some(DeleteTarget::Managed { entry, state }) => Some((entry, state)),
+        _ => None,
+    };
+    let action = if managed.is_some() {
         "  Delete this session and its TUI-managed worktree?"
     } else {
         "  Delete this session?"
@@ -578,17 +672,18 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(format!("  {}", name)),
         Line::from(""),
     ];
-    if managed {
+    if let Some((entry, state)) = managed {
         text.push(Line::from(Span::styled(
             "  The worktree will be removed before session metadata.",
             Style::default().fg(theme.warning),
         )));
-    }
-    if dirty {
-        text.push(Line::from(Span::styled(
-            "  This worktree is dirty; another force confirmation follows.",
-            Style::default().fg(theme.error),
-        )));
+        for (loss, note) in worktree_delete_notes(entry, state) {
+            let colour = if loss { theme.error } else { theme.warning };
+            text.push(Line::from(Span::styled(
+                format!("  {note}"),
+                Style::default().fg(colour),
+            )));
+        }
     }
     text.extend([
         Line::from(""),
@@ -611,6 +706,8 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
         ]),
     ]);
 
+    let area = popup_for(&text, 80, f.area());
+    prepare_popup(f, area, theme);
     let block = Block::default()
         .title(" Confirm Delete ")
         .borders(Borders::ALL)
@@ -626,16 +723,22 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
 
 pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
     let theme = app.theme();
-    let area = centered_rect(60, 36, f.area());
-    prepare_popup(f, area, theme);
-    let path = match &app.pending_delete {
-        Some(DeleteTarget::Managed { entry, .. }) => entry.path.display().to_string(),
-        _ => String::new(),
+    let (path, state) = match &app.pending_delete {
+        Some(DeleteTarget::Managed { entry, state }) => {
+            (entry.path.display().to_string(), Some(state))
+        }
+        _ => (String::new(), None),
     };
-    let text = vec![
+    let dirty = state.is_none_or(|state| state.dirty);
+    let title = if dirty {
+        "  FORCE REMOVE DIRTY WORKTREE?"
+    } else {
+        "  FORCE REMOVE WORKTREE?"
+    };
+    let mut text = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  FORCE REMOVE DIRTY WORKTREE?",
+            title,
             Style::default()
                 .fg(theme.error)
                 .add_modifier(Modifier::BOLD),
@@ -643,10 +746,14 @@ pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
         Line::from(""),
         Line::from(format!("  {path}")),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Modified, staged, and untracked files will be permanently lost.",
+    ];
+    for note in state.map(force_delete_notes).unwrap_or_default() {
+        text.push(Line::from(Span::styled(
+            format!("  {note}"),
             Style::default().fg(theme.error),
-        )),
+        )));
+    }
+    text.extend([
         Line::from(""),
         Line::from(vec![
             Span::raw("  Press "),
@@ -658,7 +765,9 @@ pub fn draw_force_delete_confirm(f: &mut Frame, app: &App) {
             ),
             Span::raw(" to force delete; any other key cancels"),
         ]),
-    ];
+    ]);
+    let area = popup_for(&text, 80, f.area());
+    prepare_popup(f, area, theme);
     let block = Block::default()
         .title(" Destructive Confirmation ")
         .borders(Borders::ALL)
@@ -3049,6 +3158,104 @@ pub fn draw_new_project(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+#[cfg(test)]
+mod delete_confirm_tests {
+    use super::*;
+    use crate::app::App;
+    use crate::config::UserConfig;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    fn rendered(state: WorktreeState, force: bool) -> String {
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.pending_delete = Some(DeleteTarget::Managed {
+            entry: Box::new(ManagedWorktree::fixture(
+                PathBuf::from("C:/cst-wt/repo-1234/atupini-20260819-201152-ci-tests-improvement"),
+                "atupini/20260819-201152-ci-tests-improvement",
+            )),
+            state,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                if force {
+                    draw_force_delete_confirm(f, &app)
+                } else {
+                    draw_delete_confirm(f, &app)
+                }
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_delete_confirmation_says_which_branch_the_worktree_moved_to_and_what_happens_to_each() {
+        let text = rendered(
+            WorktreeState {
+                dirty: false,
+                branch: Some("atupini/lazy-matplotlib-import".to_string()),
+                unanchored_commits: 0,
+                unpushed_commits: 3,
+            },
+            false,
+        );
+        assert!(
+            text.contains("Moved to branch 'atupini/lazy-matplotlib-import', which is kept."),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains(
+                "CST's branch 'atupini/20260819-201152-ci-tests-improvement' is deleted if merged."
+            ),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains("3 commits not pushed to any remote."),
+            "got:\n{text}"
+        );
+        assert!(!text.contains("force confirmation"), "got:\n{text}");
+        assert!(text.contains("Cancel"), "key hints clipped:\n{text}");
+    }
+
+    #[test]
+    fn a_detached_worktree_with_commits_on_no_branch_is_warned_about_in_both_confirmations() {
+        let state = WorktreeState {
+            dirty: false,
+            branch: None,
+            unanchored_commits: 2,
+            unpushed_commits: 2,
+        };
+        let first = rendered(state.clone(), false);
+        assert!(
+            first.contains("Detached HEAD: 2 commits on no branch will be lost."),
+            "got:\n{first}"
+        );
+        assert!(
+            first.contains("Another force confirmation follows."),
+            "got:\n{first}"
+        );
+        assert!(first.contains("Cancel"), "key hints clipped:\n{first}");
+
+        let second = rendered(state, true);
+        assert!(second.contains("FORCE REMOVE WORKTREE?"), "got:\n{second}");
+        assert!(
+            second.contains("2 commits on no branch will be permanently lost."),
+            "got:\n{second}"
+        );
+        assert!(!second.contains("untracked files"), "got:\n{second}");
+        assert!(second.contains("Shift+Y"), "key hints clipped:\n{second}");
+    }
 }
 
 #[cfg(test)]
