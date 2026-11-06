@@ -768,8 +768,7 @@ fn remove_managed_worktree_in(
     // it are commits reachable from nowhere else, which only a detached HEAD can hold.
     if head.branch.is_none() && !commit_is_in_repository(&entry.source_repository, &head.commit)? {
         bail!(
-            "Refusing removal because the worktree is on a detached HEAD whose commits are on no branch; \
-             check them out on a branch first"
+            "Worktree is on a detached HEAD with commits on no branch; put them on a branch first"
         );
     }
     let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
@@ -821,10 +820,24 @@ fn remove_managed_worktree_in(
         let left = format!("the worktree had moved to branch '{other}', which was left alone");
         outcome.branch_notice = Some(match outcome.branch_notice.take() {
             Some(notice) => format!("{notice}; {left}"),
-            None => format!("Worktree removed; {left}"),
+            None => format!("Branch '{}' deleted; {left}", entry.branch),
         });
     }
     Ok(outcome)
+}
+
+/// The automatic paths (rolling back a creation that failed, pruning a stale
+/// reservation) remove with `--force` and without a dirty check, on the strength of
+/// the worktree being exactly what CST just made. A worktree that has since moved to
+/// another branch is no longer that, so they leave it for the user to delete.
+fn require_registered_branch(head: &WorktreeHead, branch: &str) -> Result<()> {
+    match head.branch.as_deref() {
+        Some(actual) if actual == branch => Ok(()),
+        Some(actual) => bail!(
+            "Refusing automatic removal because the worktree branch changed from '{branch}' to '{actual}'"
+        ),
+        None => bail!("Refusing automatic removal because the worktree is on a detached HEAD"),
+    }
 }
 
 /// Whether `commit` is already reachable from some branch of the repository, so that
@@ -862,7 +875,9 @@ fn rollback_registered_worktree_in(entry: &ManagedWorktree, registry_path: &Path
         bail!("Managed worktree metadata changed; refusing rollback");
     }
 
-    let branch_oid = validate_worktree_identity(entry)?.commit;
+    let head = validate_worktree_identity(entry)?;
+    require_registered_branch(&head, &entry.branch)?;
+    let branch_oid = head.commit;
     let remove = git_output(
         &entry.source_repository,
         [
@@ -914,7 +929,11 @@ fn rollback_reserved_creation_in(
 
     let mut errors = Vec::new();
     let mut owned_worktree_remains = false;
-    if reservation.path.exists() && validate_reservation_identity(reservation).is_ok() {
+    if reservation.path.exists()
+        && validate_reservation_identity(reservation)
+            .and_then(|head| require_registered_branch(&head, &reservation.branch))
+            .is_ok()
+    {
         match git_output(
             &reservation.source_repository,
             [
@@ -1942,11 +1961,13 @@ mod tests {
         assert!(!created.entry.path.exists());
         // The branch CST made is merged (it never moved off the base), so it goes.
         assert!(outcome.branch_removed);
-        assert!(outcome
-            .branch_notice
-            .as_deref()
-            .unwrap()
-            .contains("moved to branch 'agent/renamed'"));
+        assert_eq!(
+            outcome.branch_notice.as_deref(),
+            Some(
+                "Branch 'copilot/original' deleted; the worktree had moved to branch \
+                 'agent/renamed', which was left alone"
+            )
+        );
         // The agent's branch, and its commit, are not CST's to delete.
         let agent_branch = git_output(
             repo.path(),
@@ -1970,6 +1991,28 @@ mod tests {
         )
         .unwrap();
         assert!(!original.status.success());
+    }
+
+    #[test]
+    fn an_automatic_rollback_still_refuses_a_worktree_that_moved_to_another_branch() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/rollback",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "-b", "agent/elsewhere"]);
+
+        let refused = rollback_registered_worktree_in(&created.entry, &registry).unwrap_err();
+        assert!(refused
+            .to_string()
+            .contains("changed from 'copilot/rollback'"));
+        assert!(created.entry.path.exists());
     }
 
     #[test]
