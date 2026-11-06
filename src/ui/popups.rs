@@ -706,7 +706,9 @@ pub fn draw_delete_confirm(f: &mut Frame, app: &App) {
         ]),
     ]);
 
-    let area = popup_for(&text, 80, f.area());
+    // A plain session delete is a one-line question; only worktree notes need room.
+    let width = if managed.is_some() { 80 } else { 55 };
+    let area = popup_for(&text, width, f.area());
     prepare_popup(f, area, theme);
     let block = Block::default()
         .title(" Confirm Delete ")

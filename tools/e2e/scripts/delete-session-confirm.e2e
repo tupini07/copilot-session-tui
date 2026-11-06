@@ -1,0 +1,11 @@
+# Deleting a plain session: the confirmation asks, and declining leaves the session alone.
+size 110x30
+session existing-app Existing app session
+wait_for Existing app session
+press d
+wait_for Confirm Delete
+dump 01-confirm
+press n
+wait_gone Confirm Delete
+expect Existing app session
+dump 02-declined
