@@ -5,7 +5,9 @@ use crate::notifications::{NotificationKind, NotificationRequest, NotificationWo
 use crate::scratchpad::Scratchpad;
 use crate::session::manager;
 use crate::session::tmux::{self, TmuxSessionRef, TmuxSupport};
-use crate::session::worktree::{self, CreatedWorktree, CreationProgress, ManagedWorktree};
+use crate::session::worktree::{
+    self, CreatedWorktree, CreationProgress, ManagedWorktree, WorktreeState,
+};
 use crate::session::Session;
 use crate::snippets::{SnippetModal, SnippetUpdate};
 use crate::terminal_pane::TerminalManager;
@@ -309,7 +311,10 @@ pub struct UpdateRestartPane {
 #[derive(Debug, Clone)]
 pub enum DeleteTarget {
     SessionOnly,
-    Managed { entry: ManagedWorktree, dirty: bool },
+    Managed {
+        entry: Box<ManagedWorktree>,
+        state: WorktreeState,
+    },
 }
 
 #[derive(Debug, Clone)]

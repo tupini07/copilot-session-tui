@@ -1269,7 +1269,13 @@ remain session-only during deletion.
 Deleting a registered session explicitly removes its worktree first. Dirty worktrees
 require a second `Shift+Y` force confirmation. CST then attempts `git branch -d`; an
 unmerged branch is preserved and reported, and CST never escalates automatically to
-`git branch -D`. Active sessions cannot be deleted.
+`git branch -D`. A worktree the agent moved to a branch of its own is removed
+all the same; only the branch CST created is a candidate for deletion, and the agent's
+branch is left alone and named in the result. A worktree on a detached HEAD whose
+commits are on no branch takes the same force confirmation as a dirty one. Both
+confirmations say what state the worktree is in: the branch it is on and what happens
+to it, commits not pushed to any remote, and what the deletion would lose. Active
+sessions cannot be deleted.
 
 ## Screenshots
 

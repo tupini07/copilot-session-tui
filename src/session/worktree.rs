@@ -121,6 +121,21 @@ impl CreationProgress {
     }
 }
 
+#[cfg(test)]
+impl ManagedWorktree {
+    /// An entry for drawing tests, which never touch git.
+    pub(crate) fn fixture(path: PathBuf, branch: &str) -> Self {
+        Self {
+            path,
+            source_repository: PathBuf::from("repo"),
+            common_git_dir: PathBuf::from("repo/.git"),
+            branch: branch.to_string(),
+            identity: "fixture".to_string(),
+            include_patterns: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RemovalOutcome {
     pub branch_removed: bool,
@@ -231,6 +246,74 @@ pub fn is_dirty(entry: &ManagedWorktree) -> Result<bool> {
     }
 
     included_files_are_dirty(entry)
+}
+
+/// What a user is about to delete, gathered before the confirmation popups so they
+/// can say it: whether there are uncommitted changes, which branch the worktree is on
+/// now, and which commits exist nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeState {
+    pub dirty: bool,
+    /// The branch checked out now; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// Commits reachable from HEAD that no local branch and no remote has. Only a
+    /// detached HEAD can hold any; removing the worktree loses them.
+    pub unanchored_commits: usize,
+    /// Commits reachable from HEAD that no remote has, when the repository has one.
+    pub unpushed_commits: usize,
+}
+
+impl WorktreeState {
+    /// Deleting would lose something, which only the second confirmation may allow.
+    pub fn needs_force(&self) -> bool {
+        self.dirty || self.unanchored_commits > 0
+    }
+}
+
+pub fn inspect(entry: &ManagedWorktree) -> Result<WorktreeState> {
+    let dirty = is_dirty(entry)?;
+    let branch = git_stdout(&entry.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    let has_remote = !git_stdout(&entry.path, ["remote"])?.is_empty();
+    let unpushed_commits = if has_remote {
+        count_commits(
+            &entry.path,
+            ["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        )?
+    } else {
+        0
+    };
+    let unanchored_commits = if branch.is_some() {
+        0
+    } else {
+        count_commits(
+            &entry.path,
+            [
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--remotes",
+            ],
+        )?
+    };
+    Ok(WorktreeState {
+        dirty,
+        branch,
+        unanchored_commits,
+        unpushed_commits,
+    })
+}
+
+fn count_commits<I, S>(repository: &Path, args: I) -> Result<usize>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let count = git_stdout(repository, args)?;
+    count
+        .parse()
+        .with_context(|| format!("git rev-list --count answered '{count}'"))
 }
 
 pub fn remove_managed_worktree(entry: &ManagedWorktree, force: bool) -> Result<RemovalOutcome> {
@@ -757,12 +840,19 @@ fn remove_managed_worktree_in(
         bail!("Managed worktree metadata changed; reload before deleting");
     }
 
-    let dirty = is_dirty(entry)?;
-    if dirty && !force {
-        bail!("Worktree has uncommitted changes and requires explicit force confirmation");
+    // An agent that checked out or created another branch inside the worktree had a
+    // reason to; that is not a reason to keep the folder. What would vanish with it,
+    // uncommitted changes or commits on no branch, is the user's call, and the
+    // confirmation popups have said which it is before `force` arrives here.
+    let state = inspect(entry)?;
+    if state.needs_force() && !force {
+        if state.dirty {
+            bail!("Worktree has uncommitted changes and requires explicit force confirmation");
+        }
+        bail!("Worktree has commits on no branch and requires explicit force confirmation");
     }
 
-    let branch_oid = validate_worktree_identity(entry)?;
+    let head = validate_worktree_identity(entry)?;
     let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
         args.push(OsStr::new("--force"));
@@ -773,25 +863,62 @@ fn remove_managed_worktree_in(
         bail!("Failed to remove worktree: {}", command_error(&output));
     }
 
-    match delete_branch_if_owned(&entry.source_repository, &entry.branch, &branch_oid, true)? {
-        BranchCleanup::Removed => Ok(RemovalOutcome {
+    // Only the branch CST created is a candidate for deletion, and only at the tip
+    // it has now: when the worktree moved to another branch, the registered one may
+    // have been left anywhere, and the merged check below is what keeps it safe.
+    let moved_to = head
+        .branch
+        .as_deref()
+        .filter(|branch| *branch != entry.branch);
+    let expected_oid = match &moved_to {
+        None if head.branch.is_some() => Some(head.commit.clone()),
+        _ => branch_tip(&entry.source_repository, &entry.branch)?,
+    };
+    let cleanup = match expected_oid {
+        Some(oid) => delete_branch_if_owned(&entry.source_repository, &entry.branch, &oid, true)?,
+        None => BranchCleanup::Missing,
+    };
+    let mut outcome = match cleanup {
+        BranchCleanup::Removed => RemovalOutcome {
             branch_removed: true,
             branch_notice: None,
-        }),
-        BranchCleanup::Missing => Ok(RemovalOutcome {
+        },
+        BranchCleanup::Missing => RemovalOutcome {
             branch_removed: false,
             branch_notice: Some(format!(
                 "Worktree removed, but branch '{}' was already absent",
                 entry.branch
             )),
-        }),
-        BranchCleanup::Preserved(reason) => Ok(RemovalOutcome {
+        },
+        BranchCleanup::Preserved(reason) => RemovalOutcome {
             branch_removed: false,
             branch_notice: Some(format!(
                 "Worktree removed, but branch '{}' was preserved: {}",
                 entry.branch, reason
             )),
-        }),
+        },
+    };
+    if let Some(other) = moved_to {
+        let left = format!("the worktree had moved to branch '{other}', which was left alone");
+        outcome.branch_notice = Some(match outcome.branch_notice.take() {
+            Some(notice) => format!("{notice}; {left}"),
+            None => format!("Branch '{}' deleted; {left}", entry.branch),
+        });
+    }
+    Ok(outcome)
+}
+
+/// The automatic paths (rolling back a creation that failed, pruning a stale
+/// reservation) remove with `--force` and without a dirty check, on the strength of
+/// the worktree being exactly what CST just made. A worktree that has since moved to
+/// another branch is no longer that, so they leave it for the user to delete.
+fn require_registered_branch(head: &WorktreeHead, branch: &str) -> Result<()> {
+    match head.branch.as_deref() {
+        Some(actual) if actual == branch => Ok(()),
+        Some(actual) => bail!(
+            "Refusing automatic removal because the worktree branch changed from '{branch}' to '{actual}'"
+        ),
+        None => bail!("Refusing automatic removal because the worktree is on a detached HEAD"),
     }
 }
 
@@ -808,7 +935,9 @@ fn rollback_registered_worktree_in(entry: &ManagedWorktree, registry_path: &Path
         bail!("Managed worktree metadata changed; refusing rollback");
     }
 
-    let branch_oid = validate_worktree_identity(entry)?;
+    let head = validate_worktree_identity(entry)?;
+    require_registered_branch(&head, &entry.branch)?;
+    let branch_oid = head.commit;
     let remove = git_output(
         &entry.source_repository,
         [
@@ -860,7 +989,11 @@ fn rollback_reserved_creation_in(
 
     let mut errors = Vec::new();
     let mut owned_worktree_remains = false;
-    if reservation.path.exists() && validate_reservation_identity(reservation).is_ok() {
+    if reservation.path.exists()
+        && validate_reservation_identity(reservation)
+            .and_then(|head| require_registered_branch(&head, &reservation.branch))
+            .is_ok()
+    {
         match git_output(
             &reservation.source_repository,
             [
@@ -1188,7 +1321,14 @@ fn worktree_identity_path(worktree: &Path) -> Result<PathBuf> {
     Ok(canonicalize_or_absolute(Path::new(&git_dir)).join(IDENTITY_FILE))
 }
 
-fn validate_reservation_identity(reservation: &WorktreeReservation) -> Result<String> {
+/// Where a managed worktree's HEAD is, once the worktree has proven to be the one
+/// CST created: `branch` is `None` when it is detached.
+struct WorktreeHead {
+    commit: String,
+    branch: Option<String>,
+}
+
+fn validate_reservation_identity(reservation: &WorktreeReservation) -> Result<WorktreeHead> {
     validate_worktree_identity_fields(
         &reservation.path,
         &reservation.source_repository,
@@ -1198,7 +1338,7 @@ fn validate_reservation_identity(reservation: &WorktreeReservation) -> Result<St
     )
 }
 
-fn validate_worktree_identity(entry: &ManagedWorktree) -> Result<String> {
+fn validate_worktree_identity(entry: &ManagedWorktree) -> Result<WorktreeHead> {
     validate_worktree_identity_fields(
         &entry.path,
         &entry.source_repository,
@@ -1214,7 +1354,7 @@ fn validate_worktree_identity_fields(
     common_git_dir: &Path,
     branch: &str,
     identity: &str,
-) -> Result<String> {
+) -> Result<WorktreeHead> {
     let actual_repository = resolve_repository(path)
         .context("Refusing removal because the registered path is not the expected worktree")?;
     if path_key(&actual_repository.main_worktree) != path_key(source_repository)
@@ -1246,24 +1386,16 @@ fn validate_worktree_identity_fields(
         bail!("Refusing removal because the durable worktree identity changed");
     }
 
-    let actual_branch = git_stdout(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).context(
-        "Refusing removal because the worktree is detached or its branch is unavailable",
-    )?;
-    if actual_branch != branch {
-        bail!(
-            "Refusing removal because the worktree branch changed from '{}' to '{}'",
-            branch,
-            actual_branch
-        );
-    }
-
-    let head = git_stdout(path, ["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let tip = branch_tip(source_repository, branch)?
-        .context("Refusing removal because the registered branch no longer exists")?;
-    if head != tip {
-        bail!("Refusing removal because the worktree HEAD and registered branch differ");
-    }
-    Ok(head)
+    // The marker above is what proves this folder is ours. Which branch is checked
+    // out in it is not: agents switch and create branches inside a worktree as part
+    // of their work, so that is reported to the caller rather than refused here.
+    let commit = git_stdout(path, ["rev-parse", "--verify", "HEAD^{commit}"])
+        .context("Refusing removal because the worktree HEAD cannot be resolved")?;
+    let actual_branch = git_stdout(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    Ok(WorktreeHead {
+        commit,
+        branch: actual_branch,
+    })
 }
 
 fn delete_branch_if_owned(
@@ -1862,6 +1994,172 @@ mod tests {
         assert!(error.contains("identity marker"));
         assert!(reused_path.exists());
         assert!(branch_exists(repo.path(), "replacement").unwrap());
+    }
+
+    #[test]
+    fn a_worktree_that_moved_to_another_branch_is_removed_and_only_the_registered_branch_is_deleted(
+    ) {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/original",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        // The agent decided the work belonged on a branch of its own naming.
+        git(&created.entry.path, &["checkout", "-b", "agent/renamed"]);
+        fs::write(created.entry.path.join("new.txt"), "agent work").unwrap();
+        git(&created.entry.path, &["add", "."]);
+        git(&created.entry.path, &["commit", "-m", "agent commit"]);
+
+        let outcome = remove_managed_worktree_in(&created.entry, false, &registry).unwrap();
+
+        assert!(!created.entry.path.exists());
+        // The branch CST made is merged (it never moved off the base), so it goes.
+        assert!(outcome.branch_removed);
+        assert_eq!(
+            outcome.branch_notice.as_deref(),
+            Some(
+                "Branch 'copilot/original' deleted; the worktree had moved to branch \
+                 'agent/renamed', which was left alone"
+            )
+        );
+        // The agent's branch, and its commit, are not CST's to delete.
+        let agent_branch = git_output(
+            repo.path(),
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/agent/renamed",
+            ],
+        )
+        .unwrap();
+        assert!(agent_branch.status.success());
+        let original = git_output(
+            repo.path(),
+            [
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/copilot/original",
+            ],
+        )
+        .unwrap();
+        assert!(!original.status.success());
+    }
+
+    #[test]
+    fn an_automatic_rollback_still_refuses_a_worktree_that_moved_to_another_branch() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/rollback",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "-b", "agent/elsewhere"]);
+
+        let refused = rollback_registered_worktree_in(&created.entry, &registry).unwrap_err();
+        assert!(refused
+            .to_string()
+            .contains("changed from 'copilot/rollback'"));
+        assert!(created.entry.path.exists());
+    }
+
+    #[test]
+    fn a_detached_worktree_with_commits_on_no_branch_needs_force_like_a_dirty_one() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/detached",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "--detach"]);
+        fs::write(created.entry.path.join("new.txt"), "unanchored").unwrap();
+        git(&created.entry.path, &["add", "."]);
+        git(
+            &created.entry.path,
+            &["commit", "-m", "commit on no branch"],
+        );
+
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.branch, None);
+        assert_eq!(state.unanchored_commits, 1);
+        assert!(state.needs_force());
+        let refused = remove_managed_worktree_in(&created.entry, false, &registry).unwrap_err();
+        assert!(refused.to_string().contains("force confirmation"));
+        assert!(created.entry.path.exists());
+
+        // Forcing is the user's second confirmation; it takes the commit with it.
+        let outcome = remove_managed_worktree_in(&created.entry, true, &registry).unwrap();
+        assert!(!created.entry.path.exists());
+        assert!(outcome.branch_removed);
+    }
+
+    #[test]
+    fn a_detached_worktree_at_a_commit_some_branch_has_needs_no_force() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/anchored",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "--detach"]);
+        fs::write(created.entry.path.join("new.txt"), "kept").unwrap();
+        git(&created.entry.path, &["add", "."]);
+        git(
+            &created.entry.path,
+            &["commit", "-m", "commit kept on a branch"],
+        );
+        git(&created.entry.path, &["branch", "agent/kept"]);
+
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.unanchored_commits, 0);
+        assert!(!state.needs_force());
+        let outcome = remove_managed_worktree_in(&created.entry, false, &registry).unwrap();
+        assert!(!created.entry.path.exists());
+        assert!(outcome.branch_removed);
+    }
+
+    #[test]
+    fn inspecting_a_moved_worktree_names_its_branch_and_counts_no_unpushed_work_without_a_remote() {
+        let repo = repository();
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("registry.json");
+        let created = create_managed_worktree_with(
+            repo.path(),
+            "copilot/inspected",
+            &test_config(&temp),
+            &registry,
+            |_, _| Ok(WorktreeIncludeState::default()),
+        )
+        .unwrap();
+        git(&created.entry.path, &["checkout", "-b", "agent/moved"]);
+
+        let state = inspect(&created.entry).unwrap();
+        assert_eq!(state.branch.as_deref(), Some("agent/moved"));
+        assert_eq!(state.unanchored_commits, 0);
+        assert_eq!(state.unpushed_commits, 0);
+        assert!(!state.needs_force());
     }
 
     #[test]
