@@ -137,13 +137,30 @@ pub fn is_web_page(path: &Path) -> bool {
         })
 }
 
-/// Whether this file link opens in the browser — an existing page, not a folder that
-/// happens to be called `x.html`, which a browser would only list.
-fn opens_in_browser(path: &Path) -> bool {
-    is_web_page(path) && path.is_file()
+/// Whether a file link is a picture, which opens in the image viewer rather than being
+/// revealed.
+///
+/// Exact extensions only, as for pages: `.svg` is left out because it opens in a browser
+/// and can carry script, and anything with a second extension after the picture's is
+/// whatever that second one says it is.
+pub fn is_image(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
 }
 
-/// Open a file link: an HTML page in the browser, anything else revealed in its folder.
+/// Whether this file link opens in its own viewer — an existing page or picture, not a
+/// folder that happens to be called `x.html`, which a browser would only list.
+fn opens_in_browser(path: &Path) -> bool {
+    (is_web_page(path) || is_image(path)) && path.is_file()
+}
+
+/// Open a file link: an HTML page in the browser, a picture in the image viewer,
+/// anything else revealed in its folder.
 pub fn open_file(path: &Path) -> Result<()> {
     if opens_in_browser(path) {
         open_with_default_app(path)
@@ -391,6 +408,37 @@ mod tests {
                 !is_web_page(Path::new(name)),
                 "{name} must only be revealed"
             );
+        }
+    }
+
+    #[test]
+    fn a_picture_opens_in_the_image_viewer_because_revealing_it_only_added_a_double_click() {
+        for name in [
+            "shot.png",
+            "photo.JPG",
+            "photo.jpeg",
+            "anim.gif",
+            "web.webp",
+            "old.BMP",
+        ] {
+            assert!(is_image(Path::new(name)), "{name} should open");
+        }
+    }
+
+    #[test]
+    fn only_the_exact_picture_extensions_open_because_svg_and_disguises_can_run_things() {
+        // SVG opens in a browser and may carry script; the rest are not pictures at all,
+        // whatever they are called.
+        for name in [
+            "drawing.svg",
+            "shot.png.exe",
+            "shot.png.lnk",
+            "icon.ico",
+            "scan.tiff",
+            "png",
+            ".png",
+        ] {
+            assert!(!is_image(Path::new(name)), "{name} must only be revealed");
         }
     }
 

@@ -3,6 +3,7 @@ pub mod diff;
 pub mod file_tree;
 pub mod github_inspector;
 pub mod hyperlinks;
+pub mod image_viewer;
 pub mod markdown;
 pub mod pane;
 pub mod popups;
@@ -284,6 +285,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         command_palette::draw_overlays(f, app);
         thread_inbox::draw(f, app);
         whats_new::draw(f, app);
+        image_viewer::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }

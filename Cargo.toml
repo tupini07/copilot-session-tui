@@ -57,6 +57,11 @@ pulldown-cmark = { version = "0.13", default-features = false }
 ab_glyph = "0.2"
 epaint_default_fonts = "0.34"
 png = "0.18"
+# A picture the model looked at, shown inside CST: decoding the formats Copilot reads
+# and scaling to the viewer. Only those formats, to keep the build small.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# Sixel takes at most 256 colours; this is the quantiser the image crate itself uses.
+color_quant = "1.1"
 # Questions for a model that are not a session's business — a topic's emoji, a side
 # question from the phone about a session — go through Copilot's own SDK: one CLI kept
 # in server mode, a session made and deleted per question. The bundled CLI is left off;
