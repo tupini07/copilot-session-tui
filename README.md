@@ -589,6 +589,15 @@ text such as "Open the report".
   running it. Over SSH the file is on the other computer, so CST says so instead.
 - **Anything else** — `ms-settings:`, `vscode:` and the like — is refused.
 
+**Ctrl+click a picture Copilot read** to see it. Outside CST, Copilot draws an image it
+reads straight into the terminal; inside a pane it cannot, and prints
+`[Image: Image file at path …]` instead. Ctrl+click that line, or the `Viewed image file
+at path …` line under the tool call, and CST shows the picture in a popup over the
+session: as real pixels in Windows Terminal, in half-block characters anywhere else,
+including over SSH. Esc or a click closes it; `o` opens the file in whatever shows
+pictures on your machine. Pictures you paste or attach yourself print a name without a
+path, so they cannot be opened this way.
+
 It is kept this narrow because an agent can print a link to anything, including one copied
 out of somebody else's comment.
 

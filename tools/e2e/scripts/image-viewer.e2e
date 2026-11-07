@@ -1,0 +1,42 @@
+# Ctrl+click on the line Copilot prints for a picture it read opens the picture in CST,
+# `o` hands it on (refused here, as over SSH), Esc closes it, and a line naming a file
+# that is not there says so instead.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+image_file pics/sample.png 64x32
+# As over SSH: the viewer draws half-blocks either way under this pseudo-terminal, and
+# `o` must not open a picture viewer on the desktop of whoever runs the script.
+env SSH_TTY=1
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# The stub echoes the line back, so it is on screen as Copilot would print it. The path
+# is long enough to wrap in the pane, which is the usual case.
+type [Image: Image file at path {projects}\pics\sample.png [image/png] 64x32]
+press enter
+wait_for Fake Copilot received: [Image: Image file at path
+dump 01-image-line
+
+click_on ctrl+left Image file at path
+wait_for sample.png  64x32
+dump 02-viewer
+
+press o
+wait_for Not opened:
+dump 03-open-refused-over-ssh
+
+press esc
+wait_gone sample.png  64x32
+dump 04-closed
+
+type Viewed image file at path {projects}\pics\missing.png
+press enter
+wait_for Fake Copilot received: Viewed image file at path
+click_on ctrl+left Viewed image file
+wait_for No picture at
+expect_not sample.png  64x32
+dump 05-missing-file

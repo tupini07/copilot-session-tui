@@ -11,6 +11,7 @@ mod events;
 mod github;
 mod hook_plugin;
 mod host_terminal;
+mod image_viewer;
 mod input;
 mod links;
 mod mux;
@@ -24,6 +25,7 @@ mod scratchpad;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod session;
+mod sixel;
 mod snippets;
 mod telegram;
 mod terminal_pane;
@@ -1710,23 +1712,37 @@ fn draw_frame(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     synchronized_frame(terminal, |frame| {
         ui::draw(frame, app);
         // Read after drawing, so the pane's position is the one this frame used.
-        app.visible_hyperlinks()
+        let links = app.visible_hyperlinks();
+        // Likewise the picture: drawn where this frame put its popup, and only when it
+        // is not already on the screen.
+        let paint = app
+            .image_viewer
+            .as_mut()
+            .map(image_viewer::ImageViewer::paint)
+            .unwrap_or_default();
+        (links, paint)
     })
 }
 
-/// Draw a frame, then turn the links on it into real hyperlinks — one terminal update.
+/// Draw a frame, then turn the links on it into real hyperlinks and put the image
+/// viewer's picture on it — one terminal update.
 ///
-/// The links go in the same update as the frame, so the terminal never shows a moment
-/// where the text is there and the link behind it is not.
+/// Both go in the same update as the frame, so the terminal never shows a moment where
+/// the text is there and the link behind it is not, or the popup is there and empty.
 fn synchronized_frame<W: io::Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
-    render: impl FnOnce(&mut ratatui::Frame) -> Vec<ui::hyperlinks::HyperlinkRun>,
+    render: impl FnOnce(&mut ratatui::Frame) -> (Vec<ui::hyperlinks::HyperlinkRun>, Vec<u8>),
 ) -> Result<()> {
     execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let mut links = Vec::new();
+    let mut paint = Vec::new();
     let drawn = terminal
-        .draw(|frame| links = render(frame))
-        .map(|frame| ui::hyperlinks::overlay(&links, frame.buffer))
+        .draw(|frame| (links, paint) = render(frame))
+        .map(|frame| {
+            let mut bytes = ui::hyperlinks::overlay(&links, frame.buffer);
+            bytes.extend_from_slice(&paint);
+            bytes
+        })
         .and_then(|bytes| {
             if !bytes.is_empty() {
                 terminal.backend_mut().write_all(&bytes)?;
@@ -1997,7 +2013,7 @@ mod tests {
 
         synchronized_frame(&mut terminal, |frame| {
             frame.render_widget(ratatui::widgets::Paragraph::new("hello"), frame.area());
-            Vec::new()
+            (Vec::new(), Vec::new())
         })
         .expect("recording writer cannot fail");
 

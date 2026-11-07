@@ -928,6 +928,10 @@ pub struct App {
     /// Anything CST launches then starts on that host, not on the machine the user is
     /// looking at, so it must not try to open files on their behalf.
     pub over_ssh: bool,
+    /// How the outer terminal can be shown a picture, decided once at startup.
+    pub host_graphics: crate::image_viewer::HostGraphics,
+    /// The picture open over the attached view, if any.
+    pub image_viewer: Option<crate::image_viewer::ImageViewer>,
     #[cfg(test)]
     pub update_install_requested_for: Option<String>,
     pub config: UserConfig,
@@ -1142,6 +1146,14 @@ impl App {
             #[cfg(test)]
             opened_links: Vec::new(),
             over_ssh: crate::links::running_over_ssh(|name| std::env::var_os(name).is_some()),
+            // Tests draw half-blocks whatever terminal they run in, so a frame means the
+            // same thing on every machine.
+            host_graphics: if cfg!(test) {
+                crate::image_viewer::HostGraphics::HalfBlocks
+            } else {
+                crate::image_viewer::detect_host_graphics(|name| std::env::var_os(name).is_some())
+            },
+            image_viewer: None,
             #[cfg(test)]
             update_install_requested_for: None,
             config,
@@ -2171,6 +2183,35 @@ impl App {
         if let Err(error) = crate::links::open_file(&target) {
             self.status_message = Some(format!("Could not open link: {error}"));
         }
+    }
+
+    /// Show a picture over the attached view, given the paths a click on Copilot's
+    /// image line might mean.
+    ///
+    /// The line may have wrapped, and where the break fell is a guess, so the pane offers
+    /// every reading, shortest first; the first that names a file wins. A file that
+    /// exists but will not decode, or a path that names nothing, is said so on the status
+    /// line — naming the longest reading, which is the whole path as the user sees it.
+    pub fn open_image(&mut self, candidates: &[PathBuf]) {
+        let Some(path) = candidates
+            .iter()
+            .find(|path| path.is_file())
+            .or(candidates.last())
+        else {
+            return;
+        };
+        if !path.is_file() {
+            self.status_message = Some(format!("No picture at {}", path.display()));
+            return;
+        }
+        match crate::image_viewer::ImageViewer::open(path, self.host_graphics) {
+            Ok(viewer) => self.image_viewer = Some(viewer),
+            Err(error) => self.status_message = Some(format!("Could not show picture: {error}")),
+        }
+    }
+
+    pub fn close_image_viewer(&mut self) {
+        self.image_viewer = None;
     }
 
     /// Web links in whatever panes are showing, to be drawn as real hyperlinks.

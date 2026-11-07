@@ -77,6 +77,13 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // Over live panes like the two above: a keystroke meant to close the picture must
+    // not land in a chat.
+    if app.image_viewer.is_some() {
+        handle_image_viewer_event(app, event);
+        return;
+    }
+
     if app.command_palette.is_some() {
         handle_command_palette_event(app, event);
         return;
@@ -215,13 +222,21 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
             && mouse.modifiers.contains(KeyModifiers::CONTROL)
         {
             let under = app.workspace_areas.chat_at(mouse.column, mouse.row);
-            let link = app
+            let pane = app
                 .mux
                 .as_ref()
-                .and_then(|mux| under.and_then(|id| mux.pane(id)).or(mux.focused_pane()))
-                .and_then(|pane| pane.link_at(mouse.column, mouse.row));
-            if let Some(link) = link {
+                .and_then(|mux| under.and_then(|id| mux.pane(id)).or(mux.focused_pane()));
+            if let Some(link) = pane.and_then(|pane| pane.link_at(mouse.column, mouse.row)) {
                 app.open_link(&link);
+                return;
+            }
+            // Not a link, but Copilot's line about a picture it read: the path on it is
+            // as good as one, and CST can show the picture itself.
+            let images = pane
+                .map(|pane| pane.image_paths_at(mouse.column, mouse.row))
+                .unwrap_or_default();
+            if !images.is_empty() {
+                app.open_image(&images);
                 return;
             }
         }
@@ -679,6 +694,27 @@ fn use_snippet_at(app: &mut App, index: usize) {
     app.close_github_inspector();
     app.workspace_help = None;
     focus_chat(app);
+}
+
+/// Keys and clicks while a picture is open. Esc, Enter, `q` or any click closes it, as
+/// Copilot's own viewer closes; `o` hands the file to whatever opens pictures on this
+/// machine, for full size. Everything else is swallowed rather than sent to a pane.
+pub fn handle_image_viewer_event(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.close_image_viewer(),
+            KeyCode::Char('o') => {
+                if let Some(path) = app.image_viewer.as_ref().map(|viewer| viewer.path.clone()) {
+                    app.open_link(&path.to_string_lossy());
+                }
+            }
+            _ => {}
+        },
+        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
+            app.close_image_viewer();
+        }
+        _ => {}
+    }
 }
 
 pub fn handle_command_palette_event(app: &mut App, event: Event) {
@@ -5148,6 +5184,81 @@ mod tests {
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
+    /// Copilot cannot draw a picture into a CST pane, so it prints a line naming the
+    /// file instead. Ctrl+click on that line is how the user gets to see the picture.
+    #[test]
+    fn ctrl_clicking_copilots_image_line_opens_the_picture_in_cst_and_o_hands_it_on() {
+        let file = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([0, 0, 255, 255]))
+            .save(file.path())
+            .unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        // No hyperlink at all: the target is only ever the text of the line.
+        let (mut app, x, y) = app_showing_a_link("image-line", "https://example.com/");
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .feed_synthetic(
+                format!("\x1b[3;1H  [Image: Image file at path {path} [image/png] 8x4]").as_bytes(),
+            );
+        let on_line = x + 12;
+        let line_row = y + 2;
+
+        handle_attached_event(
+            &mut app,
+            mouse_down(on_line, line_row, KeyModifiers::CONTROL),
+        );
+        assert!(
+            app.image_viewer.is_some(),
+            "no viewer; status: {:?}",
+            app.status_message
+        );
+        assert_eq!(app.image_viewer.as_ref().unwrap().path, file.path());
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            app.opened_links,
+            vec![crate::links::Target::File(file.path().to_path_buf())],
+            "`o` opens the same file outside CST"
+        );
+
+        handle_attached_event(
+            &mut app,
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(app.image_viewer.is_none(), "Esc closes the viewer");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    #[test]
+    fn ctrl_clicking_an_image_line_whose_file_is_gone_says_so_instead_of_opening_anything() {
+        let (mut app, x, y) = app_showing_a_link("image-gone", "https://example.com/");
+        let missing = if cfg!(windows) {
+            r"C:\nowhere\at\all\picture.png"
+        } else {
+            "/nowhere/at/all/picture.png"
+        };
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .feed_synthetic(format!("\x1b[3;1H  Viewed image file at path {missing}").as_bytes());
+        handle_attached_event(&mut app, mouse_down(x + 12, y + 2, KeyModifiers::CONTROL));
+        assert!(app.image_viewer.is_none());
+        assert!(app.opened_links.is_empty());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(format!("No picture at {missing}").as_str())
+        );
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
     /// Draw one real frame of `app` through the production path, returning the bytes a
     /// terminal would receive. `links` false leaves hyperlinks out, for comparison.
     fn frame_bytes(app: &mut App, links: bool) -> Vec<u8> {
@@ -5172,11 +5283,12 @@ mod tests {
         .unwrap();
         crate::synchronized_frame(&mut terminal, |frame| {
             crate::ui::draw(frame, app);
-            if links {
+            let links = if links {
                 app.visible_hyperlinks()
             } else {
                 Vec::new()
-            }
+            };
+            (links, Vec::new())
         })
         .unwrap();
         let bytes = recorder.0.lock().unwrap().clone();
