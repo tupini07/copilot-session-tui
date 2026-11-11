@@ -1,0 +1,68 @@
+# Ctrl+click on the line Copilot prints for a picture it read opens the picture in CST,
+# `o` hands it on (refused here, as over SSH), Esc closes it, and a line naming a file
+# that is not there says so instead.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+image_file pics/sample.png 64x32
+image_file pics/house.png 48x48
+image_file pics/my long gallery-with-a-very-long-name/house two.png 40x24
+# As over SSH: the viewer draws half-blocks either way under this pseudo-terminal, and
+# `o` must not open a picture viewer on the desktop of whoever runs the script.
+env SSH_TTY=1
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# The stub echoes the line back, so it is on screen as Copilot would print it. The path
+# is long enough to wrap in the pane, which is the usual case.
+type [Image: Image file at path {projects}\pics\sample.png [image/png] 64x32]
+press enter
+wait_for Fake Copilot received: [Image: Image file at path
+dump 01-image-line
+
+click_on ctrl+left Image file at path
+wait_for sample.png  64x32
+dump 02-viewer
+
+press o
+wait_for Not opened:
+dump 03-open-refused-over-ssh
+
+press esc
+wait_gone sample.png  64x32
+dump 04-closed
+
+# Asked to show a picture, a model answers with markdown, which Copilot prints like
+# this, with the read folded away; the path in the answer is the only one on screen.
+type Image: A modern house interior -> {projects}\pics\house.png
+press enter
+wait_for Fake Copilot received: Image: A modern house interior
+click_on ctrl+left house.png
+wait_for house.png  48x48
+dump 05-model-answer-viewer
+press esc
+wait_gone house.png  48x48
+
+# A long path with spaces that Copilot word-wrapped: the first row ends at the space
+# before a word too long for what was left, the space is dropped, the rest is on the
+# next row. The stub lays the two rows out as Copilot's renderer would.
+type e2e:print Image: Gallery -> {projects}\pics\my long\ngallery-with-a-very-long-name\house two.png
+press enter
+wait_for gallery-with-a-very-long-name\house two.png
+dump 06-word-wrapped-line
+click_on ctrl+left house two.png
+wait_for house two.png  40x24
+dump 07-word-wrapped-viewer
+press esc
+wait_gone house two.png  40x24
+
+type Viewed image file at path {projects}\pics\missing.png
+press enter
+wait_for Fake Copilot received: Viewed image file at path
+click_on ctrl+left Viewed image file
+wait_for No picture at
+expect_not sample.png  64x32
+dump 08-missing-file

@@ -246,6 +246,12 @@ enum Step {
         name: String,
         git: bool,
     },
+    /// A PNG under `projects/`, for a script that needs a picture on disk.
+    ImageFile {
+        path: String,
+        width: u32,
+        height: u32,
+    },
     Env(String, String),
     Arg(String),
     Config(String),
@@ -311,6 +317,7 @@ impl Step {
             Step::Size(..)
                 | Step::Session { .. }
                 | Step::Project { .. }
+                | Step::ImageFile { .. }
                 | Step::Env(..)
                 | Step::Arg(_)
                 | Step::Config(_)
@@ -391,6 +398,21 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             name: need("a name")?,
             git: true,
         },
+        "image_file" => {
+            let text = need("a path under projects/ and a size, like pics/a.png 64x32")?;
+            let (path, size) = text
+                .rsplit_once(' ')
+                .ok_or("image_file wants a path and then WxH")?;
+            let (width, height) = size
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                .ok_or_else(|| format!("image_file size {size:?} is not WxH"))?;
+            Step::ImageFile {
+                path: path.to_string(),
+                width,
+                height,
+            }
+        }
         "env" => {
             let text = need("KEY=VALUE")?;
             let (key, value) = text.split_once('=').ok_or("env wants KEY=VALUE")?;
@@ -491,6 +513,8 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
                 Some(("left", place)) => (0, place),
                 Some(("middle", place)) => (1, place),
                 Some(("right", place)) => (2, place),
+                // SGR mouse reports carry Ctrl as bit 4 of the button.
+                Some(("ctrl+left", place)) => (16, place),
                 _ => (0, text.as_str()),
             };
             Step::Click {
@@ -638,6 +662,7 @@ struct Setup {
     watched: Vec<String>,
     held: Vec<String>,
     telegram: Option<(telegram_stub::Mode, bool)>,
+    images: Vec<(String, u32, u32)>,
 }
 
 struct Running {
@@ -671,6 +696,11 @@ impl Driver {
                 self.setup.sessions.push((project.clone(), summary.clone()))
             }
             Step::Project { name, git } => self.setup.projects.push((name.clone(), *git)),
+            Step::ImageFile {
+                path,
+                width,
+                height,
+            } => self.setup.images.push((path.clone(), *width, *height)),
             Step::Env(key, value) => self.setup.env.push((key.clone(), value.clone())),
             Step::Arg(arg) => self.setup.args.push(arg.clone()),
             Step::Config(json) => self.setup.config = Some(json.clone()),
@@ -705,7 +735,15 @@ impl Driver {
                 )),
             },
             Step::Key(bytes) => self.send(bytes),
-            Step::Type(text) => self.send(text.as_bytes()),
+            // `{projects}` stands for the run's projects folder, whose path a script
+            // cannot know in advance.
+            Step::Type(text) => self.send(
+                text.replace(
+                    "{projects}",
+                    &self.run_dir.join("projects").to_string_lossy(),
+                )
+                .as_bytes(),
+            ),
             Step::Press(names) => {
                 for name in names {
                     self.send(&key_bytes(name)?)?;
@@ -938,6 +976,9 @@ impl Driver {
                 }
             }
         }
+        for (path, width, height) in &self.setup.images {
+            write_png(&projects.join(path), *width, *height)?;
+        }
         for index in 0..self.setup.sessions.len() {
             self.write_session(index)?;
         }
@@ -1056,6 +1097,10 @@ impl Driver {
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
                 .map_err(|error| error.to_string())?;
         command.env("PATH", path);
+        // Set when the driver itself runs in Windows Terminal, and CST would take it as
+        // permission to draw pictures as Sixel — which this pseudo-terminal drops, so the
+        // dump would show an empty popup. Without it CST draws them in half-blocks.
+        command.env_remove("WT_SESSION");
         for (key, value) in &self.setup.env {
             command.env(key, value);
         }
@@ -1509,4 +1554,30 @@ delete_session First
         ));
         assert!(matches!(steps[4].1, Step::Github(None)));
     }
+}
+
+/// A PNG of the given size: a two-colour gradient, so a dump drawn in half-blocks shows
+/// something other than one flat colour.
+fn write_png(path: &Path, width: u32, height: u32) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width.max(1), height.max(1));
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| error.to_string())?;
+    let mut pixels = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height.max(1) {
+        for x in 0..width.max(1) {
+            let across = (x * 255 / width.max(1)) as u8;
+            let down = (y * 255 / height.max(1)) as u8;
+            pixels.extend_from_slice(&[across, 80, 255 - down]);
+        }
+    }
+    writer
+        .write_image_data(&pixels)
+        .map_err(|error| error.to_string())
 }

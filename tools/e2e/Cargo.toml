@@ -15,3 +15,5 @@ chrono = "0.4"
 dirs = "6"
 portable-pty = "0.9"
 vt100 = "0.16"
+# `image_file` writes a small picture for a script to point CST at.
+png = "0.18"

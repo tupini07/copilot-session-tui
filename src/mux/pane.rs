@@ -720,6 +720,23 @@ impl Pane {
             .flatten()
     }
 
+    /// The file Copilot's image line under an outer-terminal coordinate names, as every
+    /// path the wrapped line could spell; empty when the click is not on such a line.
+    pub fn image_paths_at(&self, column: u16, row: u16) -> Vec<std::path::PathBuf> {
+        let Some((row, column)) = self.viewport.cell_coordinates(column, row) else {
+            return Vec::new();
+        };
+        self.with_screen(|screen| {
+            let on_copilots_line = image_paths_at(screen, row, column);
+            if on_copilots_line.is_empty() {
+                picture_path_at(screen, row, column)
+            } else {
+                on_copilots_line
+            }
+        })
+        .unwrap_or_default()
+    }
+
     /// Where the hyperlink under an outer-terminal coordinate points, if there is one.
     pub fn link_at(&self, column: u16, row: u16) -> Option<String> {
         let (row, column) = self.viewport.cell_coordinates(column, row)?;
@@ -1541,6 +1558,217 @@ fn github_references(screen: &vt100::Screen) -> Vec<u64> {
     found.into_iter().collect()
 }
 
+/// What Copilot prints before the path of a picture it read, in both of its forms:
+/// `[Image: Image file at path C:\x.png [image/png] 800x600]` where the picture would
+/// have been drawn, and `Viewed image file at path C:\x.png` under the tool call.
+const IMAGE_PATH_ANCHOR: &str = "image file at path ";
+/// Copilot word-wraps that line, so a path can run over this many rows.
+const IMAGE_LINE_ROWS: u16 = 3;
+
+/// The path on Copilot's image line at `row`, in every way the wrapped rows could join.
+///
+/// The line is word-wrapped by Copilot, which drops the space it broke at, so two rows
+/// usually join with a space put back. A path with no space in it is broken by the
+/// terminal instead, and `vt100` marks such a row as wrapped, so those join as they are.
+/// Which rows belong to the line at all is the guess: the candidates are the one-row,
+/// two-row and three-row readings, shortest first, for the caller to test against the
+/// disk. Empty when `row` is not part of such a line.
+fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
+    let (rows, cols) = screen.size();
+    let text = |row: u16| -> String {
+        (0..cols)
+            .filter_map(|col| screen.cell(row, col))
+            .filter(|cell| !cell.is_wide_continuation())
+            .map(|cell| {
+                let contents = cell.contents();
+                if contents.is_empty() {
+                    " "
+                } else {
+                    contents
+                }
+            })
+            .collect()
+    };
+    let lower_anchor = IMAGE_PATH_ANCHOR;
+    for start in (row.saturating_sub(IMAGE_LINE_ROWS - 1)..=row).rev() {
+        let first = text(start);
+        let Some(anchor) = first.to_ascii_lowercase().find(lower_anchor) else {
+            continue;
+        };
+        let after_anchor = anchor + lower_anchor.len();
+        // A click anywhere on the anchor's row past its indent counts, so the `[Image:`
+        // or `Viewed` label and the path are one target, as a hyperlink's text is.
+        let indent = first.len() - first.trim_start().len();
+        if start == row && (column as usize) < indent {
+            return Vec::new();
+        }
+        let mut joined = first[after_anchor..].trim_end().to_string();
+        let mut candidates = vec![image_path(&joined)];
+        let mut last = start;
+        for next in start + 1..(start + IMAGE_LINE_ROWS).min(rows) {
+            let continuation = text(next);
+            let continuation = continuation.trim();
+            if continuation.is_empty() {
+                break;
+            }
+            if !screen.row_wrapped(next - 1) {
+                joined.push(' ');
+            }
+            joined.push_str(continuation);
+            candidates.push(image_path(&joined));
+            last = next;
+        }
+        if row > last {
+            return Vec::new();
+        }
+        candidates.dedup();
+        return candidates
+            .into_iter()
+            .filter(|path| path.is_absolute())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The path part of what follows the anchor: up to the ` [image/png] 800x600]` tail
+/// when there is one, otherwise everything.
+fn image_path(text: &str) -> std::path::PathBuf {
+    let end = text.find(" [image/").unwrap_or(text.len());
+    std::path::PathBuf::from(text[..end].trim())
+}
+
+/// An absolute path to a picture under the click, wherever on the row it is.
+///
+/// Asked to show a picture, a model answers with markdown, which Copilot prints as
+/// `Image: A modern house interior → C:\…\house.jpg`, and the read that would have
+/// carried the anchored line is folded away under `1 read`. So the path in the model's
+/// own words is the one the user sees. It is found from the click outwards: back to
+/// the nearest place a path can start, a drive letter or a slash after a space, and
+/// forward to the file's extension, the first dot that ends a word rather than a folder
+/// name such as `.claude\`. That extension has to name a picture, or the path is not one,
+/// so `todo.md` on a row that also mentions a picture does not borrow its ending. The
+/// click has to be on the path itself, so a `#123` or a web link sharing the row still
+/// gets its own click. Spaces inside the path are kept, since a path may have them.
+///
+/// A long path runs over more than one row, and how is a guess. A row the terminal
+/// broke is marked by `vt100` and read joined as it is. A row Copilot laid out itself
+/// is not marked: it wrote the row up to the word that no longer fitted, dropped the
+/// space, and went on under the bullet's indent on the next, and where its right edge
+/// lies is its own affair. So the rows are read twice, first as separate lines and then
+/// with each short row continuing onto the next with the space put back, and both
+/// readings are offered, in that order; whether either names a file is for the caller
+/// to find out, which is what settles it.
+fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = [false, true]
+        .into_iter()
+        .filter_map(|join_short_rows| picture_path_reading(screen, row, column, join_short_rows))
+        .collect();
+    candidates.dedup();
+    candidates
+}
+
+/// One reading of the path under the click; see [`picture_path_at`] for the two.
+fn picture_path_reading(
+    screen: &vt100::Screen,
+    row: u16,
+    column: u16,
+    join_short_rows: bool,
+) -> Option<std::path::PathBuf> {
+    let (rows, cols) = screen.size();
+    let first = row.saturating_sub(IMAGE_LINE_ROWS - 1);
+    let last = (row + IMAGE_LINE_ROWS - 1).min(rows.saturating_sub(1));
+
+    // The rows around the click as one text. Each character remembers its cell, so the
+    // click can be found again once the rows are joined; a boundary no path crosses is
+    // marked with a line break.
+    let mut joined: Vec<(char, Option<(u16, u16)>)> = Vec::new();
+    for current in first..=last {
+        let cells = row_characters(screen, current, cols);
+        if current > first && !screen.row_wrapped(current - 1) {
+            let trailing_blanks = joined
+                .iter()
+                .rev()
+                .take_while(|(c, _)| c.is_whitespace())
+                .count();
+            let indent = cells.iter().take_while(|c| **c == ' ').count();
+            let continues = join_short_rows && indent < cells.len();
+            let keep = joined.len() - trailing_blanks;
+            joined.truncate(keep);
+            joined.push((if continues { ' ' } else { '\n' }, None));
+            if continues {
+                joined.extend(
+                    cells
+                        .iter()
+                        .enumerate()
+                        .skip(indent)
+                        .map(|(col, c)| (*c, Some((current, col as u16)))),
+                );
+                continue;
+            }
+        }
+        joined.extend(
+            cells
+                .iter()
+                .enumerate()
+                .map(|(col, c)| (*c, Some((current, col as u16)))),
+        );
+    }
+    let click = joined
+        .iter()
+        .position(|(_, cell)| *cell == Some((row, column)))?;
+    let characters: Vec<char> = joined.into_iter().map(|(c, _)| c).collect();
+
+    let starts_path = |at: usize| -> bool {
+        let before_is_boundary = at == 0 || !characters[at - 1].is_alphanumeric();
+        let drive = characters[at].is_ascii_alphabetic()
+            && characters.get(at + 1) == Some(&':')
+            && matches!(characters.get(at + 2), Some('\\') | Some('/'));
+        let root = characters[at] == '/'
+            && (at == 0
+                || characters[at - 1].is_whitespace()
+                || "(\"'`[<".contains(characters[at - 1]));
+        before_is_boundary && (drive || root)
+    };
+    let start = (0..=click).rev().find(|&at| starts_path(at))?;
+
+    let mut at = start + 1;
+    while at < characters.len() {
+        if characters[at] == '\n' {
+            // A row boundary nothing continued over: the path had no extension.
+            return None;
+        }
+        if characters[at] == '.' {
+            let mut end = at + 1;
+            while end < characters.len() && characters[end].is_ascii_alphanumeric() {
+                end += 1;
+            }
+            let more_name_follows = match characters.get(end) {
+                Some('\\') | Some('/') => true,
+                // One of several dots in the name, as against the full stop after it.
+                Some('.') => characters
+                    .get(end + 1)
+                    .is_some_and(char::is_ascii_alphanumeric),
+                _ => false,
+            };
+            if more_name_follows {
+                at = end;
+                continue;
+            }
+            // A further path starting before any extension means the clicked one had
+            // none, as a folder has not; the picture named later is not it.
+            if (start + 1..at).any(&starts_path) {
+                return None;
+            }
+            let span: String = characters[start..end].iter().collect();
+            let path = std::path::PathBuf::from(span.trim_end());
+            return (crate::links::is_image(&path) && click < end && path.is_absolute())
+                .then_some(path);
+        }
+        at += 1;
+    }
+    None
+}
+
 fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<u64> {
     let (_, cols) = screen.size();
     let characters = row_characters(screen, row, cols);
@@ -1616,6 +1844,233 @@ mod tests {
         assert_eq!(viewport.clamped_coordinates(99, 99), (20, 10));
         assert_eq!(viewport.cell_coordinates(2, 1), Some((0, 0)));
         assert_eq!(viewport.cell_coordinates(21, 10), Some((9, 19)));
+    }
+
+    fn image_candidates(screen: &vt100::Screen, row: u16, column: u16) -> Vec<String> {
+        image_paths_at(screen, row, column)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[cfg(windows)]
+    const PICTURE: &str = r"C:\Users\me\Pictures\city street.png";
+    #[cfg(not(windows))]
+    const PICTURE: &str = "/home/me/Pictures/city street.png";
+
+    #[test]
+    fn copilots_image_line_on_one_row_names_its_path_without_the_type_and_size_tail() {
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(
+            format!("  [Image: Image file at path {PICTURE} [image/png] 932x564]").as_bytes(),
+        );
+        assert_eq!(
+            image_candidates(parser.screen(), 0, 20),
+            vec![PICTURE.to_string()]
+        );
+        assert!(
+            image_candidates(parser.screen(), 0, 1).is_empty(),
+            "the indent before the label is not part of it"
+        );
+        assert!(
+            image_candidates(parser.screen(), 2, 20).is_empty(),
+            "a blank row below is not part of the line either"
+        );
+    }
+
+    #[test]
+    fn a_line_copilot_wrapped_at_a_space_offers_the_rows_joined_with_the_space_put_back() {
+        // Copilot breaks the line at the space in "city street" and drops it; the rows
+        // are separate writes, so vt100 does not mark the first as wrapped.
+        let (head, tail) = PICTURE.split_once("city ").unwrap();
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(
+            format!(
+                "\x1b[1;1H  [Image: Image file at path {head}city\x1b[2;1H  {tail} [image/png] 932x564]"
+            )
+            .as_bytes(),
+        );
+        let from_first_row = image_candidates(parser.screen(), 0, 30);
+        assert_eq!(from_first_row.len(), 2, "{from_first_row:?}");
+        assert_eq!(from_first_row[1], PICTURE);
+        assert_eq!(
+            image_candidates(parser.screen(), 1, 5),
+            from_first_row,
+            "clicking the continuation row finds the same line"
+        );
+    }
+
+    #[test]
+    fn a_path_the_terminal_wrapped_mid_word_is_joined_with_nothing_added() {
+        // One long write that runs past the right edge: vt100 marks the row wrapped,
+        // and nothing was dropped at the break.
+        let line = format!("Viewed image file at path {PICTURE}");
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(line.as_bytes());
+        assert!(parser.screen().row_wrapped(0));
+        let candidates = image_candidates(parser.screen(), 0, 30);
+        assert!(
+            candidates.contains(&PICTURE.to_string()),
+            "{candidates:?} should include the unbroken path"
+        );
+    }
+
+    #[cfg(windows)]
+    const HOUSE: &str = r"C:\Users\me\Downloads\modern_house_interior.jpg";
+    #[cfg(not(windows))]
+    const HOUSE: &str = "/home/me/Downloads/modern_house_interior.jpg";
+
+    fn bare_candidates(screen: &vt100::Screen, row: u16, column: u16) -> Vec<String> {
+        picture_path_at(screen, row, column)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_picture_path_in_the_models_own_answer_is_found_under_the_click_and_only_there() {
+        // What Copilot prints for `![A modern house interior](C:\…\house.jpg)`, the
+        // answer a model gives when asked to show a picture; the read is folded away.
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("● Image: A modern house interior → {HOUSE}").as_bytes());
+        let path_starts = "● Image: A modern house interior → ".chars().count() as u16;
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, path_starts + 8),
+            vec![HOUSE.to_string()]
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, path_starts + HOUSE.len() as u16 - 1),
+            vec![HOUSE.to_string()],
+            "the last letter of the extension is still the path"
+        );
+        assert!(
+            bare_candidates(parser.screen(), 0, 12).is_empty(),
+            "the words before the path are not it"
+        );
+        assert!(
+            bare_candidates(parser.screen(), 0, path_starts + HOUSE.len() as u16 + 2).is_empty(),
+            "nor is the blank after it"
+        );
+    }
+
+    #[test]
+    fn a_picture_path_keeps_its_spaces_and_sheds_the_punctuation_after_it() {
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("I looked at {PICTURE}, which is fine.").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![PICTURE.to_string()]
+        );
+        assert!(
+            bare_candidates(parser.screen(), 0, 12 + PICTURE.len() as u16 + 3).is_empty(),
+            "the words after the path are not it"
+        );
+    }
+
+    #[test]
+    fn a_picture_path_copilot_word_wrapped_at_a_space_is_read_with_the_space_put_back() {
+        // Copilot lays the answer out itself: the row is written up to the word that no
+        // longer fits, the space is dropped, and the rest is written on the next row
+        // with the bullet's indent. The terminal never saw a wrap.
+        let (head, tail) = PICTURE.split_once("city ").unwrap();
+        let mut parser = vt100::Parser::new(4, 60, 0);
+        parser.process(
+            format!("\x1b[1;1H● Image: Looking down the road, {head}city\x1b[2;1H  {tail}")
+                .as_bytes(),
+        );
+        assert!(!parser.screen().row_wrapped(0));
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 40),
+            vec![PICTURE.to_string()]
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 1, 4),
+            vec![PICTURE.to_string()],
+            "clicking the continuation row finds the same path"
+        );
+
+        // Where Copilot's right edge lies is not knowable from the screen: a row that
+        // ends well short of the pane's edge, followed by a short word, may still be
+        // a wrapped line. Both readings are offered and the disk settles it.
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("\x1b[1;1HSaved under {head}city\x1b[2;1H  {tail}").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![PICTURE.to_string()],
+            "the joined reading is offered even with room to spare on the row"
+        );
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("\x1b[1;1HSaved under {head}city.png\x1b[2;1H  {tail}").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![format!("{head}city.png")],
+            "a path complete on its own row does not take the next row along"
+        );
+    }
+
+    #[test]
+    fn a_picture_path_broken_over_two_rows_by_the_terminal_is_read_whole() {
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(format!("Here it is: {HOUSE}").as_bytes());
+        assert!(parser.screen().row_wrapped(0));
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![HOUSE.to_string()]
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 1, 3),
+            vec![HOUSE.to_string()],
+            "clicking the continuation row finds the same path"
+        );
+    }
+
+    #[test]
+    fn a_text_file_or_a_relative_picture_is_not_a_picture_path() {
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        let notes = if cfg!(windows) {
+            r"C:\notes\todo.md"
+        } else {
+            "/notes/todo.md"
+        };
+        parser.process(format!("See {notes} and pics/relative.png for more").as_bytes());
+        assert!(bare_candidates(parser.screen(), 0, 8).is_empty());
+        assert!(bare_candidates(parser.screen(), 0, 30).is_empty());
+
+        let folder = if cfg!(windows) { r"C:\notes" } else { "/notes" };
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(format!("Moved {folder} next to {PICTURE}").as_bytes());
+        assert!(
+            bare_candidates(parser.screen(), 0, 8).is_empty(),
+            "a folder before a picture on the same row is not the picture"
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 30),
+            vec![PICTURE.to_string()],
+            "while the picture itself still is"
+        );
+
+        let dotted = if cfg!(windows) {
+            r"C:\Users\me\.claude\.tmpA1b2.final.png"
+        } else {
+            "/home/me/.claude/.tmpA1b2.final.png"
+        };
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(format!("Saved to {dotted}.").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 12),
+            vec![dotted.to_string()],
+            "a dot in a folder name is not the extension"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_or_an_ordinary_line_is_not_a_picture() {
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(b"Image file at path pictures/relative.png and other words");
+        assert!(image_candidates(parser.screen(), 0, 30).is_empty());
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(b"Read the file at path C:\\x.png, then stop.");
+        assert!(image_candidates(parser.screen(), 0, 10).is_empty());
     }
 
     #[test]

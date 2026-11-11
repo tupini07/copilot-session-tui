@@ -49,6 +49,7 @@ checked before anything starts, so a typo fails at once.
 | `session <project> <summary...>` | A Copilot session whose cwd is `projects/<project>`. Ids are `00000001-0000-4000-8000-000000000001`, `...02`, and so on, in order; the first is the most recently used. |
 | `project <name>` | An empty folder under `projects/`. |
 | `git_project <name>` | The same, with `git init` run in it. |
+| `image_file <path> <W>x<H>` | A PNG of that size under `projects/`, e.g. `image_file pics/a.png 64x32`, for a script that points CST at a picture. |
 | `env KEY=VALUE` | An environment variable for CST. |
 | `arg <argument>` | A command-line argument for CST, one per line. |
 | `config <json>` | CST's settings file for this run, on one line, e.g. `config {"theme": "gruvbox"}`. Without it CST runs on its defaults. |
@@ -67,11 +68,11 @@ reads anything sent too soon as Alt+key.
 | Command | Effect |
 | --- | --- |
 | `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `f1` to `f12`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
-| `type <text>` | The text exactly as written, trailing spaces included. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
+| `type <text>` | The text exactly as written, trailing spaces included. `{projects}` is replaced by the run's `projects/` folder. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
 | `key <bytes>` | Raw bytes, with `\e`, `\r`, `\n`, `\t`, `\s` (space), `\\` and `\xHH`. |
 | `paste <text>` | A bracketed paste. |
-| `click [left\|middle\|right] COLUMN ROW` | A mouse click. |
-| `click_on [left\|middle\|right] <text>` | A click on the first place `<text>` appears. |
+| `click [left\|middle\|right\|ctrl+left] COLUMN ROW` | A mouse click. `ctrl+left` is the Ctrl+click that opens links and pictures. |
+| `click_on [left\|middle\|right\|ctrl+left] <text>` | A click on the first place `<text>` appears. |
 | `scroll up\|down COLUMN ROW`, `scroll_on up\|down <text>` | One wheel notch. |
 | `wait <ms>` | Sleep. Prefer `wait_for`. |
 | `wait_for <text>` | Until `<text>` is on screen; fails after the timeout. |
@@ -102,7 +103,10 @@ script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a tu
 OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as
 an assistant message while it runs (which is what a Telegram notification carries);
 `e2e:say <text>` writes such a message without a turn (a literal `
-` in either is a line break, which is how a table gets into a message); `e2e:ask <ms> <text> | <choice> | …`
+` in either is a line break, which is how a table gets into a message); `e2e:print <text>`
+clears the pane's screen and prints `<text>` as is, a literal `\n` starting a new row, which
+is how a script lays out a line the way Copilot's word-wrap would, with nothing else on
+screen for a `click_on` to land on; `e2e:ask <ms> <text> | <choice> | …`
 starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as the real
 Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
 <text>`, or by playing the form as CST does for a phone reply (arrows move the highlight
