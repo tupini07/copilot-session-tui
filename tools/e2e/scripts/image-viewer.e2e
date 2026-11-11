@@ -6,6 +6,7 @@ size 110x30
 arg --mux
 session existing-app Existing app session
 image_file pics/sample.png 64x32
+image_file pics/house.png 48x48
 # As over SSH: the viewer draws half-blocks either way under this pseudo-terminal, and
 # `o` must not open a picture viewer on the desktop of whoever runs the script.
 env SSH_TTY=1
@@ -33,10 +34,21 @@ press esc
 wait_gone sample.png  64x32
 dump 04-closed
 
+# Asked to show a picture, a model answers with markdown, which Copilot prints like
+# this, with the read folded away; the path in the answer is the only one on screen.
+type Image: A modern house interior -> {projects}\pics\house.png
+press enter
+wait_for Fake Copilot received: Image: A modern house interior
+click_on ctrl+left house.png
+wait_for house.png  48x48
+dump 05-model-answer-viewer
+press esc
+wait_gone house.png  48x48
+
 type Viewed image file at path {projects}\pics\missing.png
 press enter
 wait_for Fake Copilot received: Viewed image file at path
 click_on ctrl+left Viewed image file
 wait_for No picture at
 expect_not sample.png  64x32
-dump 05-missing-file
+dump 06-missing-file

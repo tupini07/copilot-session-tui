@@ -227,11 +227,19 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
                 .as_ref()
                 .and_then(|mux| under.and_then(|id| mux.pane(id)).or(mux.focused_pane()));
             if let Some(link) = pane.and_then(|pane| pane.link_at(mouse.column, mouse.row)) {
+                // A link to a picture on this machine is shown by CST itself, which also
+                // works over SSH, where handing the file on could not.
+                if let Some(crate::links::Target::File(path)) = crate::links::classify(&link) {
+                    if crate::links::is_image(&path) {
+                        app.open_image(std::slice::from_ref(&path));
+                        return;
+                    }
+                }
                 app.open_link(&link);
                 return;
             }
-            // Not a link, but Copilot's line about a picture it read: the path on it is
-            // as good as one, and CST can show the picture itself.
+            // Not a link, but a path to a picture: Copilot's line about one it read, or
+            // the path in the model's own answer. CST can show the picture itself.
             let images = pane
                 .map(|pane| pane.image_paths_at(mouse.column, mouse.row))
                 .unwrap_or_default();
@@ -5232,6 +5240,55 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
         );
         assert!(app.image_viewer.is_none(), "Esc closes the viewer");
+        let _ = app.mux.as_mut().unwrap().shutdown();
+    }
+
+    /// Asked to show a picture, a model answers with markdown, which Copilot prints as
+    /// `Image: A modern house interior → C:\…\house.jpg`; the read that would have carried
+    /// the anchored line is folded away. Clicking that path, or a hyperlink to a picture
+    /// file, must show the picture in CST rather than hand it to the desktop.
+    #[test]
+    fn ctrl_clicking_a_picture_path_in_the_models_answer_or_a_picture_link_shows_it_in_cst() {
+        let file = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        image::RgbImage::from_pixel(8, 4, image::Rgb([0, 128, 0]))
+            .save(file.path())
+            .unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        // The row at the top is a hyperlink to the picture; the one below is its path in
+        // the model's own words, as Copilot prints a markdown image.
+        let (mut app, x, y) = app_showing_a_link("image-answer", &path);
+        app.mux
+            .as_mut()
+            .unwrap()
+            .pane_mut(1)
+            .unwrap()
+            .feed_synthetic(
+                format!("\x1b[3;1H● Image: A modern house interior → {path}").as_bytes(),
+            );
+        let path_starts = "● Image: A modern house interior → ".chars().count() as u16;
+
+        handle_attached_event(
+            &mut app,
+            mouse_down(x + path_starts + 5, y + 2, KeyModifiers::CONTROL),
+        );
+        assert!(
+            app.image_viewer.is_some(),
+            "no viewer for the path in the answer; status: {:?}",
+            app.status_message
+        );
+        assert_eq!(app.image_viewer.as_ref().unwrap().path, file.path());
+        app.close_image_viewer();
+
+        handle_attached_event(&mut app, mouse_down(x + 4, y, KeyModifiers::CONTROL));
+        assert!(
+            app.image_viewer.is_some(),
+            "no viewer for the hyperlink; status: {:?}",
+            app.status_message
+        );
+        assert!(
+            app.opened_links.is_empty(),
+            "the picture stays in CST, nothing is handed to the desktop"
+        );
         let _ = app.mux.as_mut().unwrap().shutdown();
     }
 
