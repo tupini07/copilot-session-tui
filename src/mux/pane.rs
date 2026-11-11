@@ -1653,21 +1653,61 @@ fn image_path(text: &str) -> std::path::PathBuf {
 /// whether the result names a file is for the caller to find out.
 fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
     let (rows, cols) = screen.size();
-    let mut first = row;
-    while first > 0 && screen.row_wrapped(first - 1) && row - first < IMAGE_LINE_ROWS - 1 {
-        first -= 1;
+    let first = row.saturating_sub(IMAGE_LINE_ROWS - 1);
+    let last = (row + IMAGE_LINE_ROWS - 1).min(rows.saturating_sub(1));
+
+    // The rows around the click, joined as the text was before it was laid out: a row
+    // the terminal broke continues as it is; a row Copilot word-wrapped, which it does
+    // only when the next word did not fit in what was left of the row, continues after
+    // the space it dropped; any other row boundary is a break no path crosses. Each
+    // character remembers its cell, so the click can be found in the joined text.
+    let mut joined: Vec<(char, Option<(u16, u16)>)> = Vec::new();
+    for current in first..=last {
+        let cells = row_characters(screen, current, cols);
+        if current > first {
+            if screen.row_wrapped(current - 1) {
+                // Nothing to do: the previous row is full and this one continues it.
+            } else {
+                let trailing_blanks = joined
+                    .iter()
+                    .rev()
+                    .take_while(|(c, _)| c.is_whitespace())
+                    .count();
+                let indent = cells.iter().take_while(|c| **c == ' ').count();
+                let first_word = cells[indent..]
+                    .iter()
+                    .take_while(|c| !c.is_whitespace())
+                    .count();
+                let word_wrapped = first_word > 0 && trailing_blanks <= first_word;
+                let keep = joined.len() - trailing_blanks;
+                joined.truncate(keep);
+                joined.push((if word_wrapped { ' ' } else { '\n' }, None));
+                if word_wrapped {
+                    joined.extend(
+                        cells
+                            .iter()
+                            .enumerate()
+                            .skip(indent)
+                            .map(|(col, c)| (*c, Some((current, col as u16)))),
+                    );
+                    continue;
+                }
+            }
+        }
+        joined.extend(
+            cells
+                .iter()
+                .enumerate()
+                .map(|(col, c)| (*c, Some((current, col as u16)))),
+        );
     }
-    let mut last = row;
-    while last + 1 < rows && screen.row_wrapped(last) && last - first < IMAGE_LINE_ROWS - 1 {
-        last += 1;
-    }
-    let characters: Vec<char> = (first..=last)
-        .flat_map(|row| row_characters(screen, row, cols))
-        .collect();
-    let click = usize::from(row - first) * usize::from(cols) + usize::from(column);
-    if click >= characters.len() {
+    let Some(click) = joined
+        .iter()
+        .position(|(_, cell)| *cell == Some((row, column)))
+    else {
         return Vec::new();
-    }
+    };
+    let characters: Vec<char> = joined.into_iter().map(|(c, _)| c).collect();
 
     let starts_path = |at: usize| -> bool {
         let before_is_boundary = at == 0 || !characters[at - 1].is_alphanumeric();
@@ -1686,6 +1726,10 @@ fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pa
 
     let mut at = start + 1;
     while at < characters.len() {
+        if characters[at] == '\n' {
+            // A row boundary nothing continued over: the path had no extension.
+            return Vec::new();
+        }
         if characters[at] == '.' {
             let mut end = at + 1;
             while end < characters.len() && characters[end].is_ascii_alphanumeric() {
@@ -1916,6 +1960,38 @@ mod tests {
         assert!(
             bare_candidates(parser.screen(), 0, 12 + PICTURE.len() as u16 + 3).is_empty(),
             "the words after the path are not it"
+        );
+    }
+
+    #[test]
+    fn a_picture_path_copilot_word_wrapped_at_a_space_is_read_with_the_space_put_back() {
+        // Copilot lays the answer out itself: the row is written up to the word that no
+        // longer fits, the space is dropped, and the rest is written on the next row
+        // with the bullet's indent. The terminal never saw a wrap.
+        let (head, tail) = PICTURE.split_once("city ").unwrap();
+        let mut parser = vt100::Parser::new(4, 60, 0);
+        parser.process(
+            format!("\x1b[1;1H● Image: Looking down the road, {head}city\x1b[2;1H  {tail}")
+                .as_bytes(),
+        );
+        assert!(!parser.screen().row_wrapped(0));
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 40),
+            vec![PICTURE.to_string()]
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 1, 4),
+            vec![PICTURE.to_string()],
+            "clicking the continuation row finds the same path"
+        );
+
+        // A short row above an unrelated one is not a wrapped line: the whole of the
+        // next row's first word would have fitted on it.
+        let mut parser = vt100::Parser::new(4, 60, 0);
+        parser.process(format!("\x1b[1;1HSaved under {head}city\x1b[2;1H{tail}").as_bytes());
+        assert!(
+            bare_candidates(parser.screen(), 0, 20).is_empty(),
+            "a folder on a row with room to spare does not borrow the next row"
         );
     }
 

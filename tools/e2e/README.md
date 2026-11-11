@@ -103,7 +103,10 @@ script can act out a turn without a model: `e2e:work <ms> [<text>]` reports a tu
 OSC progress that ends after `<ms>`, writing `<text>` to the session's `events.jsonl` as
 an assistant message while it runs (which is what a Telegram notification carries);
 `e2e:say <text>` writes such a message without a turn (a literal `
-` in either is a line break, which is how a table gets into a message); `e2e:ask <ms> <text> | <choice> | …`
+` in either is a line break, which is how a table gets into a message); `e2e:print <text>`
+clears the pane's screen and prints `<text>` as is, a literal `\n` starting a new row, which
+is how a script lays out a line the way Copilot's word-wrap would, with nothing else on
+screen for a `click_on` to land on; `e2e:ask <ms> <text> | <choice> | …`
 starts a turn and, after `<ms>`, asks the user through the `ask_user` tool as the real
 Copilot records it, leaving the turn open until the answer is recorded: by `e2e:answered
 <text>`, or by playing the form as CST does for a phone reply (arrows move the highlight

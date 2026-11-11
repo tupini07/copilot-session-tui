@@ -7,6 +7,7 @@ arg --mux
 session existing-app Existing app session
 image_file pics/sample.png 64x32
 image_file pics/house.png 48x48
+image_file pics/my long gallery-with-a-very-long-name/house two.png 40x24
 # As over SSH: the viewer draws half-blocks either way under this pseudo-terminal, and
 # `o` must not open a picture viewer on the desktop of whoever runs the script.
 env SSH_TTY=1
@@ -45,10 +46,23 @@ dump 05-model-answer-viewer
 press esc
 wait_gone house.png  48x48
 
+# A long path with spaces that Copilot word-wrapped: the first row ends at the space
+# before a word too long for what was left, the space is dropped, the rest is on the
+# next row. The stub lays the two rows out as Copilot's renderer would.
+type e2e:print Image: Gallery -> {projects}\pics\my long\ngallery-with-a-very-long-name\house two.png
+press enter
+wait_for gallery-with-a-very-long-name\house two.png
+dump 06-word-wrapped-line
+click_on ctrl+left house two.png
+wait_for house two.png  40x24
+dump 07-word-wrapped-viewer
+press esc
+wait_gone house two.png  40x24
+
 type Viewed image file at path {projects}\pics\missing.png
 press enter
 wait_for Fake Copilot received: Viewed image file at path
 click_on ctrl+left Viewed image file
 wait_for No picture at
 expect_not sample.png  64x32
-dump 06-missing-file
+dump 08-missing-file

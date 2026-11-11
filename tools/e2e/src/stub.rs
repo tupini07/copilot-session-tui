@@ -44,6 +44,8 @@ pub fn main() {
     //
     // Lines starting with `e2e:` are stage directions for the stub itself, typed by a
     // script, so it can act out what the real Copilot does without a model:
+    //   e2e:print <text>        clear the screen and print <text> as is; a literal \n
+    //                           starts a new row, as the real Copilot's word-wrap does
     //   e2e:say <text>          write an assistant message to the session's event log
     //   e2e:work <ms> [<text>]  report a turn over OSC progress that ends after <ms>,
     //                           saying <text> while it runs
@@ -146,6 +148,18 @@ fn append_event(path: &std::path::Path, record: &str) {
 fn act(direction: &str, events_path: Option<&std::path::Path>) {
     let (verb, rest) = direction.split_once(' ').unwrap_or((direction, ""));
     match verb {
+        "print" => {
+            // The real Copilot word-wraps what it prints, writing each row on its own
+            // and dropping the space it broke at. A script lays those rows out itself
+            // with a literal `\n`, which is the one thing typing a line cannot do. The
+            // screen is cleared first: the typed direction was echoed above with the
+            // `\n` in it, and a script's `click_on` must not land on that instead.
+            print!("\x1b[2J\x1b[H");
+            for row in rest.split("\\n") {
+                print!("{row}\r\n");
+            }
+            let _ = std::io::stdout().flush();
+        }
         "say" => {
             let Some(path) = events_path else { return };
             // A script types one line; a literal `\n` in it is a line break in what the
