@@ -1703,6 +1703,11 @@ fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pa
                 at = end;
                 continue;
             }
+            // A further path starting before any extension means the clicked one had
+            // none, as a folder has not; the picture named later is not it.
+            if (start + 1..at).any(&starts_path) {
+                return Vec::new();
+            }
             let span: String = characters[start..end].iter().collect();
             let path = std::path::PathBuf::from(span.trim_end());
             if crate::links::is_image(&path) && click < end && path.is_absolute() {
@@ -1941,6 +1946,19 @@ mod tests {
         parser.process(format!("See {notes} and pics/relative.png for more").as_bytes());
         assert!(bare_candidates(parser.screen(), 0, 8).is_empty());
         assert!(bare_candidates(parser.screen(), 0, 30).is_empty());
+
+        let folder = if cfg!(windows) { r"C:\notes" } else { "/notes" };
+        let mut parser = vt100::Parser::new(4, 80, 0);
+        parser.process(format!("Moved {folder} next to {PICTURE}").as_bytes());
+        assert!(
+            bare_candidates(parser.screen(), 0, 8).is_empty(),
+            "a folder before a picture on the same row is not the picture"
+        );
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 30),
+            vec![PICTURE.to_string()],
+            "while the picture itself still is"
+        );
 
         let dotted = if cfg!(windows) {
             r"C:\Users\me\.claude\.tmpA1b2.final.png"
