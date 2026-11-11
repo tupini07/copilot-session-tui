@@ -1648,50 +1648,62 @@ fn image_path(text: &str) -> std::path::PathBuf {
 /// name such as `.claude\`. That extension has to name a picture, or the path is not one,
 /// so `todo.md` on a row that also mentions a picture does not borrow its ending. The
 /// click has to be on the path itself, so a `#123` or a web link sharing the row still
-/// gets its own click. A path the terminal broke over several rows is read joined, as
-/// `vt100` marks such rows. Spaces inside the path are kept, since a path may have them;
-/// whether the result names a file is for the caller to find out.
+/// gets its own click. Spaces inside the path are kept, since a path may have them.
+///
+/// A long path runs over more than one row, and how is a guess. A row the terminal
+/// broke is marked by `vt100` and read joined as it is. A row Copilot laid out itself
+/// is not marked: it wrote the row up to the word that no longer fitted, dropped the
+/// space, and went on under the bullet's indent on the next, and where its right edge
+/// lies is its own affair. So the rows are read twice, first as separate lines and then
+/// with each short row continuing onto the next with the space put back, and both
+/// readings are offered, in that order; whether either names a file is for the caller
+/// to find out, which is what settles it.
 fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = [false, true]
+        .into_iter()
+        .filter_map(|join_short_rows| picture_path_reading(screen, row, column, join_short_rows))
+        .collect();
+    candidates.dedup();
+    candidates
+}
+
+/// One reading of the path under the click; see [`picture_path_at`] for the two.
+fn picture_path_reading(
+    screen: &vt100::Screen,
+    row: u16,
+    column: u16,
+    join_short_rows: bool,
+) -> Option<std::path::PathBuf> {
     let (rows, cols) = screen.size();
     let first = row.saturating_sub(IMAGE_LINE_ROWS - 1);
     let last = (row + IMAGE_LINE_ROWS - 1).min(rows.saturating_sub(1));
 
-    // The rows around the click, joined as the text was before it was laid out: a row
-    // the terminal broke continues as it is; a row Copilot word-wrapped, which it does
-    // only when the next word did not fit in what was left of the row, continues after
-    // the space it dropped; any other row boundary is a break no path crosses. Each
-    // character remembers its cell, so the click can be found in the joined text.
+    // The rows around the click as one text. Each character remembers its cell, so the
+    // click can be found again once the rows are joined; a boundary no path crosses is
+    // marked with a line break.
     let mut joined: Vec<(char, Option<(u16, u16)>)> = Vec::new();
     for current in first..=last {
         let cells = row_characters(screen, current, cols);
-        if current > first {
-            if screen.row_wrapped(current - 1) {
-                // Nothing to do: the previous row is full and this one continues it.
-            } else {
-                let trailing_blanks = joined
-                    .iter()
-                    .rev()
-                    .take_while(|(c, _)| c.is_whitespace())
-                    .count();
-                let indent = cells.iter().take_while(|c| **c == ' ').count();
-                let first_word = cells[indent..]
-                    .iter()
-                    .take_while(|c| !c.is_whitespace())
-                    .count();
-                let word_wrapped = first_word > 0 && trailing_blanks <= first_word;
-                let keep = joined.len() - trailing_blanks;
-                joined.truncate(keep);
-                joined.push((if word_wrapped { ' ' } else { '\n' }, None));
-                if word_wrapped {
-                    joined.extend(
-                        cells
-                            .iter()
-                            .enumerate()
-                            .skip(indent)
-                            .map(|(col, c)| (*c, Some((current, col as u16)))),
-                    );
-                    continue;
-                }
+        if current > first && !screen.row_wrapped(current - 1) {
+            let trailing_blanks = joined
+                .iter()
+                .rev()
+                .take_while(|(c, _)| c.is_whitespace())
+                .count();
+            let indent = cells.iter().take_while(|c| **c == ' ').count();
+            let continues = join_short_rows && indent < cells.len();
+            let keep = joined.len() - trailing_blanks;
+            joined.truncate(keep);
+            joined.push((if continues { ' ' } else { '\n' }, None));
+            if continues {
+                joined.extend(
+                    cells
+                        .iter()
+                        .enumerate()
+                        .skip(indent)
+                        .map(|(col, c)| (*c, Some((current, col as u16)))),
+                );
+                continue;
             }
         }
         joined.extend(
@@ -1701,12 +1713,9 @@ fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pa
                 .map(|(col, c)| (*c, Some((current, col as u16)))),
         );
     }
-    let Some(click) = joined
+    let click = joined
         .iter()
-        .position(|(_, cell)| *cell == Some((row, column)))
-    else {
-        return Vec::new();
-    };
+        .position(|(_, cell)| *cell == Some((row, column)))?;
     let characters: Vec<char> = joined.into_iter().map(|(c, _)| c).collect();
 
     let starts_path = |at: usize| -> bool {
@@ -1720,15 +1729,13 @@ fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pa
                 || "(\"'`[<".contains(characters[at - 1]));
         before_is_boundary && (drive || root)
     };
-    let Some(start) = (0..=click).rev().find(|&at| starts_path(at)) else {
-        return Vec::new();
-    };
+    let start = (0..=click).rev().find(|&at| starts_path(at))?;
 
     let mut at = start + 1;
     while at < characters.len() {
         if characters[at] == '\n' {
             // A row boundary nothing continued over: the path had no extension.
-            return Vec::new();
+            return None;
         }
         if characters[at] == '.' {
             let mut end = at + 1;
@@ -1750,19 +1757,16 @@ fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pa
             // A further path starting before any extension means the clicked one had
             // none, as a folder has not; the picture named later is not it.
             if (start + 1..at).any(&starts_path) {
-                return Vec::new();
+                return None;
             }
             let span: String = characters[start..end].iter().collect();
             let path = std::path::PathBuf::from(span.trim_end());
-            if crate::links::is_image(&path) && click < end && path.is_absolute() {
-                return vec![path];
-            }
-            return Vec::new();
-        } else {
-            at += 1;
+            return (crate::links::is_image(&path) && click < end && path.is_absolute())
+                .then_some(path);
         }
+        at += 1;
     }
-    Vec::new()
+    None
 }
 
 fn github_reference_at(screen: &vt100::Screen, row: u16, column: u16) -> Option<u64> {
@@ -1985,13 +1989,22 @@ mod tests {
             "clicking the continuation row finds the same path"
         );
 
-        // A short row above an unrelated one is not a wrapped line: the whole of the
-        // next row's first word would have fitted on it.
-        let mut parser = vt100::Parser::new(4, 60, 0);
-        parser.process(format!("\x1b[1;1HSaved under {head}city\x1b[2;1H{tail}").as_bytes());
-        assert!(
-            bare_candidates(parser.screen(), 0, 20).is_empty(),
-            "a folder on a row with room to spare does not borrow the next row"
+        // Where Copilot's right edge lies is not knowable from the screen: a row that
+        // ends well short of the pane's edge, followed by a short word, may still be
+        // a wrapped line. Both readings are offered and the disk settles it.
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("\x1b[1;1HSaved under {head}city\x1b[2;1H  {tail}").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![PICTURE.to_string()],
+            "the joined reading is offered even with room to spare on the row"
+        );
+        let mut parser = vt100::Parser::new(4, 100, 0);
+        parser.process(format!("\x1b[1;1HSaved under {head}city.png\x1b[2;1H  {tail}").as_bytes());
+        assert_eq!(
+            bare_candidates(parser.screen(), 0, 20),
+            vec![format!("{head}city.png")],
+            "a path complete on its own row does not take the next row along"
         );
     }
 
