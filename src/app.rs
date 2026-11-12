@@ -936,6 +936,9 @@ pub struct App {
     pub background_popup: Option<crate::background::Popup>,
     /// When marked processes were last checked for having exited.
     background_checked: Instant,
+    /// The background summary last drawn for the focused session, to repaint when
+    /// its age moves on.
+    background_summary_shown: Option<String>,
     #[cfg(test)]
     pub update_install_requested_for: Option<String>,
     pub config: UserConfig,
@@ -1160,6 +1163,7 @@ impl App {
             image_viewer: None,
             background_popup: None,
             background_checked: Instant::now(),
+            background_summary_shown: None,
             #[cfg(test)]
             update_install_requested_for: None,
             config,
@@ -2340,6 +2344,17 @@ impl App {
             return changed;
         }
         self.background_checked = Instant::now();
+        // The ages on screen are text like any other, and nothing else repaints an
+        // idle session: without this the status line would say "13s" for two days.
+        let summary = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .and_then(|pane| pane.background.summary(Instant::now()));
+        if summary != self.background_summary_shown || self.background_popup.is_some() {
+            self.background_summary_shown = summary;
+            changed = true;
+        }
         let attended = match self.view {
             View::Attached(id) if self.terminal_focused => Some(id),
             _ => None,
@@ -2356,19 +2371,33 @@ impl App {
                 }
                 // Nobody is told by Copilot that this ended; it does not know the
                 // process was being waited on. So the tab says so until it is read.
-                if attended != Some(pane.id) {
+                let watching = attended == Some(pane.id);
+                if !watching {
                     pane.mark_unread();
                 }
                 for process in done {
-                    finished.push((pane.title.clone(), pane.session_id.clone(), process.label));
+                    finished.push((
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                        process.label,
+                        watching,
+                    ));
                 }
             }
         }
-        for (title, session_id, label) in finished {
+        for (title, session_id, label, watching) in finished {
             changed = true;
             // The process first: titles are sentences, and the bar cuts from the right.
             self.status_message = Some(format!("Background process finished: {label} ({title})"));
-            self.enqueue_notification(NotificationKind::BackgroundDone, title, Some(&session_id));
+            // As with a turn that ends in front of the user: the line above is on the
+            // screen they are looking at, and a ping on the phone as well is noise.
+            if !watching {
+                self.enqueue_notification(
+                    NotificationKind::BackgroundDone,
+                    title,
+                    Some(&session_id),
+                );
+            }
         }
         changed
     }
@@ -3853,11 +3882,14 @@ impl App {
             self.status_message = Some(format!("Notifications disabled: {error}"));
             return;
         }
-        let (events_path, events_start, events_end) = if effective.ntfy_verbose {
-            self.cycle_window(session_id)
-        } else {
-            (None, None, None)
-        };
+        // A process ending is not a turn ending: the session said nothing new, and
+        // its last message has been sent already.
+        let (events_path, events_start, events_end) =
+            if effective.ntfy_verbose && kind != NotificationKind::BackgroundDone {
+                self.cycle_window(session_id)
+            } else {
+                (None, None, None)
+            };
         let request = NotificationRequest {
             config: configured.clone(),
             access_token: effective.ntfy_access_token.clone(),

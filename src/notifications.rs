@@ -418,7 +418,11 @@ pub(crate) fn telegram_content(
         (Some(path), Some(start), Some(end)) if end > start => Some((path, start, end)),
         _ => None,
     };
-    let body = window.and_then(|(path, start, end)| latest_assistant_message(path, start, end));
+    // A process ending is not a turn ending: the session said nothing new, and what
+    // it said last has been sent already.
+    let body = window
+        .filter(|_| kind != NotificationKind::BackgroundDone)
+        .and_then(|(path, start, end)| latest_assistant_message(path, start, end));
     let question = match (kind, window) {
         (NotificationKind::Question, Some((path, start, end))) => {
             pending_question(path, start, end)

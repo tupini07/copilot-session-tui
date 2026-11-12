@@ -5,6 +5,7 @@
 
 size 110x30
 arg --mux
+fake_telegram private
 # A loaded machine can take longer than the default ten seconds to open a session.
 timeout 60000
 session existing-app Training run
@@ -38,6 +39,11 @@ wait_gone Background work:
 wait_for background: Start the campaign execution
 dump 03-status-line
 
+# Left alone, the age moves on: nothing else repaints an idle session.
+timeout 120000
+wait_for Start the campaign execution (1m)
+timeout 60000
+
 # From the list, the row carries the marker its tab does.
 press ctrl+b d
 wait_for Other session
@@ -62,7 +68,7 @@ expect_not ◷
 dump 06-command-ended
 
 # A process marked by hand: what the session's shell started, watched until it exits.
-type e2e:spawn 25
+type e2e:spawn 40
 press enter
 wait_for Fake Copilot started a process
 press ctrl+b b
@@ -74,7 +80,12 @@ wait_for Watching:
 press esc
 wait_for background: 
 dump 08-process-watched
-timeout 90000
+
+# Away from the tab when it exits: the list says so, the tab is left unread, and the
+# phone is told, since Copilot does not know anybody was waiting on it.
+press ctrl+b d
+wait_for Other session
+timeout 120000
 wait_for Background process finished:
-wait_gone background: 
+telegram_wait Background work finished
 dump 09-process-finished
