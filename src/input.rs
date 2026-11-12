@@ -187,7 +187,9 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
     // The wheel moves through the list wherever the list is what is on screen. Three
     // rows a notch, as terminals scroll text.
     if let Event::Mouse(mouse) = &event {
-        if matches!(app.mode, Mode::Normal | Mode::Search) {
+        // Not while a favorite is grabbed: the arrows are moving that row, and a notch
+        // would carry the selection off it with the grab still held.
+        if matches!(app.mode, Mode::Normal | Mode::Search) && app.grabbed_favorite.is_none() {
             match mouse.kind {
                 crossterm::event::MouseEventKind::ScrollUp => app.move_by(-3),
                 crossterm::event::MouseEventKind::ScrollDown => app.move_by(3),
@@ -2802,6 +2804,12 @@ mod tests {
         press(&mut app, KeyCode::PageUp);
         assert_eq!(app.selected, 0);
 
+        // Nor while a favorite is being moved, which the arrows are busy with.
+        app.grabbed_favorite = Some("s01".to_string());
+        handle_terminal_event(&mut app, wheel(MouseEventKind::ScrollDown)).unwrap();
+        assert_eq!(app.selected, 0);
+        app.grabbed_favorite = None;
+
         // Over a popup the wheel is not the list's.
         handle_normal(&mut app, KeyCode::Char('?'));
         handle_terminal_event(&mut app, wheel(MouseEventKind::ScrollDown)).unwrap();
@@ -3160,10 +3168,7 @@ mod tests {
 
         handle_normal(&mut app, KeyCode::Char('c'));
 
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Nothing to clear: every session is listed")
-        );
+        assert_eq!(app.status_message.as_deref(), Some("Nothing to clear"));
         assert!(app.confirm_end_tmux.is_none());
     }
 

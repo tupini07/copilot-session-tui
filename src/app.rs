@@ -5207,7 +5207,7 @@ impl App {
             (true, true) => "Search and filter cleared",
             (true, false) => "Search cleared",
             (false, true) => "Filter cleared",
-            (false, false) => "Nothing to clear: every session is listed",
+            (false, false) => "Nothing to clear",
         }
     }
 
@@ -9072,10 +9072,7 @@ mod tests {
         };
         let mut app = App::new(vec![favorite, recent], config);
         app.disable_config_persistence();
-        assert_eq!(
-            app.clear_narrowing(),
-            "Nothing to clear: every session is listed"
-        );
+        assert_eq!(app.clear_narrowing(), "Nothing to clear");
 
         app.search_query = "recent".to_string();
         app.apply_filter();
