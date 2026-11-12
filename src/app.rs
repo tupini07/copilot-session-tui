@@ -5104,12 +5104,21 @@ impl App {
 
     pub fn apply_filter(&mut self) {
         let matcher = SkimMatcherV2::default();
+        // An id is usually pasted, and a paste often brings a space along.
+        let id_query = self.search_query.trim().to_ascii_lowercase();
 
         self.filtered_indices = self
             .sessions
             .iter()
             .enumerate()
             .filter(|(_, s)| {
+                // A whole id names one session and nothing else, so it is found even
+                // where the project filter or the hidden rules would leave it out:
+                // CST often starts filtered to the folder it was run from, and an id
+                // copied from somewhere else is rarely for that folder.
+                if !id_query.is_empty() && s.id.eq_ignore_ascii_case(&id_query) {
+                    return true;
+                }
                 if !self.show_hidden_sessions
                     && (self.session_title_is_hidden(s) || self.session_path_is_hidden(s))
                 {
@@ -5126,14 +5135,15 @@ impl App {
                     // Match fields independently. Concatenating them let a short query
                     // start in a title/path and finish in the UUID, so nearly every
                     // favorite in the same project appeared to match.
-                    return [
-                        s.display_name(),
-                        s.project_root.as_str(),
-                        s.cwd.as_str(),
-                        s.id.as_str(),
-                    ]
-                    .into_iter()
-                    .any(|field| matcher.fuzzy_match(field, &self.search_query).is_some());
+                    //
+                    // The id is matched as a run of characters, not fuzzily. An id is
+                    // 32 hex digits, so nearly any short word made of a-f and digits
+                    // can be picked out of nearly any id in order, and a typed piece
+                    // of an id matched every session instead of the one it belongs to.
+                    return (!id_query.is_empty() && s.id.to_ascii_lowercase().contains(&id_query))
+                        || [s.display_name(), s.project_root.as_str(), s.cwd.as_str()]
+                            .into_iter()
+                            .any(|field| matcher.fuzzy_match(field, &self.search_query).is_some());
                 }
                 true
             })
@@ -5155,7 +5165,60 @@ impl App {
         if self.selected >= self.filtered_indices.len() {
             self.selected = self.filtered_indices.len().saturating_sub(1);
         }
-        self.scroll_offset = 0;
+        // From the top, unless that would leave the selection below the last row
+        // drawn: the highlight is how the user knows where the keys will act.
+        self.scroll_offset = (self.selected + 1).saturating_sub(self.visible_rows.max(1));
+    }
+
+    /// Filter again and start from the first row: for a change of what is being
+    /// looked for, where the row number selected before means nothing in the new list.
+    pub fn refilter_from_top(&mut self) {
+        self.selected = 0;
+        self.apply_filter();
+    }
+
+    /// Select the row `delta` away, stopping at either end, and scroll it into view.
+    pub fn move_by(&mut self, delta: isize) {
+        self.select_row(self.selected.saturating_add_signed(delta));
+    }
+
+    /// Select `row`, or the last row if the list is shorter, and scroll it into view.
+    pub fn select_row(&mut self, row: usize) {
+        let visible = self.visible_rows.max(1);
+        self.selected = row.min(self.filtered_indices.len().saturating_sub(1));
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + visible {
+            self.scroll_offset = self.selected + 1 - visible;
+        }
+    }
+
+    /// Drop the search and the project filter, whichever are on, and say which were.
+    ///
+    /// One place for it, because the two narrow the list the same way and the user
+    /// cannot be expected to know which one is hiding their sessions: `c` used to
+    /// clear only the project filter and report "Filter cleared" over a list a search
+    /// was still narrowing.
+    pub fn clear_narrowing(&mut self) -> &'static str {
+        let search = !std::mem::take(&mut self.search_query).is_empty();
+        let project = self.project_filter.take().is_some();
+        self.refilter_from_top();
+        match (search, project) {
+            (true, true) => "Search and filter cleared",
+            (true, false) => "Search cleared",
+            (false, true) => "Filter cleared",
+            (false, false) => "Nothing to clear",
+        }
+    }
+
+    /// Drop a search that is still narrowing the list. False when there was none.
+    pub fn clear_search(&mut self) -> bool {
+        if self.search_query.is_empty() {
+            return false;
+        }
+        self.search_query.clear();
+        self.refilter_from_top();
+        true
     }
 
     fn session_title_is_hidden(&self, session: &Session) -> bool {
@@ -5430,7 +5493,7 @@ impl App {
 
     pub fn set_project_filter(&mut self, project: Option<String>) {
         self.project_filter = project;
-        self.apply_filter();
+        self.refilter_from_top();
     }
 
     /// Open the dialog that adds a project, its path starting beside the project in
@@ -8935,6 +8998,153 @@ mod tests {
             app.apply_filter();
             assert_eq!(visible_ids(&app), vec!["abc1234"], "query {query:?}");
         }
+    }
+
+    #[test]
+    fn a_piece_of_a_session_id_finds_that_session_and_not_every_id_it_could_be_picked_out_of() {
+        // "1f18" can be picked out of the second id in order (1..f..1..8), which is how
+        // a fuzzy match on ids made a typed id fragment match nearly everything.
+        let wanted = session(
+            "1f181ad0-5c1e-4d6f-9a57-0c2b6f3e9d11",
+            "project",
+            "2026-08-14T12:00:00Z",
+        );
+        let other = session(
+            "10f0a1b8-77aa-4c21-8e0d-5b9a3c44e2f0",
+            "project",
+            "2026-08-13T12:00:00Z",
+        );
+        // The helper names a session after its id, which would match on the name.
+        let (mut wanted, mut other) = (wanted, other);
+        wanted.summary = Some("Fix the parser".to_string());
+        other.summary = Some("Write the docs".to_string());
+        let mut app = App::new(vec![wanted, other], UserConfig::default());
+
+        // As pasted: upper case from some log, and a space the selection dragged along.
+        for query in ["1f18", "1F181AD0-5C1E", " 4d6f-9a57 "] {
+            app.search_query = query.to_string();
+            app.apply_filter();
+            assert_eq!(
+                visible_ids(&app),
+                vec!["1f181ad0-5c1e-4d6f-9a57-0c2b6f3e9d11"],
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_session_id_finds_its_session_from_inside_another_project_and_past_hidden_rules() {
+        let here = session("here-0001", "C:/work/here", "2026-08-14T12:00:00Z");
+        let mut elsewhere = session(
+            "1f181ad0-5c1e-4d6f-9a57-0c2b6f3e9d11",
+            "C:/work/elsewhere",
+            "2026-08-13T12:00:00Z",
+        );
+        elsewhere.summary = Some("Your objective: a hidden one".to_string());
+        let config = UserConfig {
+            hidden_title_prefixes: vec!["Your objective:".to_string()],
+            ..UserConfig::default()
+        };
+        let mut app = App::new(vec![here, elsewhere], config);
+        app.set_project_filter(Some("C:/work/here".to_string()));
+
+        // A piece of the id is an ordinary search, and stays inside what is listed.
+        app.search_query = "1f181ad0".to_string();
+        app.apply_filter();
+        assert!(visible_ids(&app).is_empty());
+
+        // The whole id can only mean that session, wherever it lives.
+        app.search_query = "1F181AD0-5c1e-4d6f-9a57-0c2b6f3e9d11 ".to_string();
+        app.apply_filter();
+        assert_eq!(
+            visible_ids(&app),
+            vec!["1f181ad0-5c1e-4d6f-9a57-0c2b6f3e9d11"]
+        );
+    }
+
+    #[test]
+    fn clearing_drops_the_search_and_the_project_filter_together_and_says_which_were_on() {
+        let favorite = session("fav", "C:/work/a", "2026-08-10T12:00:00Z");
+        let recent = session("recent", "C:/work/b", "2026-08-14T12:00:00Z");
+        let config = UserConfig {
+            favorites: vec!["fav".to_string()],
+            ..UserConfig::default()
+        };
+        let mut app = App::new(vec![favorite, recent], config);
+        app.disable_config_persistence();
+        assert_eq!(app.clear_narrowing(), "Nothing to clear");
+
+        app.search_query = "recent".to_string();
+        app.apply_filter();
+        assert!(!app.favorites_section_active());
+        assert_eq!(app.clear_narrowing(), "Search cleared");
+        assert!(
+            app.favorites_section_active(),
+            "the favorites group is what a stuck search took away"
+        );
+        assert_eq!(visible_ids(&app), vec!["fav", "recent"]);
+
+        app.set_project_filter(Some("C:/work/b".to_string()));
+        assert_eq!(app.clear_narrowing(), "Filter cleared");
+
+        app.set_project_filter(Some("C:/work/b".to_string()));
+        app.search_query = "recent".to_string();
+        app.apply_filter();
+        assert_eq!(app.clear_narrowing(), "Search and filter cleared");
+        assert_eq!(visible_ids(&app), vec!["fav", "recent"]);
+    }
+
+    #[test]
+    fn a_change_of_filter_never_leaves_the_selection_below_the_last_row_drawn() {
+        let sessions = (0..30)
+            .map(|n| {
+                session(
+                    &format!("s{n:02}"),
+                    "project",
+                    &format!("2026-08-{:02}T12:00:00Z", 30 - n),
+                )
+            })
+            .collect();
+        let mut app = App::new(sessions, UserConfig::default());
+        app.visible_rows = 5;
+        app.select_row(usize::MAX);
+        assert_eq!((app.selected, app.scroll_offset), (29, 25));
+
+        // A rescan or the hidden toggle re-filters with the selection where it was.
+        // Scrolling to the top regardless left the highlight out of sight.
+        app.apply_filter();
+        assert_eq!(app.selected, 29);
+        assert!((app.scroll_offset..app.scroll_offset + 5).contains(&app.selected));
+
+        // A new query is a new list: its first row.
+        app.search_query = "s1".to_string();
+        app.refilter_from_top();
+        assert_eq!((app.selected, app.scroll_offset), (0, 0));
+    }
+
+    #[test]
+    fn moving_by_a_screenful_stops_at_either_end_and_keeps_the_selection_in_view() {
+        let sessions = (0..12)
+            .map(|n| {
+                session(
+                    &format!("s{n:02}"),
+                    "project",
+                    &format!("2026-08-{:02}T12:00:00Z", 30 - n),
+                )
+            })
+            .collect();
+        let mut app = App::new(sessions, UserConfig::default());
+        app.visible_rows = 5;
+
+        app.move_by(5);
+        assert_eq!((app.selected, app.scroll_offset), (5, 1));
+        app.move_by(5);
+        app.move_by(5);
+        assert_eq!((app.selected, app.scroll_offset), (11, 7));
+        app.move_by(-5);
+        assert_eq!((app.selected, app.scroll_offset), (6, 6));
+        app.move_by(-50);
+        assert_eq!((app.selected, app.scroll_offset), (0, 0));
     }
 
     #[test]

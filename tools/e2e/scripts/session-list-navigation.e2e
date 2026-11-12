@@ -1,0 +1,136 @@
+# Getting around the session list: a search kept with Enter says so in the title bar,
+# `c` and Esc both drop it and bring the favorites group back, the selection is never
+# left off screen, PgUp/PgDn and the wheel move through a long list, and a session is
+# found by a piece of its id, or by its whole id even from inside another project.
+
+size 110x30
+arg --mux
+session beta-app Session number 01
+session gamma-app Session number 02
+session alpha-app Session number 03
+session beta-app Session number 04
+session gamma-app Session number 05
+session alpha-app Session number 06
+session beta-app Session number 07
+session gamma-app Session number 08
+session alpha-app Session number 09
+session beta-app Session number 10
+session gamma-app Session number 11
+session alpha-app Session number 12
+session beta-app Session number 13
+session gamma-app Session number 14
+session alpha-app Session number 15
+session beta-app Session number 16
+session gamma-app Session number 17
+session alpha-app Session number 18
+session beta-app Session number 19
+session gamma-app Session number 20
+session alpha-app Session number 21
+session beta-app Session number 22
+session gamma-app Session number 23
+session alpha-app Session number 24
+session beta-app Session number 25
+session gamma-app Session number 26
+session alpha-app Session number 27
+session beta-app Session number 28
+session gamma-app Session number 29
+session alpha-app Session number 30
+
+wait_for Session number 01
+press down down space
+wait_for Added to favorites
+press down down down space
+wait_for Favorites
+dump 01-favorites-on-top
+
+# A search kept with Enter: the group goes, and the title bar says why.
+press /
+type number 1
+press enter
+wait_for Search: number 1
+expect_not Favorites
+expect Esc Clear search
+dump 02-search-kept
+
+# It is still on after a visit to a session.
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b d
+wait_gone Fake Copilot is idling
+expect Search: number 1
+
+# `c` drops it, and says what it dropped.
+press c
+wait_for Search cleared
+wait_for Favorites
+expect_not Search: number 1
+dump 03-cleared-with-c
+
+# So does Esc, which only quits once there is no search left.
+press /
+type number 2
+press enter
+wait_for Search: number 2
+press esc
+wait_for Search cleared
+wait_for Favorites
+expect 30 sessions
+dump 04-cleared-with-esc
+
+# A new search starts from the whole list, not the last search's rows.
+press /
+type number 3
+press enter
+press /
+wait_for Session number 01
+dump 05-new-search-shows-everything
+press esc
+
+# From the last row, a search puts the selection on its first result, in view.
+press end
+wait_for Name: Session number 30
+dump 06-end
+press /
+type number 0
+wait_for Name: Session number 01
+dump 07-search-from-the-end
+press esc
+
+# A screenful at a time, and by the wheel.
+press pagedown
+wait_for Name: Session number 12
+dump 08-page-down
+press pagedown pagedown
+wait_for Name: Session number 30
+press pageup pageup pageup
+wait_for Name: Session number 03
+scroll_on down Session number 01
+wait_for Name: Session number 02
+scroll_on up Session number 01
+wait_for Name: Session number 03
+dump 09-back-at-the-top
+
+# A piece of an id finds that session and no other.
+press /
+paste 00000007-0000
+wait_for 1 sessions
+expect Session number 07
+dump 10-id-fragment
+press esc
+
+# A whole id finds its session even while the list is filtered to another project.
+press f
+type alpha
+press enter
+wait_for Filter: alpha-app
+expect_not Session number 07
+press /
+paste 00000007-0000-4000-8000-000000000007
+wait_for Session number 07
+expect 1 sessions
+press enter
+dump 11-whole-id-under-a-project-filter
+press c
+wait_for Search and filter cleared
+wait_for Favorites
+dump 12-everything-cleared

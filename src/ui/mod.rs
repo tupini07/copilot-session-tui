@@ -320,8 +320,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
 
     let sort_text = format!(" Sort: {} ", app.sort_label());
+    // A search goes on narrowing the list after Enter closes its prompt, and with
+    // nothing here saying so the list just looked wrong: sessions missing, the
+    // favorites group gone, "All Projects" above it. While the prompt is open it
+    // shows the query itself.
+    let search_text = (!app.search_query.is_empty() && app.mode != crate::app::Mode::Search)
+        .then(|| search_chip(&app.search_query));
 
-    let title = Paragraph::new(Line::from(vec![
+    let mut title_spans = vec![
         Span::styled(
             " Copilot Session Manager ",
             Style::default()
@@ -337,6 +343,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .bg(theme.warning),
         ),
         Span::raw("  "),
+    ];
+    if let Some(search_text) = search_text {
+        title_spans.push(Span::styled(
+            search_text,
+            Style::default()
+                .fg(badge_foreground(theme, theme.warning))
+                .bg(theme.warning),
+        ));
+        title_spans.push(Span::raw("  "));
+    }
+    title_spans.extend([
         Span::styled(
             sort_text,
             Style::default()
@@ -344,8 +361,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 .bg(theme.accent),
         ),
         Span::raw(format!("  {} sessions", app.filtered_indices.len())),
-    ]))
-    .style(Style::default().fg(theme.text).bg(theme.background));
+    ]);
+    let title = Paragraph::new(Line::from(title_spans))
+        .style(Style::default().fg(theme.text).bg(theme.background));
 
     f.render_widget(title, main_layout[0]);
 
@@ -390,6 +408,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.confirm_quit {
         popups::draw_quit_confirm(f, app);
+    }
+}
+
+/// The title bar's reminder that a search is narrowing the list.
+///
+/// The query is cut short because a pasted session id is 36 characters, and the sort
+/// order and the session count to its right have to stay on the bar.
+fn search_chip(query: &str) -> String {
+    const SHOWN: usize = 16;
+    let query = query.trim();
+    if query.chars().count() > SHOWN {
+        let head: String = query.chars().take(SHOWN - 1).collect();
+        format!(" Search: {head}… ")
+    } else {
+        format!(" Search: {query} ")
     }
 }
 

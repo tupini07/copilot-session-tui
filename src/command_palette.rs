@@ -509,11 +509,11 @@ fn commands(app: &App) -> Vec<CommandEntry> {
         entry(
             Id::ClearProjectFilter,
             Group::View,
-            "Clear project filter",
-            "Show sessions from all projects",
+            "Clear search and project filter",
+            "Show every session again",
             "c",
-            app.project_filter.is_some(),
-            "No project filter is active",
+            app.project_filter.is_some() || !app.search_query.is_empty(),
+            "No search or project filter is active",
         ),
         entry(
             Id::CycleSort,

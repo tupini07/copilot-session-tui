@@ -143,6 +143,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             if app.project_filter.is_some() {
                 spans.push(key_span("c", theme));
                 spans.push(Span::raw(" Clear filter  "));
+            } else if !app.search_query.is_empty() {
+                // `c` drops a search too; Esc is named because it is the key people
+                // try, and here it would otherwise read as Quit.
+                spans.push(key_span("Esc", theme));
+                spans.push(Span::raw(" Clear search  "));
             }
             spans.extend([
                 key_span("T", theme),
@@ -304,6 +309,17 @@ mod tests {
 
         app.set_project_filter(Some("C:/Workspace/zazen".to_string()));
         assert!(rendered(&app).contains("c Clear filter"));
+    }
+
+    #[test]
+    fn a_search_kept_with_enter_is_offered_esc_to_clear_it_because_nothing_else_says_how() {
+        let mut app = App::new(vec![session("a")], UserConfig::default());
+        app.disable_config_persistence();
+        assert!(!rendered(&app).contains("Clear search"));
+
+        app.search_query = "a".to_string();
+        app.apply_filter();
+        assert!(rendered(&app).contains("Esc Clear search"));
     }
 
     #[test]
