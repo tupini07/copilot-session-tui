@@ -55,6 +55,10 @@ pub fn main() {
     //                    event log records it; the turn stays open until e2e:answered
     //   e2e:answered <text>  record the answer to the open question and end the turn
     //   e2e:bell         ring the bell, which is how a turn's end is also reported
+    //   e2e:background <shellId> <description>
+    //                    record a command left running in the background
+    //   e2e:background-done <shellId>   record that command ending
+    //   e2e:spawn <seconds>  start a process under a shell, alive about that long
     let events_path = events_path(&args);
     enable_virtual_terminal_input();
     std::thread::spawn(move || {
@@ -254,6 +258,66 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             }
             print!("\x1b]9;4;0;0\x1b\\");
             println!("Fake Copilot finished a turn.");
+            let _ = std::io::stdout().flush();
+        }
+        "background" => {
+            // A command left running, as the real Copilot's log records it: the call
+            // with its description, then the result naming the shell it runs under.
+            let (shell, description) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            let Some(path) = events_path else { return };
+            let number = ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let id = format!("call_e2e_background_{number}");
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_start","data":{{"toolCallId":"{id}","toolName":"powershell","arguments":{{"command":"e2e","description":{},"shellId":"{shell}","mode":"async","detach":true}}}},"timestamp":"{}"}}"#,
+                    crate::telegram_stub::json_string(description),
+                    now_stamp()
+                ),
+            );
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"{id}","success":true,"result":{{"content":"<command started in detached background with shellId: {shell}>"}}}},"timestamp":"{}"}}"#,
+                    now_stamp()
+                ),
+            );
+            println!("Fake Copilot left a command running: {shell}");
+            let _ = std::io::stdout().flush();
+        }
+        "background-done" => {
+            let shell = rest.trim();
+            let Some(path) = events_path else { return };
+            append_event(
+                path,
+                &format!(
+                    r#"{{"type":"system.notification","data":{{"content":"Detached shell (shellId: {shell}) has completed.","kind":{{"type":"shell_detached_completed","shellId":"{shell}","description":"e2e"}}}},"timestamp":"{}"}}"#,
+                    now_stamp()
+                ),
+            );
+            println!("Fake Copilot's command ended: {shell}");
+            let _ = std::io::stdout().flush();
+        }
+        "spawn" => {
+            // A process under one of the session's shells, alive for about <seconds>:
+            // what a command the model ran looks like to the system. `ping` and `sleep`
+            // are the two things sure to be there.
+            let seconds: u64 = rest.trim().parse().unwrap_or(10);
+            let spawned = if cfg!(windows) {
+                std::process::Command::new("cmd")
+                    .args(["/c", &format!("ping -n {} 127.0.0.1 >nul", seconds + 1)])
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+            } else {
+                std::process::Command::new("sh")
+                    .args(["-c", &format!("sleep {seconds}; true")])
+                    .stdin(std::process::Stdio::null())
+                    .spawn()
+            };
+            match spawned {
+                Ok(_) => println!("Fake Copilot started a process."),
+                Err(error) => println!("Fake Copilot could not start a process: {error}"),
+            }
             let _ = std::io::stdout().flush();
         }
         "bell" => {
