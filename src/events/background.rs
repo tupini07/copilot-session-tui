@@ -29,6 +29,22 @@ const MAX_CALLS_IN_FLIGHT: usize = 64;
 
 /// What the result of a shell call reads when the command was left running.
 const STARTED: &[u8] = br#""content":"<command started in "#;
+/// How a result begins whenever it speaks of a shell that is still going: a command
+/// that outlived the wait it was given ("is still running after 180 seconds"), one the
+/// user sent to the background by hand ("moved to background by the user"), and a
+/// later look at either that found it not done. Every form of it means the same thing
+/// here, so only the id after it is read.
+///
+/// It closes the result and does not always open it: whatever the command printed
+/// before its wait ran out comes first. So it is looked for at the start of the result
+/// or of a line of it, and has to go on in one of the ways Copilot words it, which
+/// keeps printed text that merely mentions a shell from passing for the notice.
+const STILL_RUNNING: &[u8] = b"<command with shellId: ";
+const STILL_RUNNING_WORDINGS: [&[u8]; 3] = [
+    b" is still running",
+    b" moved to background",
+    b" is running in the background",
+];
 /// What the result of stopping a shell reads, for one that was running or already gone.
 const STOPPED: &[u8] = br#""content":"<command with id: "#;
 
@@ -76,20 +92,24 @@ impl BackgroundTracker {
         }
     }
 
+    /// Keep the description of a shell call until its result says how it went.
+    ///
+    /// Every shell call, not only the ones asked to run in the background: a plain
+    /// command that outlives its wait is moved there too, and which will is not known
+    /// when it starts. Read from the bytes, since this is every command a session runs.
     fn remember_description(&mut self, line: &[u8]) {
-        if !contains(line, br#""mode":"async""#) {
+        if !SHELL_TOOLS.iter().any(|tool| contains(line, tool)) {
             return;
         }
-        let Ok(start) = serde_json::from_slice::<StartRecord>(line) else {
-            // An oversized record is cut before it closes. The command is still found
-            // by its completion, labelled with its shell id.
+        let Some(call) = tool_call_id(line) else {
             return;
         };
-        let (Some(id), Some(description)) = (start.data.tool_call_id, start.data.arguments) else {
-            return;
-        };
-        let Some(description) = description
-            .description
+        // The command text comes first and may itself hold this key, but quoted inside
+        // a JSON string its quotes are escaped, so the first bare match is the real one.
+        // An oversized record is cut before it; the command is then labelled by its
+        // shell id.
+        let Some(description) = after(line, br#","description":"#)
+            .and_then(json_string)
             .filter(|text| !text.trim().is_empty())
         else {
             return;
@@ -97,27 +117,34 @@ impl BackgroundTracker {
         if self.descriptions.len() >= MAX_CALLS_IN_FLIGHT {
             self.descriptions.clear();
         }
-        self.descriptions.insert(id, description);
+        self.descriptions.insert(call.to_string(), description);
     }
 
     fn completed(&mut self, line: &[u8]) -> Option<LifecycleEvent> {
+        let description = tool_call_id(line).and_then(|call| self.descriptions.remove(call));
         if let Some(rest) = after(line, STARTED) {
             let detached = rest.starts_with(b"detached background with shellId: ");
             let id = between(rest, b"background with shellId: ", b">")?;
-            let description = tool_call_id(line)
-                .and_then(|call| self.descriptions.remove(call))
-                .unwrap_or_else(|| id.to_string());
             // A shell id is the model's to choose and can be used twice. The second
             // start replaces the first on the receiving side, so it is reported again.
             self.open.insert(id.to_string());
             return Some(LifecycleEvent::BackgroundStarted {
                 shell_id: id.to_string(),
-                description,
+                description: description.unwrap_or_else(|| id.to_string()),
                 detached,
             });
         }
-        if let Some(call) = tool_call_id(line) {
-            self.descriptions.remove(call);
+        if let Some((id, rest)) = still_running(line) {
+            // Already followed: this is the model looking in on it, not a start.
+            if !self.open.insert(id.to_string()) {
+                return None;
+            }
+            let said = &rest[..rest.len().min(80)];
+            return Some(LifecycleEvent::BackgroundStarted {
+                shell_id: id.to_string(),
+                description: description.unwrap_or_else(|| id.to_string()),
+                detached: contains(said, b" in detached background "),
+            });
         }
         if self.open.is_empty() {
             return None;
@@ -177,21 +204,48 @@ impl BackgroundTracker {
     }
 }
 
-#[derive(Deserialize)]
-struct StartRecord {
-    data: StartData,
+/// The shell a result says is still going, and what follows its id, if it says so.
+fn still_running(line: &[u8]) -> Option<(&str, &[u8])> {
+    // The last one: the notice ends the result, and anything like it earlier is output.
+    let at = line
+        .windows(STILL_RUNNING.len())
+        .rposition(|window| window == STILL_RUNNING)?;
+    let before = &line[..at];
+    // A result carries its text twice, as `content` and again as `detailedContent`,
+    // and the last notice is in whichever comes second.
+    if !(before.ends_with(br#"ontent":""#) || before.ends_with(br"\n")) {
+        return None;
+    }
+    let rest = &line[at + STILL_RUNNING.len()..];
+    let id = between(rest, b"", b" ")?;
+    let rest = &rest[id.len()..];
+    STILL_RUNNING_WORDINGS
+        .iter()
+        .any(|wording| rest.starts_with(wording))
+        .then_some((id, rest))
 }
 
-#[derive(Deserialize)]
-struct StartData {
-    #[serde(rename = "toolCallId")]
-    tool_call_id: Option<String>,
-    arguments: Option<StartArguments>,
-}
+/// The tools that run a command in a shell, as their start records name them.
+const SHELL_TOOLS: [&[u8]; 3] = [
+    br#""toolName":"powershell""#,
+    br#""toolName":"bash""#,
+    br#""toolName":"local_shell""#,
+];
 
-#[derive(Deserialize)]
-struct StartArguments {
-    description: Option<String>,
+/// The JSON string starting at `bytes`, decoded. `None` if it is not one, or is cut.
+fn json_string(bytes: &[u8]) -> Option<String> {
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut end = 1;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'\\' => end += 2,
+            b'"' => return serde_json::from_slice(&bytes[..=end]).ok(),
+            _ => end += 1,
+        }
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -229,7 +283,11 @@ fn after<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<&'a [u8]> {
 /// The text between `open` and the next `close`. Shell ids are plain words, so an id
 /// with a JSON escape in it is not one of ours and is passed over.
 fn between<'a>(haystack: &'a [u8], open: &[u8], close: &[u8]) -> Option<&'a str> {
-    let rest = after(haystack, open)?;
+    let rest = if open.is_empty() {
+        haystack
+    } else {
+        after(haystack, open)?
+    };
     let end = rest
         .windows(close.len())
         .position(|window| window == close)?;
@@ -332,6 +390,124 @@ mod tests {
 
         assert_eq!(
             feed(&mut tracker, &started("call-1", "campaign", true)),
+            Some(LifecycleEvent::BackgroundStarted {
+                shell_id: "campaign".into(),
+                description: "campaign".into(),
+                detached: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_plain_command_that_outlives_its_wait_is_reported_because_it_carries_on_in_the_background()
+    {
+        let mut tracker = BackgroundTracker::default();
+        // Not asked to run in the background: there is no `mode`, and the description
+        // has an escaped quote in it, as descriptions do. The command text holds a
+        // decoy of the key, which is only ever a quoted string inside a string.
+        let plain = r#"{"type":"tool.execution_start","data":{"toolCallId":"call-1","toolName":"powershell","arguments":{"command":"echo \",\\\"description\\\":\\\"decoy\\\"\"","description":"Run the \"slow\" audit","initial_wait":180},"turnId":"1"}}"#;
+        assert_eq!(feed(&mut tracker, plain), None);
+
+        let outlived = result(
+            "call-1",
+            "<command with shellId: audit-1 is still running after 180 seconds. You will be automatically notified when it completes.>",
+        );
+        assert_eq!(
+            feed(&mut tracker, &outlived),
+            Some(LifecycleEvent::BackgroundStarted {
+                shell_id: "audit-1".into(),
+                description: r#"Run the "slow" audit"#.into(),
+                detached: false,
+            })
+        );
+        // Looked in on later and still going: not a second start.
+        assert_eq!(
+            feed(
+                &mut tracker,
+                &result(
+                    "read-1",
+                    "<command with shellId: audit-1 is still running after 30 seconds.>"
+                )
+            ),
+            None
+        );
+        assert_eq!(
+            feed(
+                &mut tracker,
+                &notification("shell_completed", "audit-1", Some(0))
+            ),
+            Some(LifecycleEvent::BackgroundEnded {
+                shell_id: "audit-1".into(),
+                exit_code: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn the_notice_is_found_after_whatever_the_command_printed_before_its_wait_ran_out() {
+        let mut tracker = BackgroundTracker::default();
+
+        assert_eq!(
+            feed(
+                &mut tracker,
+                &result(
+                    "call-1",
+                    r"wrote catalog (1768 bytes)\n<command with shellId: verify is still running after 120 seconds. The command is still running.>"
+                )
+            ),
+            Some(LifecycleEvent::BackgroundStarted {
+                shell_id: "verify".into(),
+                description: "verify".into(),
+                detached: false,
+            })
+        );
+
+        // Output that only mentions a shell, mid-line or with other words after the
+        // id, is not the notice.
+        for printed in [
+            r"see <command with shellId: fake is still running after 5 seconds>",
+            r"log\n<command with shellId: fake was mentioned here>",
+        ] {
+            assert_eq!(
+                feed(&mut tracker, &result("cat", printed)),
+                None,
+                "{printed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_the_user_sent_to_the_background_by_hand_is_reported() {
+        let mut tracker = BackgroundTracker::default();
+
+        assert_eq!(
+            feed(
+                &mut tracker,
+                &result(
+                    "call-1",
+                    "<command with shellId: 149 moved to background by the user. You will be automatically notified when it completes.>"
+                )
+            ),
+            Some(LifecycleEvent::BackgroundStarted {
+                shell_id: "149".into(),
+                description: "149".into(),
+                detached: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_shell_from_before_the_log_was_joined_is_picked_up_when_the_model_looks_in_on_it() {
+        let mut tracker = BackgroundTracker::default();
+
+        assert_eq!(
+            feed(
+                &mut tracker,
+                &result(
+                    "read-1",
+                    "<command with shellId: campaign is still running in detached background after 30s. You will be automatically notified when it completes.>"
+                )
+            ),
             Some(LifecycleEvent::BackgroundStarted {
                 shell_id: "campaign".into(),
                 description: "campaign".into(),
@@ -475,6 +651,55 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// Replay a real event log and count what the tracker makes of it:
+    /// `CST_REPLAY_LOG=<events.jsonl> cargo test replay_a_real_log -- --ignored --nocapture`.
+    /// Prints counts only, never the log's text.
+    #[test]
+    #[ignore = "needs a real event log named by CST_REPLAY_LOG"]
+    fn replay_a_real_log() {
+        let Some(path) = std::env::var_os("CST_REPLAY_LOG") else {
+            return;
+        };
+        let text = std::fs::read(path).expect("the log can be read");
+        let mut tracker = BackgroundTracker::default();
+        let (mut starts, mut ends, mut cleared, mut unmatched, mut never) = (0, 0, 0, 0, 0);
+        let mut ever_started = HashSet::new();
+        for line in text.split(|byte| *byte == b'\n') {
+            let event_type = line
+                .strip_prefix(br#"{"type":""#)
+                .and_then(|rest| rest.split(|byte| *byte == b'"').next());
+            let was_open = tracker.open.len();
+            match tracker.observe(line, event_type) {
+                Some(LifecycleEvent::BackgroundStarted { shell_id, .. }) => {
+                    starts += 1;
+                    ever_started.insert(shell_id);
+                }
+                Some(LifecycleEvent::BackgroundEnded { .. }) => ends += 1,
+                Some(LifecycleEvent::BackgroundCleared) => cleared += was_open,
+                _ => {
+                    if event_type == Some(NOTIFICATION)
+                        && (contains(line, br#""shell_completed""#)
+                            || contains(line, br#""shell_detached_completed""#))
+                    {
+                        unmatched += 1;
+                        let id = serde_json::from_slice::<NotificationRecord>(line)
+                            .ok()
+                            .and_then(|record| record.data.kind?.shell_id);
+                        if id.is_some_and(|id| !ever_started.contains(&id)) {
+                            never += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!(
+            "starts {starts}, ends {ends}, dropped at a restart {cleared}, still open {}, \
+             completions with nothing open under that id {unmatched} \
+             (of those, for an id never seen starting: {never})",
+            tracker.open.len()
+        );
     }
 
     #[test]
