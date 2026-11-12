@@ -184,6 +184,19 @@ pub fn handle_terminal_event(app: &mut App, event: Event) -> anyhow::Result<()> 
         return Ok(());
     }
 
+    // The wheel moves through the list wherever the list is what is on screen. Three
+    // rows a notch, as terminals scroll text.
+    if let Event::Mouse(mouse) = &event {
+        if matches!(app.mode, Mode::Normal | Mode::Search) {
+            match mouse.kind {
+                crossterm::event::MouseEventKind::ScrollUp => app.move_by(-3),
+                crossterm::event::MouseEventKind::ScrollDown => app.move_by(3),
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
     let Event::Key(key) = event else {
         return Ok(());
     };
@@ -680,27 +693,29 @@ fn handle_normal(app: &mut App, key: KeyCode) {
     }
 
     match key {
+        // A search confirmed with Enter keeps narrowing the list after the prompt is
+        // gone. Esc is what anyone reaches for to get out of it, and quitting CST
+        // instead, with every pane it holds, would be a poor answer to that.
+        KeyCode::Esc if app.clear_search() => {
+            app.status_message = Some("Search cleared".to_string());
+        }
         KeyCode::Char('q') | KeyCode::Esc => {
             request_quit(app);
         }
         KeyCode::Up | KeyCode::Char('k') => app.move_up(),
         KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-        KeyCode::Home => {
-            app.selected = 0;
-            app.scroll_offset = 0;
-        }
-        KeyCode::End => {
-            if !app.filtered_indices.is_empty() {
-                app.selected = app.filtered_indices.len() - 1;
-                if app.selected >= app.visible_rows {
-                    app.scroll_offset = app.selected - app.visible_rows + 1;
-                }
-            }
-        }
+        KeyCode::Home => app.select_row(0),
+        KeyCode::End => app.select_row(usize::MAX),
+        KeyCode::PageUp => app.move_by(-(app.visible_rows.max(1) as isize)),
+        KeyCode::PageDown => app.move_by(app.visible_rows.max(1) as isize),
         KeyCode::Enter => resume_selected(app),
         KeyCode::Char('/') => {
             app.mode = Mode::Search;
+            // A new search starts from every session, and the list has to show that:
+            // emptying the query alone left the last search's rows under an empty
+            // prompt.
             app.search_query.clear();
+            app.refilter_from_top();
         }
         KeyCode::Char('r') => {
             if let Some(session) = app.selected_session() {
@@ -749,8 +764,7 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('c') => {
-            app.set_project_filter(None);
-            app.status_message = Some("Filter cleared".to_string());
+            app.status_message = Some(app.clear_narrowing().to_string());
         }
         KeyCode::Char('n') => begin_new_session_choice(app),
         KeyCode::Char('N') => begin_worktree_session(app),
@@ -1329,19 +1343,24 @@ fn handle_search(app: &mut App, key: KeyCode) {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
             app.search_query.clear();
-            app.apply_filter();
+            app.refilter_from_top();
         }
         KeyCode::Enter => app.mode = Mode::Normal,
+        // Each change to the query is a different list, so the selection goes back to
+        // its first row; kept as a row number it pointed at some unrelated session,
+        // often one scrolled out of sight.
         KeyCode::Backspace => {
             app.search_query.pop();
-            app.apply_filter();
+            app.refilter_from_top();
         }
         KeyCode::Char(c) => {
             app.search_query.push(c);
-            app.apply_filter();
+            app.refilter_from_top();
         }
         KeyCode::Up => app.move_up(),
         KeyCode::Down => app.move_down(),
+        KeyCode::PageUp => app.move_by(-(app.visible_rows.max(1) as isize)),
+        KeyCode::PageDown => app.move_by(app.visible_rows.max(1) as isize),
         _ => {}
     }
 }
@@ -2676,6 +2695,119 @@ mod tests {
         assert_eq!(app.mode, Mode::Settings);
     }
 
+    fn listed(id: &str, day: u32) -> crate::session::Session {
+        crate::session::Session {
+            id: id.to_string(),
+            cwd: "project".to_string(),
+            project_root: "project".to_string(),
+            summary: Some(format!("Session {id}")),
+            created_at: None,
+            updated_at: chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, day, 12, 0, 0)
+                .single(),
+            is_active: false,
+            dir_path: std::path::PathBuf::from(id),
+            edited_files: Vec::new(),
+            last_user_message: None,
+            turn_count: 0,
+            tool_call_count: 0,
+            details_parsed_len: 0,
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_terminal_event(
+            app,
+            Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn esc_drops_a_search_kept_with_enter_before_it_quits_because_the_list_was_stuck_narrowed() {
+        let mut app = App::new(
+            vec![listed("alpha", 14), listed("beta", 13)],
+            config::UserConfig::default(),
+        );
+        press(&mut app, KeyCode::Char('/'));
+        for character in "alpha".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.filtered_indices.len(), 1, "Enter keeps the search on");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.should_quit, "the first Esc is for the search");
+        assert_eq!(app.filtered_indices.len(), 2);
+        assert_eq!(app.status_message.as_deref(), Some("Search cleared"));
+
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            app.should_quit,
+            "with nothing to clear, Esc quits as before"
+        );
+    }
+
+    #[test]
+    fn c_clears_a_kept_search_too_instead_of_saying_filter_cleared_over_a_narrowed_list() {
+        let mut app = App::new(
+            vec![listed("alpha", 14), listed("beta", 13)],
+            config::UserConfig::default(),
+        );
+        app.search_query = "alpha".to_string();
+        app.apply_filter();
+
+        press(&mut app, KeyCode::Char('c'));
+
+        assert_eq!(app.filtered_indices.len(), 2);
+        assert_eq!(app.status_message.as_deref(), Some("Search cleared"));
+    }
+
+    #[test]
+    fn opening_a_new_search_lists_every_session_again_not_the_rows_of_the_last_one() {
+        let mut app = App::new(
+            vec![listed("alpha", 14), listed("beta", 13)],
+            config::UserConfig::default(),
+        );
+        app.search_query = "alpha".to_string();
+        app.apply_filter();
+
+        press(&mut app, KeyCode::Char('/'));
+
+        assert_eq!(app.mode, Mode::Search);
+        assert_eq!(app.filtered_indices.len(), 2);
+    }
+
+    #[test]
+    fn the_wheel_and_the_page_keys_move_through_the_session_list() {
+        let sessions = (1..=20).map(|n| listed(&format!("s{n:02}"), n)).collect();
+        let mut app = App::new(sessions, config::UserConfig::default());
+        app.visible_rows = 5;
+        let wheel = |kind| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 5,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        handle_terminal_event(&mut app, wheel(MouseEventKind::ScrollDown)).unwrap();
+        assert_eq!(app.selected, 3);
+        handle_terminal_event(&mut app, wheel(MouseEventKind::ScrollUp)).unwrap();
+        assert_eq!(app.selected, 0);
+
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.selected, 5);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.selected, 0);
+
+        // Over a popup the wheel is not the list's.
+        handle_normal(&mut app, KeyCode::Char('?'));
+        handle_terminal_event(&mut app, wheel(MouseEventKind::ScrollDown)).unwrap();
+        assert_eq!(app.selected, 0);
+    }
+
     #[test]
     fn arrow_keys_scroll_the_help_instead_of_closing_it() {
         let mut app = App::new(Vec::new(), config::UserConfig::default());
@@ -3020,7 +3152,7 @@ mod tests {
     #[test]
     fn a_tmux_key_that_slips_past_validation_can_never_steal_a_built_in_command() {
         let mut config = config::UserConfig::default();
-        // c clears the project filter; validation rejects this, so set it directly
+        // c clears the search and the project filter; validation rejects this, so set it directly
         // the way a future drift between the key tables would.
         config.tmux_keys.end_session = "c".to_string();
         let mut app = App::new(Vec::new(), config);
@@ -3028,7 +3160,10 @@ mod tests {
 
         handle_normal(&mut app, KeyCode::Char('c'));
 
-        assert_eq!(app.status_message.as_deref(), Some("Filter cleared"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Nothing to clear: every session is listed")
+        );
         assert!(app.confirm_end_tmux.is_none());
     }
 

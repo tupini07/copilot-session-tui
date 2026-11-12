@@ -205,6 +205,7 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 |-----|--------|
 | `↑/k` `↓/j` | Navigate sessions |
 | `Home` / `End` | Jump to first/last |
+| `PgUp` / `PgDn` | Move a screenful; the mouse wheel scrolls the list too |
 | `Enter` | Resume selected session |
 | `t` | Resume selected session persistently via tmux |
 | `Space` | Toggle selected session favorite |
@@ -218,9 +219,9 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `X` | End the selected persistent tmux session |
 | `r` | Rename session |
 | `d` | Delete session (with confirmation) |
-| `/` | Fuzzy search |
+| `/` | Search: fuzzy on names and paths, or any part of a session id. A whole id finds its session even outside the project filter. `Enter` keeps the search on (the title bar shows it), `Esc` drops it |
 | `f` / `p` | Filter by project |
-| `c` | Clear project filter |
+| `c` | Clear the search and the project filter |
 | `s` | Cycle sort order |
 | `H` | Temporarily show or re-hide sessions excluded by saved filters |
 | `,` | Edit global settings |

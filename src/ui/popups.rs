@@ -1033,6 +1033,11 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         help_section(theme, "Sessions"),
         help_line(theme, "↑/k ↓/j", "Navigate sessions"),
         help_line(theme, "Home/End", "Jump to first/last"),
+        help_line(
+            theme,
+            "PgUp/PgDn",
+            "Move a screenful (the wheel scrolls too)",
+        ),
         help_line(theme, "Enter", "Resume selected session"),
         help_line(theme, "n", "New session (asks: as-is or isolated worktree)"),
         help_line(theme, "N", "New worktree session, skipping the question"),
@@ -1078,10 +1083,14 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         help_line(theme, "R", "Recover the tabs of a closed or crashed CST"),
         Line::from(""),
         help_section(theme, "Filter & sort"),
-        help_line(theme, "/", "Search / fuzzy filter"),
+        help_line(
+            theme,
+            "/",
+            "Search names and paths, or part of a session id",
+        ),
         help_line(theme, "f/p", "Filter by project (type to search)"),
         help_line(theme, "P", "New project: add a folder, or create one"),
-        help_line(theme, "c", "Clear project filter"),
+        help_line(theme, "c", "Clear the search and the project filter"),
         help_line(theme, "s", "Cycle sort order"),
         help_line(theme, "H", "Temporarily show/hide filtered sessions"),
         help_line(
@@ -1095,7 +1104,7 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         help_line(theme, ".", "Filtered-project settings"),
         help_line(theme, "?", "Toggle this help"),
         help_line(theme, "u", "Update (when available)"),
-        help_line(theme, "q/Esc", "Quit"),
+        help_line(theme, "q/Esc", "Quit (Esc clears a search first)"),
         help_line(theme, "Ctrl+C", "Force quit"),
         Line::from(""),
     ]);
