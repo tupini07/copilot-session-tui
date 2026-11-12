@@ -131,6 +131,11 @@ impl PtySession {
         self.size
     }
 
+    /// The child's process id, while there is one to ask.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok()?.process_id()
+    }
+
     /// Exit code if the child has already finished, without blocking.
     pub fn try_wait(&self) -> Option<u32> {
         let mut child = self.child.lock().ok()?;

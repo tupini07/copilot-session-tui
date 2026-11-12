@@ -1,3 +1,4 @@
+pub mod background;
 pub mod command_palette;
 pub mod diff;
 pub mod file_tree;
@@ -286,6 +287,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         thread_inbox::draw(f, app);
         whats_new::draw(f, app);
         image_viewer::draw(f, app);
+        background::draw(f, app);
         if app.confirm_update_restart {
             popups::draw_update_restart_confirm(f, app);
         }

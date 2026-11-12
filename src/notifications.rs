@@ -21,6 +21,8 @@ pub enum NotificationKind {
     Question,
     PlanApproval,
     Error,
+    /// A process the user marked as work a session was waiting on has exited.
+    BackgroundDone,
 }
 
 impl NotificationKind {
@@ -30,12 +32,13 @@ impl NotificationKind {
             Self::Question => "Question waiting for your response",
             Self::PlanApproval => "Plan waiting for approval",
             Self::Error => "Copilot reported an error",
+            Self::BackgroundDone => "Background work finished",
         }
     }
 
     fn priority(self) -> u8 {
         match self {
-            Self::Ready => 3,
+            Self::Ready | Self::BackgroundDone => 3,
             Self::Question | Self::PlanApproval => 4,
             Self::Error => 4,
         }
@@ -47,6 +50,7 @@ impl NotificationKind {
             Self::Question => ["robot", "question"],
             Self::PlanApproval => ["robot", "clipboard"],
             Self::Error => ["robot", "warning"],
+            Self::BackgroundDone => ["robot", "hourglass"],
         }
     }
 }

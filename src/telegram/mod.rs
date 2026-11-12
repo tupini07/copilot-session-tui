@@ -127,7 +127,9 @@ pub enum SentKind {
 impl From<NotificationKind> for SentKind {
     fn from(kind: NotificationKind) -> Self {
         match kind {
-            NotificationKind::Ready => Self::Ready,
+            // Recorded as the kind it behaves like: something to read, nothing to answer.
+            // A kind of its own would be one an older CST sharing this file cannot read.
+            NotificationKind::Ready | NotificationKind::BackgroundDone => Self::Ready,
             NotificationKind::Question => Self::Question,
             NotificationKind::PlanApproval => Self::PlanApproval,
             NotificationKind::Error => Self::Error,
@@ -365,6 +367,7 @@ fn kind_line(kind: NotificationKind) -> &'static str {
         NotificationKind::Question => "Question waiting for your response",
         NotificationKind::PlanApproval => "Plan waiting for approval",
         NotificationKind::Error => "Copilot reported an error",
+        NotificationKind::BackgroundDone => "Background work finished",
     }
 }
 

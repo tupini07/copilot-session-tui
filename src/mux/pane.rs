@@ -147,6 +147,10 @@ pub struct Pane {
     hook_completion_window: bool,
     attention_resolved_at: u64,
     pending_inputs: Vec<(String, InputKind)>,
+    /// What is running behind this session, and which of it the user is waiting on.
+    /// Deliberately apart from `working`: watched work must never hold back a
+    /// wake-up or a reply, which a working turn does.
+    pub background: crate::background::BackgroundWork,
     needs_attention: bool,
     /// Set by hand from the tab's menu, as a reminder that something already read still
     /// needs dealing with. Kept apart from `needs_attention` because that goes with any
@@ -316,6 +320,7 @@ impl Pane {
             hook_completion_window: false,
             attention_resolved_at: 0,
             pending_inputs: Vec::new(),
+            background: Default::default(),
             needs_attention: false,
             marked_unread: false,
             ready_sent_in_cycle: false,
@@ -917,7 +922,13 @@ impl Pane {
     }
 
     pub fn apply_lifecycle(&mut self, event: LifecycleEvent) -> Option<PaneNotification> {
+        self.background.apply(&event);
         match event {
+            // Taken in above. Background commands are listed, never announced: the
+            // model is told when one ends and its own turn says what came of it.
+            LifecycleEvent::BackgroundStarted { .. }
+            | LifecycleEvent::BackgroundEnded { .. }
+            | LifecycleEvent::BackgroundCleared => None,
             LifecycleEvent::InputRequested { tool_call_id, kind } => {
                 if self
                     .pending_inputs
@@ -1202,6 +1213,11 @@ impl Pane {
     /// A hand-made mark counts here but not in `needs_attention`, which also puts "? "
     /// in the outer window title: a reminder the user left for themselves is not the
     /// session asking for anything.
+    /// The process id of the Copilot CLI in this pane, for finding what it started.
+    pub fn child_process_id(&self) -> Option<u32> {
+        self.pty.as_ref()?.process_id()
+    }
+
     pub fn is_unread(&self) -> bool {
         (self.needs_attention || self.marked_unread) && !self.requires_user_action()
     }

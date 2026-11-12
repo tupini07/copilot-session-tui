@@ -1148,6 +1148,11 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         ));
         text.push(help_line(
             theme,
+            &format!("{prefix} b"),
+            "Background work: mark what to wait for",
+        ));
+        text.push(help_line(
+            theme,
             &format!("{prefix} u"),
             "Install update without stopping sessions",
         ));

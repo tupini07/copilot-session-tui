@@ -199,6 +199,8 @@ pub enum PrefixCommand {
     Scratchpad,
     Terminal,
     Snippets,
+    /// `prefix b` — what is running behind this session, and which of it to wait for.
+    Background,
     Update,
     Help,
     Github,
@@ -238,8 +240,8 @@ pub fn resolve_prefix_command(key: &KeyEvent, prefix: &KeyChord) -> Option<Prefi
 /// validated against this and only consulted after the built-ins, so drift here makes
 /// a configured key inert — it can never steal a multiplexer command.
 pub(crate) const PREFIX_COMMAND_KEYS: &[char] = &[
-    'd', 'n', 'p', 'x', 'w', 'c', 'e', 't', 's', 'u', 'q', 'm', 'h', 'g', 'l', '0', '1', '2', '3',
-    '4', '5', '6', '7', '8', '9',
+    'd', 'n', 'p', 'x', 'w', 'c', 'e', 't', 's', 'b', 'u', 'q', 'm', 'h', 'g', 'l', '0', '1', '2',
+    '3', '4', '5', '6', '7', '8', '9',
 ];
 
 /// `tmux_keys` is `None` when tmux-backed sessions cannot work here, which keeps the
@@ -263,6 +265,7 @@ pub fn resolve_prefix_command_with_tmux_keys(
         KeyCode::Char('e') => Some(PrefixCommand::Scratchpad),
         KeyCode::Char('t') => Some(PrefixCommand::Terminal),
         KeyCode::Char('s') => Some(PrefixCommand::Snippets),
+        KeyCode::Char('b') => Some(PrefixCommand::Background),
         KeyCode::Char('u') => Some(PrefixCommand::Update),
         KeyCode::Char('q') => Some(PrefixCommand::Quit),
         KeyCode::Char('m') => Some(PrefixCommand::MoveTab),
@@ -1245,12 +1248,18 @@ mod tests {
             Some(PrefixCommand::Layout)
         );
         assert!(PREFIX_COMMAND_KEYS.contains(&'l'));
+        // `b` splits nothing any more: it lists what runs behind the session.
+        assert_eq!(
+            resolve_prefix_command(&key(KeyCode::Char('b'), none), &chord),
+            Some(PrefixCommand::Background)
+        );
+        assert!(PREFIX_COMMAND_KEYS.contains(&'b'));
         assert_eq!(
             resolve_prefix_command(&key(KeyCode::Left, none), &chord),
             Some(PrefixCommand::FocusSplit(SplitStep::Left))
         );
         // The old top-level keys are free again for the configurable tmux end key.
-        for free in ['|', '-', 'z', 'b', 'r'] {
+        for free in ['|', '-', 'z', 'r'] {
             assert_eq!(
                 resolve_prefix_command(&key(KeyCode::Char(free), none), &chord),
                 None,
