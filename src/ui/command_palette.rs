@@ -137,6 +137,7 @@ fn draw_prefix_menu(f: &mut Frame, app: &App) {
                 ("e", "Scratchpad"),
                 ("t", "Terminal"),
                 ("s", "Snippets"),
+                ("b", "Background work"),
                 (prefix.as_str(), "Command search"),
             ],
         ),

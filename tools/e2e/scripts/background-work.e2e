@@ -1,0 +1,91 @@
+# A session that left something running reads as idle, because the model is. This
+# marks one background command as work being waited on and checks the tab, the status
+# line and the session list say so until it ends, that an unmarked command (a dev
+# server) changes nothing, and that a process marked by hand is noticed when it exits.
+
+size 110x30
+arg --mux
+fake_telegram private
+# A loaded machine can take longer than the default ten seconds to open a session.
+timeout 60000
+session existing-app Training run
+session existing-app Other session
+
+wait_for Training run
+press enter
+wait_for Fake Copilot is idling
+
+type e2e:background dev-server Run the dev server
+press enter
+wait_for left a command running: dev-server
+type e2e:background campaign Start the campaign execution
+press enter
+wait_for left a command running: campaign
+
+# Nothing is marked yet, so nothing says background.
+expect_not background:
+
+press ctrl+b b
+wait_for Background work:
+wait_for Run the dev server
+dump 01-popup
+
+# Mark the campaign, and leave the server alone.
+press down space
+wait_for Watching: Start the campaign execution
+dump 02-watching
+press esc
+wait_gone Background work:
+wait_for background: Start the campaign execution
+dump 03-status-line
+
+# Left alone, the age moves on: nothing else repaints an idle session.
+timeout 120000
+wait_for Start the campaign execution (1m)
+timeout 60000
+
+# From the list, the row carries the marker its tab does.
+press ctrl+b d
+wait_for Other session
+expect ◷
+dump 04-list
+
+# With a second session open there is a tab strip, and the first tab keeps its marker
+# while the other one has the keyboard.
+press down enter
+wait_for --resume=00000002-0000-4000-8000-000000000002
+expect ◷
+dump 05-tab-marker
+press ctrl+b 1
+wait_for --resume=00000001-0000-4000-8000-000000000001
+
+# The command ends, and so does the mark.
+type e2e:background-done campaign
+press enter
+wait_for command ended: campaign
+wait_gone background: Start the campaign execution
+expect_not ◷
+dump 06-command-ended
+
+# A process marked by hand: what the session's shell started, watched until it exits.
+type e2e:spawn 40
+press enter
+wait_for Fake Copilot started a process
+press ctrl+b b
+wait_for Background work:
+wait_for 127.0.0.1
+dump 07-processes
+press down space
+wait_for Watching: 
+press esc
+wait_for background: 
+dump 08-process-watched
+
+# Away from the tab when it exits: the list says so, the tab is left unread, and the
+# phone is told, since Copilot does not know anybody was waiting on it.
+press ctrl+b d
+wait_for Other session
+timeout 120000
+wait_for Background process finished:
+telegram_wait Background work finished
+dump 09-process-finished

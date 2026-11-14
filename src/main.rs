@@ -1,6 +1,7 @@
 mod app;
 mod app_state;
 mod aside;
+mod background;
 mod changelog;
 mod command_palette;
 mod config;
@@ -1373,6 +1374,7 @@ fn run_app(
         // no events at all. Cheap — the queue is almost always empty.
         repaint |= app.flush_thread_wakes();
         repaint |= app.flush_telegram_replies();
+        repaint |= app.poll_background();
         app.pump_telegram_keys();
         app.cancel_orphaned_worktrees();
         // Covers every route into the Files tab — keys, mouse, or opening

@@ -84,6 +84,12 @@ pub fn handle_attached_event(app: &mut App, event: Event) {
         return;
     }
 
+    // As above: every key is taken, so one meant for the list cannot reach a chat.
+    if app.background_popup.is_some() {
+        handle_background_popup_event(app, event);
+        return;
+    }
+
     if app.command_palette.is_some() {
         handle_command_palette_event(app, event);
         return;
@@ -704,6 +710,32 @@ fn use_snippet_at(app: &mut App, index: usize) {
     focus_chat(app);
 }
 
+/// Keys while the background work list is open. Space is the only one that changes
+/// anything, and what it changes is a mark; nothing here starts or stops a process.
+pub fn handle_background_popup_event(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            app.status_message = None;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.background_popup = None,
+                KeyCode::Up | KeyCode::Char('k') => app.background_popup_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.background_popup_move(1),
+                KeyCode::Home => app.background_popup_move(isize::MIN),
+                KeyCode::End => app.background_popup_move(isize::MAX),
+                KeyCode::Char(' ') | KeyCode::Enter => app.background_popup_toggle(),
+                KeyCode::Char('r') => app.background_popup_refresh(),
+                _ => {}
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => app.background_popup_move(-1),
+            MouseEventKind::ScrollDown => app.background_popup_move(1),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
 /// Keys and clicks while a picture is open. Esc, Enter, `q` or any click closes it, as
 /// Copilot's own viewer closes; `o` hands the file to whatever opens pictures on this
 /// machine, for full size. Everything else is swallowed rather than sent to a pane.
@@ -861,6 +893,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
             toggle_attached_terminal(app);
         }
         OpenSnippets => app.open_snippets(),
+        BackgroundWork => app.open_background_popup(),
         MoveTab => {
             close_context_overlays(app);
             enter_transient_mode(app, TransientMode::MoveTab);
@@ -1107,6 +1140,7 @@ fn handle_attached_key(app: &mut App, key: KeyEvent) {
                 toggle_attached_terminal(app);
             }
             Some(PrefixCommand::Snippets) => app.open_snippets(),
+            Some(PrefixCommand::Background) => app.open_background_popup(),
             Some(PrefixCommand::Update) => app.request_update(),
             Some(PrefixCommand::Help) => {
                 if let Some(mux) = app.mux.as_mut() {
@@ -2408,6 +2442,10 @@ pub fn handle_list_prefix(app: &mut App, key: KeyEvent) -> bool {
             attach_focused(app);
             app.open_snippets();
         }
+        Some(PrefixCommand::Background) => {
+            attach_focused(app);
+            app.open_background_popup();
+        }
         // The strip only exists once attached, so reordering from the list means
         // going there first — the same thing `prefix c` and `prefix e` do.
         Some(PrefixCommand::MoveTab) => {
@@ -2964,6 +3002,14 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             true
         }
         MuxEvent::SessionLifecycle(id, event) => {
+            // A command starting or ending in the background changes a tab's marker,
+            // the list's and the popup's rows, on a session that may be on no screen.
+            let background_changed = matches!(
+                event,
+                crate::events::lifecycle::LifecycleEvent::BackgroundStarted { .. }
+                    | crate::events::lifecycle::LifecycleEvent::BackgroundEnded { .. }
+                    | crate::events::lifecycle::LifecycleEvent::BackgroundCleared
+            );
             let focused = app.mux.as_ref().and_then(|mux| mux.focused) == Some(id);
             let (notification, attention_changed, action_or_progress_changed, title, session_id) =
                 app.mux
@@ -3007,6 +3053,7 @@ pub fn handle_mux_event(app: &mut App, event: MuxEvent) -> bool {
             app.pane_on_screen(id)
                 || attention_changed
                 || action_or_progress_changed
+                || background_changed
                 || notification.is_some()
         }
         MuxEvent::HookLifecycle(id, event) => {

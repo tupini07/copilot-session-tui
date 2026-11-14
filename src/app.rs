@@ -932,6 +932,13 @@ pub struct App {
     pub host_graphics: crate::image_viewer::HostGraphics,
     /// The picture open over the attached view, if any.
     pub image_viewer: Option<crate::image_viewer::ImageViewer>,
+    /// The list of what is running behind a session, when open.
+    pub background_popup: Option<crate::background::Popup>,
+    /// When marked processes were last checked for having exited.
+    background_checked: Instant,
+    /// The background summary last drawn for the focused session, to repaint when
+    /// its age moves on.
+    background_summary_shown: Option<String>,
     #[cfg(test)]
     pub update_install_requested_for: Option<String>,
     pub config: UserConfig,
@@ -1154,6 +1161,9 @@ impl App {
                 crate::image_viewer::detect_host_graphics(|name| std::env::var_os(name).is_some())
             },
             image_viewer: None,
+            background_popup: None,
+            background_checked: Instant::now(),
+            background_summary_shown: None,
             #[cfg(test)]
             update_install_requested_for: None,
             config,
@@ -2212,6 +2222,184 @@ impl App {
 
     pub fn close_image_viewer(&mut self) {
         self.image_viewer = None;
+    }
+
+    /// Open the list of what is running behind the focused session.
+    pub fn open_background_popup(&mut self) {
+        let Some((pane, session_id, root)) = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .filter(|pane| pane.is_running())
+            .map(|pane| (pane.id, pane.session_id.clone(), pane.child_process_id()))
+        else {
+            self.status_message = Some("Background work needs a running session".to_string());
+            return;
+        };
+        // A tmux-backed pane's child is the tmux client; Copilot and everything it
+        // started run under the tmux server, which is nobody's child here. Saying so
+        // beats an empty list that reads as "nothing is running".
+        let root = if self.session_is_tmux_backed(&session_id) {
+            Err(
+                "Processes of a tmux-backed session run inside tmux, where CST cannot list them."
+                    .to_string(),
+            )
+        } else {
+            root.ok_or_else(|| "This session's process could not be found.".to_string())
+        };
+        self.background_popup = Some(crate::background::Popup::open(pane, root));
+    }
+
+    /// The popup's rows as they stand now, or none when it is closed or its pane gone.
+    pub fn background_rows(&self) -> Vec<crate::background::Row> {
+        let Some(popup) = self.background_popup.as_ref() else {
+            return Vec::new();
+        };
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane(popup.pane))
+            .map(|pane| popup.rows(&pane.background, Instant::now()))
+            .unwrap_or_default()
+    }
+
+    pub fn background_popup_move(&mut self, delta: isize) {
+        let rows = self.background_rows();
+        if let Some(popup) = self.background_popup.as_mut() {
+            popup.move_selection(&rows, delta);
+        }
+    }
+
+    /// Flip whether the selected row counts as work this session is waiting on.
+    pub fn background_popup_toggle(&mut self) {
+        let rows = self.background_rows();
+        let Some(popup) = self.background_popup.as_mut() else {
+            return;
+        };
+        let Some(row) = rows.get(popup.selected_index(&rows)) else {
+            return;
+        };
+        popup.selected = Some(row.key.clone());
+        let pane_id = popup.pane;
+        let Some(pane) = self.mux.as_mut().and_then(|mux| mux.pane_mut(pane_id)) else {
+            return;
+        };
+        let watching = match &row.key {
+            crate::background::RowKey::Command(shell_id) => {
+                pane.background.toggle_command(shell_id).unwrap_or(false)
+            }
+            crate::background::RowKey::Process(identity) => {
+                pane.background.toggle_process(*identity, &row.label)
+            }
+        };
+        self.status_message = Some(if watching {
+            format!("Watching: {}", row.label)
+        } else {
+            format!("No longer watching: {}", row.label)
+        });
+    }
+
+    /// List the session's processes again, for one started since the popup opened.
+    pub fn background_popup_refresh(&mut self) {
+        let selected = self
+            .background_popup
+            .as_ref()
+            .and_then(|popup| popup.selected.clone());
+        self.open_background_popup();
+        if let Some(popup) = self.background_popup.as_mut() {
+            popup.selected = selected;
+        }
+    }
+
+    /// How many things the user is waiting on behind this session.
+    pub fn background_watched_for(&self, session_id: &str) -> usize {
+        self.mux
+            .as_ref()
+            .and_then(|mux| mux.pane_for_session(session_id).and_then(|id| mux.pane(id)))
+            .map_or(0, |pane| pane.background.watched())
+    }
+
+    /// The tick's share of background work: take a process list that has arrived,
+    /// close a popup whose session is gone, and notice marked processes that exited.
+    ///
+    /// Returns whether the screen needs drawing again.
+    pub fn poll_background(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(popup) = self.background_popup.as_mut() {
+            changed |= popup.poll();
+            let pane = popup.pane;
+            let alive = self
+                .mux
+                .as_ref()
+                .and_then(|mux| mux.pane(pane))
+                .is_some_and(|pane| pane.is_running());
+            if !alive {
+                self.background_popup = None;
+                changed = true;
+            }
+        }
+
+        // Asking the system about a handful of pids is cheap, and still not worth
+        // doing on every pass of a loop that can spin many times a second.
+        if self.background_checked.elapsed() < Duration::from_secs(2) {
+            return changed;
+        }
+        self.background_checked = Instant::now();
+        // The ages on screen are text like any other, and nothing else repaints an
+        // idle session: without this the status line would say "13s" for two days.
+        let summary = self
+            .mux
+            .as_ref()
+            .and_then(|mux| mux.focused_pane())
+            .and_then(|pane| pane.background.summary(Instant::now()));
+        if summary != self.background_summary_shown || self.background_popup.is_some() {
+            self.background_summary_shown = summary;
+            changed = true;
+        }
+        let attended = match self.view {
+            View::Attached(id) if self.terminal_focused => Some(id),
+            _ => None,
+        };
+        let mut finished = Vec::new();
+        if let Some(mux) = self.mux.as_mut() {
+            for pane in &mut mux.panes {
+                if pane.background.processes().is_empty() {
+                    continue;
+                }
+                let done = pane.background.reap(crate::background::process_is_running);
+                if done.is_empty() {
+                    continue;
+                }
+                // Nobody is told by Copilot that this ended; it does not know the
+                // process was being waited on. So the tab says so until it is read.
+                let watching = attended == Some(pane.id);
+                if !watching {
+                    pane.mark_unread();
+                }
+                for process in done {
+                    finished.push((
+                        pane.title.clone(),
+                        pane.session_id.clone(),
+                        process.label,
+                        watching,
+                    ));
+                }
+            }
+        }
+        for (title, session_id, label, watching) in finished {
+            changed = true;
+            // The process first: titles are sentences, and the bar cuts from the right.
+            self.status_message = Some(format!("Background process finished: {label} ({title})"));
+            // As with a turn that ends in front of the user: the line above is on the
+            // screen they are looking at, and a ping on the phone as well is noise.
+            if !watching {
+                self.enqueue_notification(
+                    NotificationKind::BackgroundDone,
+                    title,
+                    Some(&session_id),
+                );
+            }
+        }
+        changed
     }
 
     /// Web links in whatever panes are showing, to be drawn as real hyperlinks.
@@ -3552,6 +3740,10 @@ impl App {
             || self.update_install_receiver.is_some()
             || self.update_restart_ready()
             || self.notification_pending > 0
+            || self
+                .background_popup
+                .as_ref()
+                .is_some_and(crate::background::Popup::is_loading)
             || self.telegram_pending > 0
             || self
                 .telegram_wizard
@@ -3679,7 +3871,8 @@ impl App {
         let event_enabled = match kind {
             NotificationKind::Ready
             | NotificationKind::Question
-            | NotificationKind::PlanApproval => configured.ready,
+            | NotificationKind::PlanApproval
+            | NotificationKind::BackgroundDone => configured.ready,
             NotificationKind::Error => configured.error,
         };
         if !configured.enabled || !event_enabled {
@@ -3689,11 +3882,14 @@ impl App {
             self.status_message = Some(format!("Notifications disabled: {error}"));
             return;
         }
-        let (events_path, events_start, events_end) = if effective.ntfy_verbose {
-            self.cycle_window(session_id)
-        } else {
-            (None, None, None)
-        };
+        // A process ending is not a turn ending: the session said nothing new, and
+        // its last message has been sent already.
+        let (events_path, events_start, events_end) =
+            if effective.ntfy_verbose && kind != NotificationKind::BackgroundDone {
+                self.cycle_window(session_id)
+            } else {
+                (None, None, None)
+            };
         let request = NotificationRequest {
             config: configured.clone(),
             access_token: effective.ntfy_access_token.clone(),

@@ -120,7 +120,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             // re-attached, theirs cannot.
             let active_indicator = if app.has_running_pane_for(&session.id) {
                 Span::styled(
-                    if tmux_backed { "◆ " } else { "▶ " },
+                    // Open here, idle, and waited on: the same marker its tab carries.
+                    if app.background_watched_for(&session.id) > 0 {
+                        crate::background::MARKER
+                    } else if tmux_backed {
+                        "◆ "
+                    } else {
+                        "▶ "
+                    },
                     Style::default().fg(if is_selected {
                         selection_fg
                     } else {

@@ -115,7 +115,10 @@ which ends the turn; `e2e:bell` rings the bell. An Escape pressed in the pane on
 arrived on …`) is acted out as a 3 s turn on its own, as the real Copilot would, so a
 script can see how CST treats that turn's end. A turn
 that ends while the script is back at the list is an attention event, which is what
-sends a notification.
+sends a notification. `e2e:background <shellId> <description>` records a command left
+running in the background as the real Copilot's log does, `e2e:background-done <shellId>`
+records it ending, and `e2e:spawn <seconds>` starts a real process under a shell of the
+stub's, alive about that long, for a script that marks a process by hand.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |
 | `pace <ms>`, `timeout <ms>` | Change the pause after inputs, and the `wait_for` limit (default 10 s). |
 

@@ -55,6 +55,25 @@ pub enum LifecycleEvent {
     /// may not have needed it yet when the quiet began.
     Quiet,
     Reset,
+    /// Copilot left a command running in the background under this shell id.
+    ///
+    /// Reported again if the id is started again; the later one replaces the earlier.
+    BackgroundStarted {
+        shell_id: String,
+        /// Copilot's own short label for the command, or the shell id without one.
+        description: String,
+        detached: bool,
+        /// How long it had been going when it was reported: nothing for a command
+        /// started in the background, the wait it outlived for one moved there.
+        running_for: Duration,
+    },
+    /// A background command reported as started has finished or was stopped.
+    BackgroundEnded {
+        shell_id: String,
+        exit_code: Option<i32>,
+    },
+    /// The CLI restarted or shut down, and its background commands went with it.
+    BackgroundCleared,
 }
 
 #[cfg(test)]
@@ -123,7 +142,8 @@ impl LifecycleMonitor {
     ///
     /// Events are delivered in file order. Returning `false` from `callback`
     /// stops the worker. Payload fields such as arguments, result, and content
-    /// are neither retained nor included in [`LifecycleEvent`].
+    /// are neither retained nor included in [`LifecycleEvent`], with one exception:
+    /// a background command carries the short description Copilot shows for it.
     pub fn start_from_baseline<F>(
         path: impl Into<PathBuf>,
         baseline: LifecycleBaseline,
@@ -249,6 +269,7 @@ struct LifecycleTail {
     /// Signed, because a log CST started reading partway through can complete a tool it
     /// never saw start. Going negative is harmless — it means the same thing as zero.
     outstanding_tools: i64,
+    background: super::background::BackgroundTracker,
 }
 
 impl LifecycleTail {
@@ -276,6 +297,7 @@ impl LifecycleTail {
             seen_completions: HashSet::new(),
             advanced: false,
             outstanding_tools: 0,
+            background: Default::default(),
         }
     }
 
@@ -298,6 +320,7 @@ impl LifecycleTail {
                     self.seen_starts.clear();
                     self.seen_completions.clear();
                     self.outstanding_tools = 0;
+                    self.background.clear();
                     return Ok(callback(LifecycleEvent::Reset));
                 }
                 return Ok(true);
@@ -314,6 +337,7 @@ impl LifecycleTail {
             self.seen_starts.clear();
             self.seen_completions.clear();
             self.outstanding_tools = 0;
+            self.background.clear();
             self.reset_to_end(&mut file, len, identity)?;
             return Ok(callback(LifecycleEvent::Reset));
         }
@@ -357,6 +381,7 @@ impl LifecycleTail {
                     &mut self.seen_starts,
                     &mut self.seen_completions,
                     &mut self.outstanding_tools,
+                    &mut self.background,
                     callback,
                 ) {
                     return false;
@@ -379,6 +404,7 @@ impl LifecycleTail {
                         &mut self.seen_starts,
                         &mut self.seen_completions,
                         &mut self.outstanding_tools,
+                        &mut self.background,
                         callback,
                     ) {
                         return false;
@@ -391,6 +417,7 @@ impl LifecycleTail {
                         &mut self.seen_starts,
                         &mut self.seen_completions,
                         &mut self.outstanding_tools,
+                        &mut self.background,
                         callback,
                     ) {
                         return false;
@@ -463,12 +490,18 @@ fn record_line<F>(
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
     outstanding_tools: &mut i64,
+    background: &mut super::background::BackgroundTracker,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
     count_tool(line, outstanding_tools);
+    if let Some(event) = background.observe(line, leading_event_type(line)) {
+        if !callback(event) {
+            return false;
+        }
+    }
     if candidate_kind(line, pending).is_none() {
         return true;
     }
@@ -492,12 +525,18 @@ fn record_oversized_prefix<F>(
     seen_starts: &mut HashSet<String>,
     seen_completions: &mut HashSet<String>,
     outstanding_tools: &mut i64,
+    background: &mut super::background::BackgroundTracker,
     callback: &mut F,
 ) -> bool
 where
     F: FnMut(LifecycleEvent) -> bool,
 {
     count_tool(prefix, outstanding_tools);
+    if let Some(event) = background.observe(prefix, leading_event_type(prefix)) {
+        if !callback(event) {
+            return false;
+        }
+    }
     if candidate_kind(prefix, pending).is_none() {
         return true;
     }

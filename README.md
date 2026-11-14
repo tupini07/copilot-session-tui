@@ -361,6 +361,7 @@ While attached to a session, every keystroke goes to Copilot except the prefix k
 | `prefix` `e` | Toggle/focus the session scratchpad beside the chat |
 | `prefix` `t` | Toggle/focus the session terminal below the chat |
 | `prefix` `s` | Open prompt snippets |
+| `prefix` `b` | Background work: mark what this session is waiting on while Copilot is idle |
 | `prefix` `u` | Install an update without stopping running sessions |
 | `prefix` `h` `e` | Open scratchpad shortcut help |
 | `prefix` `g` `i` | Inspect a GitHub issue, pull request, or discussion |
@@ -476,6 +477,40 @@ another. A session that is already running — in another CST, or in a terminal 
 own — is never resumed a second time; it is left out of what is offered. Closing every
 tab before quitting leaves nothing to recover. The ten most recent workspaces are kept,
 for up to thirty days.
+
+### Background work
+
+A session that started a long job in the background reads as idle: the turn that
+started it is over, and Copilot is waiting for a prompt. `prefix` `b` lists what is
+still running behind the focused session so you can say which of it you are waiting on:
+
+- **Commands Copilot left running**, taken from the session's own log, under the short
+  description Copilot gave them. They leave the list when the log says they finished or
+  were stopped.
+- **Processes started by the session's shells**, with their command lines. `r` lists
+  them again.
+
+`Space` marks a row as watched, or unmarks it. Nothing counts until you mark it,
+because a background command is as often a dev server left up on purpose as a job to
+wait for. While something is watched:
+
+- the tab shows `◷` whenever it would otherwise be blank, and so does the session's row
+  in the list;
+- the status line names the newest watched item, how long it has run, and how many more
+  there are.
+
+Watched work is not a working turn. Thread wake-ups and Telegram replies are still
+delivered, and you can keep prompting the session.
+
+When a watched command ends, Copilot is told and its next turn says what came of it, so
+the usual notification follows. When a watched process exits, CST marks the tab unread
+and sends a "Background work finished" notification itself, since Copilot does not know
+you were waiting on it.
+
+Limits: marks are kept for as long as the tab is open, and are not restored after CST
+restarts. A tmux-backed session's processes run inside tmux and cannot be listed; its
+background commands still can. Commands started before the tab was opened are not
+listed, though their processes are.
 
 ### Prompt snippets
 

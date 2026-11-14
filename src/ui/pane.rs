@@ -675,11 +675,27 @@ pub fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]
         }
-        PaneStatus::Running => vec![
-            Span::raw(" "),
-            Span::styled(prefix.clone(), Style::default().fg(theme.accent_alt)),
-            Span::raw(" for commands "),
-        ],
+        PaneStatus::Running => {
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(prefix.clone(), Style::default().fg(theme.accent_alt)),
+                Span::raw(" for commands "),
+            ];
+            // What the focused session is waiting on, since its tab can only say that
+            // there is something. The newest, with a count of the rest.
+            if let Some(summary) = pane.background.summary(std::time::Instant::now()) {
+                let room = (area.width as usize).saturating_sub(text::display_width(&prefix) + 31);
+                spans.push(Span::styled(
+                    format!(
+                        " {}background: {} ",
+                        crate::background::MARKER,
+                        text::truncate_to_width(&summary, room)
+                    ),
+                    Style::default().fg(theme.accent),
+                ));
+            }
+            spans
+        }
         PaneStatus::Exited(code) => {
             let text = match code {
                 Some(0) | None => "exited".to_string(),
@@ -728,6 +744,12 @@ fn tab_marker(pane: &crate::mux::Pane) -> String {
         }
         ProgressState::Error => "! ".to_string(),
         ProgressState::Warning => "▲ ".to_string(),
+        // Idle as far as Copilot goes, with something the user said to wait for still
+        // running behind it. Shown only here, where the cell would otherwise be blank:
+        // a turn, a question or an unread result all say more.
+        ProgressState::Clear if pane.background.watched() > 0 => {
+            crate::background::MARKER.to_string()
+        }
         ProgressState::Clear => "  ".to_string(),
     }
 }
@@ -774,9 +796,10 @@ fn window_marker(members: &[&crate::mux::Pane]) -> String {
         "● " => 1,
         "! " => 2,
         "▲ " => 3,
-        "✎ " => 5,
-        "× " => 6,
-        "  " => 7,
+        crate::background::MARKER => 5,
+        "✎ " => 6,
+        "× " => 7,
+        "  " => 8,
         // Anything else is a spinner frame: a turn in progress.
         _ => 4,
     };
@@ -1412,6 +1435,79 @@ mod tests {
         // Every state keeps the cell the same width, so titles never shift sideways.
         assert_eq!(crate::text::display_width(&tab_marker(&pane)), 2);
         let _ = pane.shutdown();
+    }
+
+    #[test]
+    fn an_idle_tab_with_watched_background_work_says_so_without_ever_counting_as_working() {
+        use crate::events::lifecycle::LifecycleEvent;
+        let (tx, _) = mpsc::channel();
+        let mut pane = silent_pane(tx);
+        let started = |shell: &str| LifecycleEvent::BackgroundStarted {
+            shell_id: shell.to_string(),
+            description: format!("Run {shell}"),
+            detached: true,
+            running_for: Duration::ZERO,
+        };
+
+        // A command in the background that nobody marked is, as often as not, a dev
+        // server left up on purpose. It must not change the tab.
+        pane.apply_lifecycle(started("server"));
+        assert_eq!(tab_marker(&pane), "  ");
+
+        pane.apply_lifecycle(started("campaign"));
+        pane.background.toggle_command("campaign");
+        assert_eq!(tab_marker(&pane), crate::background::MARKER);
+        assert_eq!(
+            crate::text::display_width(&tab_marker(&pane)),
+            2,
+            "the glyph must occupy the same cell as every other marker"
+        );
+        // The whole point of a separate state: a working pane holds back thread
+        // wake-ups and Telegram replies, and a session waiting on a two-day job must
+        // still take them.
+        assert!(!pane.is_working());
+        assert!(!pane.has_draft());
+        assert!(!pane.requires_user_action());
+        assert!(!pane.needs_attention());
+        assert_eq!(
+            pane.effective_progress_state(),
+            crate::host_terminal::ProgressState::Clear
+        );
+
+        // A turn says more than "something is running behind this", and so does a
+        // question; the marker is only for a cell that would otherwise be blank.
+        pane.feed_synthetic(b"\x1b]9;4;3;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        assert_eq!(
+            tab_marker(&pane),
+            format!("{} ", crate::ui::spinner_frame())
+        );
+        pane.feed_synthetic(b"\x1b]9;4;0;0\x1b\\");
+        pane.refresh_from_callbacks(true);
+        pane.acknowledge_attention();
+        assert_eq!(tab_marker(&pane), crate::background::MARKER);
+
+        // In a split, it outranks a blank neighbour and yields to a question.
+        let (tx, _) = mpsc::channel();
+        let mut other = silent_pane(tx);
+        assert_eq!(window_marker(&[&other, &pane]), crate::background::MARKER);
+        other.apply_lifecycle(LifecycleEvent::InputRequested {
+            tool_call_id: "question-1".into(),
+            kind: crate::events::lifecycle::InputKind::Question,
+        });
+        assert_eq!(window_marker(&[&other, &pane]), "? ");
+
+        pane.apply_lifecycle(LifecycleEvent::BackgroundEnded {
+            shell_id: "campaign".to_string(),
+            exit_code: Some(0),
+        });
+        assert_eq!(
+            tab_marker(&pane),
+            "  ",
+            "it ended, so there is nothing to wait for"
+        );
+        let _ = pane.shutdown();
+        let _ = other.shutdown();
     }
 
     #[test]
