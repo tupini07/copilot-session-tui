@@ -37,7 +37,7 @@ use super::store::{self, Follow, Pairing, Peek, Reply, ReplyStatus, TelegramStat
 use super::transcript;
 use super::{
     chat_mode_of, classify, compose_with_pictures, escape_html, message_carries_code, route,
-    wording, Content, Incoming, Paired, Route, SentKind, SentRecord, TopicRecord, Verdict,
+    wording, Content, Incoming, Paired, Part, Route, SentKind, SentRecord, TopicRecord, Verdict,
     POLL_TIMEOUT,
 };
 use crate::config::TelegramChatMode;
@@ -1218,43 +1218,50 @@ pub(crate) fn ask_prompt(question: &str, exchange: Option<&str>) -> String {
     prompt
 }
 
-/// A message's tables, drawn: Telegram has no table markup and a monospace block wraps
-/// on a phone. A table that will not draw, or whose upload Telegram refuses (it caps a
-/// photo's aspect ratio, and a long one-row table can exceed it), arrives as the block
-/// it would have been. Returns the message ids, one per table.
-fn send_tables(
+/// One part of a message: text as text, a table drawn. Telegram has no table markup and
+/// a wide monospace block wraps on a phone. A table that will not draw, or whose upload
+/// Telegram refuses (it caps a photo's aspect ratio, and a long one-row table can
+/// exceed it), arrives as the block it would have been. Returns the message id.
+fn send_message_part(
     bot: &impl BotApi,
     chat_id: i64,
     thread_id: Option<i64>,
-    tables: &[String],
-) -> Result<Vec<i64>, BotError> {
-    let mut sent_ids = Vec::with_capacity(tables.len());
-    for (index, table) in tables.iter().enumerate() {
-        let caption = format!("<i>Table {}</i>", index + 1);
-        let lines: Vec<String> = table.lines().map(str::to_string).collect();
-        let drawn = image::render_at(
-            &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
-            image::LIGHT_BG,
-            image::TABLE_FONT_PX,
-        );
-        let sent = drawn.ok().and_then(|png| {
-            bot.send_photo(chat_id, thread_id, None, &png, &caption)
-                .ok()
-        });
-        let message_id = match sent {
-            Some(message_id) => message_id,
-            None => {
-                let html = format!("{caption}\n<pre>{}</pre>", escape_html(table));
-                send_part(bot, chat_id, thread_id, &html)?.0
-            }
-        };
-        sent_ids.push(message_id);
+    part: &Part,
+) -> Result<i64, BotError> {
+    let (layout, caption_html) = match part {
+        Part::Text(html) => return Ok(send_part(bot, chat_id, thread_id, html)?.0),
+        Part::Table {
+            layout,
+            caption_html,
+        } => (layout, caption_html),
+    };
+    let lines: Vec<String> = layout.lines().map(str::to_string).collect();
+    let drawn = image::render_at(
+        &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
+        image::LIGHT_BG,
+        image::TABLE_FONT_PX,
+    );
+    let sent = drawn.ok().and_then(|png| {
+        bot.send_photo(chat_id, thread_id, None, &png, caption_html)
+            .ok()
+    });
+    match sent {
+        Some(message_id) => Ok(message_id),
+        None => {
+            let block = format!("<pre>{}</pre>", escape_html(layout));
+            let html = if caption_html.is_empty() {
+                block
+            } else {
+                format!("{caption_html}\n{block}")
+            };
+            Ok(send_part(bot, chat_id, thread_id, &html)?.0)
+        }
     }
-    Ok(sent_ids)
 }
 
 /// Put the answer where the "asking" message was; a long one continues in messages
-/// after it, and its tables follow as pictures, as a notification's do. A failure is
+/// after it, with its tables as pictures where they stood, as a notification's are. A
+/// failure is
 /// said in a sentence in the same place. When the edit itself fails — the message too
 /// old, Telegram unreachable for a moment — the answer is sent as a fresh reply rather
 /// than lost, since an "Asking…" that never changes is the one outcome not allowed.
@@ -1266,24 +1273,29 @@ pub(crate) fn deliver_answer(
     placeholder: i64,
     answer: &crate::aside::Answer,
 ) {
-    let (parts, tables) = match answer {
+    let title_html = format!("<b>{}</b>", escape_html(title));
+    let mut parts = match answer {
         Ok(text) => {
             let (html, tables) = markdown::to_telegram_html_with_tables(text, None);
-            (
-                super::chunk(&format!("<b>{}</b>", escape_html(title)), &html),
-                tables,
-            )
+            super::chunk_with_tables(&title_html, &html, &tables)
         }
-        Err(failure) => (
-            vec![escape_html(&wording::ask_failed(
-                title,
-                &failure.to_string(),
-            ))],
-            Vec::new(),
-        ),
+        Err(failure) => vec![Part::Text(escape_html(&wording::ask_failed(
+            title,
+            &failure.to_string(),
+        )))],
     };
-    let mut parts = parts.into_iter();
-    if let Some(first) = parts.next() {
+    // The placeholder is a text message and can only become one. An answer that opens
+    // with a table leaves it saying whose answer this is, and the table follows.
+    let first = match parts.first() {
+        Some(Part::Text(html)) => {
+            let html = html.clone();
+            parts.remove(0);
+            Some(html)
+        }
+        Some(Part::Table { .. }) => Some(title_html),
+        None => None,
+    };
+    if let Some(first) = first {
         let edited = match bot.edit_message_text(ask.chat_id, placeholder, &first) {
             Ok(()) => true,
             Err(BotError::Rejected(description))
@@ -1306,13 +1318,8 @@ pub(crate) fn deliver_answer(
             }
         }
     }
-    for part in parts {
-        if let Ok((message_id, _)) = send_part(bot, ask.chat_id, ask.thread_id, &part) {
-            record_sent(root, &ask.session_id, message_id);
-        }
-    }
-    if let Ok(message_ids) = send_tables(bot, ask.chat_id, ask.thread_id, &tables) {
-        for message_id in message_ids {
+    for part in &parts {
+        if let Ok(message_id) = send_message_part(bot, ask.chat_id, ask.thread_id, part) {
             record_sent(root, &ask.session_id, message_id);
         }
     }
@@ -1514,18 +1521,8 @@ fn perform_with(
                 .as_ref()
                 .map(|question| question.tool_call_id.clone());
             let mut records = Vec::new();
-            let (chunks, tables) = compose_with_pictures(content, outbound.mode);
-            for chunk in chunks {
-                let (message_id, _) = send_part(bot, outbound.chat_id, thread_id, &chunk)?;
-                records.push(SentRecord {
-                    message_id,
-                    session_id: session_id.clone(),
-                    kind: Some(SentKind::from(content.kind)),
-                    tool_call_id: tool_call_id.clone(),
-                    sent_at: Utc::now(),
-                });
-            }
-            for message_id in send_tables(bot, outbound.chat_id, thread_id, &tables)? {
+            for part in compose_with_pictures(content, outbound.mode) {
+                let message_id = send_message_part(bot, outbound.chat_id, thread_id, &part)?;
                 records.push(SentRecord {
                     message_id,
                     session_id: session_id.clone(),
@@ -2471,12 +2468,8 @@ mod tests {
             "a reply to the question: {:?}",
             sent[0]
         );
-        assert!(
-            sent[0].1.contains("Table 1 is sent as a picture below"),
-            "{}",
-            sent[0].1
-        );
-        assert!(sent[1].1.contains("<pre>"), "{}", sent[1].1);
+        assert!(sent[0].1.ends_with("Counts:"), "{}", sent[0].1);
+        assert!(sent[1].1.starts_with("<pre>"), "{}", sent[1].1);
         assert!(ask_prompt("what is left?", None).ends_with("quoted as data:\nwhat is left?"));
         let quoted = ask_prompt("what is left?", Some("User: hi\n\nCopilot: hello"));
         assert!(
@@ -3022,12 +3015,8 @@ mod tests {
         assert_eq!(*bot.photos.borrow(), 1, "the picture was tried first");
         let sent = bot.sent.borrow();
         assert_eq!(sent.len(), 2, "the text, then the table as a block");
-        assert!(sent[0].contains("[Table 1 is sent as a picture below]"));
-        assert!(
-            sent[1].starts_with("<i>Table 1</i>\n<pre>Name  Size"),
-            "{}",
-            sent[1]
-        );
+        assert_eq!(sent[0], "<b>(Build)</b>\nDone:");
+        assert!(sent[1].starts_with("<pre>Name  Size"), "{}", sent[1]);
         // Both are recorded, so a reply to either routes to the session.
         assert_eq!(store::load_in(temp.path()).sent.len(), 2);
     }
