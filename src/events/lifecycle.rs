@@ -63,6 +63,9 @@ pub enum LifecycleEvent {
         /// Copilot's own short label for the command, or the shell id without one.
         description: String,
         detached: bool,
+        /// How long it had been going when it was reported: nothing for a command
+        /// started in the background, the wait it outlived for one moved there.
+        running_for: Duration,
     },
     /// A background command reported as started has finished or was stopped.
     BackgroundEnded {

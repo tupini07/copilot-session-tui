@@ -61,6 +61,7 @@ impl BackgroundWork {
                 shell_id,
                 description,
                 detached,
+                running_for,
             } => {
                 // A shell id used again is a new command; a mark made on the old one
                 // was about the old one.
@@ -70,7 +71,11 @@ impl BackgroundWork {
                     shell_id: shell_id.clone(),
                     description: description.clone(),
                     detached: *detached,
-                    started: Instant::now(),
+                    // Its age is how long the user has been waiting on it, and a
+                    // command moved here after a three-minute wait is not new.
+                    started: Instant::now()
+                        .checked_sub(*running_for)
+                        .unwrap_or_else(Instant::now),
                     watched: false,
                 });
                 true
@@ -609,6 +614,7 @@ mod tests {
             shell_id: shell.to_string(),
             description: description.to_string(),
             detached: true,
+            running_for: Duration::ZERO,
         }
     }
 
@@ -620,6 +626,25 @@ mod tests {
             command: format!("{name} --flag"),
             age: None,
         }
+    }
+
+    #[test]
+    fn a_command_moved_to_the_background_is_as_old_as_its_call_not_as_the_move() {
+        // Seen against the real CLI: a command that outlived a 30 s wait read "2s"
+        // beside its own process at "32s".
+        let mut work = BackgroundWork::default();
+        work.apply(&LifecycleEvent::BackgroundStarted {
+            shell_id: "audit".into(),
+            description: "Run the audit".into(),
+            detached: false,
+            running_for: Duration::from_secs(180),
+        });
+        work.toggle_command("audit");
+
+        assert_eq!(
+            work.summary(Instant::now()).as_deref(),
+            Some("Run the audit (3m)")
+        );
     }
 
     #[test]

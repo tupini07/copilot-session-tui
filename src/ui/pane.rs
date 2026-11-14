@@ -1446,6 +1446,7 @@ mod tests {
             shell_id: shell.to_string(),
             description: format!("Run {shell}"),
             detached: true,
+            running_for: Duration::ZERO,
         };
 
         // A command in the background that nobody marked is, as often as not, a dev

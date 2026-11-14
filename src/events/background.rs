@@ -15,6 +15,9 @@
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
 
 use super::lifecycle::LifecycleEvent;
 
@@ -51,7 +54,7 @@ const STOPPED: &[u8] = br#""content":"<command with id: "#;
 #[derive(Default)]
 pub(super) struct BackgroundTracker {
     /// Descriptions of async shell calls whose completion has not been read yet.
-    descriptions: HashMap<String, String>,
+    descriptions: HashMap<String, Call>,
     /// Shell ids reported as started and not yet as ended.
     open: HashSet<String>,
 }
@@ -108,20 +111,39 @@ impl BackgroundTracker {
         // a JSON string its quotes are escaped, so the first bare match is the real one.
         // An oversized record is cut before it; the command is then labelled by its
         // shell id.
-        let Some(description) = after(line, br#","description":"#)
+        let description = after(line, br#","description":"#)
             .and_then(json_string)
-            .filter(|text| !text.trim().is_empty())
-        else {
+            .filter(|text| !text.trim().is_empty());
+        let started = timestamp(line);
+        if description.is_none() && started.is_none() {
             return;
-        };
+        }
         if self.descriptions.len() >= MAX_CALLS_IN_FLIGHT {
             self.descriptions.clear();
         }
-        self.descriptions.insert(call.to_string(), description);
+        self.descriptions.insert(
+            call.to_string(),
+            Call {
+                description,
+                started,
+            },
+        );
     }
 
     fn completed(&mut self, line: &[u8]) -> Option<LifecycleEvent> {
-        let description = tool_call_id(line).and_then(|call| self.descriptions.remove(call));
+        let call = tool_call_id(line).and_then(|call| self.descriptions.remove(call));
+        // A command moved to the background has been going since before the move.
+        // This is the fallback for a notice that does not say how long: the call's
+        // record is written before any permission prompt, so it counts the time the
+        // prompt sat unanswered as well.
+        let since_call = call
+            .as_ref()
+            .and_then(|call| call.started)
+            .zip(timestamp(line))
+            .and_then(|(started, now)| (now - started).to_std().ok())
+            .filter(|elapsed| *elapsed <= LONGEST_BELIEVED_WAIT)
+            .unwrap_or_default();
+        let description = call.and_then(|call| call.description);
         if let Some(rest) = after(line, STARTED) {
             let detached = rest.starts_with(b"detached background with shellId: ");
             let id = between(rest, b"background with shellId: ", b">")?;
@@ -132,6 +154,7 @@ impl BackgroundTracker {
                 shell_id: id.to_string(),
                 description: description.unwrap_or_else(|| id.to_string()),
                 detached,
+                running_for: Duration::ZERO,
             });
         }
         if let Some((id, rest)) = still_running(line) {
@@ -144,6 +167,7 @@ impl BackgroundTracker {
                 shell_id: id.to_string(),
                 description: description.unwrap_or_else(|| id.to_string()),
                 detached: contains(said, b" in detached background "),
+                running_for: seconds_after(said).unwrap_or(since_call),
             });
         }
         if self.open.is_empty() {
@@ -223,6 +247,37 @@ fn still_running(line: &[u8]) -> Option<(&str, &[u8])> {
         .iter()
         .any(|wording| rest.starts_with(wording))
         .then_some((id, rest))
+}
+
+/// How long a notice says the command has run: "after 180 seconds", "after 30s".
+fn seconds_after(said: &[u8]) -> Option<Duration> {
+    let digits = after(said, b" after ")?;
+    let end = digits.iter().position(|byte| !byte.is_ascii_digit())?;
+    let seconds = std::str::from_utf8(&digits[..end]).ok()?.parse().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+/// A shell call that has started and not yet returned.
+#[derive(Debug)]
+struct Call {
+    description: Option<String>,
+    /// When its start record says it began, if the record was read whole.
+    started: Option<DateTime<Utc>>,
+}
+
+/// A wait longer than this between a call and its result is taken for a record read
+/// wrong, not for a command that ran that long before being moved.
+const LONGEST_BELIEVED_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// When a record says it was written. It closes the record, so the last match is the
+/// record's own and not one a command printed; a record cut short has lost it.
+fn timestamp(line: &[u8]) -> Option<DateTime<Utc>> {
+    const KEY: &[u8] = br#""timestamp":""#;
+    let at = line.windows(KEY.len()).rposition(|window| window == KEY)?;
+    let text = between(&line[at + KEY.len()..], b"", b"\"")?;
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
 }
 
 /// The tools that run a command in a shell, as their start records name them.
@@ -361,6 +416,7 @@ mod tests {
                 shell_id: "train-1".into(),
                 description: "Train the model".into(),
                 detached: true,
+                running_for: Duration::ZERO,
             })
         );
 
@@ -377,6 +433,7 @@ mod tests {
                 shell_id: "7".into(),
                 description: "Watch the build".into(),
                 detached: false,
+                running_for: Duration::ZERO,
             })
         );
     }
@@ -394,6 +451,7 @@ mod tests {
                 shell_id: "campaign".into(),
                 description: "campaign".into(),
                 detached: true,
+                running_for: Duration::ZERO,
             })
         );
     }
@@ -405,19 +463,23 @@ mod tests {
         // Not asked to run in the background: there is no `mode`, and the description
         // has an escaped quote in it, as descriptions do. The command text holds a
         // decoy of the key, which is only ever a quoted string inside a string.
-        let plain = r#"{"type":"tool.execution_start","data":{"toolCallId":"call-1","toolName":"powershell","arguments":{"command":"echo \",\\\"description\\\":\\\"decoy\\\"\"","description":"Run the \"slow\" audit","initial_wait":180},"turnId":"1"}}"#;
+        let plain = r#"{"type":"tool.execution_start","data":{"toolCallId":"call-1","toolName":"powershell","arguments":{"command":"echo \",\\\"description\\\":\\\"decoy\\\"\"","description":"Run the \"slow\" audit","initial_wait":180},"turnId":"1"},"id":"a","timestamp":"2026-10-29T05:44:03.000Z"}"#;
         assert_eq!(feed(&mut tracker, plain), None);
 
         let outlived = result(
             "call-1",
             "<command with shellId: audit-1 is still running after 180 seconds. You will be automatically notified when it completes.>",
-        );
+        )
+        // Four minutes after the call was recorded, one of them spent at a permission
+        // prompt: the notice's own figure is the one the age has to start from.
+        .replace(r#""id":"d"}"#, r#""id":"d","timestamp":"2026-10-29T05:48:03.000Z"}"#);
         assert_eq!(
             feed(&mut tracker, &outlived),
             Some(LifecycleEvent::BackgroundStarted {
                 shell_id: "audit-1".into(),
                 description: r#"Run the "slow" audit"#.into(),
                 detached: false,
+                running_for: Duration::from_secs(180),
             })
         );
         // Looked in on later and still going: not a second start.
@@ -459,6 +521,7 @@ mod tests {
                 shell_id: "verify".into(),
                 description: "verify".into(),
                 detached: false,
+                running_for: Duration::from_secs(120),
             })
         );
 
@@ -477,6 +540,29 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_that_gives_no_duration_is_aged_from_when_its_call_was_recorded() {
+        let mut tracker = BackgroundTracker::default();
+        feed(&mut tracker, &start("call-1", "Run the audit", "", false));
+
+        // Sent to the background by hand ninety seconds in; the notice only says so.
+        let moved = result(
+            "call-1",
+            "<command with shellId: 7 moved to background by the user. You will be automatically notified when it completes.>",
+        )
+        .replace(r#""id":"d"}"#, r#""id":"d","timestamp":"2026-10-29T05:45:33.000Z"}"#);
+
+        assert_eq!(
+            feed(&mut tracker, &moved),
+            Some(LifecycleEvent::BackgroundStarted {
+                shell_id: "7".into(),
+                description: "Run the audit".into(),
+                detached: false,
+                running_for: Duration::from_secs(90),
+            })
+        );
+    }
+
+    #[test]
     fn a_command_the_user_sent_to_the_background_by_hand_is_reported() {
         let mut tracker = BackgroundTracker::default();
 
@@ -492,6 +578,7 @@ mod tests {
                 shell_id: "149".into(),
                 description: "149".into(),
                 detached: false,
+                running_for: Duration::ZERO,
             })
         );
     }
@@ -512,6 +599,7 @@ mod tests {
                 shell_id: "campaign".into(),
                 description: "campaign".into(),
                 detached: true,
+                running_for: Duration::from_secs(30),
             })
         );
     }
