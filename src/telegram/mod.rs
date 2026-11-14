@@ -251,23 +251,37 @@ pub struct Content {
 /// three characters, and what the agent wrote is Markdown, which [`markdown`] turns into
 /// the tags Telegram knows and shows everything else as text.
 pub fn compose(content: &Content, mode: TelegramChatMode) -> Vec<String> {
-    compose_in(content, mode, false).0
+    compose_in(content, mode, false)
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Text(html) => Some(html),
+            Part::Table { .. } => None,
+        })
+        .collect()
+}
+
+/// One message of a notification, in the order it is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Part {
+    Text(String),
+    /// A table, as the monospace layout the sender draws. It is sent where it stood in
+    /// the text, between what came before it and what comes after, so the message
+    /// reads top to bottom as it was written.
+    Table {
+        layout: String,
+        /// The session's label, when the table opens the message and no text above it
+        /// says whose it is. Empty otherwise: its place says the rest.
+        caption_html: String,
+    },
 }
 
 /// [`compose`] with the body's tables taken out as pictures: the messages, then the
 /// tables' monospace layouts for the caller to draw and send after them.
-pub fn compose_with_pictures(
-    content: &Content,
-    mode: TelegramChatMode,
-) -> (Vec<String>, Vec<String>) {
+pub fn compose_with_pictures(content: &Content, mode: TelegramChatMode) -> Vec<Part> {
     compose_in(content, mode, true)
 }
 
-fn compose_in(
-    content: &Content,
-    mode: TelegramChatMode,
-    pictures: bool,
-) -> (Vec<String>, Vec<String>) {
+fn compose_in(content: &Content, mode: TelegramChatMode, pictures: bool) -> Vec<Part> {
     // In a forum the topic already carries the name, so repeating it would read as
     // part of what the session said. In a private chat it is the only thing telling
     // interleaved sessions apart, kept in brackets so it reads as a label.
@@ -358,7 +372,7 @@ fn compose_in(
         });
         text.push_str(&html);
     }
-    (chunk(&title, &text), tables)
+    chunk_with_tables(&title, &text, &tables)
 }
 
 fn kind_line(kind: NotificationKind) -> &'static str {
@@ -383,7 +397,24 @@ fn kind_line(kind: NotificationKind) -> &'static str {
 /// balance, and rejects the whole of it. When there is more than one part, each says
 /// which it is. [`MAX_MESSAGES`] is a safety valve against a runaway, not a length
 /// anyone should meet.
-pub(crate) fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
+///
+/// The text is cut as well wherever a table stood: each [`markdown::table_marker`] in
+/// it ends one message, and the table it names goes between that one and the next.
+/// The pictures used to follow the whole text, under a line saying "Table 1 is sent
+/// as a picture below", and reading meant scrolling down to the table and back up to
+/// the sentence about it.
+///
+/// A cut for a table is not a part: nothing says "part 1 of 2" unless the text itself
+/// was too long for one message, since the picture in between already shows the
+/// message goes on. The label still heads every message, as it does every part.
+/// Formatting open across a table (one inside a quote) is closed
+/// before it and opened again after, as at any other cut. What falls after the point
+/// where [`MAX_MESSAGES`] stopped the text is not sent, tables included.
+pub(crate) fn chunk_with_tables(title_html: &str, text_html: &str, tables: &[String]) -> Vec<Part> {
+    enum Piece {
+        Text(String),
+        Table(usize),
+    }
     let header = |index: usize, total: usize| -> String {
         let label = if title_html.is_empty() {
             String::new()
@@ -401,47 +432,113 @@ pub(crate) fn chunk(title_html: &str, text_html: &str) -> Vec<String> {
     let reserve = header(MAX_MESSAGES, MAX_MESSAGES).chars().count() + 80 + TAG_RESERVE;
     let budget = MESSAGE_LIMIT.saturating_sub(reserve).max(256);
 
-    let mut pieces: Vec<String> = Vec::new();
-    let mut rest = text_html.to_string();
-    while !rest.is_empty() && pieces.len() < MAX_MESSAGES {
-        let (piece, remainder) = split_at_budget(&rest, budget);
-        let open = open_tags(piece);
-        let mut part = piece.trim().to_string();
-        for (_, tag) in open.iter().rev() {
-            part.push_str(&closing_tag(tag));
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut texts = 0;
+    // Whether the text was cut for length anywhere, which is what numbers the parts.
+    let mut cut_for_length = false;
+    // The tags a table interrupted, to open again in the text after it.
+    let mut reopen = String::new();
+    let mut not_shown = 0;
+    for (segment, table) in segments(text_html) {
+        if not_shown > 0 {
+            not_shown += segment.chars().count();
+            continue;
         }
-        let mut next = String::new();
-        if !remainder.trim().is_empty() {
-            for (_, tag) in &open {
-                next.push_str(tag);
+        let mut rest = format!("{reopen}{}", segment.trim_start_matches('\n'));
+        if markdown::strip_tags(&rest).trim().is_empty() {
+            // Nothing between two tables, or before the first: no empty message.
+            rest.clear();
+        }
+        while !rest.is_empty() && texts < MAX_MESSAGES {
+            let (piece, remainder) = split_at_budget(&rest, budget);
+            let open = open_tags(piece);
+            let mut part = piece.trim().to_string();
+            for (_, tag) in open.iter().rev() {
+                part.push_str(&closing_tag(tag));
             }
-            next.push_str(remainder.trim_start_matches('\n'));
+            let tags: String = open.iter().map(|(_, tag)| *tag).collect();
+            let mut next = String::new();
+            if remainder.trim().is_empty() {
+                reopen = tags;
+            } else {
+                next.push_str(&tags);
+                next.push_str(remainder.trim_start_matches('\n'));
+                cut_for_length = true;
+            }
+            pieces.push(Piece::Text(part));
+            texts += 1;
+            rest = next;
         }
-        pieces.push(part);
-        rest = next;
+        not_shown += rest.chars().count();
+        if let Some(number) = table.filter(|_| not_shown == 0) {
+            pieces.push(Piece::Table(number));
+        }
     }
     if pieces.is_empty() {
-        pieces.push(String::new());
+        pieces.push(Piece::Text(String::new()));
+        texts = 1;
     }
-    let total = pieces.len();
-    let mut messages: Vec<String> = pieces
-        .iter()
-        .enumerate()
-        .map(|(index, piece)| {
-            let mut message = header(index, total);
-            message.push_str(piece);
-            message
-        })
-        .collect();
-    if !rest.is_empty() {
-        let cut = rest.chars().count();
-        if let Some(last) = messages.last_mut() {
+    let mut parts: Vec<Part> = Vec::with_capacity(pieces.len());
+    let mut index = 0;
+    for (position, piece) in pieces.into_iter().enumerate() {
+        match piece {
+            Piece::Text(text) => {
+                // In a private chat every message says whose it is, the ones after a
+                // table too: another session's can arrive in between. In a topic the
+                // label is empty and nothing is added.
+                let mut message = if cut_for_length {
+                    header(index, texts)
+                } else {
+                    header(0, 1)
+                };
+                index += 1;
+                message.push_str(&text);
+                parts.push(Part::Text(message));
+            }
+            Piece::Table(number) => {
+                let Some(layout) = number.checked_sub(1).and_then(|at| tables.get(at)) else {
+                    continue;
+                };
+                parts.push(Part::Table {
+                    layout: layout.clone(),
+                    caption_html: if position == 0 {
+                        title_html.to_string()
+                    } else {
+                        String::new()
+                    },
+                });
+            }
+        }
+    }
+    if not_shown > 0 {
+        let last = parts.iter_mut().rev().find_map(|part| match part {
+            Part::Text(text) => Some(text),
+            Part::Table { .. } => None,
+        });
+        if let Some(last) = last {
             last.push_str(&format!(
-                "\n\n… {cut} more characters not shown; open the session to read the rest."
+                "\n\n… {not_shown} more characters not shown; open the session to read the rest."
             ));
         }
     }
-    messages
+    parts
+}
+
+/// `html` as the stretches of text between its table markers, each with the number of
+/// the table that followed it; the last stretch has none.
+fn segments(html: &str) -> Vec<(&str, Option<usize>)> {
+    let mut found = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find(markdown::TABLE_MARKER_OPEN) {
+        let after = &rest[at + markdown::TABLE_MARKER_OPEN.len()..];
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        found.push((&rest[..at], after[..end].parse().ok()));
+        rest = &after[end + 1..];
+    }
+    found.push((rest, None));
+    found
 }
 
 /// Cut `text` after at most `budget` characters, at the best boundary available.
@@ -1326,5 +1423,124 @@ mod tests {
         assert_eq!(chat_mode_of("supergroup", false), None);
         assert_eq!(chat_mode_of("group", false), None);
         assert_eq!(chat_mode_of("channel", false), None);
+    }
+
+    const TABLE: &str = "| Name | Size |\n|---|---|\n| alpha | 12 KB |";
+
+    fn shape(parts: &[Part]) -> String {
+        parts
+            .iter()
+            .map(|part| match part {
+                Part::Text(_) => "text",
+                Part::Table { .. } => "table",
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn texts(parts: &[Part]) -> Vec<&str> {
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                Part::Text(html) => Some(html.as_str()),
+                Part::Table { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_table_is_sent_where_it_stood_so_the_message_reads_top_to_bottom() {
+        // It used to follow the whole text, under a line saying it was "sent as a
+        // picture below": read the sentence, scroll down to the table, scroll back.
+        let body = format!("Before one.\n\n{TABLE}\n\nBetween.\n\n{TABLE}\n\nAfter two.");
+        let parts = compose_with_pictures(&content(Some(&body)), TelegramChatMode::Private);
+
+        assert_eq!(shape(&parts), "text table text table text");
+        assert_eq!(
+            texts(&parts),
+            [
+                "<b>(Plan &lt;review&gt; &amp; more)</b>\nBefore one.",
+                "<b>(Plan &lt;review&gt; &amp; more)</b>\nBetween.",
+                "<b>(Plan &lt;review&gt; &amp; more)</b>\nAfter two."
+            ],
+            "the label on each, and no part numbers: nothing here was too long"
+        );
+        // In a topic, which is named for the session, the text is all there is.
+        let in_topic = compose_with_pictures(&content(Some(&body)), TelegramChatMode::Forum);
+        assert_eq!(texts(&in_topic), ["Before one.", "Between.", "After two."]);
+        for text in texts(&parts) {
+            assert!(!text.contains("cst-table"), "a marker was sent: {text}");
+            assert!(!text.contains("picture below"), "{text}");
+        }
+        let Part::Table {
+            layout,
+            caption_html,
+        } = &parts[1]
+        else {
+            panic!("expected a table");
+        };
+        assert!(layout.starts_with("Name   Size"), "{layout}");
+        assert_eq!(caption_html, "", "its place says which table it is");
+    }
+
+    #[test]
+    fn a_message_that_opens_or_closes_with_a_table_sends_no_empty_text_around_it() {
+        let opens = format!("{TABLE}\n\nThat is all.");
+        let parts = compose_with_pictures(&content(Some(&opens)), TelegramChatMode::Private);
+        assert_eq!(shape(&parts), "table text");
+        // No text came first to say whose it is, so the picture carries the label.
+        assert!(
+            matches!(&parts[0], Part::Table { caption_html, .. }
+                if caption_html == "<b>(Plan &lt;review&gt; &amp; more)</b>"),
+            "{parts:?}"
+        );
+        assert_eq!(
+            texts(&parts),
+            ["<b>(Plan &lt;review&gt; &amp; more)</b>\nThat is all."]
+        );
+
+        let closes = format!("Here it is:\n\n{TABLE}");
+        let parts = compose_with_pictures(&content(Some(&closes)), TelegramChatMode::Forum);
+        assert_eq!(shape(&parts), "text table");
+
+        let adjacent = format!("Two:\n\n{TABLE}\n\n{TABLE}");
+        let parts = compose_with_pictures(&content(Some(&adjacent)), TelegramChatMode::Forum);
+        assert_eq!(shape(&parts), "text table table");
+    }
+
+    #[test]
+    fn formatting_a_table_interrupts_is_closed_before_it_and_opened_again_after() {
+        // Telegram rejects a message whose tags do not balance, and rejects all of it.
+        let body = "> Quoted before.\n>\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n>\n> Quoted after.";
+        let parts = compose_with_pictures(&content(Some(body)), TelegramChatMode::Forum);
+
+        assert_eq!(shape(&parts), "text table text");
+        assert_eq!(
+            texts(&parts),
+            [
+                "<blockquote>Quoted before.</blockquote>",
+                "<blockquote>Quoted after.</blockquote>"
+            ]
+        );
+    }
+
+    #[test]
+    fn parts_are_numbered_only_when_the_text_itself_was_too_long_for_one_message() {
+        let long = "A sentence of ordinary length that says something. ".repeat(120);
+        let body = format!("{long}\n\n{TABLE}\n\nAfter.");
+        let parts = compose_with_pictures(&content(Some(&body)), TelegramChatMode::Forum);
+
+        assert_eq!(shape(&parts), "text text table text");
+        let texts = texts(&parts);
+        assert!(
+            texts[0].starts_with("<i>(part 1 of 3)</i>\n"),
+            "{}",
+            texts[0]
+        );
+        assert!(
+            texts[2].starts_with("<i>(part 3 of 3)</i>\nAfter."),
+            "{}",
+            texts[2]
+        );
     }
 }
