@@ -493,7 +493,7 @@ fn telegram_check(probe: Option<&TelegramProbe>) -> Check {
             Health::Degraded,
             format!("@{username} is paired with a {} but cannot manage its topics: {why}", mode.label()),
             Some("one topic per session; messages cannot be delivered to the group"),
-            "Make the bot a group admin with the Manage Topics right.",
+            "Make the bot a group admin with the Manage Topics right (and Pin Messages, so a new topic's first message is not left pinned).",
         ),
         Some(TelegramProbe::Bot {
             username,

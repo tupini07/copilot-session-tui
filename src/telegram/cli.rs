@@ -306,7 +306,7 @@ mod tests {
         assert!(private.contains("https://t.me/cst_bot?start=ABC234"));
         assert!(private.contains("ABC234"));
         let group = pairing_instructions("cst_bot", "ABC234", TelegramChatMode::Forum);
-        assert!(group.contains("startgroup=ABC234&admin=manage_topics"));
+        assert!(group.contains("startgroup=ABC234&admin=manage_topics+pin_messages"));
         assert!(group.contains("Topics turned on"));
     }
 }

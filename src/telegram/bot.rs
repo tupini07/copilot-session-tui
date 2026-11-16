@@ -110,11 +110,19 @@ pub struct ChatMember {
     pub status: String,
     #[serde(default)]
     pub can_manage_topics: bool,
+    #[serde(default)]
+    pub can_pin_messages: bool,
 }
 
 impl ChatMember {
     pub fn may_manage_topics(&self) -> bool {
         self.status == "creator" || (self.status == "administrator" && self.can_manage_topics)
+    }
+
+    /// Needed only to take the pin off a new topic's first message, so its absence
+    /// is a blemish rather than a fault.
+    pub fn may_pin_messages(&self) -> bool {
+        self.status == "creator" || (self.status == "administrator" && self.can_pin_messages)
     }
 }
 
@@ -198,6 +206,17 @@ pub trait BotApi {
     /// Show "typing…" in the chat, or in one topic of it, for about five seconds.
     /// Provided as a no-op, so a stub that does not care is not asked to.
     fn send_chat_action(&self, _chat_id: i64, _thread_id: Option<i64>) -> Result<(), BotError> {
+        Ok(())
+    }
+    /// Take every pin off one topic. Telegram pins the first message of a new topic
+    /// by itself, which in a topic per session is a pin on every topic. Needs the Pin
+    /// Messages right; without it Telegram refuses and the pin stays. Provided as a
+    /// no-op, so a stub that does not care is not asked to.
+    fn unpin_all_forum_topic_messages(
+        &self,
+        _chat_id: i64,
+        _thread_id: i64,
+    ) -> Result<(), BotError> {
         Ok(())
     }
     /// The emoji Telegram allows as topic icons, each with the id a topic is made
@@ -709,6 +728,22 @@ impl BotApi for UreqBot {
         }
         let _: Value = self.call(
             "closeForumTopic",
+            &Body {
+                chat_id,
+                message_thread_id: thread_id,
+            },
+        )?;
+        Ok(())
+    }
+
+    fn unpin_all_forum_topic_messages(&self, chat_id: i64, thread_id: i64) -> Result<(), BotError> {
+        #[derive(Serialize)]
+        struct Body {
+            chat_id: i64,
+            message_thread_id: i64,
+        }
+        let _: Value = self.call(
+            "unpinAllForumTopicMessages",
             &Body {
                 chat_id,
                 message_thread_id: thread_id,
