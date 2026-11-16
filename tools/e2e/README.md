@@ -51,6 +51,7 @@ checked before anything starts, so a typo fails at once.
 | `git_project <name>` | The same, with `git init` run in it. |
 | `image_file <path> <W>x<H>` | A PNG of that size under `projects/`, e.g. `image_file pics/a.png 64x32`, for a script that points CST at a picture. |
 | `env KEY=VALUE` | An environment variable for CST. |
+| `answer <query> <reply>` | Bytes the driver writes back, as the terminal, whenever the program's output contains `<query>`; both in `key` notation. `{id}` in the reply becomes the `i=` value after the match, so `answer \e_G \e_Gi={id};OK\e\\` says yes to a Kitty graphics query. The driver otherwise answers only ConPTY's cursor-position request. |
 | `arg <argument>` | A command-line argument for CST, one per line. |
 | `config <json>` | CST's settings file for this run, on one line, e.g. `config {"theme": "gruvbox"}`. Without it CST runs on its defaults. |
 | `fake_gh` | Put a stub `gh` first on CST's `PATH`, logged in as `cst-e2e`. It answers what thread watching asks about a discussion (who is logged in, a token, `updatedAt`, an empty comment list) and fails anything else. Discussion number 404 does not exist, like a deleted one. Without it CST uses your real `gh`. |
