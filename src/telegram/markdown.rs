@@ -21,7 +21,7 @@
 //! other entity, and a blockquote cannot sit inside a blockquote.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::escape_html;
 use crate::github::RepositoryRef;
@@ -59,8 +59,27 @@ pub fn to_telegram_html_in(markdown: &str, repository: Option<&RepositoryRef>) -
     renderer.finish()
 }
 
+/// How wide a table drawn as a picture may be, in characters.
+///
+/// Telegram fits a picture to the width of the chat, so a table as wide as its longest
+/// row arrives with every letter shrunk to match: seventy characters across is already
+/// too small to read on a phone. Held to about what a phone shows of ordinary text, the
+/// letters stay the size of the message around them, and cells wrap instead.
+pub const PICTURE_TABLE_WIDTH: usize = 48;
+
+/// How [`table_marker`] begins. Nothing an agent writes can produce it: every `<` of
+/// theirs is escaped.
+pub(crate) const TABLE_MARKER_OPEN: &str = "<cst-table ";
+
+/// What stands in the text where table `number` (from one) was, for the sender to cut
+/// the message at. It is never sent.
+pub(crate) fn table_marker(number: usize) -> String {
+    format!("{TABLE_MARKER_OPEN}{number}>")
+}
+
 /// [`to_telegram_html_in`] with every table taken out of the text and returned as its
-/// monospace layout, one string per table, in order; the text says where each was.
+/// monospace layout, one string per table, in order; a [`table_marker`] stands where
+/// each was, so it can be sent there, between the text before it and the text after.
 ///
 /// Telegram has no table markup, and a `<pre>` block wraps on a phone into something
 /// unreadable at four columns. A picture keeps the columns. The layouts are what the
@@ -371,18 +390,14 @@ impl Renderer {
             }
             Event::End(TagEnd::Table) => {
                 let table = self.table.take().unwrap_or_default();
-                let laid_out = layout(&table.rows);
                 match self.tables_out.as_mut() {
                     Some(tables) => {
-                        tables.push(laid_out);
-                        self.out.push_str(&format!(
-                            "<i>[Table {} is sent as a picture below]</i>",
-                            tables.len()
-                        ));
+                        tables.push(layout_within(&table.rows, PICTURE_TABLE_WIDTH));
+                        self.out.push_str(&table_marker(tables.len()));
                     }
                     None => {
                         self.out.push_str("<pre>");
-                        self.out.push_str(&escape_html(&laid_out));
+                        self.out.push_str(&escape_html(&layout(&table.rows)));
                         self.out.push_str("</pre>");
                     }
                 }
@@ -481,6 +496,175 @@ fn layout(rows: &[Vec<String>]) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// Spaces between two columns.
+const GAP: usize = 2;
+/// The narrowest a column is squeezed to, and the longest word a column is still made
+/// wide enough to keep whole. A figure or an identifier cut in two reads as two; a file
+/// path longer than this is cut, because one path must not push a table off the phone.
+const NARROWEST_COLUMN: usize = 4;
+const LONGEST_WORD_KEPT_WHOLE: usize = 16;
+
+/// [`layout`] held to `max` characters across, for a table drawn as a picture.
+///
+/// A table that fits is laid out as it always was. One that does not gives up width
+/// where it has most to spare: the widest column narrows first, down to its longest
+/// word, and its cells wrap onto further lines, with an empty line between rows so the
+/// eye can still tell where one ends. A table with too many columns to fit even so is
+/// written out a row at a time, each cell under its heading, which is how one would
+/// read it aloud.
+fn layout_within(rows: &[Vec<String>], max: usize) -> String {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if columns == 0 {
+        return String::new();
+    }
+    let cells_of = |column: usize| rows.iter().filter_map(move |row| row.get(column));
+    let natural: Vec<usize> = (0..columns)
+        .map(|column| cells_of(column).map(|cell| cell.width()).max().unwrap_or(0))
+        .collect();
+    let gaps = GAP * (columns - 1);
+    if natural.iter().sum::<usize>() + gaps <= max {
+        return layout(rows);
+    }
+    let floors: Vec<usize> = (0..columns)
+        .map(|column| {
+            let word = cells_of(column)
+                .flat_map(|cell| cell.split_whitespace())
+                .map(|word| word.width())
+                .max()
+                .unwrap_or(0);
+            word.clamp(NARROWEST_COLUMN, LONGEST_WORD_KEPT_WHOLE)
+                .min(natural[column])
+        })
+        .collect();
+    if floors.iter().sum::<usize>() + gaps > max {
+        return records(rows, max);
+    }
+    let mut widths = natural;
+    while widths.iter().sum::<usize>() + gaps > max {
+        let Some(widest) = (0..columns)
+            .filter(|column| widths[*column] > floors[*column])
+            .max_by_key(|column| widths[*column])
+        else {
+            break;
+        };
+        widths[widest] -= 1;
+    }
+
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let cells: Vec<Vec<String>> = widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| wrap(row.get(column).map_or("", String::as_str), *width))
+            .collect();
+        let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut line = String::new();
+            for (column, width) in widths.iter().enumerate() {
+                let part = cells[column].get(line_index).map_or("", String::as_str);
+                line.push_str(part);
+                if column + 1 < columns {
+                    line.push_str(&" ".repeat(width.saturating_sub(part.width()) + GAP));
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        if index == 0 && rows.len() > 1 {
+            lines.push(
+                widths
+                    .iter()
+                    .map(|width| "─".repeat(*width))
+                    .collect::<Vec<_>>()
+                    .join("  "),
+            );
+        } else if index + 1 < rows.len() {
+            lines.push(String::new());
+        }
+    }
+    lines.join("\n")
+}
+
+/// A table as one block per row, each cell on a line of its own under its heading.
+fn records(rows: &[Vec<String>], max: usize) -> String {
+    let Some((header, body)) = rows.split_first() else {
+        return String::new();
+    };
+    // A table of one row has no headings to put before anything.
+    let (header, body): (&[String], &[Vec<String>]) = if body.is_empty() {
+        (&[], rows)
+    } else {
+        (header, body)
+    };
+    let mut blocks = Vec::new();
+    for row in body {
+        let mut lines = Vec::new();
+        for (column, cell) in row.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            let text = match header.get(column).filter(|label| !label.is_empty()) {
+                Some(label) => format!("{label}: {cell}"),
+                None => cell.clone(),
+            };
+            // Further lines of one cell hang in, so the headings stay down the edge.
+            for (index, line) in wrap(&text, max.saturating_sub(GAP)).into_iter().enumerate() {
+                lines.push(if index == 0 {
+                    line
+                } else {
+                    format!("{}{line}", " ".repeat(GAP))
+                });
+            }
+        }
+        if !lines.is_empty() {
+            blocks.push(lines.join("\n"));
+        }
+    }
+    blocks.join("\n\n")
+}
+
+/// `text` on lines of at most `width` columns, broken between words; a word longer
+/// than a line is cut where the line ends.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for mut word in text.split_whitespace() {
+        loop {
+            let room = width.saturating_sub(line.width() + usize::from(!line.is_empty()));
+            if word.width() <= room {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                break;
+            }
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                continue;
+            }
+            let mut cut = 0;
+            let mut used = 0;
+            for (at, character) in word.char_indices() {
+                let wide = character.width().unwrap_or(0);
+                if used + wide > width && cut > 0 {
+                    break;
+                }
+                used += wide;
+                cut = at + character.len_utf8();
+            }
+            lines.push(word[..cut].to_string());
+            word = &word[cut..];
+            if word.is_empty() {
+                break;
+            }
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -608,5 +792,152 @@ mod tests {
     fn stripping_tags_leaves_the_text_and_its_entities() {
         let html = to_telegram_html("## Hi\n\n- a `<b>` & more\n- [x](https://e.com)");
         assert_eq!(strip_tags(&html), "Hi\n\n• a &lt;b&gt; &amp; more\n• x");
+    }
+
+    fn rows(table: &[&[&str]]) -> Vec<Vec<String>> {
+        table
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_table_that_fits_the_phone_is_drawn_as_it_always_was() {
+        let table = rows(&[&["Name", "Size"], &["alpha", "12 KB"]]);
+        assert_eq!(layout_within(&table, PICTURE_TABLE_WIDTH), layout(&table));
+    }
+
+    #[test]
+    fn a_wide_table_wraps_its_longest_column_instead_of_shrinking_every_letter() {
+        // Telegram fits a picture to the chat's width: a table seventy characters
+        // across arrived with letters too small to read on a phone.
+        let table = rows(&[
+            &[
+                "Specialist",
+                "Selected pass",
+                "Best development loss",
+                "Final development loss",
+            ],
+            &["Generation", "2 of 5", "0.5487", "0.8387"],
+            &["Repair", "3 of 4", "0.1125", "0.1240"],
+        ]);
+        let drawn = layout_within(&table, PICTURE_TABLE_WIDTH);
+
+        for line in drawn.lines() {
+            assert!(
+                line.width() <= PICTURE_TABLE_WIDTH,
+                "too wide: {line:?}\n{drawn}"
+            );
+        }
+        // Figures and single words stay whole; only the long headings wrapped.
+        for whole in [
+            "Generation",
+            "0.5487",
+            "0.1240",
+            "Specialist",
+            "development",
+        ] {
+            assert!(drawn.contains(whole), "{whole} was cut:\n{drawn}");
+        }
+        assert!(
+            drawn.lines().count() > layout(&table).lines().count(),
+            "{drawn}"
+        );
+    }
+
+    #[test]
+    fn rows_that_wrap_are_set_apart_so_one_can_be_told_from_the_next() {
+        let table = rows(&[
+            &["Step", "What happened"],
+            &[
+                "Build",
+                "Compiled every crate in the workspace without a single warning",
+            ],
+            &[
+                "Test",
+                "Ran the whole suite twice because the first run was under load",
+            ],
+        ]);
+        let drawn = layout_within(&table, 40);
+        let lines: Vec<&str> = drawn.lines().collect();
+
+        assert!(
+            lines[1].starts_with('─'),
+            "the rule under the header: {drawn}"
+        );
+        let gap = lines.iter().position(|line| line.is_empty());
+        assert!(
+            gap.is_some(),
+            "an empty line between the two rows:\n{drawn}"
+        );
+        assert!(lines[gap.unwrap() + 1].starts_with("Test"), "{drawn}");
+    }
+
+    #[test]
+    fn a_table_with_too_many_columns_to_fit_is_written_out_a_row_at_a_time() {
+        let header = [
+            "Model",
+            "Accuracy",
+            "Precision",
+            "Recall",
+            "Latency",
+            "Throughput",
+            "Notes",
+        ];
+        let first = [
+            "baseline",
+            "0.9120",
+            "0.9011",
+            "0.8850",
+            "120 ms",
+            "8.3 rps",
+            "as shipped",
+        ];
+        let table = rows(&[&header, &first]);
+        let drawn = layout_within(&table, PICTURE_TABLE_WIDTH);
+
+        assert!(
+            drawn.starts_with("Model: baseline\nAccuracy: 0.9120\n"),
+            "{drawn}"
+        );
+        for line in drawn.lines() {
+            assert!(line.width() <= PICTURE_TABLE_WIDTH, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_its_column_is_cut_at_the_line_end_and_nothing_is_lost() {
+        assert_eq!(
+            wrap("src/telegram/markdown.rs ok", 10),
+            ["src/telegr", "am/markdow", "n.rs ok"]
+        );
+        assert_eq!(wrap("", 10), [""]);
+    }
+
+    /// Draws a wide table to the file named by `CST_TABLE_PNG`, to look at: whether it
+    /// reads at a phone's width is a judgement no assertion makes.
+    #[test]
+    #[ignore = "writes a picture to the path in CST_TABLE_PNG, for looking at"]
+    fn draw_a_wide_table_to_look_at() {
+        use crate::telegram::image;
+        let Ok(path) = std::env::var("CST_TABLE_PNG") else {
+            return;
+        };
+        let markdown = std::env::var("CST_TABLE_MARKDOWN").unwrap_or_else(|_| {
+            "| Specialist | Selected pass | Best development loss | Final development loss |\n\
+             |---|---|---|---|\n\
+             | Generation | 2 of 5 | 0.5487 | 0.8387 |\n\
+             | Repair | 3 of 4 | 0.1125 | 0.1240 |"
+                .to_string()
+        });
+        let (_, tables) = to_telegram_html_with_tables(&markdown.replace("\\n", "\n"), None);
+        let lines: Vec<String> = tables[0].lines().map(str::to_string).collect();
+        let png = image::render_at(
+            &image::cells_of_text(&lines, image::LIGHT_FG, image::LIGHT_BG),
+            image::LIGHT_BG,
+            image::TABLE_FONT_PX,
+        )
+        .expect("the table draws");
+        std::fs::write(path, png).expect("the picture is written");
     }
 }

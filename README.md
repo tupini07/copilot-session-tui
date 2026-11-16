@@ -915,8 +915,12 @@ to one session.
 plus the question and its choices or the plan summary when there is one. Copilot writes
 Markdown, and it arrives as Telegram formatting: bold, italic, code and links as
 themselves, a heading as a bold line, lists as indented bullets, and a raw HTML tag as the text it
-is. A table is sent after the message as a picture, drawn by CST, because Telegram has no
-table markup and a monospace block wraps on a phone; the text says where each table was. An issue or pull request
+is. A table is sent as a picture, drawn by CST, because Telegram has no table markup and
+a monospace block wraps on a phone. It arrives where it stood: the text before it, the
+picture, then the text after, so the message reads top to bottom. The picture is kept to
+about the width of a phone, with long cells wrapped onto further lines, because Telegram
+shrinks a wide picture to fit and the letters with it; a table with too many columns for
+that is written out a row at a time, each value under its heading. An issue or pull request
 number in the prose, like #12, is a link into the repository the session's folder
 belongs to, the same way it is a click target in the pane. Nothing is cut:
 content longer than one Telegram message is split into as many parts as it takes, at a
