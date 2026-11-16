@@ -1,0 +1,40 @@
+# Several sessions whose folders are all called `inputs`, none in a Git repository, so
+# each is its own project. The filter popup and the list must tell them apart instead
+# of printing `inputs` once per session, and typing part of the parent must find one.
+#
+# Labels are joined with the platform separator, so the expectations below are written
+# for Windows; on Linux they would read c01-r00/inputs.
+
+size 110x30
+arg --mux
+session requests/c01-r00/inputs Request one
+session requests/c03-r00/inputs Request three
+session judgments/c05/inputs Judging five
+session alpha Plain project
+
+wait_for Plain project
+# The list's project line carries the parent folder for the twins and only the name
+# for alpha.
+expect c01-r00\inputs
+expect c05\inputs
+expect_not judgments\c05
+dump 01-list
+
+press p
+wait_for Select Project
+expect c01-r00\inputs
+expect c03-r00\inputs
+expect c05\inputs
+expect alpha
+dump 02-filter
+
+# Searching by the part that differs finds exactly that project.
+type c05
+wait_for c05█
+expect c05\inputs
+dump 03-search
+press enter
+wait_for Filter: c05\inputs
+expect Judging five
+expect_not Request one
+dump 04-filtered

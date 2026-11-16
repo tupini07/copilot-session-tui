@@ -21,6 +21,7 @@ mod new_project;
 mod notifications;
 mod paste;
 mod paths;
+mod project_labels;
 mod recovery;
 mod scratchpad;
 #[cfg(feature = "screenshots")]
