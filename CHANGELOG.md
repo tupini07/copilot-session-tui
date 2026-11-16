@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.40.0 - 2026-11-16
+
+- You must give the bot the Pin Messages right once for new Telegram topics to open without a pin.
+- Mark what a session is waiting on in the background so its tab shows it, and hear when it ends.
+- Ctrl+click a picture path in a session to see the picture inside CST.
+- Tables in Telegram arrive where they stood in the message, narrow enough to read on a phone.
+- The session list comes back after a search, and a session can be found by its id.
+- Deleting a worktree session works after its agent changed branch, and says what will be lost.
+- Projects with the same folder name are told apart in the filter and the session list.
+
 ## v0.39.0 - 2026-10-27
 
 - Note: a reply sent while a session works now steers that turn. Use /queue to hold it for the end.
