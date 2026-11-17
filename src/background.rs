@@ -220,7 +220,9 @@ impl ProcessInfo {
 ///
 /// Everything descended from `root`, less the plumbing: console hosts, and whatever
 /// Copilot started that is not a shell (its MCP servers and helpers), with all that
-/// those started. A command the model ran is always under one of its shells.
+/// those started. A command the model ran is always under one of its shells. Those
+/// shells are Copilot's children, whether Copilot is `root` itself or a copy of itself
+/// that `root` started.
 ///
 /// A child must not be older than its parent. Pids are reused, and without this a
 /// process whose long-dead parent's pid now belongs to one of ours would be adopted.
@@ -239,7 +241,18 @@ pub fn descendants(all: &[ProcessInfo], root: u32) -> Vec<ProcessInfo> {
             {
                 continue;
             }
-            if is_console_host(&process.name) || (parent_is_root && !is_shell(&process.name)) {
+            if is_console_host(&process.name) {
+                continue;
+            }
+            if parent_is_root && is_copilot(&process.name) {
+                // Copilot started again as its own child: it does so when it restarts
+                // itself, and the launcher CST started stays on as the parent. The
+                // model's shells are under the child, so look through it as if it
+                // were the root. Only here: a `copilot` a shell started is a job.
+                frontier.push((process.identity, true));
+                continue;
+            }
+            if parent_is_root && !is_shell(&process.name) {
                 continue;
             }
             found.push(process.clone());
@@ -261,6 +274,10 @@ fn bare_name(name: &str) -> String {
 
 fn is_console_host(name: &str) -> bool {
     bare_name(name) == "conhost"
+}
+
+fn is_copilot(name: &str) -> bool {
+    bare_name(name) == "copilot"
 }
 
 fn is_shell(name: &str) -> bool {
@@ -833,6 +850,31 @@ mod tests {
 
         assert_eq!(pids, vec![120, 122, 123]);
         assert!(descendants(&all, 999).is_empty());
+    }
+
+    #[test]
+    fn shells_under_a_copilot_that_copilot_restarted_itself_as_are_still_found() {
+        // Seen live: a session whose job was running listed no processes at all. Its
+        // Copilot had restarted itself three hours in, as a child of the launcher CST
+        // started, and everything the model ran was under that child, which was
+        // dropped with its whole tree for not being a shell.
+        let all = vec![
+            process(100, 1, 10, "copilot.EXE"),
+            process(105, 100, 30, "copilot.exe"),
+            process(106, 105, 31, "computer-use-mcp.exe"),
+            process(120, 105, 40, "pwsh.exe"),
+            process(122, 120, 41, "python.exe"),
+            // A Copilot the job itself runs is the job's, and stays listed.
+            process(123, 122, 42, "copilot.EXE"),
+            process(124, 123, 43, "node.exe"),
+        ];
+
+        let pids: Vec<u32> = descendants(&all, 100)
+            .iter()
+            .map(|process| process.identity.pid)
+            .collect();
+
+        assert_eq!(pids, vec![120, 122, 123, 124]);
     }
 
     #[test]
