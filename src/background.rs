@@ -216,11 +216,23 @@ impl ProcessInfo {
     }
 }
 
-/// The processes worth offering under a session's Copilot process.
+/// The processes worth offering under a session's Copilot process: the shells Copilot
+/// started, one row for each, and nothing below them.
 ///
-/// Everything descended from `root`, less the plumbing: console hosts, and whatever
-/// Copilot started that is not a shell (its MCP servers and helpers), with all that
-/// those started. A command the model ran is always under one of its shells.
+/// A command the model ran is always under one of Copilot's shells, and everything it
+/// starts in turn hangs under that same shell: a launcher, a pair of interpreters, the
+/// program itself. Listing all of those made one job read as ten things to choose
+/// between, when the shell at the top is the one whose end means the job is over.
+/// Console hosts and whatever else Copilot started (its MCP servers and helpers) are
+/// its own plumbing and are left out.
+///
+/// The shells are Copilot's children, whether Copilot is `root` itself or a copy of
+/// itself that `root` started: it restarts itself as a child of the launcher CST
+/// started, which stays on.
+///
+/// Every such shell is started with the same wrapper command line, which tells nobody
+/// which job it is. So the row is named for what the shell is running, the first thing
+/// under it that is not itself a shell, and for the shell only when it runs nothing.
 ///
 /// A child must not be older than its parent. Pids are reused, and without this a
 /// process whose long-dead parent's pid now belongs to one of ours would be adopted.
@@ -228,27 +240,65 @@ pub fn descendants(all: &[ProcessInfo], root: u32) -> Vec<ProcessInfo> {
     let Some(root_process) = all.iter().find(|process| process.identity.pid == root) else {
         return Vec::new();
     };
-    let mut found: Vec<ProcessInfo> = Vec::new();
-    let mut frontier = vec![(root_process.identity, true)];
-    while let Some((parent, parent_is_root)) = frontier.pop() {
-        for process in all {
-            if process.parent != parent.pid
-                || process.identity.pid == parent.pid
-                || process.identity.created < parent.created
-                || found.iter().any(|seen| seen.identity == process.identity)
-            {
+    let children_of = |parent: ProcessIdentity| {
+        all.iter().filter(move |process| {
+            process.parent == parent.pid
+                && process.identity.pid != parent.pid
+                && process.identity.created >= parent.created
+        })
+    };
+    let mut shells: Vec<ProcessInfo> = Vec::new();
+    let mut copilots = vec![root_process.identity];
+    let mut seen = vec![root_process.identity];
+    while let Some(copilot) = copilots.pop() {
+        for process in children_of(copilot) {
+            if seen.contains(&process.identity) {
                 continue;
             }
-            if is_console_host(&process.name) || (parent_is_root && !is_shell(&process.name)) {
-                continue;
+            seen.push(process.identity);
+            if is_copilot(&process.name) {
+                copilots.push(process.identity);
+            } else if is_shell(&process.name) {
+                shells.push(process.clone());
             }
-            found.push(process.clone());
-            frontier.push((process.identity, false));
+        }
+    }
+    for shell in &mut shells {
+        if let Some(running) = first_program_under(shell.identity, &children_of) {
+            shell.command = running;
         }
     }
     // Oldest first: a list that reorders itself between two looks is hard to mark in.
-    found.sort_by_key(|process| (process.identity.created, process.identity.pid));
-    found
+    shells.sort_by_key(|process| (process.identity.created, process.identity.pid));
+    shells
+}
+
+/// What a shell is running: the command line of the nearest process under it that is
+/// neither a shell nor a console host, the oldest where several are as near.
+fn first_program_under<'a, I>(
+    shell: ProcessIdentity,
+    children_of: &impl Fn(ProcessIdentity) -> I,
+) -> Option<String>
+where
+    I: Iterator<Item = &'a ProcessInfo>,
+{
+    let mut level = vec![shell];
+    let mut seen = vec![shell];
+    while !level.is_empty() {
+        let mut below: Vec<&ProcessInfo> = level
+            .iter()
+            .flat_map(|parent| children_of(*parent))
+            .filter(|process| !is_console_host(&process.name))
+            .filter(|process| !seen.contains(&process.identity))
+            .collect();
+        below.sort_by_key(|process| (process.identity.created, process.identity.pid));
+        if let Some(program) = below.iter().find(|process| !is_shell(&process.name)) {
+            return Some(program.label().to_string());
+        }
+        seen.extend(below.iter().map(|process| process.identity));
+        level = below.iter().map(|process| process.identity).collect();
+    }
+    None
 }
 
 fn bare_name(name: &str) -> String {
@@ -261,6 +311,10 @@ fn bare_name(name: &str) -> String {
 
 fn is_console_host(name: &str) -> bool {
     bare_name(name) == "conhost"
+}
+
+fn is_copilot(name: &str) -> bool {
+    bare_name(name) == "copilot"
 }
 
 fn is_shell(name: &str) -> bool {
@@ -811,7 +865,9 @@ mod tests {
     }
 
     #[test]
-    fn the_processes_offered_are_what_the_models_shells_started_not_copilots_own_plumbing() {
+    fn one_row_is_offered_for_each_shell_copilot_started_and_named_for_what_it_runs() {
+        // Seen live: one job listed as ten rows, the wrapper shell and everything
+        // below it, beside Copilot's own count of one.
         let all = vec![
             process(100, 1, 10, "copilot.exe"),
             process(101, 100, 11, "conhost.exe"),
@@ -819,38 +875,75 @@ mod tests {
             process(111, 110, 13, "helper.exe"),
             process(120, 100, 14, "pwsh.exe"),
             process(121, 120, 15, "conhost.exe"),
-            process(122, 120, 16, "python.exe"),
-            process(123, 122, 17, "python.exe"),
+            process(122, 120, 16, "pwsh.exe"),
+            process(123, 122, 17, "labgoblin.exe"),
+            process(124, 123, 18, "python.exe"),
+            // A shell with nothing under it keeps its own name.
+            process(130, 100, 19, "pwsh.exe"),
+            process(131, 130, 20, "conhost.exe"),
             // Another session's, and unrelated.
             process(200, 1, 10, "copilot.exe"),
             process(201, 200, 20, "pwsh.exe"),
         ];
 
-        let pids: Vec<u32> = descendants(&all, 100)
+        let offered = descendants(&all, 100);
+        let rows: Vec<(u32, &str)> = offered
             .iter()
-            .map(|process| process.identity.pid)
+            .map(|process| (process.identity.pid, process.label()))
             .collect();
 
-        assert_eq!(pids, vec![120, 122, 123]);
+        assert_eq!(
+            rows,
+            vec![(120, "labgoblin.exe --flag"), (130, "pwsh.exe --flag")]
+        );
         assert!(descendants(&all, 999).is_empty());
+    }
+
+    #[test]
+    fn shells_under_a_copilot_that_copilot_restarted_itself_as_are_still_found() {
+        // Seen live: a session whose job was running listed no processes at all. Its
+        // Copilot had restarted itself three hours in, as a child of the launcher CST
+        // started, and everything the model ran was under that child, which was
+        // dropped with its whole tree for not being a shell.
+        let all = vec![
+            process(100, 1, 10, "copilot.EXE"),
+            process(105, 100, 30, "copilot.exe"),
+            process(106, 105, 31, "computer-use-mcp.exe"),
+            process(120, 105, 40, "pwsh.exe"),
+            process(122, 120, 41, "python.exe"),
+            // A Copilot the job itself runs is the job's, not a restart.
+            process(123, 122, 42, "copilot.EXE"),
+            process(124, 123, 43, "pwsh.exe"),
+        ];
+
+        let offered = descendants(&all, 100);
+        let rows: Vec<(u32, &str)> = offered
+            .iter()
+            .map(|process| (process.identity.pid, process.label()))
+            .collect();
+
+        assert_eq!(rows, vec![(120, "python.exe --flag")]);
     }
 
     #[test]
     fn a_process_older_than_its_supposed_parent_is_not_adopted_because_pids_are_reused() {
         let all = vec![
             process(100, 1, 50, "copilot.exe"),
+            // Started before 100 existed: its real parent was an earlier pid 100.
+            process(119, 100, 5, "pwsh.exe"),
             process(120, 100, 60, "pwsh.exe"),
-            // Started before 120 existed: its real parent was an earlier pid 120.
-            process(300, 120, 5, "python.exe"),
+            // Likewise under the shell, and so not what the shell is running.
+            process(300, 120, 5, "old.exe"),
             process(301, 120, 70, "python.exe"),
         ];
 
-        let pids: Vec<u32> = descendants(&all, 100)
+        let offered = descendants(&all, 100);
+        let rows: Vec<(u32, &str)> = offered
             .iter()
-            .map(|process| process.identity.pid)
+            .map(|process| (process.identity.pid, process.label()))
             .collect();
 
-        assert_eq!(pids, vec![120, 301]);
+        assert_eq!(rows, vec![(120, "python.exe --flag")]);
     }
 
     #[cfg(windows)]

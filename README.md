@@ -487,8 +487,9 @@ still running behind the focused session so you can say which of it you are wait
 - **Commands Copilot left running**, taken from the session's own log, under the short
   description Copilot gave them. They leave the list when the log says they finished or
   were stopped.
-- **Processes started by the session's shells**, with their command lines. `r` lists
-  them again.
+- **What the session's shells are running**, one row for each shell Copilot started,
+  named for the program running under it. A job that starts ten processes is one row,
+  and it ends when that shell does. `r` lists them again.
 
 `Space` marks a row as watched, or unmarks it. Nothing counts until you mark it,
 because a background command is as often a dev server left up on purpose as a job to
