@@ -423,6 +423,7 @@ pub(crate) fn handle_portable_modal_event(app: &mut App, event: Event) {
                 }
                 _ => {}
             }
+            app.leave_theme_picker_opened_alone();
         }
         return;
     }
@@ -1804,6 +1805,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
             KeyCode::Esc => app.cancel_theme_picker(),
             _ => {}
         }
+        app.leave_theme_picker_opened_alone();
         return;
     }
 
@@ -1889,7 +1891,7 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                     .map(|limit| limit.to_string())
                     .unwrap_or_default(),
             ),
-            3 => app.open_theme_picker(),
+            crate::app::THEME_SETTINGS_ROW => app.open_theme_picker(),
             20 => begin_global_edit(
                 app,
                 SettingsEditField::ThreadTrustedAuthors,
@@ -3060,6 +3062,42 @@ mod tests {
         handle_settings(&mut app, KeyCode::Enter);
         assert!(app.theme_picker.is_none());
         assert_eq!(app.config.theme, crate::theme::ThemeName::Gruvbox);
+        assert_eq!(
+            app.mode,
+            Mode::Settings,
+            "opened from its row, the picker hands back to Settings"
+        );
+    }
+
+    #[test]
+    fn a_theme_picker_opened_by_itself_closes_all_the_way_out_whichever_way_it_is_left() {
+        // Opened from Command Search there was no Settings screen before it, so
+        // there must be none after it either.
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+
+        app.choose_theme();
+        assert_eq!(app.mode, Mode::Settings);
+        assert!(app.theme_picker.is_some());
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Gruvbox);
+        assert_eq!(app.mode, Mode::Settings, "moving in it leaves it open");
+        handle_settings(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Classic);
+
+        app.choose_theme();
+        handle_settings(&mut app, KeyCode::Down);
+        handle_settings(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.config.theme, crate::theme::ThemeName::Gruvbox);
+
+        // Settings opened the ordinary way afterwards is not left in a hurry.
+        app.begin_global_settings();
+        app.settings_selected = crate::app::THEME_SETTINGS_ROW;
+        handle_settings(&mut app, KeyCode::Enter);
+        handle_settings(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Settings);
     }
 
     #[test]

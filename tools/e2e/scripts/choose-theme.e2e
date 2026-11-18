@@ -1,0 +1,62 @@
+# Changing theme from Command Search: prefix, prefix, "theme", Enter opens the picker by
+# itself, over whatever is on screen, and leaving it goes back there, not to Settings.
+# Driven from an attached session and from the session list, with Enter and with Esc.
+
+size 110x30
+arg --mux
+session existing-app Existing app session
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+# From an attached session. "theme" has to put the picker first: Enter takes line one.
+press ctrl+b ctrl+b
+wait_for Command Search
+type theme
+wait_for Choose theme
+dump 01-search
+press enter
+wait_for Catppuccin Latte
+expect Fake Copilot is idling
+dump 02-picker-over-session
+
+# Preview a light theme, then take it. Back on the session, no Settings left behind.
+press end
+dump 03-preview-light
+press enter
+wait_gone Catppuccin Latte
+expect Fake Copilot is idling
+expect_not Global Settings
+dump 04-light-session
+
+# Esc from the picker also goes all the way back, and keeps the saved theme.
+press ctrl+b ctrl+b
+wait_for Command Search
+type theme
+wait_for Choose theme
+press enter
+wait_for Catppuccin Latte
+press home
+press esc
+wait_gone Catppuccin Latte
+expect Fake Copilot is idling
+expect_not Global Settings
+dump 05-esc-keeps-light
+
+# From the session list, and the choice shows as saved in Settings.
+press ctrl+b d
+wait_gone Fake Copilot is idling
+press ctrl+b ctrl+b
+wait_for Command Search
+type theme
+wait_for Choose theme
+press enter
+wait_for Catppuccin Latte
+dump 06-picker-over-list
+press esc
+wait_gone Catppuccin Latte
+expect Existing app session
+press ,
+wait_for Solarized Light
+dump 07-settings-shows-saved

@@ -1118,10 +1118,12 @@ same config:
 
 CST bundles ten themes in picker order: **CST Classic**, **Gruvbox**, **Nord**,
 **Dracula**, **Catppuccin Mocha**, **Palenight**, **Solarized Dark**,
-**Tokyo Night**, **Catppuccin Latte**, and **Solarized Light**. Open Global
-Settings with `,`, select **Theme**, and move through the picker to preview each
-theme live. `Enter` saves the selection; `Esc` closes the picker and restores the
-previously saved theme.
+**Tokyo Night**, **Catppuccin Latte**, and **Solarized Light**. The quickest way to
+the picker is Command Search: press the prefix twice, type `theme`, and press `Enter`.
+It opens over the session or the list you were looking at and returns there. It is
+also the **Theme** row of Global Settings (`,`). Move through the picker to preview
+each theme live; `Home` and `End` jump to the first and last. `Enter` saves the
+selection; `Esc` closes the picker and restores the previously saved theme.
 
 The selection is the root-level `theme` field in the global `config.json`, using a
 kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`. Omitting it

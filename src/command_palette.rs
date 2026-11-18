@@ -45,6 +45,7 @@ pub enum CommandId {
     RefreshSessions,
     InspectGithub,
     GlobalSettings,
+    ChooseTheme,
     ProjectSettings,
     CheckForUpdates,
     ThreadInbox,
@@ -579,8 +580,17 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             Id::GlobalSettings,
             Group::Settings,
             "Global settings",
-            "Edit CST behavior, theme, terminal, and notifications",
+            "Edit CST behavior, terminal, and notifications",
             ",",
+            true,
+            "",
+        ),
+        entry(
+            Id::ChooseTheme,
+            Group::Settings,
+            "Choose theme",
+            "Preview the themes and pick one, dark or light",
+            "",
             true,
             "",
         ),
@@ -731,7 +741,8 @@ fn command_keywords(id: CommandId) -> &'static str {
         CycleSort => "order",
         ToggleHiddenSessions => "exclude hidden title path prefix visibility",
         InspectGithub => "issue pr pull request discussion",
-        GlobalSettings | ProjectSettings => "config preferences theme",
+        GlobalSettings | ProjectSettings => "config preferences",
+        ChooseTheme => "colors colours appearance dark light",
         CheckForUpdates => "upgrade version release restart",
         ThreadInbox => "threads github messages waiting agents inbox comments",
         WhatsNew => "changelog release notes updates version history",
@@ -780,6 +791,30 @@ mod tests {
         let commands = filtered_commands(&app);
 
         assert_eq!(commands[0].id, CommandId::InspectGithub);
+    }
+
+    #[test]
+    fn searching_for_theme_puts_the_picker_first_because_enter_takes_the_first_line() {
+        // Changing theme used to mean finding Global Settings under "theme", then
+        // its last row. The picker has its own line now, and it has to be the one
+        // Enter runs, or the shortcut is one more thing to step past.
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        for query in ["theme", "them", "dark", "light"] {
+            app.command_palette = Some(CommandPalette {
+                query: query.to_string(),
+                ..CommandPalette::default()
+            });
+            assert_eq!(
+                filtered_commands(&app)[0].id,
+                CommandId::ChooseTheme,
+                "{query}"
+            );
+        }
+        app.command_palette = Some(CommandPalette {
+            query: "settings".to_string(),
+            ..CommandPalette::default()
+        });
+        assert_eq!(filtered_commands(&app)[0].id, CommandId::GlobalSettings);
     }
 
     #[test]
