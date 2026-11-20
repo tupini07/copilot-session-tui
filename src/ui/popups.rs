@@ -1458,6 +1458,12 @@ fn help_line(theme: Theme, key: &str, desc: &str) -> Line<'static> {
 }
 
 pub fn draw_settings(f: &mut Frame, app: &mut App) {
+    if app.theme_picker_is_alone() {
+        // Opened from Command Search: the picker over the session or the list, which
+        // is what a theme is judged against, with no settings screen in between.
+        draw_theme_picker(f, app);
+        return;
+    }
     let theme = app.theme();
     // Wide enough for seven section tabs on a 110-column terminal; at 65% the last
     // two were cut off once Telegram joined the strip.

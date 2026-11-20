@@ -346,6 +346,9 @@ pub enum SettingsEditField {
     TelegramBotToken,
 }
 
+/// The Theme row's key among the settings rows.
+pub const THEME_SETTINGS_ROW: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     General,
@@ -954,6 +957,9 @@ pub struct App {
     pub theme_picker: Option<ThemePicker>,
     pub theme_picker_hits: Vec<(Rect, usize)>,
     theme_picker_last_click: Option<(usize, Instant)>,
+    /// The picker was opened by itself, from Command Search, not from its row in
+    /// Settings: leaving it leaves Settings too.
+    theme_picker_alone: bool,
     theme_save_reloaded_external: bool,
     pub project_settings: Option<ProjectSettings>,
     pub project_settings_selected: usize,
@@ -1181,6 +1187,7 @@ impl App {
             theme_picker: None,
             theme_picker_hits: Vec::new(),
             theme_picker_last_click: None,
+            theme_picker_alone: false,
             theme_save_reloaded_external: false,
             project_settings: None,
             project_settings_selected: 0,
@@ -1743,6 +1750,7 @@ impl App {
         self.settings_editing = None;
         self.settings_input.clear();
         self.theme_picker = None;
+        self.theme_picker_alone = false;
         self.telegram_wizard = None;
         let current = config::config_revision(&self.global_config_path).ok();
         self.settings_config_revision = (current == self.applied_config_revision)
@@ -1773,6 +1781,35 @@ impl App {
         self.theme_picker_last_click = None;
         self.theme_save_reloaded_external = false;
         self.refresh_theme_dependents();
+    }
+
+    /// Open the theme picker by itself, over whatever is on screen.
+    ///
+    /// The picker lives inside Settings, which is what loads the saved settings and
+    /// guards the save against another CST's, so Settings is opened under it. What
+    /// differs is the way out: [`Self::leave_theme_picker_opened_alone`] closes both,
+    /// so choosing a theme does not end on a settings screen nobody asked for.
+    pub fn choose_theme(&mut self) {
+        self.begin_global_settings();
+        self.settings_section = SettingsSection::General;
+        self.settings_selected = THEME_SETTINGS_ROW;
+        self.open_theme_picker();
+        self.theme_picker_alone = true;
+    }
+
+    pub fn theme_picker_is_alone(&self) -> bool {
+        self.theme_picker_alone && self.theme_picker.is_some()
+    }
+
+    /// After a key or click the picker took: if it was opened by itself and has now
+    /// closed, close the Settings under it as well. A save that failed leaves the
+    /// picker open, and so leaves this alone. Nothing else in Settings was touched,
+    /// so there is nothing to validate or save on the way out.
+    pub fn leave_theme_picker_opened_alone(&mut self) {
+        if self.theme_picker_alone && self.theme_picker.is_none() {
+            self.theme_picker_alone = false;
+            self.mode = Mode::Normal;
+        }
     }
 
     pub fn move_theme_picker(&mut self, amount: isize) {

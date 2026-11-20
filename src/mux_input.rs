@@ -948,6 +948,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
         }
         InspectGithub => app.open_github_inspector(),
         GlobalSettings => app.begin_global_settings(),
+        ChooseTheme => app.choose_theme(),
         ProjectSettings => crate::input::begin_project_settings(app),
         OpenHelp => app.open_help(),
         CheckForUpdates => app.request_update(),
