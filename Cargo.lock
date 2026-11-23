@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "copilot-session-tui"
-version = "0.40.0"
+version = "0.41.0"
 dependencies = [
  "ab_glyph",
  "anyhow",

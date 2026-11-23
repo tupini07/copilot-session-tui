@@ -3,6 +3,12 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.41.0 - 2026-11-23
+
+- Change theme from Command Search: press the prefix twice, type theme, and pick one.
+- The background work list shows one row for each job instead of one for each of its processes.
+- A session whose Copilot restarted itself lists its running jobs again.
+
 ## v0.40.0 - 2026-11-16
 
 - You must give the bot the Pin Messages right once for new Telegram topics to open without a pin.
