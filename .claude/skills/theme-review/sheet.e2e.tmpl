@@ -1,0 +1,39 @@
+# One theme's sheet for the theme review: the same four screens in every theme.
+# sheets.sh fills in @THEME@ and @CARD@ and runs this once per theme.
+
+size 100x30
+arg --mux
+config {"theme": "@THEME@"}
+session existing-app Existing app session
+session other-app Another session to compare against
+
+# 1. CST's own chrome: title bar, list, selection, details, key hints.
+wait_for Existing app session
+dump 1-list
+
+# 2. A pane: what a program paints through the theme. The stub's colour card has
+# the sixteen palette colours, the grey ramp, and Copilot's own fixed colours.
+press enter
+wait_for Fake Copilot is idling
+type e2e:colors @CARD@
+press enter
+wait_for Colour card
+dump 2-pane
+
+# 3. A popup over the pane, with groups, a selection and markers.
+press ctrl+b ctrl+b
+wait_for Command Search
+type theme
+wait_for Choose theme
+press enter
+wait_for Theme Picker
+dump 3-picker
+press esc
+wait_gone Theme Picker
+
+# 4. A dense popup with tabs, values, hints and warning colours.
+press ctrl+b d
+wait_gone Colour card
+press ,
+wait_for Global Settings
+dump 4-settings
