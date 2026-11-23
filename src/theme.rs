@@ -62,6 +62,24 @@ impl ThemeName {
         }
     }
 
+    /// The name as config.json spells it.
+    pub fn id(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    /// What the theme reports itself as. Classic takes on the terminal's own
+    /// colours and so is neither.
+    pub const fn appearance(self) -> &'static str {
+        match self.terminal_light_mode() {
+            Some(true) => "light",
+            Some(false) => "dark",
+            None => "terminal",
+        }
+    }
+
     pub const fn is_light(self) -> bool {
         matches!(self, Self::CatppuccinLatte | Self::SolarizedLight)
     }
@@ -74,7 +92,19 @@ impl ThemeName {
         }
     }
 
+    /// The theme, built once: asked for on every frame and by every draw function,
+    /// while building one checks and corrects dozens of colour pairs.
     pub fn theme(self) -> Theme {
+        static BUILT: std::sync::OnceLock<Vec<Theme>> = std::sync::OnceLock::new();
+        let built = BUILT.get_or_init(|| Self::ALL.iter().map(|name| name.built()).collect());
+        let index = Self::ALL
+            .iter()
+            .position(|name| *name == self)
+            .unwrap_or_default();
+        built[index]
+    }
+
+    fn built(self) -> Theme {
         match self {
             Self::Classic => classic(),
             Self::Gruvbox => build(
@@ -248,6 +278,10 @@ pub struct Theme {
     pub diff_meta_bg: Color,
     pub diff_code_fg: Color,
     pub diff_gutter_fg: Color,
+    /// Where a program's subtle panel grey lands: see [`panel_tone`].
+    pub panel_subtle: Color,
+    /// Where its deepest panel grey lands.
+    pub panel_raised: Color,
     pub ansi: [Color; 16],
     pub syntax_theme: &'static str,
 }
@@ -321,7 +355,59 @@ fn map_terminal_color(color: Color, theme: Theme, foreground: bool) -> Color {
         Color::LightMagenta => theme.ansi[13],
         Color::LightCyan => theme.ansi[14],
         Color::White => theme.ansi[15],
-        other => other,
+        other => panel_tone(other, theme),
+    }
+}
+
+/// How far apart a colour's channels may be for it still to count as a grey.
+/// Copilot's panel greys lean blue by up to 21; its accents are past 100.
+const GREY_CHANNEL_SPREAD: u8 = 28;
+/// A grey this far from the canvas end of the scale is a subtle panel: the fill
+/// behind a prompt or inline code.
+const SUBTLE_PANEL_DEPTH: u16 = 20;
+/// Past this a grey is text or an icon, not a fill, and is left as painted.
+const DEEPEST_PANEL_DEPTH: u16 = 80;
+
+/// Bring a program's own panel greys into the theme.
+///
+/// Copilot paints nearly everything in fixed colours of its own, picked for a
+/// black or white terminal: the fill behind a prompt, inline code and its input
+/// box is a blue-grey whatever the theme. On Solarized that is a grey slab on a
+/// teal canvas. Those fills, and the borders drawn in the same tones, are moved
+/// onto the theme's own steps away from its canvas, keeping how far each stood
+/// from the program's idea of the canvas.
+///
+/// Only greys near the canvas end are touched. Text greys stay as painted, since
+/// a program chose them for contrast and a theme's own text can be dimmer; and
+/// anything with a hue stays, which is what keeps a code viewer's syntax colours
+/// and a diff's red and green.
+fn panel_tone(color: Color, theme: Theme) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index @ 16..) => xterm_rgb(index),
+        _ => return color,
+    };
+    if r.max(g).max(b) - r.min(g).min(b) > GREY_CHANNEL_SPREAD {
+        return color;
+    }
+    let level = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
+    let depth = if theme.is_light { 255 - level } else { level };
+    if depth > DEEPEST_PANEL_DEPTH {
+        return color;
+    }
+    if depth <= SUBTLE_PANEL_DEPTH {
+        blend(
+            theme.background,
+            theme.panel_subtle,
+            depth * 100 / SUBTLE_PANEL_DEPTH,
+        )
+    } else {
+        let span = DEEPEST_PANEL_DEPTH - SUBTLE_PANEL_DEPTH;
+        blend(
+            theme.panel_subtle,
+            theme.panel_raised,
+            (depth - SUBTLE_PANEL_DEPTH) * 100 / span,
+        )
     }
 }
 
@@ -358,52 +444,165 @@ impl Palette {
     }
 }
 
+/// The colours the real Copilot paints with, read off its screen under a dark and
+/// a light CST theme (1.0.112 to 1.0.114). It follows the appearance CST reports
+/// and nothing else about the theme, so these are what every theme has to live
+/// with. `.claude/skills/theme-review` says how to refresh them.
+pub(crate) struct CopilotColours {
+    /// The fills behind a prompt, inline code and the input box.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub panels: &'static [Color],
+    pub text: &'static [Color],
+    pub muted: &'static [Color],
+}
+
+pub(crate) const COPILOT_ON_DARK: CopilotColours = CopilotColours {
+    panels: &[
+        rgb(0x14, 0x1b, 0x22),
+        rgb(0x23, 0x26, 0x2c),
+        rgb(0x26, 0x2c, 0x36),
+    ],
+    text: &[rgb(0xf0, 0xf6, 0xfc), rgb(0xd3, 0xd9, 0xdf)],
+    muted: &[rgb(0x91, 0x98, 0xa1)],
+};
+
+pub(crate) const COPILOT_ON_LIGHT: CopilotColours = CopilotColours {
+    panels: &[rgb(0xe8, 0xe9, 0xeb)],
+    text: &[rgb(0x1f, 0x23, 0x28)],
+    muted: &[rgb(0x59, 0x63, 0x6e), rgb(0x6e, 0x77, 0x81)],
+};
+
+pub(crate) const fn copilot_colours(is_light: bool) -> CopilotColours {
+    if is_light {
+        COPILOT_ON_LIGHT
+    } else {
+        COPILOT_ON_DARK
+    }
+}
+
+/// Text somebody reads, by the usual 4.5 rule.
+pub(crate) const READ: f64 = 4.5;
+/// Secondary text, marks and coloured words: findable, not for reading at length.
+pub(crate) const SEEN: f64 = 3.0;
+
+/// Move `colour` towards `target`, no further than it takes for every pair in
+/// `against` to reach its contrast, where `colour` is one side of each pair.
+///
+/// This is how a palette copied faithfully from its author is made to work in
+/// places the author never put it: a comment grey on a raised panel, a pastel
+/// yellow as text on a light canvas. A colour that already works is returned
+/// untouched, so a palette shows its own colours wherever they can be told apart.
+fn moved_until(colour: Color, target: Color, against: &[(Color, f64)]) -> Color {
+    const STEPS: u16 = 20;
+    for step in 0..=STEPS {
+        let candidate = blend(colour, target, step * 100 / STEPS);
+        if against
+            .iter()
+            .all(|(other, least)| contrast_ratio(candidate, *other) >= *least)
+        {
+            return candidate;
+        }
+    }
+    target
+}
+
 fn build(name: ThemeName, p: Palette) -> Theme {
-    let ansi = [
-        if name.is_light() { p.text } else { p.surface },
-        p.error,
-        p.success,
-        p.warning,
-        p.accent,
-        p.accent,
-        p.accent_alt,
-        p.text,
+    let is_light = name.is_light();
+    // Fills give way to the text on them: a panel too close to the text goes back
+    // towards the canvas, where the text is known to read.
+    let chrome = moved_until(p.chrome, p.bg, &[(p.text, READ)]);
+    let surface = moved_until(p.surface, p.bg, &[(p.text, READ)]);
+    // Everything drawn as text gives way to what it is drawn on, towards the main
+    // text colour.
+    let on_canvas = [(p.bg, SEEN)];
+    let muted = moved_until(
         p.muted,
-        p.error,
-        p.success,
-        p.warning,
-        p.accent,
-        p.accent,
-        p.accent_alt,
+        p.text,
+        &[(p.bg, SEEN), (chrome, SEEN), (surface, SEEN)],
+    );
+    let accent = moved_until(p.accent, p.text, &on_canvas);
+    let accent_alt = moved_until(p.accent_alt, p.text, &on_canvas);
+    let success = moved_until(p.success, p.text, &on_canvas);
+    let warning = moved_until(p.warning, p.text, &on_canvas);
+    let error = moved_until(p.error, p.text, &on_canvas);
+
+    let diff_row = |tint: Color, percent: u16| {
+        moved_until(blend(p.bg, tint, percent), p.bg, &[(p.text, READ)])
+    };
+    let diff_add_bg = diff_row(success, if is_light { 18 } else { 25 });
+    let diff_delete_bg = diff_row(error, if is_light { 16 } else { 25 });
+    let diff_hunk_bg = diff_row(accent, if is_light { 14 } else { 30 });
+    let diff_gutter_fg = moved_until(
+        muted,
+        p.text,
+        &[
+            (diff_add_bg, SEEN),
+            (diff_delete_bg, SEEN),
+            (diff_hunk_bg, SEEN),
+            (chrome, SEEN),
+        ],
+    );
+
+    // The tones a program's own panel greys are moved onto. What Copilot writes on
+    // its panels is fixed, so the panels give way: back towards the canvas until
+    // its text and its secondary text can both be read on them.
+    let copilot = copilot_colours(is_light);
+    let copilot_writes: Vec<(Color, f64)> = copilot
+        .text
+        .iter()
+        .map(|colour| (*colour, READ))
+        .chain(copilot.muted.iter().map(|colour| (*colour, SEEN)))
+        .collect();
+    let panel_subtle = moved_until(surface, p.bg, &copilot_writes);
+    let panel_raised = moved_until(blend(surface, muted, 50), p.bg, &copilot_writes);
+
+    let ansi = [
+        if is_light { p.text } else { surface },
+        error,
+        success,
+        warning,
+        accent,
+        accent,
+        accent_alt,
+        p.text,
+        muted,
+        error,
+        success,
+        warning,
+        accent,
+        accent,
+        accent_alt,
         p.text,
     ];
     Theme {
         name,
-        is_light: name.is_light(),
+        is_light,
         background: p.bg,
-        chrome_bg: p.chrome,
-        surface: p.surface,
+        chrome_bg: chrome,
+        surface,
         text: p.text,
-        muted: p.muted,
-        accent: p.accent,
-        accent_alt: p.accent_alt,
-        selection_fg: best_contrast_text(p.accent),
-        selection_bg: p.accent,
-        success: p.success,
-        warning: p.warning,
-        error: p.error,
-        info: p.accent_alt,
-        inactive: p.muted,
-        directory: p.accent_alt,
+        muted,
+        accent,
+        accent_alt,
+        selection_fg: best_contrast_text(accent),
+        selection_bg: accent,
+        success,
+        warning,
+        error,
+        info: accent_alt,
+        inactive: muted,
+        directory: accent_alt,
         diff_context_bg: p.bg,
-        diff_add_bg: blend(p.bg, p.success, if name.is_light() { 18 } else { 25 }),
-        diff_delete_bg: blend(p.bg, p.error, if name.is_light() { 16 } else { 25 }),
-        diff_hunk_bg: blend(p.bg, p.accent, if name.is_light() { 14 } else { 30 }),
-        diff_meta_bg: p.chrome,
+        diff_add_bg,
+        diff_delete_bg,
+        diff_hunk_bg,
+        diff_meta_bg: chrome,
         diff_code_fg: p.text,
-        diff_gutter_fg: p.muted,
+        diff_gutter_fg,
+        panel_subtle,
+        panel_raised,
         ansi,
-        syntax_theme: if name.is_light() {
+        syntax_theme: if is_light {
             "inspired-github"
         } else {
             "dracula"
@@ -437,6 +636,8 @@ fn classic() -> Theme {
         diff_meta_bg: rgb(31, 31, 42),
         diff_code_fg: rgb(205, 214, 244),
         diff_gutter_fg: rgb(108, 112, 134),
+        panel_subtle: Color::Reset,
+        panel_raised: Color::Reset,
         ansi: [
             Color::Black,
             Color::Red,
@@ -628,6 +829,228 @@ mod tests {
                 name.label(),
                 theme.syntax_theme
             );
+        }
+    }
+
+    /// One pair of colours that meet on screen, and how far apart they must be.
+    struct Pair {
+        what: String,
+        ratio: f64,
+        least: f64,
+    }
+
+    /// Every pair of colours a theme puts together, in CST's own screens and in
+    /// what a program in a pane paints through it.
+    fn pairs(theme: Theme) -> Vec<Pair> {
+        let mut pairs = Vec::new();
+        let mut pair = |what: String, front: Color, back: Color, least: f64| {
+            pairs.push(Pair {
+                what,
+                ratio: contrast_ratio(front, back),
+                least,
+            });
+        };
+        for (name, back) in [
+            ("background", theme.background),
+            ("chrome", theme.chrome_bg),
+            ("surface", theme.surface),
+        ] {
+            pair(format!("text on {name}"), theme.text, back, READ);
+            pair(format!("muted on {name}"), theme.muted, back, SEEN);
+        }
+        pair(
+            "selection".to_string(),
+            theme.selection_fg,
+            theme.selection_bg,
+            READ,
+        );
+        for (name, front) in [
+            ("accent", theme.accent),
+            ("accent_alt", theme.accent_alt),
+            ("success", theme.success),
+            ("warning", theme.warning),
+            ("error", theme.error),
+            ("info", theme.info),
+            ("directory", theme.directory),
+            ("inactive", theme.inactive),
+        ] {
+            pair(
+                format!("{name} on background"),
+                front,
+                theme.background,
+                SEEN,
+            );
+        }
+        for (name, back) in [
+            ("added", theme.diff_add_bg),
+            ("deleted", theme.diff_delete_bg),
+            ("hunk", theme.diff_hunk_bg),
+            ("meta", theme.diff_meta_bg),
+        ] {
+            pair(
+                format!("diff code on {name}"),
+                theme.diff_code_fg,
+                back,
+                READ,
+            );
+            pair(
+                format!("diff gutter on {name}"),
+                theme.diff_gutter_fg,
+                back,
+                SEEN,
+            );
+        }
+        // The sixteen colours a program has, as text on the canvas. The one that
+        // stands for the canvas itself is left out: black on a dark theme, and the
+        // two whites on a light one where the palette keeps them light.
+        for (index, colour) in theme.ansi.iter().enumerate() {
+            let stands_for_canvas = if theme.is_light {
+                matches!(index, 7 | 15) && contrast_ratio(*colour, theme.background) < 1.6
+            } else {
+                index == 0
+            };
+            if stands_for_canvas {
+                continue;
+            }
+            let least = if matches!(index, 7 | 15) && !theme.is_light {
+                READ
+            } else {
+                SEEN
+            };
+            pair(
+                format!("ansi {index} on background"),
+                *colour,
+                theme.background,
+                least,
+            );
+        }
+        // What Copilot paints as text, on the canvas and on its panels once those
+        // are moved into the theme.
+        let copilot = if theme.is_light {
+            COPILOT_ON_LIGHT
+        } else {
+            COPILOT_ON_DARK
+        };
+        let hex = |colour: Color| {
+            let (r, g, b) = rgb_components(colour).unwrap_or_default();
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let mut backs = vec![("canvas".to_string(), theme.background)];
+        for panel in copilot.panels {
+            backs.push((
+                format!("its panel {}", hex(*panel)),
+                map_terminal_color(*panel, theme, false),
+            ));
+        }
+        for (name, back) in backs {
+            for text in copilot.text {
+                pair(
+                    format!("Copilot text {} on {name}", hex(*text)),
+                    *text,
+                    back,
+                    READ,
+                );
+            }
+            for muted in copilot.muted {
+                pair(
+                    format!("Copilot muted {} on {name}", hex(*muted)),
+                    *muted,
+                    back,
+                    SEEN,
+                );
+            }
+        }
+        pairs
+    }
+
+    fn named_themes() -> impl Iterator<Item = Theme> {
+        ThemeName::ALL
+            .into_iter()
+            .filter(|name| *name != ThemeName::Classic)
+            .map(ThemeName::theme)
+    }
+
+    #[test]
+    fn every_pair_of_colours_a_theme_puts_together_can_be_told_apart() {
+        // A palette copied faithfully from its author can still put two of its
+        // colours together in a way the author never did. This is the half of the
+        // theme review a machine can do; the pictures are the other half.
+        let mut failures = Vec::new();
+        for theme in named_themes() {
+            for pair in pairs(theme) {
+                if pair.ratio < pair.least {
+                    failures.push(format!(
+                        "{}: {} is {:.2}, needs {:.1}",
+                        theme.name.label(),
+                        pair.what,
+                        pair.ratio,
+                        pair.least
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn panel_greys_take_the_tones_of_the_theme_and_hues_are_left_alone() {
+        for theme in named_themes() {
+            let copilot = if theme.is_light {
+                COPILOT_ON_LIGHT
+            } else {
+                COPILOT_ON_DARK
+            };
+            for panel in copilot.panels {
+                let mapped = map_terminal_color(*panel, theme, false);
+                assert_ne!(mapped, *panel, "{}", theme.name.label());
+                assert_eq!(
+                    mapped,
+                    map_terminal_color(*panel, theme, true),
+                    "a box edge drawn in the colour of the panel has to match its fill"
+                );
+            }
+            // Text greys and anything with a hue pass through.
+            for kept in copilot.text.iter().chain(copilot.muted) {
+                assert_eq!(map_terminal_color(*kept, theme, true), *kept);
+            }
+            for kept in [rgb(0x09, 0x69, 0xda), rgb(18, 52, 31), Color::Indexed(42)] {
+                assert_eq!(map_terminal_color(kept, theme, false), kept);
+            }
+        }
+        // The canvas a program assumes becomes the canvas of the theme.
+        let dark = ThemeName::SolarizedDark.theme();
+        assert_eq!(
+            map_terminal_color(rgb(0, 0, 0), dark, false),
+            dark.background
+        );
+        assert_eq!(
+            map_terminal_color(Color::Indexed(232), dark, false),
+            blend(dark.background, dark.panel_subtle, 40)
+        );
+    }
+
+    #[test]
+    #[ignore = "prints the colour pairs of every theme with their contrast, for the theme review"]
+    fn print_the_theme_audit() {
+        for theme in named_themes() {
+            println!(
+                "\n== {} ({})",
+                theme.name.label(),
+                if theme.is_light { "light" } else { "dark" }
+            );
+            for pair in pairs(theme) {
+                println!(
+                    "{} {:>5.2} (needs {:.1})  {}",
+                    if pair.ratio < pair.least {
+                        "FAIL"
+                    } else {
+                        "  ok"
+                    },
+                    pair.ratio,
+                    pair.least,
+                    pair.what
+                );
+            }
         }
     }
 

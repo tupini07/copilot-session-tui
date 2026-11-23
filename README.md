@@ -1126,7 +1126,8 @@ each theme live; `Home` and `End` jump to the first and last. `Enter` saves the
 selection; `Esc` closes the picker and restores the previously saved theme.
 
 The selection is the root-level `theme` field in the global `config.json`, using a
-kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`. Omitting it
+kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`;
+`copilot-session-tui themes` lists them. Omitting it
 selects `"classic"`, which preserves CST's original behavior and inherits terminal
 defaults where appropriate. Saved theme changes propagate to other running CST
 instances through the existing config watcher; an instance with an open Global
@@ -1139,6 +1140,17 @@ bold/dim/italic/underline/reverse modifiers are preserved. This lets Copilot's c
 viewer retain its explicit syntax and background colors; when it uses default text on
 an explicit code background, CST chooses readable contrasting text instead of washing
 the code out under a light theme.
+
+One kind of explicit color is not preserved: a grey used as a fill. Copilot draws the
+box behind your prompt, inline code and its input line in a fixed blue-grey chosen for
+a black or white terminal, which sits on a tinted canvas as a slab from another color
+scheme. Greys close to the canvas end of the scale are moved onto the theme's own
+panel tones. Greys used for text, and anything with a hue, stay as painted.
+
+A theme's colors are used as its author gave them wherever they can be told apart, and
+moved only as far as needed where they cannot: a comment grey that would vanish on a
+raised panel is brightened, a pastel that would wash out as text on a light canvas is
+deepened.
 
 Named CST themes also report their dark or light appearance through the standard terminal
 theme-query protocol. Copilot's default `github` palette therefore follows CST rather than
