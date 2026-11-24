@@ -33,7 +33,9 @@ while IFS=$'\t' read -r id appearance label; do
     script="$out/theme-$id.e2e"
     sed -e "s/@THEME@/$id/g" -e "s/@CARD@/$card/g" "$here/sheet.e2e.tmpl" > "$script"
     result=$(cargo run --quiet --manifest-path tools/e2e/Cargo.toml -- "$script" --no-build 2>&1 | grep '^RESULT' | tail -1)
-    shots=$(printf '%s\n' "${TMPDIR:-/tmp}/cst-e2e/theme-$id")
+    shots="${TMPDIR:-/tmp}/cst-e2e/theme-$id"
+    # Git Bash on Windows prints /tmp, which nothing outside it can open.
+    command -v cygpath >/dev/null 2>&1 && shots=$(cygpath -w "$shots")
     case "$result" in
         "RESULT: pass") echo "$id ($appearance): pass - $shots" ;;
         *) echo "$id ($appearance): $result - $shots/failed.png"; fail=1 ;;

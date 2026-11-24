@@ -324,6 +324,20 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// The colour of the cursor painted into a pane.
+    ///
+    /// The widget's own default is the palette's white, which a light theme's
+    /// palette keeps light: on Solarized Light the cursor was a cream block on a
+    /// cream canvas. The main text colour is the one every theme guarantees can be
+    /// seen there. Classic has no colours of its own and keeps the default.
+    pub fn cursor(self) -> Color {
+        if self.name == ThemeName::Classic {
+            Color::Gray
+        } else {
+            self.text
+        }
+    }
+
     pub fn contrast_text(self, background: Color) -> Color {
         let light = rgb(0xf8, 0xf8, 0xf2);
         let dark = rgb(0x1a, 0x1b, 0x26);
@@ -366,7 +380,9 @@ pub fn apply_terminal_theme(buffer: &mut Buffer, area: Rect, theme: Theme) {
                 // A palette colour was fitted to the canvas. On a fill the program
                 // chose itself, the dark green of a light theme on a dark diff row,
                 // it may not show, and then it gives way like the default text does.
-                if mapped != original_fg
+                // Only the sixteen: a panel grey drawn on a panel grey is a box's
+                // edge against its fill, and is meant to match it.
+                if is_palette_colour(original_fg)
                     && mapped_bg != theme.background
                     && contrast_ratio(mapped, mapped_bg) < SEEN
                 {
@@ -379,6 +395,11 @@ pub fn apply_terminal_theme(buffer: &mut Buffer, area: Rect, theme: Theme) {
             cell.bg = mapped_bg;
         }
     }
+}
+
+/// One of the sixteen colours a program asks for by number or by name.
+fn is_palette_colour(color: Color) -> bool {
+    !matches!(color, Color::Reset | Color::Rgb(..) | Color::Indexed(16..))
 }
 
 fn map_terminal_color(color: Color, theme: Theme, foreground: bool) -> Color {
@@ -539,17 +560,34 @@ fn build(name: ThemeName, file: &ThemeFile) -> Theme {
     let is_light = file.appearance == Appearance::Light;
     let colors = file.colors;
     // The main text is what every other colour is moved towards, so it is settled
-    // first: Solarized's own text on its own light canvas is under the line.
+    // first, against the canvas and both fills at once: Solarized's own text on its
+    // own light canvas is under the line, and less still on its panels. The text
+    // gives way before the fills do. Were the fills pulled back to where a weak
+    // text reads, the bars and popups would end up the colour of the canvas.
+    //
+    // It also has to stay clear of the secondary text, which on a light theme must
+    // itself be readable: text that only just reads leaves secondary text nowhere
+    // to be but on top of it.
     let strongest = if is_light {
         rgb(0, 0, 0)
     } else {
         rgb(255, 255, 255)
     };
+    let secondary = secondary_contrast(is_light);
+    let text_floor = READ.max(secondary * TEXT_OVER_SECONDARY);
     let p = Palette {
         bg: colors.background.0,
         chrome: colors.chrome.0,
         surface: colors.surface.0,
-        text: moved_until(colors.text.0, strongest, &[(colors.background.0, READ)]),
+        text: moved_until(
+            colors.text.0,
+            strongest,
+            &[
+                (colors.background.0, text_floor),
+                (colors.chrome.0, text_floor),
+                (colors.surface.0, text_floor),
+            ],
+        ),
         muted: colors.muted.0,
         accent: colors.accent.0,
         accent_alt: colors.accent_alt.0,
@@ -557,14 +595,14 @@ fn build(name: ThemeName, file: &ThemeFile) -> Theme {
         warning: colors.warning.0,
         error: colors.error.0,
     };
-    // Fills give way to the text on them: a panel too close to the text goes back
-    // towards the canvas, where the text is known to read.
+    // Only a fill that even the strongest text cannot be read on gives way itself,
+    // back towards the canvas.
     let chrome = moved_until(p.chrome, p.bg, &[(p.text, READ)]);
     let surface = moved_until(p.surface, p.bg, &[(p.text, READ)]);
     // Everything drawn as text gives way to what it is drawn on, towards the main
-    // text colour.
-    let on_canvas = [(p.bg, SEEN)];
-    let secondary = secondary_contrast(is_light);
+    // text colour. Accents are drawn on the canvas and, as a popup's headings and
+    // key hints, on the bars' tone.
+    let on_canvas = [(p.bg, SEEN), (chrome, SEEN)];
     let muted = moved_until(
         p.muted,
         p.text,
@@ -697,6 +735,15 @@ pub(crate) fn stands_for_canvas(index: usize, is_light: bool) -> bool {
         index == 0
     }
 }
+
+/// How much better the main text must read than the secondary text has to, so
+/// the two are told apart at a glance.
+pub(crate) const TEXT_OVER_SECONDARY: f64 = 1.25;
+
+/// How far a bar or panel must stand from the canvas, where its file made it a
+/// different colour: enough for a popup to have an edge.
+#[cfg(test)]
+pub(crate) const FILL_APART: f64 = 1.04;
 
 /// How well secondary text must show. A light theme is what somebody switches to
 /// in daylight, where the 3.0 that does for a dim room washes out.
@@ -1053,6 +1100,22 @@ mod tests {
                 SEEN,
             );
         }
+        pair(
+            "cursor on background".to_string(),
+            map_terminal_color(theme.cursor(), theme, true),
+            theme.background,
+            READ,
+        );
+        // A popup's headings and key hints are accents on the bars' tone.
+        for (name, front) in [
+            ("accent", theme.accent),
+            ("accent_alt", theme.accent_alt),
+            ("success", theme.success),
+            ("warning", theme.warning),
+            ("error", theme.error),
+        ] {
+            pair(format!("{name} on chrome"), front, theme.chrome_bg, SEEN);
+        }
         for (name, back) in [
             ("added", theme.diff_add_bg),
             ("deleted", theme.diff_delete_bg),
@@ -1123,6 +1186,15 @@ mod tests {
                 );
             }
         }
+        // Not two colours meeting on screen, but the same kind of floor: the main
+        // text must read clearly better than the secondary text, or they are one
+        // colour with two names.
+        pairs.push(Pair {
+            what: "text reads better than muted (ratio of their contrasts)".to_string(),
+            ratio: contrast_ratio(theme.text, theme.background)
+                / contrast_ratio(theme.muted, theme.background),
+            least: 1.1,
+        });
         pairs
     }
 
@@ -1153,6 +1225,70 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_theme_keeps_the_bars_and_panels_its_file_set_apart_from_the_canvas() {
+        // The first builder made weak text readable by pulling the fills back to
+        // the canvas. Every pair passed, and Tokyo Night Day's popups were the
+        // colour of what was under them.
+        for (name, text) in FILES {
+            let file: ThemeFile = serde_json::from_str(text).unwrap();
+            let theme = name.theme();
+            for (what, given, built) in [
+                ("chrome", file.colors.chrome.0, theme.chrome_bg),
+                ("surface", file.colors.surface.0, theme.surface),
+            ] {
+                if contrast_ratio(given, file.colors.background.0) < FILL_APART {
+                    continue;
+                }
+                assert!(
+                    contrast_ratio(built, theme.background) >= FILL_APART,
+                    "{}: {what} is {:.3} from the canvas",
+                    name.id(),
+                    contrast_ratio(built, theme.background)
+                );
+                assert_eq!(
+                    built,
+                    given,
+                    "{}: {what} is as its file gives it",
+                    name.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_edge_in_a_panel_grey_still_matches_the_fill_beside_it() {
+        // Copilot draws the top and bottom of its prompt box as half blocks in the
+        // panel's colour, on the canvas, and writes on the panel in other greys.
+        // The rule that makes a palette colour give way on a fill must not touch
+        // these: they are not palette colours, and an edge is meant to match.
+        for theme in named_themes() {
+            let copilot = copilot_colours(theme.is_light);
+            let panel = copilot.panels[0];
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+            // The edge: panel colour as text, on the canvas.
+            buffer[(0, 0)].set_style(ratatui::style::Style::default().fg(panel));
+            // The fill, with one of Copilot's own text greys on it.
+            buffer[(1, 0)].set_style(
+                ratatui::style::Style::default()
+                    .fg(copilot.muted[0])
+                    .bg(panel),
+            );
+            // A panel grey on another panel grey.
+            let other = copilot.panels[copilot.panels.len() - 1];
+            buffer[(2, 0)].set_style(ratatui::style::Style::default().fg(panel).bg(other));
+
+            let area = buffer.area;
+            apply_terminal_theme(&mut buffer, area, theme);
+
+            let fill = map_terminal_color(panel, theme, false);
+            assert_eq!(buffer[(0, 0)].fg, fill, "{}", theme.name.label());
+            assert_eq!(buffer[(1, 0)].bg, fill, "{}", theme.name.label());
+            assert_eq!(buffer[(1, 0)].fg, copilot.muted[0]);
+            assert_eq!(buffer[(2, 0)].fg, fill, "{}", theme.name.label());
+        }
     }
 
     #[test]
@@ -1361,6 +1497,15 @@ mod tests {
     fn terminal_mapping_stays_below_a_frame_budget_at_large_pane_size() {
         let area = Rect::new(0, 0, 240, 70);
         let mut buffer = Buffer::empty(area);
+        // The dearest cell there is: a palette colour on a palette fill it cannot be
+        // seen on, which is measured and then moved, on every cell of the screen.
+        for cell in &mut buffer.content {
+            cell.set_style(
+                ratatui::style::Style::default()
+                    .fg(Color::Indexed(2))
+                    .bg(Color::Indexed(10)),
+            );
+        }
         let started = std::time::Instant::now();
         for _ in 0..100 {
             apply_terminal_theme(&mut buffer, area, ThemeName::CatppuccinLatte.theme());

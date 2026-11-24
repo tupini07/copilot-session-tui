@@ -99,3 +99,17 @@ wait_for Next favorite theme
 press enter
 wait_for Theme: Tokyo Night Day (favorite 2 of 2)
 dump 11-flipped-back
+
+# The switch from inside a session, which is where it is mostly used: the pane
+# repaints in the other theme and the status line says which.
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b ctrl+b
+wait_for Command Search
+type flip
+wait_for Next favorite theme
+press enter
+wait_for Theme: Nord (favorite 1 of 2)
+expect Fake Copilot is idling
+expect_not Theme Picker
+dump 12-flipped-in-session

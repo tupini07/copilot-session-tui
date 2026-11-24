@@ -348,10 +348,13 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
 ///
 /// The real one uses fixed colours of its own, one set when the terminal says it is
 /// dark and another when it says light, and next to nothing from the terminal's
-/// palette. These are those colours, read off its screen (1.0.114), laid out as its
-/// screen is: a prompt in a filled box with half-block edges, an answer with inline
+/// palette. These are those colours, laid out as its screen is: a prompt in a filled box with half-block edges, an answer with inline
 /// code, a link, secondary text and a code block. Above them, the sixteen palette
 /// colours and the grey ramp, for a program that does use the palette.
+///
+/// The fills, text and secondary greys, the link and the accent fill were read off
+/// the real screen (1.0.114). The light border and the light `+105` green were not
+/// on that screen and are Primer's published light values, which the rest match.
 fn colour_card(light: bool) {
     let fg = |hex: u32| {
         format!(

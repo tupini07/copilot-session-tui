@@ -430,9 +430,11 @@ fn draw_chat(f: &mut Frame, app: &App, slot: &ChatSlot, in_split: bool) {
     // the write traded that for a cursor that was hidden more often than not. A painted
     // cursor is just part of the frame, which is how the terminal and scratchpad panes
     // have always drawn theirs.
-    let cursor = Cursor::default().visibility(
-        focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
-    );
+    let cursor = Cursor::default()
+        .style(Style::default().fg(theme.cursor()))
+        .visibility(
+            focused && app.workspace_focus == crate::app::WorkspaceFocus::Chat && !starting,
+        );
     pane.with_screen(|screen| {
         let widget = PseudoTerminal::new(screen).cursor(cursor);
         f.render_widget(widget, terminal_area);
