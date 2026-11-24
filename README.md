@@ -1116,17 +1116,28 @@ same config:
 
 #### Themes
 
-CST bundles ten themes in picker order: **CST Classic**, **Gruvbox**, **Nord**,
-**Dracula**, **Catppuccin Mocha**, **Palenight**, **Solarized Dark**,
-**Tokyo Night**, **Catppuccin Latte**, and **Solarized Light**. The quickest way to
+CST bundles twenty themes. **CST Classic** takes on your terminal's own colors.
+The dark ones are **Gruvbox**, **Nord**, **Dracula**, **Catppuccin Mocha**,
+**Palenight**, **Solarized Dark**, **Tokyo Night**, **Nu Disco**, **One Dark**,
+**Rosé Pine**, **Synthwave '84**, **Everforest Dark** and **Kanagawa**; the light ones
+are **Catppuccin Latte**, **Solarized Light**, **Gruvbox Light**, **GitHub Light**,
+**Rosé Pine Dawn** and **Tokyo Night Day**. The quickest way to
 the picker is Command Search: press the prefix twice, type `theme`, and press `Enter`.
 It opens over the session or the list you were looking at and returns there. It is
 also the **Theme** row of Global Settings (`,`). Move through the picker to preview
 each theme live; `Home` and `End` jump to the first and last. `Enter` saves the
 selection; `Esc` closes the picker and restores the previously saved theme.
 
+Press `f` on a theme to star it. Starred themes are listed first, under **Favorites**,
+and the star is saved at once (`Esc` restores your theme, not your stars). The Command
+Search line **Next favorite theme** (type `flip`) switches to the next starred theme
+and saves it, with no popup: star one dark theme and one light one and it is the switch
+between them, for a laptop carried out into daylight and back. With nothing starred it
+opens the picker. Stars are the `favorite_themes` list in `config.json`.
+
 The selection is the root-level `theme` field in the global `config.json`, using a
-kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`. Omitting it
+kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`;
+`copilot-session-tui themes` lists them. Omitting it
 selects `"classic"`, which preserves CST's original behavior and inherits terminal
 defaults where appropriate. Saved theme changes propagate to other running CST
 instances through the existing config watcher; an instance with an open Global
@@ -1139,6 +1150,24 @@ bold/dim/italic/underline/reverse modifiers are preserved. This lets Copilot's c
 viewer retain its explicit syntax and background colors; when it uses default text on
 an explicit code background, CST chooses readable contrasting text instead of washing
 the code out under a light theme.
+
+One kind of explicit color is not preserved: a grey used as a fill. Copilot draws the
+box behind your prompt, inline code and its input line in a fixed blue-grey chosen for
+a black or white terminal, which sits on a tinted canvas as a slab from another color
+scheme. Greys close to the canvas end of the scale are moved onto the theme's own
+panel tones. Greys used for text, and anything with a hue, stay as painted.
+
+Each named theme is a small JSON file in `src/themes`, compiled into CST: ten colors
+with a part to play each (canvas, bars, panels, text, secondary text, two accents,
+success, warning, error), the sixteen colors a terminal program asks for by number, and
+where they were taken from. The colors come from each scheme's own published files.
+Adding a theme is one such file plus its name in `src/theme.rs`; CST does not yet read
+theme files from a folder of your own.
+
+A theme's colors are used as its author gave them wherever they can be told apart, and
+moved only as far as needed where they cannot: a comment grey that would vanish on a
+raised panel is brightened, a pastel that would wash out as text on a light canvas is
+deepened.
 
 Named CST themes also report their dark or light appearance through the standard terminal
 theme-query protocol. Copilot's default `github` palette therefore follows CST rather than

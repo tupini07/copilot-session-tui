@@ -128,9 +128,10 @@ pub(crate) fn choose_emoji(prompt: &str) -> String {
 /// in the folder named by the `--resume=<id>` CST passes.
 fn events_path(args: &[String]) -> Option<std::path::PathBuf> {
     let home = std::env::var_os("COPILOT_HOME")?;
-    let id = args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--resume=").or_else(|| arg.strip_prefix("--session-id=")))?;
+    let id = args.iter().find_map(|arg| {
+        arg.strip_prefix("--resume=")
+            .or_else(|| arg.strip_prefix("--session-id="))
+    })?;
     Some(
         std::path::PathBuf::from(home)
             .join("session-state")
@@ -144,7 +145,11 @@ fn now_stamp() -> String {
 }
 
 fn append_event(path: &std::path::Path, record: &str) {
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{record}");
     }
 }
@@ -189,7 +194,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             if let Some(path) = events_path {
                 append_event(
                     path,
-                    &format!(r#"{{"type":"assistant.turn_start","timestamp":"{}","data":{{}}}}"#, now_stamp()),
+                    &format!(
+                        r#"{{"type":"assistant.turn_start","timestamp":"{}","data":{{}}}}"#,
+                        now_stamp()
+                    ),
                 );
             }
             std::thread::sleep(Duration::from_millis(millis));
@@ -233,7 +241,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
                         .collect(),
                 ));
             }
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
             {
                 let _ = writeln!(file, "{record}");
             }
@@ -250,8 +261,10 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
                     r#"{{"type":"tool.execution_complete","data":{{"toolCallId":"{id}","result":{{"content":{}}}}}}}"#,
                     crate::telegram_stub::json_string(&format!("User responded: {}", rest.trim()))
                 );
-                if let Ok(mut file) =
-                    std::fs::OpenOptions::new().create(true).append(true).open(path)
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
                 {
                     let _ = writeln!(file, "{record}");
                 }
@@ -320,6 +333,9 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             }
             let _ = std::io::stdout().flush();
         }
+        "colors" => {
+            colour_card(rest.trim() == "light");
+        }
         "bell" => {
             print!("\x07");
             let _ = std::io::stdout().flush();
@@ -328,11 +344,132 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
     }
 }
 
+/// Paint what the real Copilot paints, for looking at a CST theme.
+///
+/// The real one uses fixed colours of its own, one set when the terminal says it is
+/// dark and another when it says light, and next to nothing from the terminal's
+/// palette. These are those colours, laid out as its screen is: a prompt in a filled box with half-block edges, an answer with inline
+/// code, a link, secondary text and a code block. Above them, the sixteen palette
+/// colours and the grey ramp, for a program that does use the palette.
+///
+/// The fills, text and secondary greys, the link and the accent fill were read off
+/// the real screen (1.0.114). The light border and the light `+105` green were not
+/// on that screen and are Primer's published light values, which the rest match.
+fn colour_card(light: bool) {
+    let fg = |hex: u32| {
+        format!(
+            "\x1b[38;2;{};{};{}m",
+            (hex >> 16) & 0xff,
+            (hex >> 8) & 0xff,
+            hex & 0xff
+        )
+    };
+    let bg = |hex: u32| {
+        format!(
+            "\x1b[48;2;{};{};{}m",
+            (hex >> 16) & 0xff,
+            (hex >> 8) & 0xff,
+            hex & 0xff
+        )
+    };
+    const RESET: &str = "\x1b[0m";
+    // panel, raised panel, border, text, bright text, muted, link, accent fill,
+    // string, keyword, added, bullet
+    let (panel, raised, border, text, bright, muted, link, fill, string, keyword, added, bullet) =
+        if light {
+            (
+                0xe8e9eb, 0xe8e9eb, 0xd1d9e0, 0x1f2328, 0x1f2328, 0x59636e, 0x0969da, 0x0969da,
+                0x0a3069, 0xcf222e, 0x1a7f37, 0x8534f3,
+            )
+        } else {
+            (
+                0x141b22, 0x262c36, 0x3d444d, 0xd3d9df, 0xf0f6fc, 0x9198a1, 0x4493f8, 0x0969da,
+                0xa5d6ff, 0xff7b72, 0x5fed83, 0x8534f3,
+            )
+        };
+    let mut out = String::from("\x1b[2J\x1b[H");
+    out.push_str("Colour card: default text, then the palette as text and as fills\r\n");
+    for index in 0..16 {
+        out.push_str(&format!("\x1b[38;5;{index}m {index:>2} "));
+    }
+    out.push_str(RESET);
+    out.push_str("\r\n");
+    for index in 0..16 {
+        out.push_str(&format!("\x1b[48;5;{index}m {index:>2} "));
+    }
+    out.push_str(RESET);
+    out.push_str("\r\n\x1b[1mbold\x1b[0m \x1b[2mdim\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m \x1b[7mreverse\x1b[0m  greys ");
+    for index in 232..=255 {
+        out.push_str(&format!("\x1b[48;5;{index}m  "));
+    }
+    out.push_str(RESET);
+    out.push_str("\r\n\r\n");
+
+    let width = 76;
+    out.push_str(&format!(
+        " {}{}{RESET}\r\n",
+        fg(panel),
+        "\u{2584}".repeat(width)
+    ));
+    let prompt = "  \u{276f} a prompt the user typed, in the filled box";
+    out.push_str(&format!(
+        " {}{}{prompt}{}{}{}15:30  {RESET}\r\n",
+        bg(panel),
+        fg(text),
+        " ".repeat(width - prompt.chars().count() - 7),
+        fg(muted),
+        bg(panel),
+    ));
+    out.push_str(&format!(
+        " {}{}{RESET}\r\n",
+        fg(panel),
+        "\u{2580}".repeat(width)
+    ));
+    out.push_str(&format!(
+        " {}\u{25cf}{RESET} {}Use {}{} print() {RESET}{} to show it, as in {}\x1b[4mthis example{RESET}{}.{RESET}\r\n",
+        fg(bullet),
+        fg(text),
+        bg(raised),
+        fg(bright),
+        fg(text),
+        fg(link),
+        fg(text),
+    ));
+    out.push_str(&format!(
+        "   {}2 reads \u{b7} 1 search{RESET}   {}{} Current {RESET} {}{} Sessions {RESET}\r\n",
+        fg(muted),
+        bg(fill),
+        fg(0xffffff),
+        bg(panel),
+        fg(text),
+    ));
+    out.push_str(&format!(
+        "   {}greeting{RESET} {}={RESET} {}\"Hello!\"{RESET}   {}# a comment{RESET}\r\n",
+        fg(text),
+        fg(keyword),
+        fg(string),
+        fg(muted),
+    ));
+    out.push_str(&format!(
+        "   {}Created{RESET} {}report.py{RESET} {}+105{RESET}\r\n",
+        fg(muted),
+        fg(text),
+        fg(added),
+    ));
+    out.push_str(&format!(
+        " {}{}{RESET}\r\n",
+        fg(border),
+        "\u{2500}".repeat(width)
+    ));
+    out.push_str("> ");
+    print!("{out}");
+    let _ = std::io::stdout().flush();
+}
+
 /// The question that is open, if one is: its tool call id and its choices. Set by
 /// `e2e:ask`, cleared by the answer. Every question gets a new id, because CST's
 /// lifecycle monitor ignores a start record whose id it has already seen.
-static OPEN_QUESTION: std::sync::Mutex<Option<(String, Vec<String>)>> =
-    std::sync::Mutex::new(None);
+static OPEN_QUESTION: std::sync::Mutex<Option<(String, Vec<String>)>> = std::sync::Mutex::new(None);
 static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The id of the question that is open, or of the last one asked.
@@ -386,11 +523,15 @@ fn answer_form(line: &str) -> Option<String> {
     let mut typed = String::new();
     let mut rest = line;
     while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("\x1b[A").or_else(|| rest.strip_prefix("\x1bOA")) {
+        if let Some(after) = rest
+            .strip_prefix("\x1b[A")
+            .or_else(|| rest.strip_prefix("\x1bOA"))
+        {
             highlight = highlight.saturating_sub(1);
             rest = after;
-        } else if let Some(after) =
-            rest.strip_prefix("\x1b[B").or_else(|| rest.strip_prefix("\x1bOB"))
+        } else if let Some(after) = rest
+            .strip_prefix("\x1b[B")
+            .or_else(|| rest.strip_prefix("\x1bOB"))
         {
             highlight = (highlight + 1).min(choices.len());
             rest = after;

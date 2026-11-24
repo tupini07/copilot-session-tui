@@ -1,0 +1,25 @@
+{
+  "name": "Everforest Dark",
+  "appearance": "dark",
+  "source": [
+    "https://raw.githubusercontent.com/sainnhe/everforest/master/autoload/everforest.vim",
+    "https://raw.githubusercontent.com/sainnhe/everforest/master/colors/everforest.vim",
+    "https://raw.githubusercontent.com/sainnhe/everforest/master/palette.md"
+  ],
+  "colors": {
+    "background": "#2d353b",
+    "chrome": "#343f44",
+    "surface": "#3d484d",
+    "text": "#d3c6aa",
+    "muted": "#859289",
+    "accent": "#a7c080",
+    "accent_alt": "#7fbbb3",
+    "success": "#a7c080",
+    "warning": "#dbbc7f",
+    "error": "#e67e80"
+  },
+  "ansi": [
+    "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+    "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa"
+  ]
+}

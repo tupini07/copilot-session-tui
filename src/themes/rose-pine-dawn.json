@@ -1,0 +1,23 @@
+{
+  "name": "Rosé Pine Dawn",
+  "appearance": "light",
+  "source": [
+    "https://raw.githubusercontent.com/rose-pine/alacritty/main/dist/rose-pine-dawn.toml"
+  ],
+  "colors": {
+    "background": "#faf4ed",
+    "chrome": "#fffaf3",
+    "surface": "#f2e9e1",
+    "text": "#575279",
+    "muted": "#9893a5",
+    "accent": "#907aa9",
+    "accent_alt": "#56949f",
+    "success": "#286983",
+    "warning": "#ea9d34",
+    "error": "#b4637a"
+  },
+  "ansi": [
+    "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+    "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279"
+  ]
+}

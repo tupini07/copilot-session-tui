@@ -1,0 +1,25 @@
+{
+  "name": "Kanagawa",
+  "appearance": "dark",
+  "source": [
+    "https://raw.githubusercontent.com/rebelot/kanagawa.nvim/master/extras/alacritty/kanagawa_wave.toml",
+    "https://raw.githubusercontent.com/rebelot/kanagawa.nvim/master/lua/kanagawa/colors.lua",
+    "https://raw.githubusercontent.com/rebelot/kanagawa.nvim/master/lua/kanagawa/themes.lua"
+  ],
+  "colors": {
+    "background": "#1f1f28",
+    "chrome": "#16161d",
+    "surface": "#2a2a37",
+    "text": "#dcd7ba",
+    "muted": "#727169",
+    "accent": "#7e9cd8",
+    "accent_alt": "#7aa89f",
+    "success": "#98bb6c",
+    "warning": "#ff9e3b",
+    "error": "#e82424"
+  },
+  "ansi": [
+    "#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+    "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "Gruvbox Light",
+  "appearance": "light",
+  "source": [
+    "https://raw.githubusercontent.com/morhetz/gruvbox/master/colors/gruvbox.vim",
+    "https://raw.githubusercontent.com/morhetz/gruvbox-contrib/master/termite/gruvbox-light"
+  ],
+  "colors": {
+    "background": "#fbf1c7",
+    "chrome": "#ebdbb2",
+    "surface": "#d5c4a1",
+    "text": "#3c3836",
+    "muted": "#928374",
+    "accent": "#af3a03",
+    "accent_alt": "#076678",
+    "success": "#79740e",
+    "warning": "#b57614",
+    "error": "#9d0006"
+  },
+  "ansi": [
+    "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
+    "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836"
+  ]
+}

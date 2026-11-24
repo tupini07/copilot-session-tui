@@ -26,7 +26,9 @@ fn draw_screen(frame: &mut Frame, screen: &vt100::Screen, focused: bool, area: R
     fill_area(frame.buffer_mut(), area, theme.background);
     frame.render_widget(block, area);
 
-    let cursor = Cursor::default().visibility(focused);
+    let cursor = Cursor::default()
+        .style(ratatui::style::Style::default().fg(theme.cursor()))
+        .visibility(focused);
     let widget = PseudoTerminal::new(screen).cursor(cursor);
     frame.render_widget(widget, terminal_area);
     apply_terminal_theme(frame.buffer_mut(), terminal_area, theme);

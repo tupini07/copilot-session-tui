@@ -422,9 +422,24 @@ impl ThemePicker {
         ThemeName::ALL[self.selected.min(ThemeName::ALL.len() - 1)]
     }
 
-    pub fn move_by(&mut self, amount: isize) {
-        let selected = (self.selected as isize).saturating_add(amount);
-        self.selected = selected.clamp(0, ThemeName::ALL.len() as isize - 1) as usize;
+    /// Move the selection `amount` rows through `order`, the themes as the picker
+    /// lists them, stopping at either end. `selected` stays what it always was, a
+    /// theme's place in [`ThemeName::ALL`]: which theme, not which row, so starring a
+    /// theme moves its row without moving the selection off it.
+    pub fn move_by(&mut self, amount: isize, order: &[ThemeName]) {
+        let selected = self.selected_theme();
+        let row = order
+            .iter()
+            .position(|theme| *theme == selected)
+            .unwrap_or_default();
+        let last = order.len().saturating_sub(1) as isize;
+        let row = (row as isize).saturating_add(amount).clamp(0, last) as usize;
+        if let Some(theme) = order.get(row) {
+            self.selected = ThemeName::ALL
+                .iter()
+                .position(|candidate| candidate == theme)
+                .unwrap_or_default();
+        }
     }
 }
 
@@ -1752,12 +1767,127 @@ impl App {
         self.theme_picker = None;
         self.theme_picker_alone = false;
         self.telegram_wizard = None;
+        self.note_settings_as_read();
+        self.mode = Mode::Settings;
+    }
+
+    /// Remember which saved settings the ones in memory were read from, so a save
+    /// can tell whether another CST has written since and refuse to overwrite it.
+    /// Call after [`Self::request_config_reload`], before changing anything.
+    fn note_settings_as_read(&mut self) {
         let current = config::config_revision(&self.global_config_path).ok();
         self.settings_config_revision = (current == self.applied_config_revision)
             .then_some(current)
             .flatten();
         self.config_reload_pending = false;
-        self.mode = Mode::Settings;
+    }
+
+    /// The starred themes this CST knows, in the order the picker lists them.
+    pub fn favorite_themes(&self) -> Vec<ThemeName> {
+        ThemeName::ALL
+            .into_iter()
+            .filter(|theme| self.config.favorite_themes.contains(&theme.id()))
+            .collect()
+    }
+
+    /// Every theme in the order the picker lists them: the starred ones first, then
+    /// the rest, each run in [`ThemeName::ALL`]'s order.
+    pub fn theme_picker_order(&self) -> Vec<ThemeName> {
+        let favorites = self.favorite_themes();
+        let rest = ThemeName::ALL
+            .into_iter()
+            .filter(|theme| !favorites.contains(theme));
+        favorites.iter().copied().chain(rest).collect()
+    }
+
+    /// Star or unstar the theme the picker is on, and save that at once.
+    ///
+    /// At once, not with Enter: Esc in the picker means "keep my old theme", and
+    /// taking a star back with it would be a surprise. The theme being previewed is
+    /// not saved by this; the saved theme is still the one the picker opened on.
+    pub fn toggle_theme_picker_favorite(&mut self) -> anyhow::Result<()> {
+        let Some(picker) = self.theme_picker else {
+            return Ok(());
+        };
+        let id = picker.selected_theme().id();
+        let before = self.config.favorite_themes.clone();
+        if before.contains(&id) {
+            self.config.favorite_themes.retain(|name| *name != id);
+        } else {
+            self.config.favorite_themes.push(id);
+        }
+        self.theme_save_reloaded_external = false;
+        let saved = self.save_global_settings();
+        if saved.is_err() && !self.theme_save_reloaded_external {
+            self.config.favorite_themes = before;
+        }
+        // "No favorite themes yet" may be what opened the picker, and is now untrue.
+        self.status_message = None;
+        saved
+    }
+
+    /// Switch to the starred theme after the current one, and save it.
+    ///
+    /// With a dark and a light theme starred this is the switch between them, which
+    /// is what it is for: carrying a laptop outdoors and back. Saved, so every CST
+    /// that is running follows.
+    pub fn next_favorite_theme(&mut self) {
+        let favorites = self.favorite_themes();
+        if favorites.is_empty() {
+            self.choose_theme();
+            self.status_message =
+                Some("No favorite themes yet. Press f on a theme to star it".to_string());
+            return;
+        }
+        self.request_config_reload();
+        self.note_settings_as_read();
+        let favorites = self.favorite_themes();
+        let current = self.config.theme;
+        let next = match favorites.iter().position(|theme| *theme == current) {
+            Some(at) => favorites[(at + 1) % favorites.len()],
+            None => match favorites.first() {
+                Some(first) => *first,
+                None => return,
+            },
+        };
+        if next == current {
+            self.status_message = Some(format!(
+                "{} is the only favorite theme. Star another with f in Choose theme",
+                current.label()
+            ));
+            return;
+        }
+        let saved = self.save_theme(next);
+        self.refresh_theme_dependents();
+        self.status_message = Some(match saved {
+            Ok(()) => {
+                let place = favorites
+                    .iter()
+                    .position(|theme| *theme == next)
+                    .unwrap_or_default();
+                format!(
+                    "Theme: {} (favorite {} of {})",
+                    next.label(),
+                    place + 1,
+                    favorites.len()
+                )
+            }
+            Err(error) => format!("Failed to save theme: {error}"),
+        });
+    }
+
+    /// Make `selected` the saved theme. If the save is refused the old theme is put
+    /// back, unless the refusal was because another CST had written the settings, in
+    /// which case what it wrote has already been taken up and is left alone.
+    fn save_theme(&mut self, selected: ThemeName) -> anyhow::Result<()> {
+        let previous = self.config.theme;
+        self.config.theme = selected;
+        self.theme_save_reloaded_external = false;
+        let saved = self.save_global_settings();
+        if saved.is_err() && !self.theme_save_reloaded_external {
+            self.config.theme = previous;
+        }
+        saved
     }
 
     pub fn theme_name(&self) -> ThemeName {
@@ -1813,8 +1943,9 @@ impl App {
     }
 
     pub fn move_theme_picker(&mut self, amount: isize) {
+        let order = self.theme_picker_order();
         if let Some(picker) = self.theme_picker.as_mut() {
-            picker.move_by(amount);
+            picker.move_by(amount, &order);
             self.refresh_theme_dependents();
         }
     }
@@ -1831,11 +1962,7 @@ impl App {
         let Some(picker) = self.theme_picker else {
             return Ok(());
         };
-        let selected = picker.selected_theme();
-        let previous = self.config.theme;
-        self.config.theme = selected;
-        self.theme_save_reloaded_external = false;
-        match self.save_global_settings() {
+        match self.save_theme(picker.selected_theme()) {
             Ok(()) => {
                 self.theme_picker = None;
                 self.theme_picker_hits.clear();
@@ -1848,8 +1975,6 @@ impl App {
                     if let Some(picker) = self.theme_picker.as_mut() {
                         picker.original = self.config.theme;
                     }
-                } else {
-                    self.config.theme = previous;
                 }
                 self.refresh_theme_dependents();
                 Err(error)

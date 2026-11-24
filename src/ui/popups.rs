@@ -2516,7 +2516,9 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
         return;
     };
     let theme = app.theme();
-    let area = centered_rect(54, 68, f.area());
+    // Tall, so that as many of the themes as the screen allows show at once: at
+    // 30 rows that is all but a handful of twenty.
+    let area = centered_rect(54, 86, f.area());
     f.render_widget(Clear, area);
     fill_area(f.buffer_mut(), area, theme.chrome_bg);
     let picker_style = Style::default().fg(theme.text).bg(theme.chrome_bg);
@@ -2531,14 +2533,27 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let classic = [ThemeName::Classic];
-    let groups: [(&str, &[ThemeName]); 3] = [
-        ("Classic", &classic),
-        ("Dark", &ThemeName::DARK),
-        ("Light", &ThemeName::LIGHT),
-    ];
+    // A starred theme is listed once, under Favorites, and leaves its own group:
+    // listed twice, the saved and preview marks would each need a rule for which
+    // copy carries them. This is the order `App::theme_picker_order` walks.
+    let favorites = app.favorite_themes();
+    let unstarred = |names: Vec<ThemeName>| -> Vec<ThemeName> {
+        names
+            .into_iter()
+            .filter(|name| !favorites.contains(name))
+            .collect()
+    };
+    let groups: Vec<(&str, Vec<ThemeName>)> = [
+        ("Favorites", favorites.clone()),
+        ("Classic", unstarred(vec![ThemeName::Classic])),
+        ("Dark", unstarred(ThemeName::dark())),
+        ("Light", unstarred(ThemeName::light())),
+    ]
+    .into_iter()
+    .filter(|(_, names)| !names.is_empty())
+    .collect();
     let mut entries: Vec<(Line<'static>, Option<usize>)> = Vec::new();
-    for (group_index, (label, names)) in groups.into_iter().enumerate() {
+    for (group_index, (label, names)) in groups.iter().enumerate() {
         if group_index > 0 {
             entries.push((Line::from(""), None));
         }
@@ -2568,6 +2583,10 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
                 picker_style
             };
             let marker = if selected { "▸" } else { " " };
+            let starred = favorites.contains(name);
+            let star = if starred { "★" } else { " " };
+            // Under Favorites a theme has left the group that said which it was.
+            let kind = if starred { name.appearance() } else { "" };
             let saved_label = if saved { " ● saved" } else { "" };
             let preview_label = if selected { " ◀ preview" } else { "" };
             let saved_style = if selected {
@@ -2575,9 +2594,15 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
             } else {
                 picker_style.fg(theme.success)
             };
+            let kind_style = if selected {
+                row_style
+            } else {
+                picker_style.fg(theme.muted)
+            };
             entries.push((
                 Line::from(vec![
-                    Span::styled(format!("  {marker} {:<20}", name.label()), row_style),
+                    Span::styled(format!(" {marker}{star} {:<17}", name.label()), row_style),
+                    Span::styled(format!("{kind:<9}"), kind_style),
                     Span::styled(saved_label, saved_style),
                     Span::styled(preview_label, row_style),
                 ]),
@@ -2595,20 +2620,46 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
         .position(|(_, index)| *index == Some(picker.selected))
         .unwrap_or_default();
     let max_offset = entries.len().saturating_sub(visible_rows);
-    let offset = selected_row
-        .saturating_sub(visible_rows.saturating_sub(1))
+    // One row is kept below the selection for the line that says more follow.
+    let offset = (selected_row + 2)
+        .saturating_sub(visible_rows)
         .min(max_offset);
-    let visible: Vec<Line<'static>> = entries
+    let themes_in = |rows: &[(Line<'static>, Option<usize>)]| {
+        rows.iter().filter(|(_, index)| index.is_some()).count()
+    };
+    let last_shown = (offset + visible_rows).min(entries.len());
+    // A list cut at the popup's edge looks complete. Say how many themes are out
+    // of sight each way, in place of the row at that edge.
+    let hidden_above = (offset > 0).then(|| themes_in(&entries[..offset + 1]));
+    let hidden_below = (last_shown < entries.len()).then(|| themes_in(&entries[last_shown - 1..]));
+    let more = |arrow: &str, count: usize| {
+        Line::from(Span::styled(
+            format!("    {arrow} {count} more"),
+            picker_style.fg(theme.muted),
+        ))
+    };
+    let mut visible: Vec<Line<'static>> = entries
         .iter()
         .skip(offset)
         .take(visible_rows)
         .map(|(line, _)| line.clone())
         .collect();
+    if let (Some(count), Some(first)) = (hidden_above, visible.first_mut()) {
+        *first = more("↑", count);
+    }
+    if let (Some(count), Some(last)) = (hidden_below, visible.last_mut()) {
+        *last = more("↓", count);
+    }
     let hits = entries
         .iter()
         .enumerate()
         .skip(offset)
         .take(visible_rows)
+        .filter(|(entry_row, _)| {
+            let says_more_above = hidden_above.is_some() && *entry_row == offset;
+            let says_more_below = hidden_below.is_some() && *entry_row + 1 == last_shown;
+            !says_more_above && !says_more_below
+        })
         .filter_map(|(entry_row, (_, theme_index))| {
             theme_index.map(|theme_index| {
                 let row = sections[0].y + u16::try_from(entry_row - offset).unwrap_or(u16::MAX);
@@ -2630,7 +2681,15 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
                     .bg(theme.chrome_bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" select · PageUp/PageDown/Home/End jump", picker_style),
+            Span::styled(" select · PgUp/PgDn/Home/End jump · ", picker_style),
+            Span::styled(
+                "f",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" favorite", picker_style),
         ]),
         Line::from(vec![
             Span::styled(
@@ -3767,9 +3826,54 @@ mod help_tests {
                 .any(|row| row.contains("CST Classic") && row.contains("● saved")),
             "{text}"
         );
-        assert!(text.contains("PageUp/PageDown/Home/End"), "{text}");
+        assert!(text.contains("PgUp/PgDn/Home/End"), "{text}");
+        assert!(text.contains("f favorite"), "{text}");
         assert!(text.contains("Enter apply"), "{text}");
         assert!(text.contains("Esc cancel"), "{text}");
+        assert!(!text.contains("Favorites"), "nothing is starred\n{text}");
+    }
+
+    #[test]
+    fn starred_themes_are_listed_once_under_favorites_and_say_dark_or_light() {
+        // Listed in both places, a starred theme would need a rule for which copy
+        // shows as saved and which the selection lands on. It moves instead, and
+        // carries the word its old group used to say for it.
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                theme: ThemeName::Nord,
+                favorite_themes: vec![
+                    "solarized-light".to_string(),
+                    "nord".to_string(),
+                    "a-theme-from-a-newer-cst".to_string(),
+                ],
+                ..UserConfig::default()
+            },
+        );
+        app.settings_selected = 3;
+        app.open_theme_picker();
+
+        let rows = buffer_rows(&rendered_settings(&mut app, 120, 44));
+        let text = rows.join("\n");
+        let row_of = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is not listed\n{text}"))
+        };
+        assert_eq!(text.matches("★ Nord").count(), 1, "{text}");
+        assert!(!text.contains("│   Nord"), "not also under Dark\n{text}");
+        assert_eq!(text.matches("Solarized Light").count(), 1, "{text}");
+        // Favourites keep the picker's own order, whatever order they were starred in.
+        assert!(row_of("Favorites") < row_of("★ Nord"), "{text}");
+        assert!(row_of("★ Nord") < row_of("★ Solarized Light"), "{text}");
+        assert!(row_of("★ Solarized Light") < row_of("│  Classic"), "{text}");
+        assert!(rows[row_of("★ Nord")].contains("dark"), "{text}");
+        assert!(rows[row_of("★ Nord")].contains("● saved"), "{text}");
+        assert!(
+            rows[row_of("★ Solarized Light")].contains("light"),
+            "{text}"
+        );
+        assert_eq!(app.theme_picker_hits.len(), ThemeName::ALL.len());
     }
 
     #[test]
@@ -3807,9 +3911,47 @@ mod help_tests {
 
         let text = buffer_text(&rendered_settings(&mut app, 90, 24));
 
-        assert!(text.contains("Solarized Light"), "{text}");
+        assert!(
+            text.contains(ThemeName::ALL[ThemeName::ALL.len() - 1].label()),
+            "{text}"
+        );
         assert!(text.contains("Enter"), "{text}");
         assert!(text.contains("Esc"), "{text}");
+    }
+
+    #[test]
+    fn a_theme_list_cut_by_the_popup_says_how_many_are_out_of_sight_each_way() {
+        // Twenty themes do not fit a 30-row terminal. A list that simply stopped at
+        // the edge read as complete, with the light themes nowhere to be seen.
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+
+        let top = buffer_text(&rendered_settings(&mut app, 110, 30));
+        let shown = app.theme_picker_hits.len();
+        assert!(shown < ThemeName::ALL.len(), "{top}");
+        assert!(
+            top.contains(&format!("↓ {} more", ThemeName::ALL.len() - shown)),
+            "{top}"
+        );
+        assert!(
+            top.matches(" more").count() == 1,
+            "nothing is above the first theme\n{top}"
+        );
+
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL.len() - 1;
+        let bottom = buffer_text(&rendered_settings(&mut app, 110, 30));
+        let shown = app.theme_picker_hits.len();
+        assert!(
+            bottom.contains(&format!("↑ {} more", ThemeName::ALL.len() - shown)),
+            "{bottom}"
+        );
+        assert!(bottom.matches(" more").count() == 1, "{bottom}");
+        // The row that says so is not a theme, and a click on it picks nothing.
+        assert!(app
+            .theme_picker_hits
+            .iter()
+            .all(|(_, index)| *index < ThemeName::ALL.len()));
     }
 
     #[test]

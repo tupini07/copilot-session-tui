@@ -4,7 +4,13 @@ use ratatui::style::Color;
 #[cfg(test)]
 use ratatui::style::Modifier;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
+/// A theme, by the name config.json knows it by.
+///
+/// The colours are not here: each named theme is a file in `src/themes`, read by
+/// [`ThemeFile`]. Adding one is a file, a variant, and a line in each of
+/// [`ThemeName::ALL`] and [`FILES`]; a test fails until all four agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeName {
@@ -19,10 +25,167 @@ pub enum ThemeName {
     SolarizedDark,
     SolarizedLight,
     TokyoNight,
+    NuDisco,
+    OneDark,
+    RosePine,
+    RosePineDawn,
+    #[serde(rename = "synthwave-84")]
+    Synthwave84,
+    EverforestDark,
+    Kanagawa,
+    GruvboxLight,
+    GithubLight,
+    TokyoNightDay,
+}
+
+/// The named themes' files, compiled in.
+const FILES: [(ThemeName, &str); 19] = [
+    (ThemeName::Gruvbox, include_str!("themes/gruvbox.json")),
+    (ThemeName::Nord, include_str!("themes/nord.json")),
+    (ThemeName::Dracula, include_str!("themes/dracula.json")),
+    (
+        ThemeName::CatppuccinMocha,
+        include_str!("themes/catppuccin-mocha.json"),
+    ),
+    (ThemeName::Palenight, include_str!("themes/palenight.json")),
+    (
+        ThemeName::SolarizedDark,
+        include_str!("themes/solarized-dark.json"),
+    ),
+    (
+        ThemeName::TokyoNight,
+        include_str!("themes/tokyo-night.json"),
+    ),
+    (ThemeName::NuDisco, include_str!("themes/nu-disco.json")),
+    (ThemeName::OneDark, include_str!("themes/one-dark.json")),
+    (ThemeName::RosePine, include_str!("themes/rose-pine.json")),
+    (
+        ThemeName::Synthwave84,
+        include_str!("themes/synthwave-84.json"),
+    ),
+    (
+        ThemeName::EverforestDark,
+        include_str!("themes/everforest-dark.json"),
+    ),
+    (ThemeName::Kanagawa, include_str!("themes/kanagawa.json")),
+    (
+        ThemeName::CatppuccinLatte,
+        include_str!("themes/catppuccin-latte.json"),
+    ),
+    (
+        ThemeName::SolarizedLight,
+        include_str!("themes/solarized-light.json"),
+    ),
+    (
+        ThemeName::GruvboxLight,
+        include_str!("themes/gruvbox-light.json"),
+    ),
+    (
+        ThemeName::GithubLight,
+        include_str!("themes/github-light.json"),
+    ),
+    (
+        ThemeName::RosePineDawn,
+        include_str!("themes/rose-pine-dawn.json"),
+    ),
+    (
+        ThemeName::TokyoNightDay,
+        include_str!("themes/tokyo-night-day.json"),
+    ),
+];
+
+/// A theme as its file gives it: ten colours with a part to play each, and the
+/// sixteen a terminal program can ask for by number.
+///
+/// This is the whole of what a theme's author writes. Everything else a [`Theme`]
+/// holds is worked out from these by [`build`], which also moves a colour where two
+/// of them could not be told apart, so a file cannot make CST unreadable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeFile {
+    /// The title shown in the picker.
+    pub name: String,
+    pub appearance: Appearance,
+    /// Where the colours were taken from.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[serde(default)]
+    pub source: Vec<String>,
+    /// What was changed from the source, and why. For whoever reads the file; CST
+    /// only checks it is text.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub note: String,
+    pub colors: FileColors,
+    /// Black, red, green, yellow, blue, magenta, cyan, white, then the bright
+    /// eight. Left out, they are filled from the ten.
+    #[serde(default)]
+    pub ansi: Option<[Hex; 16]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileColors {
+    /// The canvas.
+    pub background: Hex,
+    /// Bars and popups: a tone slightly apart from the canvas.
+    pub chrome: Hex,
+    /// Raised panels: a step further from the canvas.
+    pub surface: Hex,
+    pub text: Hex,
+    /// Secondary text.
+    pub muted: Hex,
+    /// The colour the scheme is known by: the selection bar, a focused border.
+    pub accent: Hex,
+    /// A second accent: information, folders, links.
+    pub accent_alt: Hex,
+    pub success: Hex,
+    pub warning: Hex,
+    pub error: Hex,
+}
+
+/// A colour written `#rrggbb`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hex(pub Color);
+
+impl<'de> Deserialize<'de> for Hex {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let digits = text
+            .strip_prefix('#')
+            .filter(|digits| digits.len() == 6 && digits.is_ascii())
+            .ok_or_else(|| serde::de::Error::custom(format!("{text:?} is not #rrggbb")))?;
+        let channel = |at: usize| {
+            u8::from_str_radix(&digits[at..at + 2], 16)
+                .map_err(|_| serde::de::Error::custom(format!("{text:?} is not #rrggbb")))
+        };
+        Ok(Self(Color::Rgb(channel(0)?, channel(2)?, channel(4)?)))
+    }
+}
+
+/// The compiled-in files, read once. A file that does not read is a build that
+/// should not have shipped, and a test reads every one, so this does not fail in
+/// a released binary.
+fn files() -> &'static [(ThemeName, ThemeFile)] {
+    static READ_FILES: OnceLock<Vec<(ThemeName, ThemeFile)>> = OnceLock::new();
+    READ_FILES.get_or_init(|| {
+        FILES
+            .iter()
+            .filter_map(|(name, text)| Some((*name, serde_json::from_str(text).ok()?)))
+            .collect()
+    })
 }
 
 impl ThemeName {
-    pub const ALL: [Self; 10] = [
+    /// Every theme in the order the picker lists them: Classic, the dark ones, the
+    /// light ones.
+    pub const ALL: [Self; 20] = [
         Self::Classic,
         Self::Gruvbox,
         Self::Nord,
@@ -31,187 +194,91 @@ impl ThemeName {
         Self::Palenight,
         Self::SolarizedDark,
         Self::TokyoNight,
+        Self::NuDisco,
+        Self::OneDark,
+        Self::RosePine,
+        Self::Synthwave84,
+        Self::EverforestDark,
+        Self::Kanagawa,
         Self::CatppuccinLatte,
         Self::SolarizedLight,
+        Self::GruvboxLight,
+        Self::GithubLight,
+        Self::RosePineDawn,
+        Self::TokyoNightDay,
     ];
 
-    pub const DARK: [Self; 7] = [
-        Self::Gruvbox,
-        Self::Nord,
-        Self::Dracula,
-        Self::CatppuccinMocha,
-        Self::Palenight,
-        Self::SolarizedDark,
-        Self::TokyoNight,
-    ];
+    pub fn dark() -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|name| name.terminal_light_mode() == Some(false))
+            .collect()
+    }
 
-    pub const LIGHT: [Self; 2] = [Self::CatppuccinLatte, Self::SolarizedLight];
+    pub fn light() -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|name| name.is_light())
+            .collect()
+    }
 
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Classic => "CST Classic",
-            Self::Gruvbox => "Gruvbox",
-            Self::Nord => "Nord",
-            Self::Dracula => "Dracula",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::Palenight => "Palenight",
-            Self::SolarizedDark => "Solarized Dark",
-            Self::SolarizedLight => "Solarized Light",
-            Self::TokyoNight => "Tokyo Night",
+    fn file(self) -> Option<&'static ThemeFile> {
+        files()
+            .iter()
+            .find(|(name, _)| *name == self)
+            .map(|(_, file)| file)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self.file() {
+            Some(file) => &file.name,
+            None => "CST Classic",
         }
     }
 
-    pub const fn is_light(self) -> bool {
-        matches!(self, Self::CatppuccinLatte | Self::SolarizedLight)
+    /// The name as config.json spells it.
+    pub fn id(self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default()
     }
 
-    pub const fn terminal_light_mode(self) -> Option<bool> {
-        if matches!(self, Self::Classic) {
-            None
-        } else {
-            Some(self.is_light())
+    /// What the theme reports itself as. Classic takes on the terminal's own
+    /// colours and so is neither.
+    pub fn appearance(self) -> &'static str {
+        match self.terminal_light_mode() {
+            Some(true) => "light",
+            Some(false) => "dark",
+            None => "terminal",
         }
     }
 
+    pub fn is_light(self) -> bool {
+        self.file()
+            .is_some_and(|file| file.appearance == Appearance::Light)
+    }
+
+    pub fn terminal_light_mode(self) -> Option<bool> {
+        self.file().map(|file| file.appearance == Appearance::Light)
+    }
+
+    /// The theme, built once: asked for on every frame and by every draw function,
+    /// while building one checks and corrects dozens of colour pairs.
     pub fn theme(self) -> Theme {
-        match self {
-            Self::Classic => classic(),
-            Self::Gruvbox => build(
-                self,
-                Palette::new([
-                    rgb(0x28, 0x28, 0x28),
-                    rgb(0x3c, 0x38, 0x36),
-                    rgb(0x50, 0x49, 0x45),
-                    rgb(0xeb, 0xdb, 0xb2),
-                    rgb(0x92, 0x83, 0x74),
-                    rgb(0xfe, 0x80, 0x19),
-                    rgb(0x83, 0xa5, 0x98),
-                    rgb(0x8e, 0xc0, 0x7c),
-                    rgb(0xfa, 0xbd, 0x2f),
-                    rgb(0xfb, 0x49, 0x34),
-                ]),
-            ),
-            Self::Nord => build(
-                self,
-                Palette::new([
-                    rgb(0x2e, 0x34, 0x40),
-                    rgb(0x3b, 0x42, 0x52),
-                    rgb(0x43, 0x4c, 0x5e),
-                    rgb(0xec, 0xef, 0xf4),
-                    rgb(0x7b, 0x88, 0xa1),
-                    rgb(0x88, 0xc0, 0xd0),
-                    rgb(0x8f, 0xbc, 0xbb),
-                    rgb(0xa3, 0xbe, 0x8c),
-                    rgb(0xeb, 0xcb, 0x8b),
-                    rgb(0xbf, 0x61, 0x6a),
-                ]),
-            ),
-            Self::Dracula => build(
-                self,
-                Palette::new([
-                    rgb(0x28, 0x2a, 0x36),
-                    rgb(0x34, 0x37, 0x46),
-                    rgb(0x44, 0x47, 0x5a),
-                    rgb(0xf8, 0xf8, 0xf2),
-                    rgb(0x62, 0x72, 0xa4),
-                    rgb(0xbd, 0x93, 0xf9),
-                    rgb(0x8b, 0xe9, 0xfd),
-                    rgb(0x50, 0xfa, 0x7b),
-                    rgb(0xff, 0xb8, 0x6c),
-                    rgb(0xff, 0x55, 0x55),
-                ]),
-            ),
-            Self::CatppuccinMocha => build(
-                self,
-                Palette::new([
-                    rgb(0x1e, 0x1e, 0x2e),
-                    rgb(0x31, 0x32, 0x44),
-                    rgb(0x45, 0x47, 0x5a),
-                    rgb(0xcd, 0xd6, 0xf4),
-                    rgb(0x6c, 0x70, 0x86),
-                    rgb(0xcb, 0xa6, 0xf7),
-                    rgb(0x94, 0xe2, 0xd5),
-                    rgb(0xa6, 0xe3, 0xa1),
-                    rgb(0xf9, 0xe2, 0xaf),
-                    rgb(0xf3, 0x8b, 0xa8),
-                ]),
-            ),
-            Self::CatppuccinLatte => build(
-                self,
-                Palette::new([
-                    rgb(0xef, 0xf1, 0xf5),
-                    rgb(0xcc, 0xd0, 0xda),
-                    rgb(0xef, 0xf1, 0xf5),
-                    rgb(0x4c, 0x4f, 0x69),
-                    rgb(0x64, 0x67, 0x7c),
-                    rgb(0x88, 0x39, 0xef),
-                    rgb(0x17, 0x92, 0x99),
-                    rgb(0x40, 0xa0, 0x2b),
-                    rgb(0xdf, 0x8e, 0x1d),
-                    rgb(0xd2, 0x0f, 0x39),
-                ]),
-            ),
-            Self::Palenight => build(
-                self,
-                Palette::new([
-                    rgb(0x29, 0x2d, 0x3e),
-                    rgb(0x32, 0x37, 0x4d),
-                    rgb(0x43, 0x47, 0x58),
-                    rgb(0xa6, 0xac, 0xcd),
-                    rgb(0x67, 0x6e, 0x95),
-                    rgb(0xc7, 0x92, 0xea),
-                    rgb(0x82, 0xaa, 0xff),
-                    rgb(0xc3, 0xe8, 0x8d),
-                    rgb(0xff, 0xcb, 0x6b),
-                    rgb(0xf0, 0x71, 0x78),
-                ]),
-            ),
-            Self::SolarizedDark => build(
-                self,
-                Palette::new([
-                    rgb(0x00, 0x2b, 0x36),
-                    rgb(0x07, 0x36, 0x42),
-                    rgb(0x0a, 0x40, 0x50),
-                    rgb(0x93, 0xa1, 0xa1),
-                    rgb(0x58, 0x6e, 0x75),
-                    rgb(0x26, 0x8b, 0xd2),
-                    rgb(0x2a, 0xa1, 0x98),
-                    rgb(0x85, 0x99, 0x00),
-                    rgb(0xb5, 0x89, 0x00),
-                    rgb(0xdc, 0x32, 0x2f),
-                ]),
-            ),
-            Self::SolarizedLight => build(
-                self,
-                Palette::new([
-                    rgb(0xfd, 0xf6, 0xe3),
-                    rgb(0xee, 0xe8, 0xd5),
-                    rgb(0xfd, 0xf6, 0xe3),
-                    rgb(0x58, 0x6e, 0x75),
-                    rgb(0x5f, 0x74, 0x7b),
-                    rgb(0x26, 0x8b, 0xd2),
-                    rgb(0x2a, 0xa1, 0x98),
-                    rgb(0x85, 0x99, 0x00),
-                    rgb(0xb5, 0x89, 0x00),
-                    rgb(0xdc, 0x32, 0x2f),
-                ]),
-            ),
-            Self::TokyoNight => build(
-                self,
-                Palette::new([
-                    rgb(0x1a, 0x1b, 0x26),
-                    rgb(0x24, 0x28, 0x3b),
-                    rgb(0x33, 0x46, 0x7c),
-                    rgb(0xa9, 0xb1, 0xd6),
-                    rgb(0x56, 0x5f, 0x89),
-                    rgb(0xbb, 0x9a, 0xf7),
-                    rgb(0x73, 0xda, 0xca),
-                    rgb(0x9e, 0xce, 0x6a),
-                    rgb(0xe0, 0xaf, 0x68),
-                    rgb(0xf7, 0x76, 0x8e),
-                ]),
-            ),
+        static BUILT: OnceLock<Vec<Theme>> = OnceLock::new();
+        let built = BUILT.get_or_init(|| Self::ALL.iter().map(|name| name.built()).collect());
+        let index = Self::ALL
+            .iter()
+            .position(|name| *name == self)
+            .unwrap_or_default();
+        built[index]
+    }
+
+    fn built(self) -> Theme {
+        match self.file() {
+            Some(file) => build(self, file),
+            None => classic(),
         }
     }
 }
@@ -248,11 +315,29 @@ pub struct Theme {
     pub diff_meta_bg: Color,
     pub diff_code_fg: Color,
     pub diff_gutter_fg: Color,
+    /// Where a program's subtle panel grey lands: see [`panel_tone`].
+    pub panel_subtle: Color,
+    /// Where its deepest panel grey lands.
+    pub panel_raised: Color,
     pub ansi: [Color; 16],
     pub syntax_theme: &'static str,
 }
 
 impl Theme {
+    /// The colour of the cursor painted into a pane.
+    ///
+    /// The widget's own default is the palette's white, which a light theme's
+    /// palette keeps light: on Solarized Light the cursor was a cream block on a
+    /// cream canvas. The main text colour is the one every theme guarantees can be
+    /// seen there. Classic has no colours of its own and keeps the default.
+    pub fn cursor(self) -> Color {
+        if self.name == ThemeName::Classic {
+            Color::Gray
+        } else {
+            self.text
+        }
+    }
+
     pub fn contrast_text(self, background: Color) -> Color {
         let light = rgb(0xf8, 0xf8, 0xf2);
         let dark = rgb(0x1a, 0x1b, 0x26);
@@ -291,12 +376,30 @@ pub fn apply_terminal_theme(buffer: &mut Buffer, area: Rect, theme: Theme) {
             {
                 theme.contrast_text(mapped_bg)
             } else {
-                map_terminal_color(original_fg, theme, true)
+                let mapped = map_terminal_color(original_fg, theme, true);
+                // A palette colour was fitted to the canvas. On a fill the program
+                // chose itself, the dark green of a light theme on a dark diff row,
+                // it may not show, and then it gives way like the default text does.
+                // Only the sixteen: a panel grey drawn on a panel grey is a box's
+                // edge against its fill, and is meant to match it.
+                if is_palette_colour(original_fg)
+                    && mapped_bg != theme.background
+                    && contrast_ratio(mapped, mapped_bg) < SEEN
+                {
+                    moved_until(mapped, theme.contrast_text(mapped_bg), &[(mapped_bg, SEEN)])
+                } else {
+                    mapped
+                }
             };
             cell.fg = mapped_fg;
             cell.bg = mapped_bg;
         }
     }
+}
+
+/// One of the sixteen colours a program asks for by number or by name.
+fn is_palette_colour(color: Color) -> bool {
+    !matches!(color, Color::Reset | Color::Rgb(..) | Color::Indexed(16..))
 }
 
 fn map_terminal_color(color: Color, theme: Theme, foreground: bool) -> Color {
@@ -321,11 +424,125 @@ fn map_terminal_color(color: Color, theme: Theme, foreground: bool) -> Color {
         Color::LightMagenta => theme.ansi[13],
         Color::LightCyan => theme.ansi[14],
         Color::White => theme.ansi[15],
-        other => other,
+        other => panel_tone(other, theme),
     }
 }
 
-#[derive(Clone, Copy)]
+/// How far apart a colour's channels may be for it still to count as a grey.
+/// Copilot's panel greys lean blue by up to 21; its accents are past 100.
+const GREY_CHANNEL_SPREAD: u8 = 28;
+/// A grey this far from the canvas end of the scale is a subtle panel: the fill
+/// behind a prompt or inline code.
+const SUBTLE_PANEL_DEPTH: u16 = 20;
+/// Past this a grey is text or an icon, not a fill, and is left as painted.
+const DEEPEST_PANEL_DEPTH: u16 = 80;
+
+/// Bring a program's own panel greys into the theme.
+///
+/// Copilot paints nearly everything in fixed colours of its own, picked for a
+/// black or white terminal: the fill behind a prompt, inline code and its input
+/// box is a blue-grey whatever the theme. On Solarized that is a grey slab on a
+/// teal canvas. Those fills, and the borders drawn in the same tones, are moved
+/// onto the theme's own steps away from its canvas, keeping how far each stood
+/// from the program's idea of the canvas.
+///
+/// Only greys near the canvas end are touched. Text greys stay as painted, since
+/// a program chose them for contrast and a theme's own text can be dimmer; and
+/// anything with a hue stays, which is what keeps a code viewer's syntax colours
+/// and a diff's red and green.
+fn panel_tone(color: Color, theme: Theme) -> Color {
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index @ 16..) => xterm_rgb(index),
+        _ => return color,
+    };
+    if r.max(g).max(b) - r.min(g).min(b) > GREY_CHANNEL_SPREAD {
+        return color;
+    }
+    let level = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
+    let depth = if theme.is_light { 255 - level } else { level };
+    if depth > DEEPEST_PANEL_DEPTH {
+        return color;
+    }
+    if depth <= SUBTLE_PANEL_DEPTH {
+        blend(
+            theme.background,
+            theme.panel_subtle,
+            depth * 100 / SUBTLE_PANEL_DEPTH,
+        )
+    } else {
+        let span = DEEPEST_PANEL_DEPTH - SUBTLE_PANEL_DEPTH;
+        blend(
+            theme.panel_subtle,
+            theme.panel_raised,
+            (depth - SUBTLE_PANEL_DEPTH) * 100 / span,
+        )
+    }
+}
+
+/// The colours the real Copilot paints with, read off its screen under a dark and
+/// a light CST theme (1.0.112 to 1.0.114). It follows the appearance CST reports
+/// and nothing else about the theme, so these are what every theme has to live
+/// with. `.claude/skills/theme-review` says how to refresh them.
+pub(crate) struct CopilotColours {
+    /// The fills behind a prompt, inline code and the input box.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub panels: &'static [Color],
+    pub text: &'static [Color],
+    pub muted: &'static [Color],
+}
+
+pub(crate) const COPILOT_ON_DARK: CopilotColours = CopilotColours {
+    panels: &[
+        rgb(0x14, 0x1b, 0x22),
+        rgb(0x23, 0x26, 0x2c),
+        rgb(0x26, 0x2c, 0x36),
+    ],
+    text: &[rgb(0xf0, 0xf6, 0xfc), rgb(0xd3, 0xd9, 0xdf)],
+    muted: &[rgb(0x91, 0x98, 0xa1)],
+};
+
+pub(crate) const COPILOT_ON_LIGHT: CopilotColours = CopilotColours {
+    panels: &[rgb(0xe8, 0xe9, 0xeb)],
+    text: &[rgb(0x1f, 0x23, 0x28)],
+    muted: &[rgb(0x59, 0x63, 0x6e), rgb(0x6e, 0x77, 0x81)],
+};
+
+pub(crate) const fn copilot_colours(is_light: bool) -> CopilotColours {
+    if is_light {
+        COPILOT_ON_LIGHT
+    } else {
+        COPILOT_ON_DARK
+    }
+}
+
+/// Text somebody reads, by the usual 4.5 rule.
+pub(crate) const READ: f64 = 4.5;
+/// Secondary text, marks and coloured words: findable, not for reading at length.
+pub(crate) const SEEN: f64 = 3.0;
+
+/// Move `colour` towards `target`, no further than it takes for every pair in
+/// `against` to reach its contrast, where `colour` is one side of each pair.
+///
+/// This is how a palette copied faithfully from its author is made to work in
+/// places the author never put it: a comment grey on a raised panel, a pastel
+/// yellow as text on a light canvas. A colour that already works is returned
+/// untouched, so a palette shows its own colours wherever they can be told apart.
+fn moved_until(colour: Color, target: Color, against: &[(Color, f64)]) -> Color {
+    const STEPS: u16 = 20;
+    for step in 0..=STEPS {
+        let candidate = blend(colour, target, step * 100 / STEPS);
+        if against
+            .iter()
+            .all(|(other, least)| contrast_ratio(candidate, *other) >= *least)
+        {
+            return candidate;
+        }
+    }
+    target
+}
+
+/// The ten colours of a file, unwrapped.
 struct Palette {
     bg: Color,
     chrome: Color,
@@ -339,75 +556,212 @@ struct Palette {
     error: Color,
 }
 
-impl Palette {
-    const fn new(colors: [Color; 10]) -> Self {
-        let [bg, chrome, surface, text, muted, accent, accent_alt, success, warning, error] =
-            colors;
-        Self {
-            bg,
-            chrome,
-            surface,
-            text,
-            muted,
-            accent,
-            accent_alt,
-            success,
-            warning,
-            error,
-        }
-    }
-}
-
-fn build(name: ThemeName, p: Palette) -> Theme {
-    let ansi = [
-        if name.is_light() { p.text } else { p.surface },
-        p.error,
-        p.success,
-        p.warning,
-        p.accent,
-        p.accent,
-        p.accent_alt,
-        p.text,
+fn build(name: ThemeName, file: &ThemeFile) -> Theme {
+    let is_light = file.appearance == Appearance::Light;
+    let colors = file.colors;
+    // The main text is what every other colour is moved towards, so it is settled
+    // first, against the canvas and both fills at once: Solarized's own text on its
+    // own light canvas is under the line, and less still on its panels. The text
+    // gives way before the fills do. Were the fills pulled back to where a weak
+    // text reads, the bars and popups would end up the colour of the canvas.
+    //
+    // It also has to stay clear of the secondary text, which on a light theme must
+    // itself be readable: text that only just reads leaves secondary text nowhere
+    // to be but on top of it.
+    let strongest = if is_light {
+        rgb(0, 0, 0)
+    } else {
+        rgb(255, 255, 255)
+    };
+    let secondary = secondary_contrast(is_light);
+    let text_floor = READ.max(secondary * TEXT_OVER_SECONDARY);
+    let p = Palette {
+        bg: colors.background.0,
+        chrome: colors.chrome.0,
+        surface: colors.surface.0,
+        text: moved_until(
+            colors.text.0,
+            strongest,
+            &[
+                (colors.background.0, text_floor),
+                (colors.chrome.0, text_floor),
+                (colors.surface.0, text_floor),
+            ],
+        ),
+        muted: colors.muted.0,
+        accent: colors.accent.0,
+        accent_alt: colors.accent_alt.0,
+        success: colors.success.0,
+        warning: colors.warning.0,
+        error: colors.error.0,
+    };
+    // Only a fill that even the strongest text cannot be read on gives way itself,
+    // back towards the canvas.
+    let chrome = moved_until(p.chrome, p.bg, &[(p.text, READ)]);
+    let surface = moved_until(p.surface, p.bg, &[(p.text, READ)]);
+    // Everything drawn as text gives way to what it is drawn on, towards the main
+    // text colour. Accents are drawn on the canvas and, as a popup's headings and
+    // key hints, on the bars' tone.
+    let on_canvas = [(p.bg, SEEN), (chrome, SEEN)];
+    let muted = moved_until(
         p.muted,
-        p.error,
-        p.success,
-        p.warning,
-        p.accent,
-        p.accent,
-        p.accent_alt,
+        p.text,
+        &[(p.bg, secondary), (chrome, secondary), (surface, secondary)],
+    );
+    let accent = moved_until(p.accent, p.text, &on_canvas);
+    let accent_alt = moved_until(p.accent_alt, p.text, &on_canvas);
+    let success = moved_until(p.success, p.text, &on_canvas);
+    let warning = moved_until(p.warning, p.text, &on_canvas);
+    let error = moved_until(p.error, p.text, &on_canvas);
+
+    let diff_row = |tint: Color, percent: u16| {
+        moved_until(blend(p.bg, tint, percent), p.bg, &[(p.text, READ)])
+    };
+    let diff_add_bg = diff_row(success, if is_light { 18 } else { 25 });
+    let diff_delete_bg = diff_row(error, if is_light { 16 } else { 25 });
+    let diff_hunk_bg = diff_row(accent, if is_light { 14 } else { 30 });
+    let diff_gutter_fg = moved_until(
+        muted,
+        p.text,
+        &[
+            (diff_add_bg, SEEN),
+            (diff_delete_bg, SEEN),
+            (diff_hunk_bg, SEEN),
+            (chrome, SEEN),
+        ],
+    );
+
+    // The tones a program's own panel greys are moved onto. What Copilot writes on
+    // its panels is fixed, so the panels give way: back towards the canvas until
+    // its text and its secondary text can both be read on them.
+    let copilot = copilot_colours(is_light);
+    let copilot_writes: Vec<(Color, f64)> = copilot
+        .text
+        .iter()
+        .map(|colour| (*colour, READ))
+        .chain(copilot.muted.iter().map(|colour| (*colour, SEEN)))
+        .collect();
+    let panel_subtle = moved_until(surface, p.bg, &copilot_writes);
+    let panel_raised = moved_until(blend(surface, muted, 50), p.bg, &copilot_writes);
+
+    // A file's sixteen are its scheme's own terminal colours. Without them the ten
+    // fill in, which leaves blue and magenta the same colour and every bright one
+    // equal to its plain twin.
+    let filled_in = [
+        if is_light { p.text } else { surface },
+        error,
+        success,
+        warning,
+        accent,
+        accent,
+        accent_alt,
+        p.text,
+        muted,
+        error,
+        success,
+        warning,
+        accent,
+        accent,
+        accent_alt,
         p.text,
     ];
+    // The selection bar is the accent, with whichever of light and dark text reads
+    // better on it. A mid-tone accent suits neither, and then the bar gives way.
+    let selection_fg = best_contrast_text(accent);
+    let away_from_its_text = if contrast_ratio(selection_fg, rgb(0, 0, 0))
+        > contrast_ratio(selection_fg, rgb(255, 255, 255))
+    {
+        rgb(0, 0, 0)
+    } else {
+        rgb(255, 255, 255)
+    };
+    let selection_bg = moved_until(accent, away_from_its_text, &[(selection_fg, READ)]);
+    let ansi = match file.ansi {
+        Some(given) => {
+            let mut fitted = [Color::Reset; 16];
+            for (index, colour) in given.iter().enumerate() {
+                fitted[index] = if stands_for_canvas(index, is_light) {
+                    colour.0
+                } else {
+                    moved_until(colour.0, p.text, &[(p.bg, ansi_contrast(index, is_light))])
+                };
+            }
+            fitted
+        }
+        None => filled_in,
+    };
     Theme {
         name,
-        is_light: name.is_light(),
+        is_light,
         background: p.bg,
-        chrome_bg: p.chrome,
-        surface: p.surface,
+        chrome_bg: chrome,
+        surface,
         text: p.text,
-        muted: p.muted,
-        accent: p.accent,
-        accent_alt: p.accent_alt,
-        selection_fg: best_contrast_text(p.accent),
-        selection_bg: p.accent,
-        success: p.success,
-        warning: p.warning,
-        error: p.error,
-        info: p.accent_alt,
-        inactive: p.muted,
-        directory: p.accent_alt,
+        muted,
+        accent,
+        accent_alt,
+        selection_fg,
+        selection_bg,
+        success,
+        warning,
+        error,
+        info: accent_alt,
+        inactive: muted,
+        directory: accent_alt,
         diff_context_bg: p.bg,
-        diff_add_bg: blend(p.bg, p.success, if name.is_light() { 18 } else { 25 }),
-        diff_delete_bg: blend(p.bg, p.error, if name.is_light() { 16 } else { 25 }),
-        diff_hunk_bg: blend(p.bg, p.accent, if name.is_light() { 14 } else { 30 }),
-        diff_meta_bg: p.chrome,
+        diff_add_bg,
+        diff_delete_bg,
+        diff_hunk_bg,
+        diff_meta_bg: chrome,
         diff_code_fg: p.text,
-        diff_gutter_fg: p.muted,
+        diff_gutter_fg,
+        panel_subtle,
+        panel_raised,
         ansi,
-        syntax_theme: if name.is_light() {
+        syntax_theme: if is_light {
             "inspired-github"
         } else {
             "dracula"
         },
+    }
+}
+
+/// The palette colour that is the canvas itself, which nothing is asked of as text:
+/// black on a dark theme, the two whites on a light one.
+pub(crate) fn stands_for_canvas(index: usize, is_light: bool) -> bool {
+    if is_light {
+        matches!(index, 7 | 15)
+    } else {
+        index == 0
+    }
+}
+
+/// How much better the main text must read than the secondary text has to, so
+/// the two are told apart at a glance.
+pub(crate) const TEXT_OVER_SECONDARY: f64 = 1.25;
+
+/// How far a bar or panel must stand from the canvas, where its file made it a
+/// different colour: enough for a popup to have an edge.
+#[cfg(test)]
+pub(crate) const FILL_APART: f64 = 1.04;
+
+/// How well secondary text must show. A light theme is what somebody switches to
+/// in daylight, where the 3.0 that does for a dim room washes out.
+pub(crate) fn secondary_contrast(is_light: bool) -> f64 {
+    if is_light {
+        READ
+    } else {
+        SEEN
+    }
+}
+
+/// How well a palette colour must show as text on the canvas. White on a dark
+/// theme is what a program writes its main text in.
+pub(crate) fn ansi_contrast(index: usize, is_light: bool) -> f64 {
+    if !is_light && matches!(index, 7 | 15) {
+        READ
+    } else {
+        SEEN
     }
 }
 
@@ -437,6 +791,8 @@ fn classic() -> Theme {
         diff_meta_bg: rgb(31, 31, 42),
         diff_code_fg: rgb(205, 214, 244),
         diff_gutter_fg: rgb(108, 112, 134),
+        panel_subtle: Color::Reset,
+        panel_raised: Color::Reset,
         ansi: [
             Color::Black,
             Color::Red,
@@ -572,13 +928,72 @@ mod tests {
 
     #[test]
     fn theme_names_are_stable_unique_and_grouped() {
-        assert_eq!(ThemeName::ALL.len(), 10);
         assert_eq!(
             ThemeName::ALL.iter().copied().collect::<HashSet<_>>().len(),
             ThemeName::ALL.len()
         );
-        assert!(ThemeName::DARK.iter().all(|name| !name.is_light()));
-        assert!(ThemeName::LIGHT.iter().all(|name| name.is_light()));
+        // The picker walks ALL top to bottom and draws it as three groups, so the
+        // order has to be the groups' order: Classic, the dark ones, the light ones.
+        let mut grouped = vec![ThemeName::Classic];
+        grouped.extend(ThemeName::dark());
+        grouped.extend(ThemeName::light());
+        assert_eq!(grouped, ThemeName::ALL);
+    }
+
+    #[test]
+    fn every_named_theme_has_a_file_that_reads_and_is_named_as_config_spells_it() {
+        // A theme is a variant, a line in ALL, a line in FILES and a file. Any one
+        // forgotten would otherwise show as a theme silently drawn as Classic.
+        let named: Vec<ThemeName> = ThemeName::ALL
+            .into_iter()
+            .filter(|name| *name != ThemeName::Classic)
+            .collect();
+        let with_files: Vec<ThemeName> = FILES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(with_files, named, "FILES lists the themes in ALL's order");
+        let mut titles = HashSet::new();
+        for (name, text) in FILES {
+            let file: ThemeFile =
+                serde_json::from_str(text).unwrap_or_else(|error| panic!("{}: {error}", name.id()));
+            assert!(titles.insert(file.name.clone()), "{} twice", file.name);
+            assert!(
+                !file.source.is_empty(),
+                "{} says where its colours came from",
+                name.id()
+            );
+            assert!(file.ansi.is_some(), "{} gives its sixteen", name.id());
+        }
+        // The file is found by the name config.json uses, so the two must agree.
+        for name in named {
+            let path = format!("src/themes/{}.json", name.id());
+            assert!(std::path::Path::new(&path).exists(), "{path}");
+            assert_eq!(
+                serde_json::from_str::<ThemeName>(&format!("\"{}\"", name.id())).unwrap(),
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn a_theme_file_is_refused_for_a_colour_that_is_not_one_or_a_key_it_does_not_know() {
+        let good = FILES[0].1;
+        assert!(serde_json::from_str::<ThemeFile>(good).is_ok());
+        let bad_colour = good.replacen("\"#282828\"", "\"282828\"", 1);
+        assert!(serde_json::from_str::<ThemeFile>(&bad_colour).is_err());
+        let unknown_key = good.replacen("\"colors\"", "\"colours\"", 1);
+        assert!(serde_json::from_str::<ThemeFile>(&unknown_key).is_err());
+        let short_palette = good.replacen("\"#282828\", ", "", 1);
+        assert!(serde_json::from_str::<ThemeFile>(&short_palette).is_err());
+    }
+
+    #[test]
+    fn a_file_with_its_own_sixteen_keeps_blue_and_magenta_apart() {
+        // With ten colours to fill sixteen, blue and magenta were both the accent
+        // and every bright colour its plain twin, in every theme.
+        for theme in named_themes() {
+            assert_ne!(theme.ansi[4], theme.ansi[5], "{}", theme.name.label());
+        }
+        let gruvbox = ThemeName::Gruvbox.theme();
+        assert_ne!(gruvbox.ansi[1], gruvbox.ansi[9]);
     }
 
     #[test]
@@ -631,9 +1046,316 @@ mod tests {
         }
     }
 
+    /// One pair of colours that meet on screen, and how far apart they must be.
+    struct Pair {
+        what: String,
+        ratio: f64,
+        least: f64,
+    }
+
+    /// Every pair of colours a theme puts together, in CST's own screens and in
+    /// what a program in a pane paints through it.
+    fn pairs(theme: Theme) -> Vec<Pair> {
+        let mut pairs = Vec::new();
+        let mut pair = |what: String, front: Color, back: Color, least: f64| {
+            pairs.push(Pair {
+                what,
+                ratio: contrast_ratio(front, back),
+                least,
+            });
+        };
+        for (name, back) in [
+            ("background", theme.background),
+            ("chrome", theme.chrome_bg),
+            ("surface", theme.surface),
+        ] {
+            pair(format!("text on {name}"), theme.text, back, READ);
+            pair(
+                format!("muted on {name}"),
+                theme.muted,
+                back,
+                secondary_contrast(theme.is_light),
+            );
+        }
+        pair(
+            "selection".to_string(),
+            theme.selection_fg,
+            theme.selection_bg,
+            READ,
+        );
+        for (name, front) in [
+            ("accent", theme.accent),
+            ("accent_alt", theme.accent_alt),
+            ("success", theme.success),
+            ("warning", theme.warning),
+            ("error", theme.error),
+            ("info", theme.info),
+            ("directory", theme.directory),
+            ("inactive", theme.inactive),
+        ] {
+            pair(
+                format!("{name} on background"),
+                front,
+                theme.background,
+                SEEN,
+            );
+        }
+        pair(
+            "cursor on background".to_string(),
+            map_terminal_color(theme.cursor(), theme, true),
+            theme.background,
+            READ,
+        );
+        // A popup's headings and key hints are accents on the bars' tone.
+        for (name, front) in [
+            ("accent", theme.accent),
+            ("accent_alt", theme.accent_alt),
+            ("success", theme.success),
+            ("warning", theme.warning),
+            ("error", theme.error),
+        ] {
+            pair(format!("{name} on chrome"), front, theme.chrome_bg, SEEN);
+        }
+        for (name, back) in [
+            ("added", theme.diff_add_bg),
+            ("deleted", theme.diff_delete_bg),
+            ("hunk", theme.diff_hunk_bg),
+            ("meta", theme.diff_meta_bg),
+        ] {
+            pair(
+                format!("diff code on {name}"),
+                theme.diff_code_fg,
+                back,
+                READ,
+            );
+            pair(
+                format!("diff gutter on {name}"),
+                theme.diff_gutter_fg,
+                back,
+                SEEN,
+            );
+        }
+        // The sixteen colours a program has, as text on the canvas. The one that
+        // stands for the canvas itself is left out: black on a dark theme, and the
+        // two whites on a light one where the palette keeps them light.
+        for (index, colour) in theme.ansi.iter().enumerate() {
+            if stands_for_canvas(index, theme.is_light) {
+                continue;
+            }
+            let least = ansi_contrast(index, theme.is_light);
+            pair(
+                format!("ansi {index} on background"),
+                *colour,
+                theme.background,
+                least,
+            );
+        }
+        // What Copilot paints as text, on the canvas and on its panels once those
+        // are moved into the theme.
+        let copilot = if theme.is_light {
+            COPILOT_ON_LIGHT
+        } else {
+            COPILOT_ON_DARK
+        };
+        let hex = |colour: Color| {
+            let (r, g, b) = rgb_components(colour).unwrap_or_default();
+            format!("#{r:02x}{g:02x}{b:02x}")
+        };
+        let mut backs = vec![("canvas".to_string(), theme.background)];
+        for panel in copilot.panels {
+            backs.push((
+                format!("its panel {}", hex(*panel)),
+                map_terminal_color(*panel, theme, false),
+            ));
+        }
+        for (name, back) in backs {
+            for text in copilot.text {
+                pair(
+                    format!("Copilot text {} on {name}", hex(*text)),
+                    *text,
+                    back,
+                    READ,
+                );
+            }
+            for muted in copilot.muted {
+                pair(
+                    format!("Copilot muted {} on {name}", hex(*muted)),
+                    *muted,
+                    back,
+                    SEEN,
+                );
+            }
+        }
+        // Not two colours meeting on screen, but the same kind of floor: the main
+        // text must read clearly better than the secondary text, or they are one
+        // colour with two names.
+        pairs.push(Pair {
+            what: "text reads better than muted (ratio of their contrasts)".to_string(),
+            ratio: contrast_ratio(theme.text, theme.background)
+                / contrast_ratio(theme.muted, theme.background),
+            least: 1.1,
+        });
+        pairs
+    }
+
+    fn named_themes() -> impl Iterator<Item = Theme> {
+        ThemeName::ALL
+            .into_iter()
+            .filter(|name| *name != ThemeName::Classic)
+            .map(ThemeName::theme)
+    }
+
+    #[test]
+    fn every_pair_of_colours_a_theme_puts_together_can_be_told_apart() {
+        // A palette copied faithfully from its author can still put two of its
+        // colours together in a way the author never did. This is the half of the
+        // theme review a machine can do; the pictures are the other half.
+        let mut failures = Vec::new();
+        for theme in named_themes() {
+            for pair in pairs(theme) {
+                if pair.ratio < pair.least {
+                    failures.push(format!(
+                        "{}: {} is {:.2}, needs {:.1}",
+                        theme.name.label(),
+                        pair.what,
+                        pair.ratio,
+                        pair.least
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_theme_keeps_the_bars_and_panels_its_file_set_apart_from_the_canvas() {
+        // The first builder made weak text readable by pulling the fills back to
+        // the canvas. Every pair passed, and Tokyo Night Day's popups were the
+        // colour of what was under them.
+        for (name, text) in FILES {
+            let file: ThemeFile = serde_json::from_str(text).unwrap();
+            let theme = name.theme();
+            for (what, given, built) in [
+                ("chrome", file.colors.chrome.0, theme.chrome_bg),
+                ("surface", file.colors.surface.0, theme.surface),
+            ] {
+                if contrast_ratio(given, file.colors.background.0) < FILL_APART {
+                    continue;
+                }
+                assert!(
+                    contrast_ratio(built, theme.background) >= FILL_APART,
+                    "{}: {what} is {:.3} from the canvas",
+                    name.id(),
+                    contrast_ratio(built, theme.background)
+                );
+                assert_eq!(
+                    built,
+                    given,
+                    "{}: {what} is as its file gives it",
+                    name.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_edge_in_a_panel_grey_still_matches_the_fill_beside_it() {
+        // Copilot draws the top and bottom of its prompt box as half blocks in the
+        // panel's colour, on the canvas, and writes on the panel in other greys.
+        // The rule that makes a palette colour give way on a fill must not touch
+        // these: they are not palette colours, and an edge is meant to match.
+        for theme in named_themes() {
+            let copilot = copilot_colours(theme.is_light);
+            let panel = copilot.panels[0];
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 3, 1));
+            // The edge: panel colour as text, on the canvas.
+            buffer[(0, 0)].set_style(ratatui::style::Style::default().fg(panel));
+            // The fill, with one of Copilot's own text greys on it.
+            buffer[(1, 0)].set_style(
+                ratatui::style::Style::default()
+                    .fg(copilot.muted[0])
+                    .bg(panel),
+            );
+            // A panel grey on another panel grey.
+            let other = copilot.panels[copilot.panels.len() - 1];
+            buffer[(2, 0)].set_style(ratatui::style::Style::default().fg(panel).bg(other));
+
+            let area = buffer.area;
+            apply_terminal_theme(&mut buffer, area, theme);
+
+            let fill = map_terminal_color(panel, theme, false);
+            assert_eq!(buffer[(0, 0)].fg, fill, "{}", theme.name.label());
+            assert_eq!(buffer[(1, 0)].bg, fill, "{}", theme.name.label());
+            assert_eq!(buffer[(1, 0)].fg, copilot.muted[0]);
+            assert_eq!(buffer[(2, 0)].fg, fill, "{}", theme.name.label());
+        }
+    }
+
+    #[test]
+    fn panel_greys_take_the_tones_of_the_theme_and_hues_are_left_alone() {
+        for theme in named_themes() {
+            let copilot = if theme.is_light {
+                COPILOT_ON_LIGHT
+            } else {
+                COPILOT_ON_DARK
+            };
+            for panel in copilot.panels {
+                let mapped = map_terminal_color(*panel, theme, false);
+                assert_ne!(mapped, *panel, "{}", theme.name.label());
+                assert_eq!(
+                    mapped,
+                    map_terminal_color(*panel, theme, true),
+                    "a box edge drawn in the colour of the panel has to match its fill"
+                );
+            }
+            // Text greys and anything with a hue pass through.
+            for kept in copilot.text.iter().chain(copilot.muted) {
+                assert_eq!(map_terminal_color(*kept, theme, true), *kept);
+            }
+            for kept in [rgb(0x09, 0x69, 0xda), rgb(18, 52, 31), Color::Indexed(42)] {
+                assert_eq!(map_terminal_color(kept, theme, false), kept);
+            }
+        }
+        // The canvas a program assumes becomes the canvas of the theme.
+        let dark = ThemeName::SolarizedDark.theme();
+        assert_eq!(
+            map_terminal_color(rgb(0, 0, 0), dark, false),
+            dark.background
+        );
+        assert_eq!(
+            map_terminal_color(Color::Indexed(232), dark, false),
+            blend(dark.background, dark.panel_subtle, 40)
+        );
+    }
+
+    #[test]
+    #[ignore = "prints the colour pairs of every theme with their contrast, for the theme review"]
+    fn print_the_theme_audit() {
+        for theme in named_themes() {
+            println!(
+                "\n== {} ({})",
+                theme.name.label(),
+                if theme.is_light { "light" } else { "dark" }
+            );
+            for pair in pairs(theme) {
+                println!(
+                    "{} {:>5.2} (needs {:.1})  {}",
+                    if pair.ratio < pair.least {
+                        "FAIL"
+                    } else {
+                        "  ok"
+                    },
+                    pair.ratio,
+                    pair.least,
+                    pair.what
+                );
+            }
+        }
+    }
+
     #[test]
     fn light_themes_choose_dark_default_text() {
-        for name in ThemeName::LIGHT {
+        for name in ThemeName::light() {
             let theme = name.theme();
             assert!(theme.is_light);
             let Color::Rgb(r, g, b) = theme.text else {
@@ -685,7 +1407,8 @@ mod tests {
         assert_eq!(buffer[(0, 0)].bg, theme.background);
         assert!(buffer[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(buffer[(0, 0)].modifier.contains(Modifier::ITALIC));
-        assert_eq!(buffer[(1, 0)].fg, theme.ansi[1]);
+        // Red on green: kept where the pair shows, moved where it would not.
+        assert!(contrast_ratio(buffer[(1, 0)].fg, theme.ansi[2]) >= SEEN);
         assert_eq!(buffer[(1, 0)].bg, theme.ansi[2]);
         assert!(buffer[(1, 0)].modifier.contains(Modifier::UNDERLINED));
         assert_eq!(buffer[(2, 0)].fg, Color::Indexed(42));
@@ -774,6 +1497,15 @@ mod tests {
     fn terminal_mapping_stays_below_a_frame_budget_at_large_pane_size() {
         let area = Rect::new(0, 0, 240, 70);
         let mut buffer = Buffer::empty(area);
+        // The dearest cell there is: a palette colour on a palette fill it cannot be
+        // seen on, which is measured and then moved, on every cell of the screen.
+        for cell in &mut buffer.content {
+            cell.set_style(
+                ratatui::style::Style::default()
+                    .fg(Color::Indexed(2))
+                    .bg(Color::Indexed(10)),
+            );
+        }
         let started = std::time::Instant::now();
         for _ in 0..100 {
             apply_terminal_theme(&mut buffer, area, ThemeName::CatppuccinLatte.theme());

@@ -136,6 +136,8 @@ enum Commands {
     },
     /// Check that everything CST needs is installed and configured
     Doctor,
+    /// List the themes: the name to put in config.json, dark or light, and the title
+    Themes,
     /// Report how this terminal delivers key presses (used to pick a mux prefix key)
     #[command(hide = true)]
     DebugKeys,
@@ -322,6 +324,13 @@ fn main() -> Result<()> {
                 updater::UpdateCommandOutcome::AlreadyInstalled(version) => {
                     println!("CST v{version} is already installed.");
                 }
+            }
+            return Ok(());
+        }
+        Some(Commands::Themes) => {
+            // Tab-separated, one theme a line, so a script can loop over it.
+            for name in theme::ThemeName::ALL {
+                println!("{}\t{}\t{}", name.id(), name.appearance(), name.label());
             }
             return Ok(());
         }

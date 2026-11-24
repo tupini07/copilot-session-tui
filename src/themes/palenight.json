@@ -1,0 +1,26 @@
+{
+  "name": "Palenight",
+  "appearance": "dark",
+  "source": [
+    "https://raw.githubusercontent.com/t3dotgg/vsc-material-but-i-wont-sue-you/main/scripts/generator/settings/specific/palenight.ts",
+    "https://raw.githubusercontent.com/t3dotgg/vsc-material-but-i-wont-sue-you/main/scripts/generator/color-set.ts",
+    "https://raw.githubusercontent.com/kaicataldo/material.vim/main/colors/material.vim",
+    "https://raw.githubusercontent.com/whizkydee/vscode-palenight-theme/master/themes/palenight.json"
+  ],
+  "colors": {
+    "background": "#292d3e",
+    "chrome": "#333747",
+    "surface": "#3a3f58",
+    "text": "#babed8",
+    "muted": "#676e95",
+    "accent": "#c792ea",
+    "accent_alt": "#82aaff",
+    "success": "#c3e88d",
+    "warning": "#ffcb6b",
+    "error": "#f07178"
+  },
+  "ansi": [
+    "#000000", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
+    "#676e95", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff"
+  ]
+}
