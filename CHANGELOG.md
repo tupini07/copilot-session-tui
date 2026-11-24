@@ -3,6 +3,16 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.42.0 - 2026-11-24
+
+- Note: close older CSTs before picking a new theme, since they cannot read the new theme names.
+- Choose from twenty themes, with Nu Disco, One Dark, Rosé Pine and GitHub Light among the new ones.
+- Star a theme with f in the theme picker to list it first, under Favorites.
+- Switch to your next starred theme from Command Search: press the prefix twice and type flip.
+- Copilot's grey boxes behind prompts, inline code and the input line now take the theme's tones.
+- Faint text and washed-out colours are stronger in every theme, so your theme may look different.
+- The typing cursor can be seen on light themes.
+
 ## v0.41.0 - 2026-11-23
 
 - Change theme from Command Search: press the prefix twice, type theme, and pick one.
