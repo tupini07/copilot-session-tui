@@ -167,6 +167,14 @@ pub struct UserConfig {
     #[serde(default)]
     pub theme: crate::theme::ThemeName,
 
+    /// Starred themes, by the names this file knows them by.
+    ///
+    /// Names and not themes, so that one starred in a newer CST, which this one has
+    /// never heard of, neither stops these settings being read nor is dropped when
+    /// they are saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_themes: Vec<String>,
+
     /// Starred sessions, in the order the user arranged them.
     ///
     /// Deliberately a list rather than a set: the order is the feature, and it drives
@@ -500,6 +508,7 @@ impl Default for UserConfig {
         Self {
             yolo: false,
             theme: crate::theme::ThemeName::Classic,
+            favorite_themes: Vec::new(),
             favorites: Vec::new(),
             projects: Vec::new(),
             snippets: Vec::new(),

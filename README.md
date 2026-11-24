@@ -1128,6 +1128,13 @@ also the **Theme** row of Global Settings (`,`). Move through the picker to prev
 each theme live; `Home` and `End` jump to the first and last. `Enter` saves the
 selection; `Esc` closes the picker and restores the previously saved theme.
 
+Press `f` on a theme to star it. Starred themes are listed first, under **Favorites**,
+and the star is saved at once (`Esc` restores your theme, not your stars). The Command
+Search line **Next favorite theme** (type `flip`) switches to the next starred theme
+and saves it, with no popup: star one dark theme and one light one and it is the switch
+between them, for a laptop carried out into daylight and back. With nothing starred it
+opens the picker. Stars are the `favorite_themes` list in `config.json`.
+
 The selection is the root-level `theme` field in the global `config.json`, using a
 kebab-case name such as `"catppuccin-mocha"` or `"solarized-light"`;
 `copilot-session-tui themes` lists them. Omitting it

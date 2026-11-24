@@ -46,6 +46,7 @@ pub enum CommandId {
     InspectGithub,
     GlobalSettings,
     ChooseTheme,
+    NextFavoriteTheme,
     ProjectSettings,
     CheckForUpdates,
     ThreadInbox,
@@ -595,6 +596,15 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             "",
         ),
         entry(
+            Id::NextFavoriteTheme,
+            Group::Settings,
+            "Next favorite theme",
+            "Switch to the next starred theme and save it",
+            "",
+            true,
+            "",
+        ),
+        entry(
             Id::ProjectSettings,
             Group::Settings,
             "Project settings",
@@ -743,6 +753,7 @@ fn command_keywords(id: CommandId) -> &'static str {
         InspectGithub => "issue pr pull request discussion",
         GlobalSettings | ProjectSettings => "config preferences",
         ChooseTheme => "colors colours appearance dark light",
+        NextFavoriteTheme => "flip swap cycle star",
         CheckForUpdates => "upgrade version release restart",
         ThreadInbox => "threads github messages waiting agents inbox comments",
         WhatsNew => "changelog release notes updates version history",
@@ -815,6 +826,19 @@ mod tests {
             ..CommandPalette::default()
         });
         assert_eq!(filtered_commands(&app)[0].id, CommandId::GlobalSettings);
+        // The switch between starred themes has words of its own, so that it never
+        // takes the Enter meant for the picker.
+        for query in ["flip", "next fav", "cycle"] {
+            app.command_palette = Some(CommandPalette {
+                query: query.to_string(),
+                ..CommandPalette::default()
+            });
+            assert_eq!(
+                filtered_commands(&app)[0].id,
+                CommandId::NextFavoriteTheme,
+                "{query}"
+            );
+        }
     }
 
     #[test]

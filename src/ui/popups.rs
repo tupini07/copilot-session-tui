@@ -2533,13 +2533,27 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let classic = [ThemeName::Classic];
-    let dark = ThemeName::dark();
-    let light = ThemeName::light();
-    let groups: [(&str, &[ThemeName]); 3] =
-        [("Classic", &classic), ("Dark", &dark), ("Light", &light)];
+    // A starred theme is listed once, under Favorites, and leaves its own group:
+    // listed twice, the saved and preview marks would each need a rule for which
+    // copy carries them. This is the order `App::theme_picker_order` walks.
+    let favorites = app.favorite_themes();
+    let unstarred = |names: Vec<ThemeName>| -> Vec<ThemeName> {
+        names
+            .into_iter()
+            .filter(|name| !favorites.contains(name))
+            .collect()
+    };
+    let groups: Vec<(&str, Vec<ThemeName>)> = [
+        ("Favorites", favorites.clone()),
+        ("Classic", unstarred(vec![ThemeName::Classic])),
+        ("Dark", unstarred(ThemeName::dark())),
+        ("Light", unstarred(ThemeName::light())),
+    ]
+    .into_iter()
+    .filter(|(_, names)| !names.is_empty())
+    .collect();
     let mut entries: Vec<(Line<'static>, Option<usize>)> = Vec::new();
-    for (group_index, (label, names)) in groups.into_iter().enumerate() {
+    for (group_index, (label, names)) in groups.iter().enumerate() {
         if group_index > 0 {
             entries.push((Line::from(""), None));
         }
@@ -2569,6 +2583,10 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
                 picker_style
             };
             let marker = if selected { "▸" } else { " " };
+            let starred = favorites.contains(name);
+            let star = if starred { "★" } else { " " };
+            // Under Favorites a theme has left the group that said which it was.
+            let kind = if starred { name.appearance() } else { "" };
             let saved_label = if saved { " ● saved" } else { "" };
             let preview_label = if selected { " ◀ preview" } else { "" };
             let saved_style = if selected {
@@ -2576,9 +2594,15 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
             } else {
                 picker_style.fg(theme.success)
             };
+            let kind_style = if selected {
+                row_style
+            } else {
+                picker_style.fg(theme.muted)
+            };
             entries.push((
                 Line::from(vec![
-                    Span::styled(format!("  {marker} {:<20}", name.label()), row_style),
+                    Span::styled(format!(" {marker}{star} {:<17}", name.label()), row_style),
+                    Span::styled(format!("{kind:<9}"), kind_style),
                     Span::styled(saved_label, saved_style),
                     Span::styled(preview_label, row_style),
                 ]),
@@ -2657,7 +2681,15 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
                     .bg(theme.chrome_bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" select · PageUp/PageDown/Home/End jump", picker_style),
+            Span::styled(" select · PgUp/PgDn/Home/End jump · ", picker_style),
+            Span::styled(
+                "f",
+                Style::default()
+                    .fg(theme.accent_alt)
+                    .bg(theme.chrome_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" favorite", picker_style),
         ]),
         Line::from(vec![
             Span::styled(
@@ -3794,9 +3826,54 @@ mod help_tests {
                 .any(|row| row.contains("CST Classic") && row.contains("● saved")),
             "{text}"
         );
-        assert!(text.contains("PageUp/PageDown/Home/End"), "{text}");
+        assert!(text.contains("PgUp/PgDn/Home/End"), "{text}");
+        assert!(text.contains("f favorite"), "{text}");
         assert!(text.contains("Enter apply"), "{text}");
         assert!(text.contains("Esc cancel"), "{text}");
+        assert!(!text.contains("Favorites"), "nothing is starred\n{text}");
+    }
+
+    #[test]
+    fn starred_themes_are_listed_once_under_favorites_and_say_dark_or_light() {
+        // Listed in both places, a starred theme would need a rule for which copy
+        // shows as saved and which the selection lands on. It moves instead, and
+        // carries the word its old group used to say for it.
+        let mut app = App::new(
+            Vec::new(),
+            UserConfig {
+                theme: ThemeName::Nord,
+                favorite_themes: vec![
+                    "solarized-light".to_string(),
+                    "nord".to_string(),
+                    "a-theme-from-a-newer-cst".to_string(),
+                ],
+                ..UserConfig::default()
+            },
+        );
+        app.settings_selected = 3;
+        app.open_theme_picker();
+
+        let rows = buffer_rows(&rendered_settings(&mut app, 120, 44));
+        let text = rows.join("\n");
+        let row_of = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} is not listed\n{text}"))
+        };
+        assert_eq!(text.matches("★ Nord").count(), 1, "{text}");
+        assert!(!text.contains("│   Nord"), "not also under Dark\n{text}");
+        assert_eq!(text.matches("Solarized Light").count(), 1, "{text}");
+        // Favourites keep the picker's own order, whatever order they were starred in.
+        assert!(row_of("Favorites") < row_of("★ Nord"), "{text}");
+        assert!(row_of("★ Nord") < row_of("★ Solarized Light"), "{text}");
+        assert!(row_of("★ Solarized Light") < row_of("│  Classic"), "{text}");
+        assert!(rows[row_of("★ Nord")].contains("dark"), "{text}");
+        assert!(rows[row_of("★ Nord")].contains("● saved"), "{text}");
+        assert!(
+            rows[row_of("★ Solarized Light")].contains("light"),
+            "{text}"
+        );
+        assert_eq!(app.theme_picker_hits.len(), ThemeName::ALL.len());
     }
 
     #[test]

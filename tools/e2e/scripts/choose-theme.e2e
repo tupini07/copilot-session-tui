@@ -60,3 +60,42 @@ expect Existing app session
 press ,
 wait_for Tokyo Night Day
 dump 07-settings-shows-saved
+
+# Favourites. Esc out of Settings first.
+press esc
+wait_gone Global Settings
+
+# With nothing starred, the switch opens the picker and says how to star.
+press ctrl+b ctrl+b
+wait_for Command Search
+type flip
+wait_for Next favorite theme
+dump 08-search-flip
+press enter
+wait_for Theme Picker
+expect No favorite themes yet
+# Star the saved light theme where the picker opened, then a dark one.
+press f
+wait_for Favorites
+press down down down
+press f
+dump 09-two-starred
+press esc
+wait_gone Theme Picker
+
+# Now the same command is the switch between them, with no popup.
+press ctrl+b ctrl+b
+wait_for Command Search
+type flip
+wait_for Next favorite theme
+press enter
+wait_for (favorite 1 of 2)
+expect_not Theme Picker
+dump 10-flipped-to-dark
+press ctrl+b ctrl+b
+wait_for Command Search
+type flip
+wait_for Next favorite theme
+press enter
+wait_for Theme: Tokyo Night Day (favorite 2 of 2)
+dump 11-flipped-back

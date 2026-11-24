@@ -1803,6 +1803,11 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 }
             }
             KeyCode::Esc => app.cancel_theme_picker(),
+            KeyCode::Char('f') => {
+                if let Err(error) = app.toggle_theme_picker_favorite() {
+                    app.status_message = Some(format!("Failed to save favorite: {error}"));
+                }
+            }
             _ => {}
         }
         app.leave_theme_picker_opened_alone();
@@ -3067,6 +3072,106 @@ mod tests {
             Mode::Settings,
             "opened from its row, the picker hands back to Settings"
         );
+    }
+
+    #[test]
+    fn starring_a_theme_keeps_the_selection_on_it_and_survives_cancelling_the_picker() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+        let nord = crate::theme::ThemeName::Nord;
+        let gruvbox = crate::theme::ThemeName::Gruvbox;
+
+        app.choose_theme();
+        handle_settings(&mut app, KeyCode::Down);
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.theme_name(), nord);
+        handle_settings(&mut app, KeyCode::Char('f'));
+        // Its row jumped to the top of the list; the selection went with it.
+        assert_eq!(
+            app.theme_name(),
+            nord,
+            "still on the theme that was starred"
+        );
+        assert_eq!(app.theme_picker_order()[0], nord);
+        assert_eq!(
+            app.mode,
+            Mode::Settings,
+            "starring does not close the picker"
+        );
+        // From the top, down leads to what now follows it: Classic, then Gruvbox.
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.theme_name(), crate::theme::ThemeName::Classic);
+        handle_settings(&mut app, KeyCode::Down);
+        assert_eq!(app.theme_name(), gruvbox);
+        handle_settings(&mut app, KeyCode::End);
+        assert_eq!(
+            app.theme_name(),
+            crate::theme::ThemeName::ALL[crate::theme::ThemeName::ALL.len() - 1]
+        );
+        handle_settings(&mut app, KeyCode::Home);
+        assert_eq!(app.theme_name(), nord);
+
+        // Esc gives the old theme back and leaves the star.
+        handle_settings(&mut app, KeyCode::Esc);
+        assert_eq!(app.config.theme, crate::theme::ThemeName::Classic);
+        assert_eq!(app.favorite_themes(), vec![nord]);
+
+        // The same key takes it off again.
+        app.choose_theme();
+        handle_settings(&mut app, KeyCode::Home);
+        handle_settings(&mut app, KeyCode::Char('f'));
+        assert!(app.favorite_themes().is_empty());
+    }
+
+    #[test]
+    fn next_favorite_theme_walks_the_starred_themes_and_says_what_it_did() {
+        let nord = crate::theme::ThemeName::Nord;
+        let latte = crate::theme::ThemeName::CatppuccinLatte;
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        app.disable_config_persistence();
+
+        // Nothing starred: the picker opens, with a line saying how to star one.
+        app.next_favorite_theme();
+        assert!(app.theme_picker.is_some());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("No favorite themes yet. Press f on a theme to star it")
+        );
+        handle_settings(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+
+        // One starred and not the current theme: go to it.
+        app.config.favorite_themes = vec![latte.id()];
+        app.next_favorite_theme();
+        assert_eq!(app.config.theme, latte);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Theme: Catppuccin Latte (favorite 1 of 1)")
+        );
+        // One starred and already on it: nothing to switch to, and it says so.
+        app.next_favorite_theme();
+        assert_eq!(app.config.theme, latte);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(
+                "Catppuccin Latte is the only favorite theme. Star another with f in Choose theme"
+            )
+        );
+
+        // A dark and a light one starred: the command is the switch between them.
+        // The order is the picker's, not the order they were starred in.
+        app.config.favorite_themes = vec![latte.id(), nord.id(), "from-a-newer-cst".to_string()];
+        app.next_favorite_theme();
+        assert_eq!(app.config.theme, nord);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Theme: Nord (favorite 1 of 2)")
+        );
+        app.next_favorite_theme();
+        assert_eq!(app.config.theme, latte);
+        assert_eq!(app.mode, Mode::Normal, "no popup on the way");
+        // A name this CST does not know is kept for the one that does.
+        assert_eq!(app.config.favorite_themes.len(), 3);
     }
 
     #[test]
