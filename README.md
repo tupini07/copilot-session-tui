@@ -1116,9 +1116,12 @@ same config:
 
 #### Themes
 
-CST bundles ten themes in picker order: **CST Classic**, **Gruvbox**, **Nord**,
-**Dracula**, **Catppuccin Mocha**, **Palenight**, **Solarized Dark**,
-**Tokyo Night**, **Catppuccin Latte**, and **Solarized Light**. The quickest way to
+CST bundles twenty themes. **CST Classic** takes on your terminal's own colors.
+The dark ones are **Gruvbox**, **Nord**, **Dracula**, **Catppuccin Mocha**,
+**Palenight**, **Solarized Dark**, **Tokyo Night**, **Nu Disco**, **One Dark**,
+**Rosé Pine**, **Synthwave '84**, **Everforest Dark** and **Kanagawa**; the light ones
+are **Catppuccin Latte**, **Solarized Light**, **Gruvbox Light**, **GitHub Light**,
+**Rosé Pine Dawn** and **Tokyo Night Day**. The quickest way to
 the picker is Command Search: press the prefix twice, type `theme`, and press `Enter`.
 It opens over the session or the list you were looking at and returns there. It is
 also the **Theme** row of Global Settings (`,`). Move through the picker to preview
@@ -1146,6 +1149,13 @@ box behind your prompt, inline code and its input line in a fixed blue-grey chos
 a black or white terminal, which sits on a tinted canvas as a slab from another color
 scheme. Greys close to the canvas end of the scale are moved onto the theme's own
 panel tones. Greys used for text, and anything with a hue, stay as painted.
+
+Each named theme is a small JSON file in `src/themes`, compiled into CST: ten colors
+with a part to play each (canvas, bars, panels, text, secondary text, two accents,
+success, warning, error), the sixteen colors a terminal program asks for by number, and
+where they were taken from. The colors come from each scheme's own published files.
+Adding a theme is one such file plus its name in `src/theme.rs`; CST does not yet read
+theme files from a folder of your own.
 
 A theme's colors are used as its author gave them wherever they can be told apart, and
 moved only as far as needed where they cannot: a comment grey that would vanish on a

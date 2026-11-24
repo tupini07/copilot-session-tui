@@ -1,7 +1,7 @@
 # One theme's sheet for the theme review: the same four screens in every theme.
 # sheets.sh fills in @THEME@ and @CARD@ and runs this once per theme.
 
-size 100x30
+size 110x30
 arg --mux
 config {"theme": "@THEME@"}
 session existing-app Existing app session
@@ -9,6 +9,8 @@ session other-app Another session to compare against
 
 # 1. CST's own chrome: title bar, list, selection, details, key hints.
 wait_for Existing app session
+# The first frame can still be on its way when the text above has arrived.
+wait 400
 dump 1-list
 
 # 2. A pane: what a program paints through the theme. The stub's colour card has

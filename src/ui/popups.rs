@@ -2516,7 +2516,9 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
         return;
     };
     let theme = app.theme();
-    let area = centered_rect(54, 68, f.area());
+    // Tall, so that as many of the themes as the screen allows show at once: at
+    // 30 rows that is all but a handful of twenty.
+    let area = centered_rect(54, 86, f.area());
     f.render_widget(Clear, area);
     fill_area(f.buffer_mut(), area, theme.chrome_bg);
     let picker_style = Style::default().fg(theme.text).bg(theme.chrome_bg);
@@ -2532,11 +2534,10 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
     f.render_widget(block, area);
 
     let classic = [ThemeName::Classic];
-    let groups: [(&str, &[ThemeName]); 3] = [
-        ("Classic", &classic),
-        ("Dark", &ThemeName::DARK),
-        ("Light", &ThemeName::LIGHT),
-    ];
+    let dark = ThemeName::dark();
+    let light = ThemeName::light();
+    let groups: [(&str, &[ThemeName]); 3] =
+        [("Classic", &classic), ("Dark", &dark), ("Light", &light)];
     let mut entries: Vec<(Line<'static>, Option<usize>)> = Vec::new();
     for (group_index, (label, names)) in groups.into_iter().enumerate() {
         if group_index > 0 {
@@ -2595,20 +2596,46 @@ fn draw_theme_picker(f: &mut Frame, app: &mut App) {
         .position(|(_, index)| *index == Some(picker.selected))
         .unwrap_or_default();
     let max_offset = entries.len().saturating_sub(visible_rows);
-    let offset = selected_row
-        .saturating_sub(visible_rows.saturating_sub(1))
+    // One row is kept below the selection for the line that says more follow.
+    let offset = (selected_row + 2)
+        .saturating_sub(visible_rows)
         .min(max_offset);
-    let visible: Vec<Line<'static>> = entries
+    let themes_in = |rows: &[(Line<'static>, Option<usize>)]| {
+        rows.iter().filter(|(_, index)| index.is_some()).count()
+    };
+    let last_shown = (offset + visible_rows).min(entries.len());
+    // A list cut at the popup's edge looks complete. Say how many themes are out
+    // of sight each way, in place of the row at that edge.
+    let hidden_above = (offset > 0).then(|| themes_in(&entries[..offset + 1]));
+    let hidden_below = (last_shown < entries.len()).then(|| themes_in(&entries[last_shown - 1..]));
+    let more = |arrow: &str, count: usize| {
+        Line::from(Span::styled(
+            format!("    {arrow} {count} more"),
+            picker_style.fg(theme.muted),
+        ))
+    };
+    let mut visible: Vec<Line<'static>> = entries
         .iter()
         .skip(offset)
         .take(visible_rows)
         .map(|(line, _)| line.clone())
         .collect();
+    if let (Some(count), Some(first)) = (hidden_above, visible.first_mut()) {
+        *first = more("↑", count);
+    }
+    if let (Some(count), Some(last)) = (hidden_below, visible.last_mut()) {
+        *last = more("↓", count);
+    }
     let hits = entries
         .iter()
         .enumerate()
         .skip(offset)
         .take(visible_rows)
+        .filter(|(entry_row, _)| {
+            let says_more_above = hidden_above.is_some() && *entry_row == offset;
+            let says_more_below = hidden_below.is_some() && *entry_row + 1 == last_shown;
+            !says_more_above && !says_more_below
+        })
         .filter_map(|(entry_row, (_, theme_index))| {
             theme_index.map(|theme_index| {
                 let row = sections[0].y + u16::try_from(entry_row - offset).unwrap_or(u16::MAX);
@@ -3807,9 +3834,47 @@ mod help_tests {
 
         let text = buffer_text(&rendered_settings(&mut app, 90, 24));
 
-        assert!(text.contains("Solarized Light"), "{text}");
+        assert!(
+            text.contains(ThemeName::ALL[ThemeName::ALL.len() - 1].label()),
+            "{text}"
+        );
         assert!(text.contains("Enter"), "{text}");
         assert!(text.contains("Esc"), "{text}");
+    }
+
+    #[test]
+    fn a_theme_list_cut_by_the_popup_says_how_many_are_out_of_sight_each_way() {
+        // Twenty themes do not fit a 30-row terminal. A list that simply stopped at
+        // the edge read as complete, with the light themes nowhere to be seen.
+        let mut app = App::new(Vec::new(), UserConfig::default());
+        app.settings_selected = 3;
+        app.open_theme_picker();
+
+        let top = buffer_text(&rendered_settings(&mut app, 110, 30));
+        let shown = app.theme_picker_hits.len();
+        assert!(shown < ThemeName::ALL.len(), "{top}");
+        assert!(
+            top.contains(&format!("↓ {} more", ThemeName::ALL.len() - shown)),
+            "{top}"
+        );
+        assert!(
+            top.matches(" more").count() == 1,
+            "nothing is above the first theme\n{top}"
+        );
+
+        app.theme_picker.as_mut().unwrap().selected = ThemeName::ALL.len() - 1;
+        let bottom = buffer_text(&rendered_settings(&mut app, 110, 30));
+        let shown = app.theme_picker_hits.len();
+        assert!(
+            bottom.contains(&format!("↑ {} more", ThemeName::ALL.len() - shown)),
+            "{bottom}"
+        );
+        assert!(bottom.matches(" more").count() == 1, "{bottom}");
+        // The row that says so is not a theme, and a click on it picks nothing.
+        assert!(app
+            .theme_picker_hits
+            .iter()
+            .all(|(_, index)| *index < ThemeName::ALL.len()));
     }
 
     #[test]

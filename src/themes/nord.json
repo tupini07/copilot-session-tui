@@ -1,0 +1,25 @@
+{
+  "name": "Nord",
+  "appearance": "dark",
+  "source": [
+    "https://raw.githubusercontent.com/nordtheme/nord/develop/src/nord.css",
+    "https://raw.githubusercontent.com/nordtheme/alacritty/main/src/nord.yaml",
+    "https://raw.githubusercontent.com/nordtheme/vim/main/colors/nord.vim"
+  ],
+  "colors": {
+    "background": "#2e3440",
+    "chrome": "#3b4252",
+    "surface": "#434c5e",
+    "text": "#d8dee9",
+    "muted": "#616e88",
+    "accent": "#88c0d0",
+    "accent_alt": "#81a1c1",
+    "success": "#a3be8c",
+    "warning": "#ebcb8b",
+    "error": "#bf616a"
+  },
+  "ansi": [
+    "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+    "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4"
+  ]
+}

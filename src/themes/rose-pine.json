@@ -1,0 +1,23 @@
+{
+  "name": "Rosé Pine",
+  "appearance": "dark",
+  "source": [
+    "https://raw.githubusercontent.com/rose-pine/alacritty/main/dist/rose-pine.toml"
+  ],
+  "colors": {
+    "background": "#191724",
+    "chrome": "#1f1d2e",
+    "surface": "#26233a",
+    "text": "#e0def4",
+    "muted": "#6e6a86",
+    "accent": "#c4a7e7",
+    "accent_alt": "#9ccfd8",
+    "success": "#31748f",
+    "warning": "#f6c177",
+    "error": "#eb6f92"
+  },
+  "ansi": [
+    "#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
+    "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4"
+  ]
+}

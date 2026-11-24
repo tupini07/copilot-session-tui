@@ -1,0 +1,24 @@
+{
+  "name": "Tokyo Night Day",
+  "appearance": "light",
+  "source": [
+    "https://raw.githubusercontent.com/folke/tokyonight.nvim/main/extras/alacritty/tokyonight_day.toml",
+    "https://raw.githubusercontent.com/folke/tokyonight.nvim/main/extras/lua/tokyonight_day.lua"
+  ],
+  "colors": {
+    "background": "#e1e2e7",
+    "chrome": "#d0d5e3",
+    "surface": "#c4c8da",
+    "text": "#3760bf",
+    "muted": "#848cb5",
+    "accent": "#2e7de9",
+    "accent_alt": "#007197",
+    "success": "#587539",
+    "warning": "#8c6c3e",
+    "error": "#f52a65"
+  },
+  "ansi": [
+    "#b4b5b9", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197", "#6172b0",
+    "#a1a6c5", "#ff4774", "#5c8524", "#a27629", "#358aff", "#a463ff", "#007ea8", "#3760bf"
+  ]
+}

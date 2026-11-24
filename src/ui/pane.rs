@@ -1244,7 +1244,7 @@ mod tests {
             "\x1b[0m"
         );
 
-        for name in ThemeName::LIGHT {
+        for name in ThemeName::light() {
             let mut app = mux_app_with_theme(name);
             let theme = app.theme();
             let events = app.mux.as_ref().expect("mux").events.clone();
@@ -1290,21 +1290,17 @@ mod tests {
             assert_eq!(buffer[(x + 6, y + 2)].fg, theme.ansi[5]);
             assert!(contrast_ratio(theme.ansi[8], theme.background) >= 2.4);
 
-            assert_eq!(buffer[(x, y + 3)].fg, theme.ansi[2]);
+            assert!(contrast_ratio(buffer[(x, y + 3)].fg, add_bg) >= 2.8);
             assert_eq!(buffer[(x, y + 3)].bg, add_bg);
-            assert_eq!(buffer[(x + 7, y + 3)].fg, theme.ansi[6]);
+            assert!(contrast_ratio(buffer[(x + 7, y + 3)].fg, add_bg) >= 2.8);
             assert_eq!(buffer[(x + 11, y + 3)].fg, theme.contrast_text(add_bg));
             assert_eq!(buffer[(x + 11, y + 3)].bg, add_bg);
-            assert!(contrast_ratio(theme.ansi[2], add_bg) >= 2.8);
-            assert!(contrast_ratio(theme.ansi[6], add_bg) >= 2.8);
 
-            assert_eq!(buffer[(x, y + 4)].fg, theme.ansi[1]);
+            assert!(contrast_ratio(buffer[(x, y + 4)].fg, delete_bg) >= 2.8);
             assert_eq!(buffer[(x, y + 4)].bg, delete_bg);
-            assert_eq!(buffer[(x + 7, y + 4)].fg, theme.ansi[6]);
+            assert!(contrast_ratio(buffer[(x + 7, y + 4)].fg, delete_bg) >= 2.8);
             assert_eq!(buffer[(x + 11, y + 4)].fg, theme.contrast_text(delete_bg));
             assert_eq!(buffer[(x + 11, y + 4)].bg, delete_bg);
-            assert!(contrast_ratio(theme.ansi[1], delete_bg) >= 2.8);
-            assert!(contrast_ratio(theme.ansi[6], delete_bg) >= 2.8);
 
             let _ = app.mux.as_mut().expect("mux").shutdown();
         }

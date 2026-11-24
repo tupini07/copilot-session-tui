@@ -1,0 +1,24 @@
+{
+  "name": "GitHub Light",
+  "appearance": "light",
+  "source": [
+    "https://unpkg.com/@primer/primitives@7.15.15/dist/json/colors/light.json",
+    "https://raw.githubusercontent.com/primer/github-vscode-theme/main/src/theme.js"
+  ],
+  "colors": {
+    "background": "#ffffff",
+    "chrome": "#f6f8fa",
+    "surface": "#eaeef2",
+    "text": "#1f2328",
+    "muted": "#656d76",
+    "accent": "#0969da",
+    "accent_alt": "#1b7c83",
+    "success": "#1a7f37",
+    "warning": "#9a6700",
+    "error": "#d1242f"
+  },
+  "ansi": [
+    "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
+    "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#8c959f"
+  ]
+}

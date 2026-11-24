@@ -17,7 +17,7 @@ type theme
 wait_for Choose theme
 dump 01-search
 press enter
-wait_for Catppuccin Latte
+wait_for Theme Picker
 expect Fake Copilot is idling
 dump 02-picker-over-session
 
@@ -25,7 +25,7 @@ dump 02-picker-over-session
 press end
 dump 03-preview-light
 press enter
-wait_gone Catppuccin Latte
+wait_gone Theme Picker
 expect Fake Copilot is idling
 expect_not Global Settings
 dump 04-light-session
@@ -36,10 +36,10 @@ wait_for Command Search
 type theme
 wait_for Choose theme
 press enter
-wait_for Catppuccin Latte
+wait_for Theme Picker
 press home
 press esc
-wait_gone Catppuccin Latte
+wait_gone Theme Picker
 expect Fake Copilot is idling
 expect_not Global Settings
 dump 05-esc-keeps-light
@@ -52,11 +52,11 @@ wait_for Command Search
 type theme
 wait_for Choose theme
 press enter
-wait_for Catppuccin Latte
+wait_for Theme Picker
 dump 06-picker-over-list
 press esc
-wait_gone Catppuccin Latte
+wait_gone Theme Picker
 expect Existing app session
 press ,
-wait_for Solarized Light
+wait_for Tokyo Night Day
 dump 07-settings-shows-saved

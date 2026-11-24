@@ -1,0 +1,25 @@
+{
+  "name": "Solarized Light",
+  "appearance": "light",
+  "source": [
+    "https://raw.githubusercontent.com/altercation/solarized/master/xresources/solarized",
+    "https://raw.githubusercontent.com/altercation/solarized/master/README.md"
+  ],
+  "note": "Bright green, yellow, blue and cyan repeat the normal colours: Solarized fills those slots with its base greys, so a program asking for bright green would get grey.",
+  "colors": {
+    "background": "#fdf6e3",
+    "chrome": "#eee8d5",
+    "surface": "#eee8d5",
+    "text": "#657b83",
+    "muted": "#93a1a1",
+    "accent": "#268bd2",
+    "accent_alt": "#2aa198",
+    "success": "#859900",
+    "warning": "#b58900",
+    "error": "#dc322f"
+  },
+  "ansi": [
+    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#002b36", "#cb4b16", "#859900", "#b58900", "#268bd2", "#6c71c4", "#2aa198", "#fdf6e3"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Nu Disco",
+  "appearance": "dark",
+  "source": [
+    "https://dbanksdesign.gallerycdn.vsassets.io/extensions/dbanksdesign/nu-disco/1.0.6/1572973325014/Microsoft.VisualStudio.Services.VSIXPackage",
+    "https://raw.githubusercontent.com/dbanksdesign/nu-disco-vscode-theme/master/tokens/core.json5",
+    "https://raw.githubusercontent.com/dbanksdesign/nu-disco-vscode-theme/master/tokens/application/terminal.json5"
+  ],
+  "note": "Text and comments are the theme's translucent whites blended over its background. Black and white are swapped back from the theme's terminal colours, which invert them in its dark build. The normal colours are its pastels and the bright ones its neons, as upstream.",
+  "colors": {
+    "background": "#0c001f",
+    "chrome": "#180d2a",
+    "surface": "#231934",
+    "text": "#efeef0",
+    "muted": "#9e99a5",
+    "accent": "#ff82b4",
+    "accent_alt": "#52e7e1",
+    "success": "#67e591",
+    "warning": "#ffb271",
+    "error": "#ff7878"
+  },
+  "ansi": [
+    "#180d2a", "#ffb8b8", "#aeecc3", "#fff9bb", "#c3e7f9", "#ffcfe3", "#c4fffd", "#bebbc3",
+    "#322941", "#ff7878", "#67e591", "#fff373", "#6bb5ff", "#ff82b4", "#52e7e1", "#efeef0"
+  ]
+}
