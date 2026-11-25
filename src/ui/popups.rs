@@ -1089,7 +1089,8 @@ pub fn help_lines(app: &App) -> Vec<Line<'static>> {
         help_line(theme, "P", "New project: add a folder, or create one"),
         help_line(theme, "c", "Clear the search and the project filter"),
         help_line(theme, "s", "Cycle sort order"),
-        help_line(theme, "H", "Temporarily show/hide filtered sessions"),
+        help_line(theme, "h", "Hide the session's project, or bring it back"),
+        help_line(theme, "H", "Temporarily show/hide hidden sessions"),
         help_line(
             theme,
             "F5",
@@ -2009,7 +2010,41 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         paths_editing,
     ));
     lines.push(Line::from(Span::styled(
-        "    Comma-separated: a full path hides that folder, a bare name every folder called that",
+        "    Comma-separated; a full path, or a bare folder name to hide it anywhere",
+        Style::default().fg(theme.muted),
+    )));
+    lines.push(Line::from(""));
+    let projects_editing = app.settings_editing == Some(SettingsEditField::HiddenProjects);
+    // Full paths while editing, since that is what is saved. Otherwise the names the
+    // session list shows: three absolute paths do not fit the row, and the names are
+    // what the projects are known by.
+    let projects_display = if projects_editing {
+        format!("{}█", app.settings_input)
+    } else if app.config.hidden_projects.is_empty() {
+        "(none)".to_string()
+    } else {
+        app.config
+            .hidden_projects
+            .iter()
+            .map(|root| app.project_label(root))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    setting_lines.insert(30, lines.len());
+    lines.push(settings_row(
+        theme,
+        "Hidden Projects",
+        &projects_display,
+        if app.config.hidden_projects.is_empty() {
+            theme.muted
+        } else {
+            theme.accent_alt
+        },
+        app.settings_selected == 30,
+        projects_editing,
+    ));
+    lines.push(Line::from(Span::styled(
+        "    Press h on a session to hide its project; Enter here to edit the folders",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));
@@ -3406,7 +3441,7 @@ mod help_tests {
 
     #[test]
     fn a_help_screen_that_fits_is_not_scrolled() {
-        let (text, clamped) = rendered(200, 100, usize::MAX);
+        let (text, clamped) = rendered(200, 120, usize::MAX);
 
         assert!(text.contains("Keyboard Shortcuts"), "got:\n{text}");
         assert!(
@@ -3641,6 +3676,7 @@ mod help_tests {
             (SettingsSection::General, 18, "Max Autopilot Continues"),
             (SettingsSection::Filters, 16, "Hidden Title Prefixes"),
             (SettingsSection::Filters, 17, "Hidden Path Prefixes"),
+            (SettingsSection::Filters, 30, "Hidden Projects"),
             (SettingsSection::Filters, 19, "GitHub Comment Filter"),
             (SettingsSection::Threads, 20, "Trusted Authors"),
             (SettingsSection::Threads, 21, "Thread Wakes"),
