@@ -46,6 +46,8 @@ pub fn main() {
     // script, so it can act out what the real Copilot does without a model:
     //   e2e:print <text>        clear the screen and print <text> as is; a literal \n
     //                           starts a new row, as the real Copilot's word-wrap does
+    //   e2e:scrollbar           draw a bar down the last column, where the real Copilot
+    //                           has its scrollbar, after whatever the rows hold
     //   e2e:say <text>          write an assistant message to the session's event log
     //   e2e:work <ms> [<text>]  report a turn over OSC progress that ends after <ms>,
     //                           saying <text> while it runs
@@ -167,6 +169,18 @@ fn act(direction: &str, events_path: Option<&std::path::Path>) {
             for row in rest.split("\\n") {
                 print!("{row}\r\n");
             }
+            let _ = std::io::stdout().flush();
+        }
+        "scrollbar" => {
+            // The real Copilot's scrollbar is a column of heavy bars against the right
+            // edge, so a row that runs to the edge has one after its last word. The
+            // stub does not know how wide it is; a column past any pane is clamped to
+            // the last one, and the same goes for the rows.
+            print!("\x1b7");
+            for row in 1..=80 {
+                print!("\x1b[{row};999H\u{2503}");
+            }
+            print!("\x1b8");
             let _ = std::io::stdout().flush();
         }
         "say" => {

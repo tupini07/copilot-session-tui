@@ -1559,6 +1559,24 @@ fn row_characters(screen: &vt100::Screen, row: u16, cols: u16) -> Vec<char> {
         .collect()
 }
 
+/// A row as a path reader should see it: without Copilot's scrollbar.
+///
+/// Copilot draws a scrollbar down the last column of its screen, track and thumb, in
+/// box-drawing bars. A path that runs to the end of a row therefore has a bar after
+/// it, which is not blank and so was read as part of the path: the first row of a
+/// wrapped image line ended `…\notes\diag ┃` and no file is called that. Nothing a
+/// path is made of is drawn with these characters, so one in the last column is
+/// read as the blank it stands in front of.
+fn path_row_characters(screen: &vt100::Screen, row: u16, cols: u16) -> Vec<char> {
+    let mut characters = row_characters(screen, row, cols);
+    if let Some(last) = characters.last_mut() {
+        if ('\u{2500}'..='\u{259f}').contains(last) {
+            *last = ' ';
+        }
+    }
+    characters
+}
+
 /// Every distinct `#1234` on screen, in no particular order.
 fn github_references(screen: &vt100::Screen) -> Vec<u64> {
     let (rows, cols) = screen.size();
@@ -1583,26 +1601,28 @@ const IMAGE_LINE_ROWS: u16 = 3;
 
 /// The path on Copilot's image line at `row`, in every way the wrapped rows could join.
 ///
-/// The line is word-wrapped by Copilot, which drops the space it broke at, so two rows
-/// usually join with a space put back. A path with no space in it is broken by the
-/// terminal instead, and `vt100` marks such a row as wrapped, so those join as they are.
-/// Which rows belong to the line at all is the guess: the candidates are the one-row,
-/// two-row and three-row readings, shortest first, for the caller to test against the
-/// disk. Empty when `row` is not part of such a line.
+/// The line is wrapped by Copilot, not by the terminal, and how it broke a row cannot
+/// be read off the screen. At a space, the space is dropped, and the rows join with
+/// it put back. Where a word is longer than the row, and a path mostly is one long
+/// word, it is broken wherever the row ends, after a hyphen or in the middle of a
+/// name, and the rows join as they are. A narrow pane, one side of a split, is where
+/// the second happens most. So each break is read both ways; a row `vt100` marks as
+/// wrapped by the terminal joins as it is only. Which rows belong to the line at all is
+/// a guess too: the candidates are the one-row, two-row and three-row readings,
+/// shortest first, for the caller to test against the disk. Empty when `row` is not
+/// part of such a line.
 fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
     let (rows, cols) = screen.size();
     let text = |row: u16| -> String {
-        (0..cols)
-            .filter_map(|col| screen.cell(row, col))
-            .filter(|cell| !cell.is_wide_continuation())
-            .map(|cell| {
-                let contents = cell.contents();
-                if contents.is_empty() {
-                    " "
-                } else {
-                    contents
-                }
+        path_row_characters(screen, row, cols)
+            .into_iter()
+            .enumerate()
+            .filter(|(col, _)| {
+                screen
+                    .cell(row, *col as u16)
+                    .is_none_or(|cell| !cell.is_wide_continuation())
             })
+            .map(|(_, c)| c)
             .collect()
     };
     let lower_anchor = IMAGE_PATH_ANCHOR;
@@ -1618,8 +1638,9 @@ fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pat
         if start == row && (column as usize) < indent {
             return Vec::new();
         }
-        let mut joined = first[after_anchor..].trim_end().to_string();
-        let mut candidates = vec![image_path(&joined)];
+        // Every way the rows so far could join, the likelier reading first.
+        let mut readings = vec![first[after_anchor..].trim_end().to_string()];
+        let mut candidates = vec![image_path(&readings[0])];
         let mut last = start;
         for next in start + 1..(start + IMAGE_LINE_ROWS).min(rows) {
             let continuation = text(next);
@@ -1627,17 +1648,30 @@ fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pat
             if continuation.is_empty() {
                 break;
             }
-            if !screen.row_wrapped(next - 1) {
-                joined.push(' ');
+            let separators: &[&str] = if screen.row_wrapped(next - 1) {
+                &[""]
+            } else {
+                &[" ", ""]
+            };
+            readings = readings
+                .iter()
+                .flat_map(|reading| {
+                    separators
+                        .iter()
+                        .map(move |separator| format!("{reading}{separator}{continuation}"))
+                })
+                .collect();
+            for reading in &readings {
+                let path = image_path(reading);
+                if !candidates.contains(&path) {
+                    candidates.push(path);
+                }
             }
-            joined.push_str(continuation);
-            candidates.push(image_path(&joined));
             last = next;
         }
         if row > last {
             return Vec::new();
         }
-        candidates.dedup();
         return candidates
             .into_iter()
             .filter(|path| path.is_absolute())
@@ -1670,25 +1704,37 @@ fn image_path(text: &str) -> std::path::PathBuf {
 /// broke is marked by `vt100` and read joined as it is. A row Copilot laid out itself
 /// is not marked: it wrote the row up to the word that no longer fitted, dropped the
 /// space, and went on under the bullet's indent on the next, and where its right edge
-/// lies is its own affair. So the rows are read twice, first as separate lines and then
-/// with each short row continuing onto the next with the space put back, and both
-/// readings are offered, in that order; whether either names a file is for the caller
-/// to find out, which is what settles it.
+/// lies is its own affair. A word longer than the row, which a path often is, it breaks
+/// where the row ends and drops nothing. So the rows are read three times: as separate
+/// lines, with each row continuing onto the next with the space put back, and with
+/// each continuing as it is. All the readings are offered, in that order; whether any
+/// names a file is for the caller to find out, which is what settles it.
 fn picture_path_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::path::PathBuf> {
-    let mut candidates: Vec<std::path::PathBuf> = [false, true]
-        .into_iter()
-        .filter_map(|join_short_rows| picture_path_reading(screen, row, column, join_short_rows))
-        .collect();
-    candidates.dedup();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for rows_join in [RowsJoin::Never, RowsJoin::WithSpace, RowsJoin::AsTheyAre] {
+        if let Some(path) = picture_path_reading(screen, row, column, rows_join) {
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+    }
     candidates
 }
 
-/// One reading of the path under the click; see [`picture_path_at`] for the two.
+/// How a row Copilot laid out itself is taken to run on into the next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowsJoin {
+    Never,
+    WithSpace,
+    AsTheyAre,
+}
+
+/// One reading of the path under the click; see [`picture_path_at`] for the three.
 fn picture_path_reading(
     screen: &vt100::Screen,
     row: u16,
     column: u16,
-    join_short_rows: bool,
+    rows_join: RowsJoin,
 ) -> Option<std::path::PathBuf> {
     let (rows, cols) = screen.size();
     let first = row.saturating_sub(IMAGE_LINE_ROWS - 1);
@@ -1699,7 +1745,7 @@ fn picture_path_reading(
     // marked with a line break.
     let mut joined: Vec<(char, Option<(u16, u16)>)> = Vec::new();
     for current in first..=last {
-        let cells = row_characters(screen, current, cols);
+        let cells = path_row_characters(screen, current, cols);
         if current > first && !screen.row_wrapped(current - 1) {
             let trailing_blanks = joined
                 .iter()
@@ -1707,10 +1753,14 @@ fn picture_path_reading(
                 .take_while(|(c, _)| c.is_whitespace())
                 .count();
             let indent = cells.iter().take_while(|c| **c == ' ').count();
-            let continues = join_short_rows && indent < cells.len();
+            let continues = rows_join != RowsJoin::Never && indent < cells.len();
             let keep = joined.len() - trailing_blanks;
             joined.truncate(keep);
-            joined.push((if continues { ' ' } else { '\n' }, None));
+            match rows_join {
+                _ if !continues => joined.push(('\n', None)),
+                RowsJoin::WithSpace => joined.push((' ', None)),
+                _ => {}
+            }
             if continues {
                 joined.extend(
                     cells
@@ -1907,12 +1957,82 @@ mod tests {
             .as_bytes(),
         );
         let from_first_row = image_candidates(parser.screen(), 0, 30);
-        assert_eq!(from_first_row.len(), 2, "{from_first_row:?}");
+        // The row alone, the rows with the space put back, the rows as they are.
+        assert_eq!(from_first_row.len(), 3, "{from_first_row:?}");
         assert_eq!(from_first_row[1], PICTURE);
         assert_eq!(
             image_candidates(parser.screen(), 1, 5),
             from_first_row,
             "clicking the continuation row finds the same line"
+        );
+    }
+
+    /// The line as the real Copilot lays it out in a pane just wide enough: indented, each
+    /// row its own write, broken at each `|` with nothing dropped, and its scrollbar
+    /// drawn down the last column.
+    fn copilot_layout(text: &str) -> vt100::Parser {
+        let longest = text
+            .split('|')
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap();
+        let width = (4 + longest + 2) as u16;
+        let mut parser = vt100::Parser::new(6, width, 0);
+        for (row, text) in text.split('|').enumerate() {
+            parser.process(format!("\x1b[{};1H    {text}", row + 1).as_bytes());
+        }
+        for row in 1..=6 {
+            parser.process(format!("\x1b[{row};{width}H\u{2503}").as_bytes());
+        }
+        parser
+    }
+
+    #[cfg(windows)]
+    const DEEP: &str =
+        r"D:\Workspace\agentic\operator\notes\diag-gt-gap\figures\fig3_prevalence.png";
+    #[cfg(not(windows))]
+    const DEEP: &str = "/work/agentic/operator/notes/diag-gt-gap/figures/fig3_prevalence.png";
+
+    #[test]
+    fn an_image_line_in_a_narrow_pane_is_read_past_the_scrollbar_and_a_break_inside_a_word() {
+        // One side of a split. The path is one long word, so Copilot breaks it where
+        // the row ends, here before a hyphen, and drops nothing; and the first row
+        // runs up to the scrollbar. Read with the bar and a space put in, it named
+        // `…\diag ┃ -gt-gap\…` and the click said there was no picture there.
+        let line = format!("[Image: Image file at path {DEEP} [image/png] 1040x416]");
+        let parser = copilot_layout(&line.replace("diag-gt", "diag|-gt"));
+        let screen = parser.screen();
+        assert!(!screen.row_wrapped(0));
+        let (_, cols) = screen.size();
+        assert!(row_characters(screen, 0, cols).ends_with(&['g', ' ', '\u{2503}']));
+
+        for (row, column) in [(0, 20), (1, 10)] {
+            let candidates = image_candidates(screen, row, column);
+            assert!(
+                candidates.contains(&DEEP.to_string()),
+                "{candidates:?} should include the path"
+            );
+            assert!(
+                candidates.iter().all(|path| !path.contains('\u{2503}')),
+                "{candidates:?} should not take the scrollbar for part of a name"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_line_over_three_rows_offers_every_way_its_two_breaks_could_join() {
+        // Narrower still: one break falls inside a name and the other at the space
+        // before the type, and which is which cannot be told from the screen.
+        let line = format!("[Image: Image file at path {DEEP} [image/png] 1040x416]");
+        let parser = copilot_layout(
+            &line
+                .replace("diag-gt", "diag|-gt")
+                .replace("fig3_p", "fig3|_p"),
+        );
+        let candidates = image_candidates(parser.screen(), 2, 8);
+        assert!(
+            candidates.contains(&DEEP.to_string()),
+            "{candidates:?} should include the path"
         );
     }
 
@@ -1995,13 +2115,15 @@ mod tests {
                 .as_bytes(),
         );
         assert!(!parser.screen().row_wrapped(0));
-        assert_eq!(
-            bare_candidates(parser.screen(), 0, 40),
-            vec![PICTURE.to_string()]
-        );
+        // The space put back is the first reading; the rows as they are, the second.
+        let both = vec![
+            PICTURE.to_string(),
+            PICTURE.replace("city street", "citystreet"),
+        ];
+        assert_eq!(bare_candidates(parser.screen(), 0, 40), both);
         assert_eq!(
             bare_candidates(parser.screen(), 1, 4),
-            vec![PICTURE.to_string()],
+            both,
             "clicking the continuation row finds the same path"
         );
 
@@ -2012,16 +2134,33 @@ mod tests {
         parser.process(format!("\x1b[1;1HSaved under {head}city\x1b[2;1H  {tail}").as_bytes());
         assert_eq!(
             bare_candidates(parser.screen(), 0, 20),
-            vec![PICTURE.to_string()],
-            "the joined reading is offered even with room to spare on the row"
+            both,
+            "the joined readings are offered even with room to spare on the row"
         );
         let mut parser = vt100::Parser::new(4, 100, 0);
         parser.process(format!("\x1b[1;1HSaved under {head}city.png\x1b[2;1H  {tail}").as_bytes());
         assert_eq!(
-            bare_candidates(parser.screen(), 0, 20),
-            vec![format!("{head}city.png")],
-            "a path complete on its own row does not take the next row along"
+            bare_candidates(parser.screen(), 0, 20).first(),
+            Some(&format!("{head}city.png")),
+            "a path complete on its own row is the first one tried"
         );
+    }
+
+    #[test]
+    fn a_picture_path_in_a_narrow_pane_is_read_past_the_scrollbar_and_a_break_inside_a_word() {
+        // The same in the model's own answer: the path is broken where the row ends,
+        // nothing is dropped, and the scrollbar stands after it.
+        let line = format!("Saved the chart to {DEEP} for you.");
+        let parser = copilot_layout(&line.replace("notes", "no|tes"));
+        let screen = parser.screen();
+        for (row, column) in [(0, 30), (1, 10)] {
+            let candidates = bare_candidates(screen, row, column);
+            assert!(
+                candidates.contains(&DEEP.to_string()),
+                "row {row}: {candidates:?} should include the path"
+            );
+            assert!(candidates.iter().all(|path| !path.contains('\u{2503}')));
+        }
     }
 
     #[test]
