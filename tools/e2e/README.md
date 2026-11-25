@@ -120,6 +120,8 @@ sends a notification. `e2e:background <shellId> <description>` records a command
 running in the background as the real Copilot's log does, `e2e:background-done <shellId>`
 records it ending, and `e2e:spawn <seconds>` starts a real process under a shell of the
 stub's, alive about that long, for a script that marks a process by hand.
+`e2e:scrollbar` draws a bar down the last column, as the real Copilot's scrollbar is, so
+a script can check that what reads a row is not thrown by it;
 `e2e:colors dark|light` paints a colour card for looking at a theme: the sixteen palette
 colours, the grey ramp, and the fixed colours the real Copilot uses for that appearance.
 | `dump <name>` | Write `<name>.txt`, `.html` and `.png`. |

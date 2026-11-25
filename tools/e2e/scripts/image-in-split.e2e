@@ -1,0 +1,71 @@
+# Ctrl+click on a picture's path in one side of a split. A pane half as wide breaks the
+# path where the row ends, in the middle of a name with nothing dropped, and the real
+# Copilot's scrollbar stands after the last word of every row. Both used to end up in
+# the path CST looked for: "No picture at …\pics\sam ┃ ple.png".
+
+size 220x30
+arg --mux
+session existing-app Existing app session
+session second-app Second app session
+image_file pics/sample.png 64x32
+image_file pics/house.png 48x48
+# As over SSH, so nothing is opened on the desktop of whoever runs the script.
+env SSH_TTY=1
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+press ctrl+b d
+wait_for Second app session
+press down
+press enter
+wait_for Fake Copilot is idling
+
+# Bring the other session in beside this one.
+press ctrl+b l
+wait 300
+press v
+wait 500
+dump 01-switcher
+press enter
+wait 1500
+dump 02-split
+
+# The line Copilot prints for a picture it read, laid out as it lays it out: broken
+# inside the file's name, the rest indented on the next row.
+type e2e:print     [Image: Image file at path {projects}\pics\sam\n    ple.png [image/png] 64x32]
+press enter
+wait_for ple.png [image/png]
+type e2e:scrollbar
+press enter
+wait 800
+dump 03-image-line
+
+click_on ctrl+left ple.png [image/png]
+wait_for sample.png  64x32
+expect_not No picture at
+dump 04-viewer-from-second-row
+press esc
+wait_gone sample.png  64x32
+
+click_on ctrl+left Image file at path
+wait_for sample.png  64x32
+dump 05-viewer-from-first-row
+press esc
+wait_gone sample.png  64x32
+
+# The same path in the model's own words, broken the same way.
+type e2e:print   Saved it as {projects}\pics\ho\n  use.png for you.
+press enter
+wait_for use.png for you.
+type e2e:scrollbar
+press enter
+wait 800
+dump 06-answer-line
+
+click_on ctrl+left use.png
+wait_for house.png  48x48
+expect_not No picture at
+dump 07-answer-viewer
+press esc
+wait_gone house.png  48x48
