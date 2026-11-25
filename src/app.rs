@@ -29,23 +29,48 @@ use std::time::{Duration, Instant};
 
 pub use crate::config::GithubCommentFilter;
 
+/// Whether a session's folder falls under a hidden path the user wrote.
+///
+/// A path written from its root, `D:\Workspace\scratch` or `/tmp`, hides that folder
+/// and everything in it. A name without a root, `scratch` or `scratch\runs`, hides
+/// every folder of that name wherever it is. The second was not understood at all:
+/// such an entry was compared with the start of the full path, matched nothing, and
+/// said nothing, so the setting looked as if it was not applied. A bare name is what
+/// the session list itself shows for a project, and so what people type. Either way
+/// only whole folder names match, so `/tmp` leaves `/tmp2` alone.
 fn path_has_prefix(path: &str, prefix: &str) -> bool {
-    #[cfg(windows)]
-    {
-        let path = path.replace('/', "\\").to_lowercase();
-        let prefix = prefix.replace('/', "\\").to_lowercase();
-        path == prefix
-            || if prefix.ends_with('\\') {
+    let separator = std::path::MAIN_SEPARATOR;
+    let (path, prefix) = if cfg!(windows) {
+        (
+            path.replace('/', "\\").to_lowercase(),
+            prefix.replace('/', "\\").to_lowercase(),
+        )
+    } else {
+        (path.to_string(), prefix.to_string())
+    };
+    // `Path::is_absolute` will not do: on Windows it is false for `\tmp`.
+    let from_the_root =
+        prefix.starts_with(separator) || (cfg!(windows) && prefix.as_bytes().get(1) == Some(&b':'));
+    if from_the_root {
+        return path == prefix
+            || if prefix.ends_with(separator) {
                 path.starts_with(&prefix)
             } else {
                 path.strip_prefix(&prefix)
-                    .is_some_and(|remainder| remainder.starts_with('\\'))
-            }
+                    .is_some_and(|remainder| remainder.starts_with(separator))
+            };
     }
-    #[cfg(not(windows))]
-    {
-        Path::new(path).starts_with(Path::new(prefix))
-    }
+    let names = |text: &str| -> Vec<String> {
+        text.split(separator)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let wanted = names(&prefix);
+    !wanted.is_empty()
+        && names(&path)
+            .windows(wanted.len())
+            .any(|run| run == wanted.as_slice())
 }
 
 /// Which surface the user is looking at: the session list, or a live session pane.
@@ -9572,6 +9597,69 @@ mod tests {
         assert_eq!(
             visible_ids(&app),
             vec!["tmp-session", "tmp-exact", "tmp2-session"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_path_written_as_a_bare_folder_name_hides_that_folder_wherever_it_is() {
+        // The list shows a project as `agentic\research`, so that is what gets typed
+        // into the setting. Compared with the start of `D:\Workspace\agentic\…` it
+        // matched nothing, and the setting looked as if it was never applied.
+        let root = if cfg!(windows) {
+            r"D:\Workspace"
+        } else {
+            "/work"
+        };
+        let at = |parts: &[&str]| {
+            let mut path = std::path::PathBuf::from(root);
+            path.extend(parts);
+            path.to_string_lossy().into_owned()
+        };
+        let named = |id: &str, parts: &[&str]| Session {
+            cwd: at(parts),
+            ..session(id, "project", "2026-08-14T12:00:00Z")
+        };
+        let sessions = vec![
+            named("in-project", &["agentic", "research"]),
+            named("project-itself", &["agentic"]),
+            named("longer-name", &["agentic-two", "research"]),
+            named("elsewhere", &["other", "research"]),
+        ];
+        let visible_with = |prefix: &str| {
+            let config = UserConfig {
+                hidden_path_prefixes: vec![prefix.to_string()],
+                ..UserConfig::default()
+            };
+            visible_ids(&App::new(sessions.clone(), config))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            visible_with("agentic"),
+            vec!["longer-name", "elsewhere"],
+            "a whole folder name, not the start of one"
+        );
+        assert_eq!(
+            visible_with(&format!("agentic{}research", std::path::MAIN_SEPARATOR)),
+            vec!["project-itself", "longer-name", "elsewhere"],
+            "two names are a run of two folders"
+        );
+        assert_eq!(
+            visible_with("agentic/research"),
+            vec!["project-itself", "longer-name", "elsewhere"],
+            "a forward slash is a separator on Windows as well"
+        );
+        assert_eq!(
+            visible_with(&at(&["agentic"])),
+            vec!["longer-name", "elsewhere"],
+            "a path from the root still hides the folder and what is in it"
+        );
+        assert_eq!(
+            visible_with("research"),
+            vec!["project-itself"],
+            "a name hides every folder called that"
         );
     }
 

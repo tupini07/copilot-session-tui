@@ -2009,7 +2009,7 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
         paths_editing,
     ));
     lines.push(Line::from(Span::styled(
-        "    Comma-separated working-directory roots; path boundaries are respected",
+        "    Comma-separated: a full path hides that folder, a bare name every folder called that",
         Style::default().fg(theme.muted),
     )));
     lines.push(Line::from(""));

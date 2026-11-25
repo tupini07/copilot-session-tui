@@ -1225,9 +1225,12 @@ search filters are applied. Matching is case-insensitive. Configure the list in 
 session list to temporarily show hidden sessions for the current CST process; press it
 again to reapply the saved filters.
 
-`hidden_path_prefixes` applies the same behavior to session working directories. Paths
-match on component boundaries, so `/tmp` hides `/tmp/project` but not `/tmp2/project`.
-Path matching follows the platform's filesystem case sensitivity.
+`hidden_path_prefixes` applies the same behavior to session working directories. An
+entry written from its root, such as `/tmp` or `D:\Workspace\scratch`, hides that folder
+and everything in it. An entry without a root, such as `scratch` or `scratch/runs`,
+hides every folder of that name wherever it is. Only whole folder names match, so
+`/tmp` hides `/tmp/project` but not `/tmp2/project`. Path matching follows the
+platform's filesystem case sensitivity.
 
 Leave `terminal.shell` unset or blank to use the platform's default shell. Set it
 to an executable name on `PATH` (such as `pwsh`, `powershell`, or `bash`) or to
