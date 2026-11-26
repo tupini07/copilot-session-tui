@@ -1,0 +1,36 @@
+# Ctrl+click on a picture's path in a session that is not split. The path fits its row,
+# the `[image/png]` after it is wrapped onto the next, and the real Copilot's scrollbar
+# stands in the last column of every row. That bar used to be read as the end of the
+# path: "No picture at …summary.png      ┃", for a file that was there.
+
+size 220x30
+arg --mux
+session existing-app Existing app session
+image_file experiments/cod-nav-curated007-matched-demand-feasibility-v1/figures/matched-demand-feasibility-v1-summary.png 64x32
+# As over SSH, so nothing is opened on the desktop of whoever runs the script.
+env SSH_TTY=1
+
+wait_for Existing app session
+press enter
+wait_for Fake Copilot is idling
+
+type e2e:print     [Image: Image file at path {projects}\experiments\cod-nav-curated007-matched-demand-feasibility-v1\figures\matched-demand-feasibility-v1-summary.png\n    [image/png] 64x32]
+press enter
+wait_for [image/png] 64x32]
+type e2e:scrollbar
+press enter
+wait 800
+dump 01-image-line
+
+click_on ctrl+left matched-demand-feasibility-v1-summary.png
+wait_for summary.png  64x32
+expect_not No picture at
+dump 02-viewer-from-path
+press esc
+wait_gone summary.png  64x32
+
+# On the wrapped remainder too.
+click_on ctrl+left [image/png] 64x32]
+wait_for summary.png  64x32
+expect_not No picture at
+dump 03-viewer-from-second-row
