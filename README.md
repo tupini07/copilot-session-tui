@@ -72,8 +72,9 @@ not duplicated when the installer is run again. Restart the shell after installa
 then run `cst`. Set `CST_NO_SHELL_INIT=1` before running an installer to install only
 the binary without changing a shell profile.
 
-The prebuilt releases currently support Windows x64 and Linux x64. All installations
-require [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
+The prebuilt releases currently support Windows x64 and Linux x64. The Linux binary is
+linked statically, so it runs on any x64 distribution, old or new, and in WSL.
+All installations require [GitHub Copilot CLI](https://github.com/github/copilot-cli) 1.0.51+, which is when
 `--session-id` arrived. CST names each new session itself so that a session's
 scratchpad, terminal, and panel layout can be bound to it from the moment it starts.
 Copilot CLI 1.0.82+ is recommended for the optional authoritative lifecycle hooks.
