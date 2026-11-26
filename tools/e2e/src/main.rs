@@ -792,11 +792,14 @@ impl Driver {
             Step::Key(bytes) => self.send(bytes),
             // `{projects}` stands for the run's projects folder, whose path a script
             // cannot know in advance.
+            // `{/}` is the separator of the system the script runs on: a path typed
+            // with Windows's names no file on Linux.
             Step::Type(text) => self.send(
                 text.replace(
                     "{projects}",
                     &self.run_dir.join("projects").to_string_lossy(),
                 )
+                .replace("{/}", std::path::MAIN_SEPARATOR_STR)
                 .as_bytes(),
             ),
             Step::Press(names) => {
@@ -1264,7 +1267,11 @@ impl Driver {
 
     fn find(&self, text: &str) -> Option<(u16, u16)> {
         let parser = self.running().parser.lock().unwrap();
-        screen::find(parser.screen(), text)
+        // As in `type`: what a script looks for is written once for both systems.
+        screen::find(
+            parser.screen(),
+            &text.replace("{/}", std::path::MAIN_SEPARATOR_STR),
+        )
     }
 
     fn locate(&self, target: &Target) -> Result<(u16, u16), String> {

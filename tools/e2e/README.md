@@ -69,7 +69,7 @@ reads anything sent too soon as Alt+key.
 | Command | Effect |
 | --- | --- |
 | `press <key> [<key> ...]` | Named keys, each its own write: `enter`, `esc`, `tab`, `backtab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `f1` to `f12`, `ctrl+<letter>`, `alt+<key>`, or any single character. `press ctrl+b d` is the prefix then `d`. |
-| `type <text>` | The text exactly as written, trailing spaces included. `{projects}` is replaced by the run's `projects/` folder. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
+| `type <text>` | The text exactly as written, trailing spaces included. `{projects}` is replaced by the run's `projects/` folder. `{/}` is replaced by the path separator of the system the script runs on, so a typed path names a file on Linux as well as on Windows; the same goes for the text `wait_for`, `expect` and `click_on` look for. On Windows the characters reach the child through ConPTY, which synthesises key events using the active keyboard layout; a character that is a dead key there — the backtick on US-International — is dropped silently. Keep the plain US layout active when a script types such characters. |
 | `key <bytes>` | Raw bytes, with `\e`, `\r`, `\n`, `\t`, `\s` (space), `\\` and `\xHH`. |
 | `paste <text>` | A bracketed paste. |
 | `click [left\|middle\|right\|ctrl+left] COLUMN ROW` | A mouse click. `ctrl+left` is the Ctrl+click that opens links and pictures. |
