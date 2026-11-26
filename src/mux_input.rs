@@ -997,6 +997,7 @@ fn execute_palette_command(app: &mut App, command: CommandId) {
         ResumeSelected
         | OpenSelectedScratchpad
         | ToggleFavorite
+        | ToggleProjectHidden
         | ReorderFavorite
         | OpenFavoriteTabs
         | RenameSelected

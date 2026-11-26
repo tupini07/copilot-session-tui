@@ -223,7 +223,8 @@ This creates a `cst` function. Use `cst` instead of `copilot-session-tui` and yo
 | `f` / `p` | Filter by project |
 | `c` | Clear the search and the project filter |
 | `s` | Cycle sort order |
-| `H` | Temporarily show or re-hide sessions excluded by saved filters |
+| `h` | Hide the selected session's project: all its sessions leave the list. With hidden sessions shown (`H`), `h` on one brings its project back |
+| `H` | Temporarily show or re-hide hidden sessions |
 | `,` | Edit global settings |
 | `.` | Edit filtered-project `.cst.json` settings |
 | `u` | Install an available update without stopping sessions |
@@ -1225,9 +1226,21 @@ search filters are applied. Matching is case-insensitive. Configure the list in 
 session list to temporarily show hidden sessions for the current CST process; press it
 again to reapply the saved filters.
 
-`hidden_path_prefixes` applies the same behavior to session working directories. Paths
-match on component boundaries, so `/tmp` hides `/tmp/project` but not `/tmp2/project`.
-Path matching follows the platform's filesystem case sensitivity.
+`hidden_path_prefixes` applies the same behavior to session working directories. An
+entry written from its root, such as `/tmp` or `D:\Workspace\scratch`, hides that folder
+and everything in it. An entry without a root, such as `scratch` or `scratch/runs`,
+hides every folder of that name wherever it is. Only whole folder names match, so
+`/tmp` hides `/tmp/project` but not `/tmp2/project`. Path matching follows the
+platform's filesystem case sensitivity.
+
+`hidden_projects` is the list `h` writes: the root folders of projects hidden from the
+session list and from the project filter. Press `h` on a session to hide its project,
+and the status line says how many sessions went and how to get them back: `H` shows
+hidden sessions, and `h` on one of them there removes its project from the list again.
+The **Filters** tab lists the hidden projects by name and lets you edit the folders.
+Filtering to a hidden project still shows its sessions, so starting CST inside one
+does not open on an empty list. While anything is hidden, the line above the list
+says how many sessions are missing from it and that `H` shows them.
 
 Leave `terminal.shell` unset or blank to use the platform's default shell. Set it
 to an executable name on `PATH` (such as `pwsh`, `powershell`, or `bash`) or to

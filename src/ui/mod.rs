@@ -358,6 +358,36 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ),
         Span::raw(format!("  {} sessions", app.filtered_indices.len())),
     ]);
+    // A list with sessions missing says so, and names the key that shows them: the
+    // message from hiding something is gone at the next key press, and after that
+    // nothing on the screen said anything was hidden at all.
+    if app.hidden_count > 0 {
+        let (what, does) = if app.show_hidden_sessions {
+            ("normally hidden", " hides them")
+        } else {
+            ("hidden", " shows them")
+        };
+        title_spans.extend([
+            Span::styled(
+                format!("  ·  {} {what}  ", app.hidden_count),
+                Style::default().fg(semantic_foreground_on(theme, theme.muted, theme.background)),
+            ),
+            Span::styled(
+                "H",
+                Style::default()
+                    .fg(semantic_foreground_on(
+                        theme,
+                        theme.accent_alt,
+                        theme.background,
+                    ))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                does,
+                Style::default().fg(semantic_foreground_on(theme, theme.muted, theme.background)),
+            ),
+        ]);
+    }
     let title = Paragraph::new(Line::from(title_spans))
         .style(Style::default().fg(theme.text).bg(theme.background));
 

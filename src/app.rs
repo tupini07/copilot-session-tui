@@ -29,23 +29,48 @@ use std::time::{Duration, Instant};
 
 pub use crate::config::GithubCommentFilter;
 
+/// Whether a session's folder falls under a hidden path the user wrote.
+///
+/// A path written from its root, `D:\Workspace\scratch` or `/tmp`, hides that folder
+/// and everything in it. A name without a root, `scratch` or `scratch\runs`, hides
+/// every folder of that name wherever it is. The second was not understood at all:
+/// such an entry was compared with the start of the full path, matched nothing, and
+/// said nothing, so the setting looked as if it was not applied. A bare name is what
+/// the session list itself shows for a project, and so what people type. Either way
+/// only whole folder names match, so `/tmp` leaves `/tmp2` alone.
 fn path_has_prefix(path: &str, prefix: &str) -> bool {
-    #[cfg(windows)]
-    {
-        let path = path.replace('/', "\\").to_lowercase();
-        let prefix = prefix.replace('/', "\\").to_lowercase();
-        path == prefix
-            || if prefix.ends_with('\\') {
+    let separator = std::path::MAIN_SEPARATOR;
+    let (path, prefix) = if cfg!(windows) {
+        (
+            path.replace('/', "\\").to_lowercase(),
+            prefix.replace('/', "\\").to_lowercase(),
+        )
+    } else {
+        (path.to_string(), prefix.to_string())
+    };
+    // `Path::is_absolute` will not do: on Windows it is false for `\tmp`.
+    let from_the_root =
+        prefix.starts_with(separator) || (cfg!(windows) && prefix.as_bytes().get(1) == Some(&b':'));
+    if from_the_root {
+        return path == prefix
+            || if prefix.ends_with(separator) {
                 path.starts_with(&prefix)
             } else {
                 path.strip_prefix(&prefix)
-                    .is_some_and(|remainder| remainder.starts_with('\\'))
-            }
+                    .is_some_and(|remainder| remainder.starts_with(separator))
+            };
     }
-    #[cfg(not(windows))]
-    {
-        Path::new(path).starts_with(Path::new(prefix))
-    }
+    let names = |text: &str| -> Vec<String> {
+        text.split(separator)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let wanted = names(&prefix);
+    !wanted.is_empty()
+        && names(&path)
+            .windows(wanted.len())
+            .any(|run| run == wanted.as_slice())
 }
 
 /// Which surface the user is looking at: the session list, or a live session pane.
@@ -336,6 +361,7 @@ pub enum SettingsEditField {
     ThreadWakeupsPerHour,
     HiddenTitlePrefixes,
     HiddenPathPrefixes,
+    HiddenProjects,
     BranchPrefix,
     WorktreeRoot,
     MuxPrefix,
@@ -386,7 +412,7 @@ impl SettingsSection {
     pub const fn rows(self) -> &'static [usize] {
         match self {
             Self::General => &[0, 1, 2, 18, 3],
-            Self::Filters => &[16, 17, 19],
+            Self::Filters => &[16, 17, 30, 19],
             Self::Worktrees => &[4, 5],
             Self::Terminal => &[6, 7, 8],
             Self::Notifications => &[9, 10, 11, 12, 13, 14, 15],
@@ -815,6 +841,10 @@ pub struct App {
     pub mode: Mode,
     pub search_query: String,
     pub show_hidden_sessions: bool,
+    /// How many sessions the hidden rules alone keep out of the list as it is
+    /// filtered now, or mark as normally hidden while they are being shown. The
+    /// header says it, so that a list with things missing gives its reason.
+    pub hidden_count: usize,
     pub rename_input: String,
     pub project_filter: Option<String>,
     /// Project root of the directory `cst` was launched from (git-aware).
@@ -1109,6 +1139,7 @@ impl App {
             mode: Mode::Normal,
             search_query: String::new(),
             show_hidden_sessions: false,
+            hidden_count: 0,
             rename_input: String::new(),
             project_filter: None,
             cwd_project: None,
@@ -1653,6 +1684,7 @@ impl App {
             self.config.hidden_title_prefixes != persisted.hidden_title_prefixes;
         let hidden_path_prefixes_changed =
             self.config.hidden_path_prefixes != persisted.hidden_path_prefixes;
+        let hidden_projects_changed = self.config.hidden_projects != persisted.hidden_projects;
         let theme_changed = self.config.theme != persisted.theme;
         let runtime_mux = self.config.mux;
         self.mux_on_disk = persisted.mux;
@@ -1678,10 +1710,14 @@ impl App {
         if let Some(settings) = self.project_settings.as_mut() {
             settings.refresh_global(&self.config);
         }
-        if projects_changed {
+        if projects_changed || hidden_projects_changed {
             self.rebuild_unique_projects();
         }
-        if favorites_changed || hidden_title_prefixes_changed || hidden_path_prefixes_changed {
+        if favorites_changed
+            || hidden_title_prefixes_changed
+            || hidden_path_prefixes_changed
+            || hidden_projects_changed
+        {
             self.apply_filter();
             if let Some(session_id) = selected_id {
                 self.focus_session(&session_id);
@@ -5424,6 +5460,16 @@ impl App {
                 self.unique_projects.insert(0, project.clone());
             }
         }
+        // A hidden project is out of the project filter's list as well as the session
+        // list, or it would still be there to scroll past. `H` brings both back.
+        if !self.show_hidden_sessions {
+            let hidden = self.config.hidden_projects.clone();
+            self.unique_projects.retain(|project| {
+                !hidden
+                    .iter()
+                    .any(|hidden| hidden.eq_ignore_ascii_case(project))
+            });
+        }
         self.project_selected = selected_project
             .as_ref()
             .and_then(|selected| {
@@ -5484,8 +5530,9 @@ impl App {
         let matcher = SkimMatcherV2::default();
         // An id is usually pasted, and a paste often brings a space along.
         let id_query = self.search_query.trim().to_ascii_lowercase();
+        let mut hidden_count = 0;
 
-        self.filtered_indices = self
+        let filtered = self
             .sessions
             .iter()
             .enumerate()
@@ -5497,11 +5544,9 @@ impl App {
                 if !id_query.is_empty() && s.id.eq_ignore_ascii_case(&id_query) {
                     return true;
                 }
-                if !self.show_hidden_sessions
-                    && (self.session_title_is_hidden(s) || self.session_path_is_hidden(s))
-                {
-                    return false;
-                }
+                let hidden = self.session_title_is_hidden(s)
+                    || self.session_path_is_hidden(s)
+                    || self.session_project_is_hidden(s);
                 // Project filter
                 if let Some(ref proj) = self.project_filter {
                     if !s.project_root.eq_ignore_ascii_case(proj) {
@@ -5518,15 +5563,27 @@ impl App {
                     // 32 hex digits, so nearly any short word made of a-f and digits
                     // can be picked out of nearly any id in order, and a typed piece
                     // of an id matched every session instead of the one it belongs to.
-                    return (!id_query.is_empty() && s.id.to_ascii_lowercase().contains(&id_query))
+                    let found = (!id_query.is_empty()
+                        && s.id.to_ascii_lowercase().contains(&id_query))
                         || [s.display_name(), s.project_root.as_str(), s.cwd.as_str()]
                             .into_iter()
                             .any(|field| matcher.fuzzy_match(field, &self.search_query).is_some());
+                    if !found {
+                        return false;
+                    }
                 }
-                true
+                // Counted last, so the number is of sessions that would be in this
+                // very list: under a project filter or a search, hidden sessions
+                // elsewhere are not what is missing from it.
+                if hidden {
+                    hidden_count += 1;
+                }
+                !hidden || self.show_hidden_sessions
             })
             .map(|(i, _)| i)
             .collect();
+        self.filtered_indices = filtered;
+        self.hidden_count = hidden_count;
 
         if self.project_filter.is_none() && self.search_query.is_empty() {
             // Favorites lead in the order the user arranged; everything else keeps the
@@ -5614,9 +5671,137 @@ impl App {
             .any(|prefix| path_has_prefix(&session.cwd, prefix))
     }
 
+    /// Whether the session's project is one the user hid.
+    ///
+    /// Not while the list is filtered to that very project. CST starts filtered to the
+    /// folder it was run from, and somebody who runs it inside a hidden project, or
+    /// asks for one by name, wants its sessions and not an empty list with no reason
+    /// given.
+    fn session_project_is_hidden(&self, session: &Session) -> bool {
+        if self
+            .project_filter
+            .as_deref()
+            .is_some_and(|filter| filter.eq_ignore_ascii_case(&session.project_root))
+        {
+            return false;
+        }
+        self.project_is_hidden(&session.project_root)
+    }
+
+    pub fn project_is_hidden(&self, root: &str) -> bool {
+        !root.is_empty()
+            && self
+                .config
+                .hidden_projects
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(root))
+    }
+
+    /// What `h` would do to the highlighted session's project, for the footer: the
+    /// same question `toggle_selected_project_hidden` asks, so the hint cannot name
+    /// one thing while the key does the other. Nothing where the key does nothing.
+    pub fn selected_project_hide_hint(&self) -> Option<&'static str> {
+        let root = &self.selected_session()?.project_root;
+        if root.is_empty() {
+            None
+        } else if self.project_is_hidden(root) {
+            Some("Show project")
+        } else {
+            Some("Hide project")
+        }
+    }
+
+    /// The hidden projects were rewritten by hand in Global Settings.
+    pub fn hidden_projects_edited(&mut self) {
+        self.rebuild_unique_projects();
+        self.refresh_project_labels();
+        self.apply_filter();
+    }
+
+    /// Whether anything is set that `H` would show.
+    pub fn has_hidden_filters(&self) -> bool {
+        !self.config.hidden_title_prefixes.is_empty()
+            || !self.config.hidden_path_prefixes.is_empty()
+            || !self.config.hidden_projects.is_empty()
+    }
+
+    /// Hide the highlighted session's project, or bring it back if it is hidden, and
+    /// say what happened in words for the status line.
+    ///
+    /// Saved at once, as a favourite is: this is something done to the list, not a
+    /// setting being edited. The message names the way back, because a whole project
+    /// leaving the list on one key has to be undoable by somebody who pressed it by
+    /// mistake and does not know what it did.
+    pub fn toggle_selected_project_hidden(&mut self) -> anyhow::Result<Option<String>> {
+        let Some(session) = self.selected_session() else {
+            return Ok(None);
+        };
+        let root = session.project_root.clone();
+        let session_id = session.id.clone();
+        if root.is_empty() {
+            // An empty entry would stand for every session without a project.
+            return Ok(Some(
+                "This session has no project folder to hide".to_string(),
+            ));
+        }
+        // The way back is at the end of the message, and a long folder name would
+        // push it past the edge of the screen.
+        let label = crate::text::truncate_to_width(self.project_label(&root), 30);
+        let previous = self.config.hidden_projects.clone();
+        let was_hidden = self.project_is_hidden(&root);
+        if was_hidden {
+            self.config
+                .hidden_projects
+                .retain(|hidden| !hidden.eq_ignore_ascii_case(&root));
+        } else {
+            self.config.hidden_projects.push(root.clone());
+        }
+        if let Err(error) = self.save_config() {
+            self.config.hidden_projects = previous;
+            return Err(error);
+        }
+        let sessions = self
+            .sessions
+            .iter()
+            .filter(|session| session.project_root.eq_ignore_ascii_case(&root))
+            .count();
+        let count = if sessions == 1 {
+            "1 session".to_string()
+        } else {
+            format!("{sessions} sessions")
+        };
+        // Filtered to the project just hidden, its sessions would stay and the key
+        // would seem to have done nothing.
+        if !was_hidden
+            && self
+                .project_filter
+                .as_deref()
+                .is_some_and(|filter| filter.eq_ignore_ascii_case(&root))
+        {
+            self.project_filter = None;
+        }
+        self.rebuild_unique_projects();
+        self.refresh_project_labels();
+        // The row's place is kept, so the highlight lands on what followed the hidden
+        // sessions; a session that is still listed keeps the highlight itself.
+        self.apply_filter();
+        self.focus_session(&session_id);
+        Ok(Some(if was_hidden {
+            format!("Showing project {label} again ({count})")
+        } else if self.show_hidden_sessions {
+            format!("Project {label} is hidden ({count}) · press h again to bring it back")
+        } else {
+            format!(
+                "Hid project {label} ({count}) · H shows hidden sessions, h there brings it back"
+            )
+        }))
+    }
+
     pub fn toggle_hidden_sessions(&mut self) -> bool {
         let selected_id = self.selected_session().map(|session| session.id.clone());
         self.show_hidden_sessions = !self.show_hidden_sessions;
+        self.rebuild_unique_projects();
+        self.refresh_project_labels();
         self.apply_filter();
         if let Some(session_id) = selected_id {
             self.focus_session(&session_id);
@@ -9546,6 +9731,177 @@ mod tests {
         assert_eq!(visible_ids(&app), vec!["visible"]);
     }
 
+    fn three_projects() -> App {
+        let mut app = App::new(
+            vec![
+                session("a-new", "C:/work/a", "2026-08-14T12:00:00Z"),
+                session("b-one", "C:/work/b", "2026-08-13T12:00:00Z"),
+                session("a-old", "C:/work/a", "2026-08-12T12:00:00Z"),
+                session("c-one", "C:/work/c", "2026-08-11T12:00:00Z"),
+            ],
+            UserConfig::default(),
+        );
+        app.disable_config_persistence();
+        app
+    }
+
+    #[test]
+    fn hiding_the_highlighted_sessions_project_takes_all_its_sessions_and_says_how_to_undo_it() {
+        let mut app = three_projects();
+        assert_eq!(visible_ids(&app), vec!["a-new", "b-one", "a-old", "c-one"]);
+
+        let message = app.toggle_selected_project_hidden().unwrap().unwrap();
+
+        assert_eq!(visible_ids(&app), vec!["b-one", "c-one"]);
+        assert_eq!(app.config.hidden_projects, vec!["C:/work/a"]);
+        assert!(message.contains("2 sessions"), "{message}");
+        assert!(
+            message.contains("H shows hidden") && message.contains("h there brings it back"),
+            "one key removed a whole project, so the message has to name the way back: {message}"
+        );
+        assert_eq!(
+            app.selected_session().map(|session| session.id.as_str()),
+            Some("b-one"),
+            "the highlight lands on what followed, not at the top or nowhere"
+        );
+        assert!(
+            !app.unique_projects
+                .iter()
+                .any(|project| project == "C:/work/a"),
+            "the project filter does not list it either"
+        );
+    }
+
+    #[test]
+    fn the_list_counts_what_the_hidden_rules_keep_out_of_it_so_the_header_can_say_rows_are_missing()
+    {
+        let mut app = three_projects();
+        assert_eq!(app.hidden_count, 0);
+
+        app.toggle_selected_project_hidden().unwrap();
+        assert_eq!(app.hidden_count, 2);
+
+        app.set_project_filter(Some("C:/work/b".to_string()));
+        assert_eq!(
+            app.hidden_count, 0,
+            "nothing is missing from this project's list"
+        );
+
+        app.set_project_filter(None);
+        app.toggle_hidden_sessions();
+        assert_eq!(visible_ids(&app).len(), 4);
+        assert_eq!(
+            app.hidden_count, 2,
+            "shown for now, they are still the ones normally hidden"
+        );
+    }
+
+    #[test]
+    fn hiding_a_project_with_a_long_name_still_says_how_to_bring_it_back_within_the_screen() {
+        let mut app = App::new(
+            vec![session(
+                "long",
+                "C:/work/a-folder-name-that-goes-on-for-much-longer-than-any-status-line-has-room-for",
+                "2026-08-14T12:00:00Z",
+            )],
+            UserConfig::default(),
+        );
+        app.disable_config_persistence();
+
+        let message = app.toggle_selected_project_hidden().unwrap().unwrap();
+
+        assert!(message.ends_with("h there brings it back"), "{message}");
+        assert!(
+            crate::text::display_width(&message) < 110,
+            "the way back is at the end, so the message has to fit: {message}"
+        );
+    }
+
+    #[test]
+    fn a_hidden_project_is_brought_back_with_the_same_key_while_hidden_sessions_are_shown() {
+        let mut app = three_projects();
+        app.toggle_selected_project_hidden().unwrap();
+
+        assert!(app.toggle_hidden_sessions());
+        assert_eq!(visible_ids(&app), vec!["a-new", "b-one", "a-old", "c-one"]);
+        assert!(app
+            .unique_projects
+            .iter()
+            .any(|project| project == "C:/work/a"));
+        app.selected = 2;
+        let message = app.toggle_selected_project_hidden().unwrap().unwrap();
+
+        assert!(message.starts_with("Showing project"), "{message}");
+        assert!(app.config.hidden_projects.is_empty());
+        assert_eq!(
+            app.selected_session().map(|session| session.id.as_str()),
+            Some("a-old"),
+            "the session it was pressed on keeps the highlight"
+        );
+        assert!(!app.toggle_hidden_sessions());
+        assert_eq!(visible_ids(&app), vec!["a-new", "b-one", "a-old", "c-one"]);
+    }
+
+    #[test]
+    fn filtering_to_a_hidden_project_shows_it_because_an_empty_list_would_explain_nothing() {
+        // CST starts filtered to the folder it was run from. Run inside a hidden
+        // project, it would otherwise open on an empty list.
+        let mut app = App::new(
+            three_projects().sessions.clone(),
+            UserConfig {
+                hidden_projects: vec!["c:/WORK/a".to_string()],
+                ..UserConfig::default()
+            },
+        );
+        app.disable_config_persistence();
+        assert_eq!(visible_ids(&app), vec!["b-one", "c-one"]);
+
+        app.set_project_filter(Some("C:/work/a".to_string()));
+        assert_eq!(visible_ids(&app), vec!["a-new", "a-old"]);
+
+        // Hidden again from there, the filter is dropped, or the key would seem to
+        // have done nothing.
+        app.config.hidden_projects.clear();
+        app.toggle_selected_project_hidden().unwrap();
+        assert_eq!(app.project_filter, None);
+        assert_eq!(visible_ids(&app), vec!["b-one", "c-one"]);
+    }
+
+    #[test]
+    fn a_session_without_a_project_folder_cannot_be_hidden_because_that_would_hide_all_such() {
+        let mut app = App::new(
+            vec![
+                session("no-project", "", "2026-08-14T12:00:00Z"),
+                session("also-none", "", "2026-08-13T12:00:00Z"),
+            ],
+            UserConfig::default(),
+        );
+        app.disable_config_persistence();
+
+        let message = app.toggle_selected_project_hidden().unwrap().unwrap();
+
+        assert!(message.contains("no project folder"), "{message}");
+        assert!(app.config.hidden_projects.is_empty());
+        assert_eq!(visible_ids(&app), vec!["no-project", "also-none"]);
+    }
+
+    #[test]
+    fn a_project_hidden_in_another_cst_leaves_this_ones_list_too() {
+        let mut app = three_projects();
+        let persisted = UserConfig {
+            hidden_projects: vec!["C:/work/a".to_string()],
+            ..UserConfig::default()
+        };
+
+        app.adopt_persisted_config(persisted);
+
+        assert_eq!(visible_ids(&app), vec!["b-one", "c-one"]);
+        assert!(!app
+            .unique_projects
+            .iter()
+            .any(|project| project == "C:/work/a"));
+    }
+
     #[test]
     fn hidden_path_prefixes_match_path_components() {
         let in_tmp = Session {
@@ -9572,6 +9928,69 @@ mod tests {
         assert_eq!(
             visible_ids(&app),
             vec!["tmp-session", "tmp-exact", "tmp2-session"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_path_written_as_a_bare_folder_name_hides_that_folder_wherever_it_is() {
+        // The list shows a project as `agentic\research`, so that is what gets typed
+        // into the setting. Compared with the start of `D:\Workspace\agentic\…` it
+        // matched nothing, and the setting looked as if it was never applied.
+        let root = if cfg!(windows) {
+            r"D:\Workspace"
+        } else {
+            "/work"
+        };
+        let at = |parts: &[&str]| {
+            let mut path = std::path::PathBuf::from(root);
+            path.extend(parts);
+            path.to_string_lossy().into_owned()
+        };
+        let named = |id: &str, parts: &[&str]| Session {
+            cwd: at(parts),
+            ..session(id, "project", "2026-08-14T12:00:00Z")
+        };
+        let sessions = vec![
+            named("in-project", &["agentic", "research"]),
+            named("project-itself", &["agentic"]),
+            named("longer-name", &["agentic-two", "research"]),
+            named("elsewhere", &["other", "research"]),
+        ];
+        let visible_with = |prefix: &str| {
+            let config = UserConfig {
+                hidden_path_prefixes: vec![prefix.to_string()],
+                ..UserConfig::default()
+            };
+            visible_ids(&App::new(sessions.clone(), config))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            visible_with("agentic"),
+            vec!["longer-name", "elsewhere"],
+            "a whole folder name, not the start of one"
+        );
+        assert_eq!(
+            visible_with(&format!("agentic{}research", std::path::MAIN_SEPARATOR)),
+            vec!["project-itself", "longer-name", "elsewhere"],
+            "two names are a run of two folders"
+        );
+        assert_eq!(
+            visible_with("agentic/research"),
+            vec!["project-itself", "longer-name", "elsewhere"],
+            "a forward slash is a separator on Windows as well"
+        );
+        assert_eq!(
+            visible_with(&at(&["agentic"])),
+            vec!["longer-name", "elsewhere"],
+            "a path from the root still hides the folder and what is in it"
+        );
+        assert_eq!(
+            visible_with("research"),
+            vec!["project-itself"],
+            "a name hides every folder called that"
         );
     }
 

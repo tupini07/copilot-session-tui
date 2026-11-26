@@ -663,7 +663,7 @@ fn handle_recover_workspace(app: &mut App, key: KeyCode) {
 /// shortcuts are validated against this and matched after these.
 pub(crate) const LIST_COMMAND_KEYS: &[char] = &[
     'q', 'k', 'j', '/', 'r', 'e', 'g', 'T', ' ', 'd', 'f', 'p', 's', 'H', 'c', 'n', 'N', '?', ',',
-    '.', 'u', 'R', 'P',
+    '.', 'u', 'R', 'P', 'h',
 ];
 
 fn handle_normal(app: &mut App, key: KeyCode) {
@@ -754,12 +754,19 @@ fn handle_normal(app: &mut App, key: KeyCode) {
             app.cycle_sort();
             app.status_message = Some(format!("Sorted by: {}", app.sort_label()));
         }
+        KeyCode::Char('h') => match app.toggle_selected_project_hidden() {
+            Ok(Some(message)) => app.status_message = Some(message),
+            Ok(None) => {}
+            Err(error) => {
+                app.status_message = Some(format!("Failed to save the hidden project: {error}"));
+            }
+        },
         KeyCode::Char('H') => {
-            if app.config.hidden_title_prefixes.is_empty()
-                && app.config.hidden_path_prefixes.is_empty()
-            {
-                app.status_message =
-                    Some("Configure hidden session filters in Global Settings".to_string());
+            if !app.has_hidden_filters() {
+                app.status_message = Some(
+                    "Nothing is hidden: press h on a session to hide its project, or see Filters in Global Settings"
+                        .to_string(),
+                );
             } else if app.toggle_hidden_sessions() {
                 app.status_message = Some("Showing hidden sessions for this run".to_string());
             } else {
@@ -842,6 +849,7 @@ pub(crate) fn execute_palette_list_command(
         CommandId::ClearProjectFilter => KeyCode::Char('c'),
         CommandId::CycleSort => KeyCode::Char('s'),
         CommandId::ToggleHiddenSessions => KeyCode::Char('H'),
+        CommandId::ToggleProjectHidden => KeyCode::Char('h'),
         CommandId::GlobalSettings => KeyCode::Char(','),
         CommandId::ProjectSettings => KeyCode::Char('.'),
         CommandId::OpenHelp => KeyCode::Char('?'),
@@ -1922,6 +1930,11 @@ fn handle_settings(app: &mut App, key: KeyCode) {
                 SettingsEditField::HiddenPathPrefixes,
                 app.config.hidden_path_prefixes.join(", "),
             ),
+            30 => begin_global_edit(
+                app,
+                SettingsEditField::HiddenProjects,
+                app.config.hidden_projects.join(", "),
+            ),
             19 => {
                 app.config.github_comment_filter = app.config.github_comment_filter.next();
             }
@@ -2114,6 +2127,11 @@ fn commit_global_setting(app: &mut App, field: SettingsEditField) {
             app.config.hidden_path_prefixes = config::parse_path_prefixes(&value);
             app.show_hidden_sessions = false;
             app.apply_filter();
+        }
+        SettingsEditField::HiddenProjects => {
+            app.config.hidden_projects = config::parse_path_prefixes(&value);
+            app.show_hidden_sessions = false;
+            app.hidden_projects_edited();
         }
         SettingsEditField::BranchPrefix => {
             if let Err(error) = worktree::validate_branch_prefix(&value) {
@@ -2660,6 +2678,19 @@ mod tests {
             mux: false,
             ..config::UserConfig::default()
         }
+    }
+
+    #[test]
+    fn the_key_that_hides_a_project_is_claimed_by_the_list_so_no_tmux_shortcut_can_shadow_it() {
+        assert!(LIST_COMMAND_KEYS.contains(&'h'));
+    }
+
+    #[test]
+    fn asking_to_show_hidden_sessions_with_nothing_hidden_says_how_to_hide_something() {
+        let mut app = App::new(Vec::new(), config::UserConfig::default());
+        handle_normal(&mut app, KeyCode::Char('H'));
+        let message = app.status_message.unwrap();
+        assert!(message.contains("press h on a session"), "{message}");
     }
 
     #[test]

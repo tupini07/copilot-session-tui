@@ -258,6 +258,18 @@ pub struct UserConfig {
     )]
     pub hidden_path_prefixes: Vec<String>,
 
+    /// Projects hidden from the session list, by their root folder.
+    ///
+    /// Apart from the path prefixes above because it is written by a key on a
+    /// session, not typed: a list CST adds to and removes from should not be mixed
+    /// into one the user words by hand.
+    #[serde(
+        default,
+        deserialize_with = "normalized_path_prefixes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub hidden_projects: Vec<String>,
+
     /// Initial filter for pull-request comments in newly opened GitHub inspectors.
     #[serde(default, skip_serializing_if = "GithubCommentFilter::is_all")]
     pub github_comment_filter: GithubCommentFilter,
@@ -521,6 +533,7 @@ impl Default for UserConfig {
             thread_trusted_authors: Vec::new(),
             hidden_title_prefixes: Vec::new(),
             hidden_path_prefixes: Vec::new(),
+            hidden_projects: Vec::new(),
             github_comment_filter: GithubCommentFilter::All,
             mux: true,
             mux_prefix: default_mux_prefix(),

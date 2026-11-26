@@ -1,0 +1,81 @@
+# Hiding projects from the session list. Two things:
+#
+# A hidden path written as a bare folder name hides that folder wherever it is. It used
+# to match nothing, silently, because it was compared with the start of the full path.
+#
+# `h` on a session hides its whole project and says how to get it back; `H` shows hidden
+# sessions, and `h` there brings the project back. The hidden projects are listed in
+# Global Settings under Filters.
+
+size 110x30
+arg --mux
+config {"hidden_path_prefixes": ["scratch-runs"]}
+session alpha/research Alpha research one
+session alpha/research Alpha research two
+session beta Beta work
+session nested/scratch-runs/r1 Scratch run
+session gamma Gamma work
+
+wait_for Gamma work
+# The bare name in the settings hid the scratch folder two levels down.
+expect_not Scratch run
+expect Alpha research one
+dump 01-list
+
+# The first session is highlighted; hide its project.
+press h
+wait_for Hid project
+expect_not Alpha research one
+expect_not Alpha research two
+expect Beta work
+expect Gamma work
+expect brings it back
+dump 02-hidden
+
+# The project filter does not offer it either.
+press p
+wait_for Select Project
+expect_not research
+dump 03-project-filter
+press esc
+wait_gone Select Project
+
+# Listed under Filters, by the name the list shows.
+press ,
+wait_for Global Settings
+press backtab
+wait_for Hidden Projects
+expect research
+dump 04-settings-filters
+press esc
+wait_gone Global Settings
+
+# H shows everything hidden, by either way; h on a hidden project's session brings the
+# project back.
+press H
+wait_for Showing hidden sessions
+expect Scratch run
+expect Alpha research one
+dump 05-shown
+# The highlight stayed on Beta work, the row that followed the hidden ones.
+press up
+press h
+wait_for Showing project
+press H
+wait_for Hidden session filters reapplied
+expect Alpha research one
+expect Alpha research two
+expect_not Scratch run
+dump 06-back
+
+# From Command Search, as any other list action.
+press down
+press ctrl+b ctrl+b
+wait 300
+type hide this
+wait_for Hide this project
+dump 07-command-search
+press enter
+wait_for Hid project
+expect_not Beta work
+dump 08-hidden-from-search

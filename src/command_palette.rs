@@ -41,6 +41,7 @@ pub enum CommandId {
     ClearProjectFilter,
     CycleSort,
     ToggleHiddenSessions,
+    ToggleProjectHidden,
     RecoverWorkspace,
     RefreshSessions,
     InspectGithub,
@@ -188,6 +189,9 @@ fn commands(app: &App) -> Vec<CommandEntry> {
     let pane_count = app.mux.as_ref().map_or(0, |mux| mux.panes.len());
     let in_split = app.mux.as_ref().is_some_and(crate::mux::MuxState::in_split);
     let selected = app.selected_session().is_some();
+    let selected_project_hidden = app
+        .selected_session()
+        .is_some_and(|session| app.project_is_hidden(&session.project_root));
     let favorite_selected = app
         .selected_session()
         .is_some_and(|session| app.is_favorite(&session.id));
@@ -546,9 +550,21 @@ fn commands(app: &App) -> Vec<CommandEntry> {
             },
             "Temporarily toggle configured hidden-session filters",
             "H",
-            !app.config.hidden_title_prefixes.is_empty()
-                || !app.config.hidden_path_prefixes.is_empty(),
-            "No hidden session filters are configured",
+            app.has_hidden_filters(),
+            "Nothing is hidden",
+        ),
+        entry(
+            Id::ToggleProjectHidden,
+            Group::View,
+            if selected_project_hidden {
+                "Show this project again"
+            } else {
+                "Hide this project"
+            },
+            "Hide every session of the selected session's project, or bring it back",
+            "h",
+            list && selected,
+            "Available for a selected session in the list",
         ),
         entry(
             Id::RecoverWorkspace,
@@ -750,6 +766,7 @@ fn command_keywords(id: CommandId) -> &'static str {
         NewProject => "add create register folder directory repository",
         CycleSort => "order",
         ToggleHiddenSessions => "exclude hidden title path prefix visibility",
+        ToggleProjectHidden => "ignore exclude mute remove hidden unhide",
         InspectGithub => "issue pr pull request discussion",
         GlobalSettings | ProjectSettings => "config preferences",
         ChooseTheme => "colors colours appearance dark light",
