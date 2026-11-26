@@ -38,7 +38,11 @@ jobs:
             os: windows-latest
             artifact: copilot-session-tui.exe
             archive: copilot-session-tui-x86_64-pc-windows-msvc.zip
-          - target: x86_64-unknown-linux-gnu
+          # Linked statically against musl, so the binary asks nothing of the machine's
+          # C library. Built against the runner's glibc it refused to start anywhere
+          # older than the runner: "version `GLIBC_2.39' not found". The archive keeps
+          # its "gnu" name because that is the one installed CSTs and install.sh ask for.
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact: copilot-session-tui
             archive: copilot-session-tui-x86_64-unknown-linux-gnu.tar.gz
@@ -53,8 +57,27 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Run in the checkout so the target lands on whichever toolchain builds there:
+      # rust-toolchain.toml pins one, and a target added only to the runner's default
+      # fails the build with "can't find crate for `core`".
+      - name: Install the musl target and C compiler
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          rustup target add ${{ matrix.target }}
+          sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
+
+      # A dependency that starts linking a system library would bring the glibc
+      # requirement back without failing the build.
+      - name: Check the Linux binary is static
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          binary="target/${{ matrix.target }}/release/${{ matrix.artifact }}"
+          file "$binary"
+          file "$binary" | grep -Eq 'static(ally)?[ -](pie )?linked'
+          "$binary" --version
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'

@@ -354,6 +354,7 @@ fn perform_update_with_progress(show_progress: bool, target_version: &str) -> Re
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name("copilot-session-tui")
+        .target(release_asset_target())
         .show_download_progress(show_progress)
         .show_output(show_progress)
         .no_confirm(true) // user already confirmed via TUI
@@ -368,9 +369,34 @@ fn perform_update_with_progress(show_progress: bool, target_version: &str) -> Re
     Ok(status.version().to_string())
 }
 
+/// The target in the name of the release archive this build updates itself from.
+///
+/// Usually the target it was built for. Not on Linux: the binary there is linked
+/// statically against musl so that it starts whatever C library the machine has, but
+/// its archive is still published under the "gnu" name. CSTs installed before that
+/// change look for that name and have no other way to reach a newer release, and one
+/// archive that runs everywhere needs no second name.
+fn release_asset_target() -> &'static str {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        self_update::get_target()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_archive_this_build_updates_from_is_one_the_release_workflow_publishes() {
+        let workflow = include_str!("../.github/workflows/release.yml");
+        let archive = format!("copilot-session-tui-{}.", release_asset_target());
+        assert!(
+            workflow.contains(&archive),
+            "an update would find no asset named {archive}* and fail"
+        );
+    }
 
     #[test]
     fn compares_minor_versions_semantically() {
