@@ -1017,7 +1017,6 @@ impl Driver {
     }
 
     fn launch(&mut self) -> Result<(), String> {
-        let (columns, rows) = self.setup.size.unwrap_or((110, 30));
         let home = self.run_dir.join("home");
         let projects = self.run_dir.join("projects");
         let bin = self.run_dir.join("bin");
