@@ -1239,7 +1239,8 @@ and the status line says how many sessions went and how to get them back: `H` sh
 hidden sessions, and `h` on one of them there removes its project from the list again.
 The **Filters** tab lists the hidden projects by name and lets you edit the folders.
 Filtering to a hidden project still shows its sessions, so starting CST inside one
-does not open on an empty list.
+does not open on an empty list. While anything is hidden, the line above the list
+says how many sessions are missing from it and that `H` shows them.
 
 Leave `terminal.shell` unset or blank to use the platform's default shell. Set it
 to an executable name on `PATH` (such as `pwsh`, `powershell`, or `bash`) or to

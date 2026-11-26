@@ -1989,12 +1989,18 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     )));
     lines.push(Line::from(""));
     let paths_editing = app.settings_editing == Some(SettingsEditField::HiddenPathPrefixes);
+    // Pointer and label take 26 columns, and one is left before the border.
+    let list_budget = (inner.width as usize).saturating_sub(27);
     let paths_display = if paths_editing {
-        format!("{}█", app.settings_input)
+        list_value_in_row(&format!("{}█", app.settings_input), list_budget, true)
     } else if app.config.hidden_path_prefixes.is_empty() {
         "(none)".to_string()
     } else {
-        app.config.hidden_path_prefixes.join(", ")
+        list_value_in_row(
+            &app.config.hidden_path_prefixes.join(", "),
+            list_budget,
+            false,
+        )
     };
     setting_lines.insert(17, lines.len());
     lines.push(settings_row(
@@ -2019,16 +2025,27 @@ pub fn draw_settings(f: &mut Frame, app: &mut App) {
     // session list shows: three absolute paths do not fit the row, and the names are
     // what the projects are known by.
     let projects_display = if projects_editing {
-        format!("{}█", app.settings_input)
+        list_value_in_row(&format!("{}█", app.settings_input), list_budget, true)
     } else if app.config.hidden_projects.is_empty() {
         "(none)".to_string()
     } else {
-        app.config
+        let names = app
+            .config
             .hidden_projects
             .iter()
             .map(|root| app.project_label(root))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", ");
+        if crate::text::display_width(&names) <= list_budget {
+            names
+        } else {
+            // Cut off, the names no longer say how many there are.
+            list_value_in_row(
+                &format!("{} projects: {names}", app.config.hidden_projects.len()),
+                list_budget,
+                false,
+            )
+        }
     };
     setting_lines.insert(30, lines.len());
     lines.push(settings_row(
@@ -2982,6 +2999,26 @@ fn settings_row<'a>(
     ])
 }
 
+/// A list that may be longer than its settings row, cut to `budget` columns so it
+/// ends in an ellipsis and not at the popup's border mid-word. While it is being
+/// typed the end is kept and the start cut: a few full paths fill the row, and the
+/// cursor was past the edge, so what was typed could not be seen.
+fn list_value_in_row(value: &str, budget: usize, editing: bool) -> String {
+    if !editing || crate::text::display_width(value) <= budget {
+        return crate::text::truncate_to_width(value, budget);
+    }
+    let mut tail = Vec::new();
+    let mut width = 1;
+    for character in value.chars().rev() {
+        width += crate::text::display_width(character.encode_utf8(&mut [0; 4]));
+        if width > budget {
+            break;
+        }
+        tail.push(character);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
 fn project_settings_row<'a>(
     theme: Theme,
     label: &str,
@@ -3527,6 +3564,19 @@ mod help_tests {
             .collect();
         assert_eq!(text.trim(), "Sessions");
         assert!(help_matches(&lines, "keyboard shortcuts").is_empty());
+    }
+
+    #[test]
+    fn a_list_too_long_for_its_settings_row_keeps_its_start_to_read_and_its_end_to_type() {
+        let value = "C:/work/one, C:/work/two, C:/work/three";
+
+        assert_eq!(list_value_in_row(value, 60, false), value);
+        assert_eq!(list_value_in_row(value, 14, false), "C:/work/one, …");
+        assert_eq!(
+            list_value_in_row(&format!("{value}█"), 15, true),
+            "…C:/work/three█",
+            "the cursor is at the end, so that is the part to keep while typing"
+        );
     }
 
     #[test]

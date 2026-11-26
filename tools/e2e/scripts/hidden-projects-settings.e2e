@@ -1,0 +1,103 @@
+# The paths around hiding that `hidden-projects.e2e` does not take: a hidden path typed
+# into Global Settings while the list is on screen (how the bare-name bug was met), a
+# project with a long name, enough hidden projects to fill their row under Filters,
+# editing that row and cancelling, the help screen, and a restart.
+
+size 110x30
+arg --mux
+session agentic-1to1/research Agentic one
+session agentic-1to1/research Agentic two
+session beta Beta work
+session a-project-folder-with-a-name-that-goes-on-for-quite-some-while Long work
+session gamma Gamma work
+session delta Delta work
+session epsilon Epsilon work
+session zeta Zeta work
+
+wait_for Zeta work
+expect Agentic one
+# Nothing hidden yet, so the header says nothing about it and the footer offers the key.
+expect_not shows them
+expect h Hide project
+dump 01-before
+
+# Typed as the user typed it: a bare folder name, no path.
+press ,
+wait_for Global Settings
+press backtab
+wait_for Hidden Path Prefixes
+press down
+press enter
+type agentic-1to1
+dump 02-typing
+press enter
+wait 300
+dump 03-saved-popup-open
+press esc
+wait_gone Global Settings
+# Applied without a restart.
+expect_not Agentic one
+expect_not Agentic two
+expect 2 hidden
+dump 04-applied
+
+# Hide four projects, one of them with a long name.
+press h
+wait_for Hid project beta
+press h
+wait_for Hid project a-project
+expect brings it back
+dump 05-long-name
+press h
+wait_for Hid project gamma
+press h
+wait_for Hid project delta
+expect 6 hidden
+expect Epsilon work
+
+# The row under Filters with four projects in it, then edited and cancelled.
+press ,
+wait_for Global Settings
+press backtab
+wait_for Hidden Projects
+dump 06-filters-four
+press down down
+press enter
+wait 300
+dump 07-editing-projects
+press esc
+wait 200
+press esc
+wait_gone Global Settings
+expect 6 hidden
+
+# The help screen lists both keys.
+press ?
+wait 400
+type /
+type bring it back
+wait 300
+expect Hide the session's project, or bring it back
+dump 08-help
+press esc
+wait 200
+press esc
+wait 300
+
+# Still hidden after CST is started again.
+restart
+wait_for Zeta work
+expect Epsilon work
+expect_not Beta work
+expect_not Agentic one
+expect 6 hidden
+dump 09-restarted
+
+# Shown, a hidden project's session offers to bring the project back.
+press H
+wait_for Beta work
+expect 6 normally hidden
+press up
+wait 200
+expect h Show project
+dump 10-shown

@@ -75,6 +75,7 @@ reads anything sent too soon as Alt+key.
 | `click [left\|middle\|right\|ctrl+left] COLUMN ROW` | A mouse click. `ctrl+left` is the Ctrl+click that opens links and pictures. |
 | `click_on [left\|middle\|right\|ctrl+left] <text>` | A click on the first place `<text>` appears. |
 | `scroll up\|down COLUMN ROW`, `scroll_on up\|down <text>` | One wheel notch. |
+| `restart` | Stop CST (killed, not quit) and start it again on the same folders and settings, for checking what a run saved. Follow it with a `wait_for`. |
 | `wait <ms>` | Sleep. Prefer `wait_for`. |
 | `wait_for <text>` | Until `<text>` is on screen; fails after the timeout. |
 | `wait_gone <text>` | Until it is not. |

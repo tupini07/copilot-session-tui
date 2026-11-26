@@ -841,6 +841,10 @@ pub struct App {
     pub mode: Mode,
     pub search_query: String,
     pub show_hidden_sessions: bool,
+    /// How many sessions the hidden rules alone keep out of the list as it is
+    /// filtered now, or mark as normally hidden while they are being shown. The
+    /// header says it, so that a list with things missing gives its reason.
+    pub hidden_count: usize,
     pub rename_input: String,
     pub project_filter: Option<String>,
     /// Project root of the directory `cst` was launched from (git-aware).
@@ -1135,6 +1139,7 @@ impl App {
             mode: Mode::Normal,
             search_query: String::new(),
             show_hidden_sessions: false,
+            hidden_count: 0,
             rename_input: String::new(),
             project_filter: None,
             cwd_project: None,
@@ -5525,8 +5530,9 @@ impl App {
         let matcher = SkimMatcherV2::default();
         // An id is usually pasted, and a paste often brings a space along.
         let id_query = self.search_query.trim().to_ascii_lowercase();
+        let mut hidden_count = 0;
 
-        self.filtered_indices = self
+        let filtered = self
             .sessions
             .iter()
             .enumerate()
@@ -5538,13 +5544,9 @@ impl App {
                 if !id_query.is_empty() && s.id.eq_ignore_ascii_case(&id_query) {
                     return true;
                 }
-                if !self.show_hidden_sessions
-                    && (self.session_title_is_hidden(s)
-                        || self.session_path_is_hidden(s)
-                        || self.session_project_is_hidden(s))
-                {
-                    return false;
-                }
+                let hidden = self.session_title_is_hidden(s)
+                    || self.session_path_is_hidden(s)
+                    || self.session_project_is_hidden(s);
                 // Project filter
                 if let Some(ref proj) = self.project_filter {
                     if !s.project_root.eq_ignore_ascii_case(proj) {
@@ -5561,15 +5563,27 @@ impl App {
                     // 32 hex digits, so nearly any short word made of a-f and digits
                     // can be picked out of nearly any id in order, and a typed piece
                     // of an id matched every session instead of the one it belongs to.
-                    return (!id_query.is_empty() && s.id.to_ascii_lowercase().contains(&id_query))
+                    let found = (!id_query.is_empty()
+                        && s.id.to_ascii_lowercase().contains(&id_query))
                         || [s.display_name(), s.project_root.as_str(), s.cwd.as_str()]
                             .into_iter()
                             .any(|field| matcher.fuzzy_match(field, &self.search_query).is_some());
+                    if !found {
+                        return false;
+                    }
                 }
-                true
+                // Counted last, so the number is of sessions that would be in this
+                // very list: under a project filter or a search, hidden sessions
+                // elsewhere are not what is missing from it.
+                if hidden {
+                    hidden_count += 1;
+                }
+                !hidden || self.show_hidden_sessions
             })
             .map(|(i, _)| i)
             .collect();
+        self.filtered_indices = filtered;
+        self.hidden_count = hidden_count;
 
         if self.project_filter.is_none() && self.search_query.is_empty() {
             // Favorites lead in the order the user arranged; everything else keeps the
@@ -5683,6 +5697,20 @@ impl App {
                 .any(|hidden| hidden.eq_ignore_ascii_case(root))
     }
 
+    /// What `h` would do to the highlighted session's project, for the footer: the
+    /// same question `toggle_selected_project_hidden` asks, so the hint cannot name
+    /// one thing while the key does the other. Nothing where the key does nothing.
+    pub fn selected_project_hide_hint(&self) -> Option<&'static str> {
+        let root = &self.selected_session()?.project_root;
+        if root.is_empty() {
+            None
+        } else if self.project_is_hidden(root) {
+            Some("Show project")
+        } else {
+            Some("Hide project")
+        }
+    }
+
     /// The hidden projects were rewritten by hand in Global Settings.
     pub fn hidden_projects_edited(&mut self) {
         self.rebuild_unique_projects();
@@ -5716,7 +5744,9 @@ impl App {
                 "This session has no project folder to hide".to_string(),
             ));
         }
-        let label = self.project_label(&root).to_string();
+        // The way back is at the end of the message, and a long folder name would
+        // push it past the edge of the screen.
+        let label = crate::text::truncate_to_width(self.project_label(&root), 30);
         let previous = self.config.hidden_projects.clone();
         let was_hidden = self.project_is_hidden(&root);
         if was_hidden {
@@ -9739,6 +9769,51 @@ mod tests {
                 .iter()
                 .any(|project| project == "C:/work/a"),
             "the project filter does not list it either"
+        );
+    }
+
+    #[test]
+    fn the_list_counts_what_the_hidden_rules_keep_out_of_it_so_the_header_can_say_rows_are_missing()
+    {
+        let mut app = three_projects();
+        assert_eq!(app.hidden_count, 0);
+
+        app.toggle_selected_project_hidden().unwrap();
+        assert_eq!(app.hidden_count, 2);
+
+        app.set_project_filter(Some("C:/work/b".to_string()));
+        assert_eq!(
+            app.hidden_count, 0,
+            "nothing is missing from this project's list"
+        );
+
+        app.set_project_filter(None);
+        app.toggle_hidden_sessions();
+        assert_eq!(visible_ids(&app).len(), 4);
+        assert_eq!(
+            app.hidden_count, 2,
+            "shown for now, they are still the ones normally hidden"
+        );
+    }
+
+    #[test]
+    fn hiding_a_project_with_a_long_name_still_says_how_to_bring_it_back_within_the_screen() {
+        let mut app = App::new(
+            vec![session(
+                "long",
+                "C:/work/a-folder-name-that-goes-on-for-much-longer-than-any-status-line-has-room-for",
+                "2026-08-14T12:00:00Z",
+            )],
+            UserConfig::default(),
+        );
+        app.disable_config_persistence();
+
+        let message = app.toggle_selected_project_hidden().unwrap().unwrap();
+
+        assert!(message.ends_with("h there brings it back"), "{message}");
+        assert!(
+            crate::text::display_width(&message) < 110,
+            "the way back is at the end, so the message has to fit: {message}"
         );
     }
 

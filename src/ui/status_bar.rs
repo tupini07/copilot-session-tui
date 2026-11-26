@@ -180,6 +180,18 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(key_span("u", theme));
                 spans.push(Span::raw(" Update"));
             }
+            // Hiding a project is not done often, so its key gives way to the others
+            // where the line is full; `?` lists it either way. It goes beside
+            // Favorite, the other thing done to the highlighted row.
+            if let Some(hint) = app.selected_project_hide_hint() {
+                let used: usize = spans.iter().map(Span::width).sum();
+                if used + "h ".len() + hint.len() + 2 <= area.width as usize {
+                    spans.splice(
+                        3..3,
+                        [key_span("h", theme), Span::raw(format!(" {hint}  "))],
+                    );
+                }
+            }
             Line::from(spans)
         }
         _ => {
@@ -228,7 +240,11 @@ mod tests {
     use ratatui::Terminal;
 
     fn rendered(app: &App) -> String {
-        let backend = TestBackend::new(180, 2);
+        rendered_at(app, 180)
+    }
+
+    fn rendered_at(app: &App, width: u16) -> String {
+        let backend = TestBackend::new(width, 2);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| draw(frame, app, frame.area()))
@@ -296,6 +312,39 @@ mod tests {
             !text.contains("Scratchpad") && !text.contains("N Worktree"),
             "rarely used keys belong in ? instead of the footer:\n{text}"
         );
+    }
+
+    #[test]
+    fn the_footer_names_the_key_that_hides_the_highlighted_project_and_what_it_will_do() {
+        let mut app = App::new(vec![session("a")], UserConfig::default());
+        app.disable_config_persistence();
+        assert!(rendered(&app).contains("h Hide project"));
+
+        app.toggle_selected_project_hidden().unwrap();
+        app.toggle_hidden_sessions();
+        assert!(
+            rendered(&app).contains("h Show project"),
+            "on a hidden project's session the key brings it back, and says so"
+        );
+    }
+
+    #[test]
+    fn the_hide_key_gives_way_where_the_footer_is_full_so_help_and_quit_stay_readable() {
+        let app = App::new(vec![session("a")], UserConfig::default());
+
+        let narrow = rendered_at(&app, 95);
+
+        assert!(!narrow.contains("Hide project"), "got:\n{narrow}");
+        assert!(narrow.contains("? Help  q Quit"), "got:\n{narrow}");
+    }
+
+    #[test]
+    fn a_session_with_no_project_folder_is_not_offered_the_hide_key_because_it_would_do_nothing() {
+        let mut without = session("a");
+        without.project_root.clear();
+        let app = App::new(vec![without], UserConfig::default());
+
+        assert!(!rendered(&app).contains("project  "));
     }
 
     #[test]

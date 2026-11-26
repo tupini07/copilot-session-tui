@@ -290,6 +290,7 @@ enum Step {
     TelegramDump(String),
     /// Whether the stub says the bot may manage topics.
     TelegramRights(bool),
+    Restart,
     Wait(Duration),
     WaitFor(String),
     WaitGone(String),
@@ -507,6 +508,7 @@ fn parse_step(command: &str, rest: &str) -> Result<Step, String> {
             "off" => Step::TelegramRights(false),
             other => return Err(format!("telegram_rights goes on or off, not {other:?}")),
         },
+        "restart" => Step::Restart,
         "wait" => Step::Wait(millis(need("milliseconds")?)?),
         "wait_for" => Step::WaitFor(need("text")?),
         "wait_gone" => Step::WaitGone(need("text")?),
@@ -820,6 +822,15 @@ impl Driver {
                 Ok(())
             }
             Step::Dump(name) => self.dump(name),
+            // Killed, not quit: what is still there afterwards is what CST had already
+            // written, which is the question a restart is asked.
+            Step::Restart => {
+                let mut running = self.cst.take().ok_or("CST is not running")?;
+                let _ = running.child.kill();
+                let _ = running.child.wait();
+                drop(running);
+                self.spawn()
+            }
             // As if another CST, or `copilot` in another terminal, had done it while
             // this one was running.
             Step::AddSession { project, summary } => {
@@ -1129,6 +1140,15 @@ impl Driver {
             let _ = std::fs::write(self.run_dir.join("config.before.json"), bytes);
         }
 
+        self.spawn()
+    }
+
+    /// Starts CST on the folders `launch` prepared. Apart from `launch`, so `restart`
+    /// can start it again on what the first run left behind.
+    fn spawn(&mut self) -> Result<(), String> {
+        let (columns, rows) = self.setup.size.unwrap_or((110, 30));
+        let home = self.run_dir.join("home");
+        let bin = self.run_dir.join("bin");
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows,
