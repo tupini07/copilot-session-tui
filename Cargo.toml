@@ -1,6 +1,6 @@
 [package]
 name = "copilot-session-tui"
-version = "0.42.0"
+version = "0.43.0"
 edition = "2021"
 rust-version = "1.94"
 description = "A TUI for managing GitHub Copilot CLI sessions"

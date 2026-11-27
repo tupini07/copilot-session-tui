@@ -3,6 +3,15 @@
 What changed in CST, newest first. Written for people using it, not for the code.
 Earlier releases: https://github.com/tupini07/copilot-session-tui/releases
 
+## v0.43.0 - 2026-11-27
+
+- Hide a whole project from the session list with h, and bring it back with H then h.
+- The line above the list says how many sessions are hidden, and the footer shows the h key.
+- A bare folder name in Hidden Path Prefixes now hides that folder wherever it is.
+- CST starts on older Linux systems instead of failing with a GLIBC version error.
+- Ctrl+click opens a picture whose path is cut by a narrow pane or sits beside the scrollbar.
+- Ctrl+click opens the picture you clicked, not the one named on the line above it.
+
 ## v0.42.0 - 2026-11-24
 
 - Note: close older CSTs before picking a new theme, since they cannot read the new theme names.
