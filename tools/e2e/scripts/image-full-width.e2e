@@ -14,7 +14,7 @@ wait_for Existing app session
 press enter
 wait_for Fake Copilot is idling
 
-type e2e:print     [Image: Image file at path {projects}\experiments\cod-nav-curated007-matched-demand-feasibility-v1\figures\matched-demand-feasibility-v1-summary.png\n    [image/png] 64x32]
+type e2e:print     [Image: Image file at path {projects}{/}experiments{/}cod-nav-curated007-matched-demand-feasibility-v1{/}figures{/}matched-demand-feasibility-v1-summary.png\n    [image/png] 64x32]
 press enter
 wait_for [image/png] 64x32]
 type e2e:scrollbar

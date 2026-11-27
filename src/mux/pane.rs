@@ -1643,6 +1643,11 @@ fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pat
         let mut candidates = vec![image_path(&readings[0])];
         let mut last = start;
         for next in start + 1..(start + IMAGE_LINE_ROWS).min(rows) {
+            // The line has said all of itself; the next row is something else, and a
+            // click there on another picture's path opened this line's picture.
+            if readings.iter().any(|reading| image_line_is_whole(reading)) {
+                break;
+            }
             let continuation = text(next);
             let continuation = continuation.trim();
             if continuation.is_empty() {
@@ -1678,6 +1683,13 @@ fn image_paths_at(screen: &vt100::Screen, row: u16, column: u16) -> Vec<std::pat
             .collect();
     }
     Vec::new()
+}
+
+/// Whether what follows the anchor has reached the end of Copilot's image line: the
+/// ` [image/png] 800x600]` tail with both its brackets closed.
+fn image_line_is_whole(text: &str) -> bool {
+    text.find(" [image/")
+        .is_some_and(|tail| text[tail..].matches(']').count() >= 2)
 }
 
 /// The path part of what follows the anchor: up to the ` [image/png] 800x600]` tail
@@ -2087,6 +2099,31 @@ mod tests {
             bare_candidates(parser.screen(), 0, path_starts + HOUSE.len() as u16 + 2).is_empty(),
             "nor is the blank after it"
         );
+    }
+
+    #[test]
+    fn a_click_on_the_row_after_a_finished_image_line_is_not_a_click_on_that_line() {
+        // The line's last bracket alone on a row, then another picture's path straight
+        // after it. The second path's row was taken for a third row of the image line,
+        // and a click on it opened the first picture.
+        let mut parser = vt100::Parser::new(6, 200, 0);
+        parser.process(
+            format!(
+                "[Image: Image file at path {DEEP} [image/png] 64x32\r\n]\r\n> Image: A house -> {DEEP}\r\n"
+            )
+            .as_bytes(),
+        );
+        let screen = parser.screen();
+        let below = (0..6)
+            .find(|row| {
+                screen
+                    .contents_between(*row, 0, *row, 200)
+                    .starts_with("> Image")
+            })
+            .unwrap();
+
+        assert!(image_candidates(screen, below, 10).is_empty());
+        assert!(!image_candidates(screen, below - 1, 0).is_empty());
     }
 
     #[test]

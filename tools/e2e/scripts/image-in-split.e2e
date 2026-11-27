@@ -33,7 +33,7 @@ dump 02-split
 
 # The line Copilot prints for a picture it read, laid out as it lays it out: broken
 # inside the file's name, the rest indented on the next row.
-type e2e:print     [Image: Image file at path {projects}\pics\sam\n    ple.png [image/png] 64x32]
+type e2e:print     [Image: Image file at path {projects}{/}pics{/}sam\n    ple.png [image/png] 64x32]
 press enter
 wait_for ple.png [image/png]
 type e2e:scrollbar
@@ -55,7 +55,7 @@ press esc
 wait_gone sample.png  64x32
 
 # The same path in the model's own words, broken the same way.
-type e2e:print   Saved it as {projects}\pics\ho\n  use.png for you.
+type e2e:print   Saved it as {projects}{/}pics{/}ho\n  use.png for you.
 press enter
 wait_for use.png for you.
 type e2e:scrollbar
